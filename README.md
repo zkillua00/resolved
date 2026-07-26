@@ -2,41 +2,243 @@
 
 A native macOS API client built with [GPUI 0.2.2](https://docs.rs/gpui/0.2.2/gpui/) and
 [GPUI Component 0.5.1](https://docs.rs/gpui-component/0.5.1/gpui_component/).
-The request editor, history, response metadata, raw/pretty body views, and headers
-are rendered by GPUI. Captured HTML responses use macOS WKWebView through
-`gpui-wry` only when the Preview tab is selected.
+The request workspace, code editors, collections, environments, response views,
+and performance HUD are rendered by GPUI. Captured HTML responses use macOS
+WKWebView through `gpui-wry` only when the Preview tab is selected.
 
 ## MVP features
 
-- GET, POST, PUT, PATCH, DELETE, HEAD, and OPTIONS requests
-- Editable URL, enabled/disabled header rows, and raw request body
+- Editable, color-coded HTTP method control with common-method suggestions and
+  support for arbitrary custom methods
+- Resizable collection sidebar and request/response work areas
+- Editable URL and enabled/disabled header rows
+- None, raw, URL-encoded, and multipart form-data request body modes
+- Explicit raw-body syntax selection for text, JSON, XML, HTML, JavaScript,
+  TypeScript, CSS, Markdown, GraphQL, YAML, TOML, SQL, Shell, Rust, and Python
+- Text and streamed local-file multipart fields with a native macOS file picker
 - Cancelable requests with a 60-second timeout and bounded redirects
 - Status, duration, size, HTTP version, final URL, response headers, and body
-- Pretty JSON and clipboard copy
+- Reusable code editors with line numbers and tree-sitter syntax highlighting
+- Pretty JSON, content-aware response highlighting, and clipboard copy
+- Sandboxed JavaScript pre-request and post-response scripts
+- Persistent collections, saved requests, environments, and secret variables
+- Request identity and Save/Update actions beside the main request editor
+- Direct active-environment switching from the title bar
+- `{{variable}}` expansion in URLs, header names and values, and request bodies
+- Toggleable UI cadence, process CPU, RSS, and physical-footprint HUD
 - Restricted captured-HTML preview
 - Newest-first, persisted request history capped at 100 entries
-- Redaction of authorization, cookies, API keys, tokens, and secrets in history
+- Sanitized history snapshots with URL, body, header, error, and secret redaction
 
-History is stored in the macOS application-data directory under
-`API Tester/history.json`. Loading a redacted history entry leaves its sensitive
-value blank and disabled rather than putting the redaction marker into a request.
+## Code editors
+
+Raw request bodies, pre-request scripts, post-response scripts, and text
+responses use the same reusable GPUI Component editor wrapper. It provides
+multiline editing, line numbers, configurable soft wrapping, runtime language
+switching, and tree-sitter highlighting. Raw request highlighting follows the
+language selected beside the body mode and is persisted with saved requests.
+Unless an enabled `Content-Type` header overrides it, that language also supplies
+the outgoing raw media type. Script editors use JavaScript, and response
+highlighting follows the response content type. Response editors are read-only
+snapshots so Pretty/Raw, Copy, Preview, and post-response scripts cannot silently
+diverge.
+
+Raw and script editors automatically close language-appropriate braces, brackets,
+parentheses, and quote marks, including closer overtyping. The raw editor's
+context menu can format valid JSON as one undoable whole-buffer edit; invalid
+JSON and languages without a safe formatter are left unchanged. Script editors
+complete the phase-appropriate `api` surface and enabled variable names from the
+active environment. Literal reads of missing or disabled variables receive
+editor warnings without exposing variable values to the completion engine.
+
+## Request bodies
+
+- **None** sends no payload, even if a previous raw editor value remains.
+- **Raw** sends the editor text and adds the selected language's media type only
+  when no enabled `Content-Type` header exists.
+- **x-www-form-urlencoded** serializes enabled key/value rows in order using
+  standards-compliant URL encoding. A row remembered as a multipart file field
+  is treated as text in this mode, so switching modes does not erase its type.
+- **form-data** generates the required multipart boundary and supports enabled
+  text rows and local-file rows. Blank field names and blank file paths are
+  ignored.
+
+The body mode, raw language, field order, enabled state, text/file kind, names,
+values, and file paths are stored with saved requests and history. Multipart
+must generate a boundary matching its payload, so an explicitly entered
+multipart `Content-Type` and `Content-Length` are replaced for that request;
+other custom headers remain untouched.
+
+## Collections and environments
+
+A collection contains named request templates, including their headers, body,
+and scripts. Environments contain enabled or disabled key/value variables; one
+environment can be active at a time. The current collection/request identity
+and Save/Update actions stay visible above the request editor. Modified requests
+are marked, and loading another saved request or history entry requires a
+second click before unsaved edits are discarded. The title bar environment menu
+switches the active environment without opening its editor. Unsaved edits to
+the active environment are visibly marked and must be saved or reverted before
+sending, so the values on screen cannot silently differ from the request.
+Marking a variable as secret masks it in the editor and includes its value in
+script and network diagnostic redaction.
+History stores the effective outgoing request as a sanitized sent snapshot,
+redacting known secrets and sensitive fields in URLs, headers, JSON/form bodies,
+and errors. Loading history restores that sent snapshot without scripts; use a
+saved request when placeholder-preserving scripts and templates are required.
+Collection, environment, saved-request, and history deletion require a second
+confirmation click.
+
+Enabled variables from the active environment are expanded immediately before
+the network request:
+
+```text
+https://{{host}}/v1/users/{{user_id}}
+Authorization: Bearer {{token}}
+```
+
+Expansion works in the URL, enabled header names and values, the raw request
+body, and enabled structured body field names and values (including multipart
+file paths). Nested variables are supported. Unknown, disabled, duplicate,
+cyclic, malformed, or excessively nested references stop the request with a
+field-specific error. Saved requests keep the original placeholders rather than
+the expanded values.
+
+## Pre-request and post-response scripts
+
+Scripts run as JavaScript in a fresh embedded QuickJS runtime for every phase.
+The pre-request script runs before variable expansion and may change the outgoing
+request. The post-response script runs after the response arrives and may record
+tests or update the active environment.
+
+Example pre-request script:
+
+```js
+api.request.headers.set(
+  "Authorization",
+  `Bearer ${api.environment.get("token")}`,
+);
+api.request.body = JSON.stringify({ name: "GPUI" });
+console.log("sending", api.request.method, api.request.url);
+```
+
+Example post-response script:
+
+```js
+api.test("created", () => {
+  api.assert(api.response.status === 201, "expected HTTP 201");
+});
+
+const body = api.response.json();
+api.environment.set("token", body.token);
+```
+
+The exposed API is deliberately small:
+
+- `api.request`: `method`, `url`, `body`, `bodyMode`, `rawBodyLanguage`,
+  `bodyFields`, and a header bag. Request fields, structured body rows, and
+  headers are mutable only in the pre-request phase. Persisted enum values use
+  `raw`, `none`, `form_url_encoded`, `multipart_form_data`, and the lowercase
+  language/kind names documented by the UI.
+- Header bags: `has`, `get`, `getAll`, `set`, `append`, `remove`, and `toArray`.
+- `api.environment`: `has`, `get`, `set`, `unset`, and `toObject`. Successful
+  mutations are persisted when an environment is active.
+- `api.variables`: read-only `has`, `get`, and `toObject`.
+- `api.response`: status, status text, HTTP version, final URL, headers,
+  duration, size, truncation state, optional Base64 body, `text()`, and `json()`.
+- `api.test(name, callback)` and `api.assert(condition, message)` in
+  post-response scripts. Test callbacks must be synchronous; Promise-returning
+  callbacks are recorded as unsupported failures.
+- `console.log`, `info`, `warn`, `error`, and `debug`, captured in the Scripts
+  response tab.
+
+A post-response script failure does not discard the received response. Script
+diagnostics, captured logs, and test results remain available in the Scripts
+tab, and Cancel interrupts the pre-script, network request, or post-script.
+
+### Script limits and security boundary
+
+Each invocation has these bounds:
+
+- 1-second execution deadline
+- 32 MiB engine heap and 256 KiB engine stack
+- 256 KiB script source
+- 5 MiB script-visible request or response body
+- 64 MiB hard cap for the response buffered by the app
+- 100 console entries totaling at most 64 KiB
+- 8 MiB serialized result
+
+Response bodies above the script limit are exposed to scripts as a truncated
+view and reported as such; responses above the app cap are rejected while
+streaming rather than buffered without a bound. Secret environment values,
+including encoded and same-run rotated values, are scrubbed from captured logs,
+errors, and stack traces.
+
+This is a capability-limited scripting environment, not a hardened security
+boundary for hostile code. There is no filesystem or network API, module loader,
+Node.js environment, browser DOM, `fetch`, `WebSocket`, `XMLHttpRequest`,
+`require`, `process`, or `Deno`; however, scripts still execute in-process in a
+native QuickJS engine. Only run scripts you trust. Imported collection formats
+and an isolated helper-process sandbox are not part of this MVP.
+
+## Performance HUD
+
+The optional in-app HUD reports UI FPS, average and p95 frame interval, process
+CPU, resident set size (RSS), and macOS Activity Monitor-style physical
+footprint. Resource sampling runs off the UI thread once per second and is
+inactive while the HUD is hidden.
+
+`UI FPS` is the application's actual GPUI redraw cadence. Idle views report
+`idle`; the HUD does not force a display-rate redraw loop. This is useful for
+spotting main-thread stalls, but it is not GPU presentation timing, compositor
+timing, or the display refresh rate. Process CPU uses the logical-core scale and
+can exceed 100% when the process uses more than one core.
+
+## Local storage
+
+State is stored in the macOS local application-data directory under
+`API Tester/`:
+
+- `api-tester.sqlite3`: the versioned SQLite database for history, collections,
+  saved requests and scripts, environments, variables, and app state
+
+The database uses foreign keys, WAL mode, a short bounded busy timeout, explicit
+forward-only schema migrations, normalized body-field tables, transactional
+aggregate writes, and a startup integrity check. Schema v2 migrates earlier
+saved requests and history to Raw/JSON body metadata without losing their body
+text. It is embedded behind a storage interface; there is no localhost database
+server or open port. A process-level workspace lock rejects a second app
+instance so stale in-memory aggregates cannot overwrite each other. Existing
+`history.json` and `workspace.json` files from earlier builds are imported
+independently once and retained as untouched backups. Loading a redacted history
+entry leaves its sensitive value blank and disabled rather than putting the
+redaction marker into a request.
+
+Secret environment values are masked in the UI and redacted from diagnostics,
+but the SQLite database is not encrypted. Multipart file paths are also ordinary
+local workspace data. The app restricts its data directory to the current user
+(`0700`) and the database, WAL, SHM, and process-lock files to `0600`; protect
+the local user account accordingly.
 
 ## Run
 
 The project uses Rust edition 2024 and targets macOS first.
 
 ```sh
-cargo run
+scripts/cargo.sh run
 ```
 
 GPUI's `runtime_shaders` feature is enabled, so the normal build works with Apple
 Command Line Tools and does not require the full Xcode Metal command-line
-compiler.
+compiler. The wrapper obtains the verified crates.io GPUI 0.2.2 archive from
+Cargo's local cache when available (or crates.io otherwise), applies the small
+Metal renderer patch, and then forwards its arguments to Cargo. The generated
+`vendor/gpui-0.2.2/` directory is ignored by Git.
 
 To build a launchable application bundle:
 
 ```sh
-sh scripts/bundle-macos.sh release
+scripts/bundle-macos.sh release
 open "target/release/API Tester.app"
 ```
 
@@ -55,22 +257,30 @@ data/blob images or media remain available so captured HTML can still be useful.
 
 Because WKWebView is a native child view above GPUI's Metal surface, Preview uses
 a dedicated rectangular pane. GPUI overlays cannot cover that pane; the app
-explicitly hides it whenever another response tab is selected.
+constructs it only when a valid captured HTML response is opened in Preview and
+destroys it when Preview is left, the response is cleared, or loading fails.
 
 ## Verification
 
 ```sh
-cargo test
-cargo check
+scripts/cargo.sh fmt --all -- --check
+scripts/cargo.sh test --all-features
+scripts/cargo.sh clippy --all-targets --all-features -- -D warnings
 ```
 
-The test suite covers request validation, a real loopback HTTP exchange,
-response formatting, history bounds/persistence/redaction, and preview detection
-and CSP injection. The loopback test may need permission to bind a local socket
-in a restricted environment.
+The test suite covers request validation, raw/none/URL-encoded/multipart wire
+serialization, file upload errors, a real loopback HTTP exchange, response
+formatting, reusable editor configuration, performance sampling, SQLite
+migrations/transactions/legacy import, workspace persistence, variable
+resolution across structured bodies, bounded script execution, history
+bounds/persistence/redaction, and preview detection and CSP injection. A
+cohesive smoke test also carries one saved request through SQLite reload,
+pre-script mutation, environment resolution, a real loopback request,
+post-script tests/mutation, and sanitized history reload. Loopback tests may
+need permission to bind a local socket in a restricted environment.
 
 ## Deliberate MVP limits
 
-Collections, environments/variables, cookie jars, multipart/file upload,
-streaming/download responses, certificate controls, proxy configuration UI, and
-import/export are not included yet.
+Cookie jars, response streaming/downloads, certificate controls, proxy
+configuration UI, and collection import/export are not included yet. macOS is
+the only supported target for now.

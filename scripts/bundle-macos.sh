@@ -4,6 +4,8 @@ set -eu
 project_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 profile="${1:-release}"
 
+"$project_dir/scripts/prepare-gpui.sh"
+
 case "$profile" in
     debug)
         cargo_profile="dev"

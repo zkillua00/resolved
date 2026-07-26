@@ -1,0 +1,31 @@
+diff --git a/src/platform/mac/metal_renderer.rs b/src/platform/mac/metal_renderer.rs
+--- a/src/platform/mac/metal_renderer.rs
++++ b/src/platform/mac/metal_renderer.rs
+@@ -327,6 +327,7 @@ impl MetalRenderer {
+         texture_descriptor.set_width(size.width.0 as u64);
+         texture_descriptor.set_height(size.height.0 as u64);
+         texture_descriptor.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
++        texture_descriptor.set_storage_mode(metal::MTLStorageMode::Private);
+         texture_descriptor
+             .set_usage(metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead);
+         self.path_intermediate_texture = Some(self.device.new_texture(&texture_descriptor));
+@@ -334,7 +335,18 @@ impl MetalRenderer {
+         if self.path_sample_count > 1 {
+             let mut msaa_descriptor = texture_descriptor;
+             msaa_descriptor.set_texture_type(metal::MTLTextureType::D2Multisample);
+-            msaa_descriptor.set_storage_mode(metal::MTLStorageMode::Private);
++            let storage_mode = if self
++                .device
++                .supports_family(metal::MTLGPUFamily::Apple1)
++            {
++                // Tile-local memory is sufficient because this multisampled
++                // render target is resolved into path_intermediate_texture.
++                // Zed uses the same optimization on Apple GPUs.
++                metal::MTLStorageMode::Memoryless
++            } else {
++                metal::MTLStorageMode::Private
++            };
++            msaa_descriptor.set_storage_mode(storage_mode);
+             msaa_descriptor.set_sample_count(self.path_sample_count as _);
+             self.path_intermediate_msaa_texture = Some(self.device.new_texture(&msaa_descriptor));
+         } else {

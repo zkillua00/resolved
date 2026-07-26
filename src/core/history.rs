@@ -1,17 +1,23 @@
-use std::fs::{self, File};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{RequestDraft, ResponseData};
+use super::{RequestDraft, ResponseData, template::redact_secret_values};
 
 pub const DEFAULT_HISTORY_LIMIT: usize = 100;
 pub const REDACTED_VALUE: &str = "[REDACTED]";
+#[cfg(test)]
 const HISTORY_FILE_VERSION: u32 = 1;
+
+#[cfg(test)]
+use anyhow::{Context, Result};
+#[cfg(test)]
+use std::fs::{self, File};
+#[cfg(test)]
+use std::io::{self, Write};
+#[cfg(test)]
+use std::path::{Path, PathBuf};
 
 static NEXT_HISTORY_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -46,18 +52,37 @@ pub struct HistoryEntry {
 }
 
 impl HistoryEntry {
+    #[cfg(test)]
     pub fn completed(request: &RequestDraft, response: &ResponseData) -> Self {
-        Self::new(request, Some(ResponseSummary::from(response)), None)
+        Self::completed_with_secrets(request, response, &[])
     }
 
-    pub fn failed(request: &RequestDraft, error: impl Into<String>) -> Self {
-        Self::new(request, None, Some(error.into()))
+    pub fn completed_with_secrets(
+        request: &RequestDraft,
+        response: &ResponseData,
+        sensitive_values: &[String],
+    ) -> Self {
+        Self::new(
+            request,
+            Some(ResponseSummary::from(response)),
+            None,
+            sensitive_values,
+        )
+    }
+
+    pub fn failed_with_secrets(
+        request: &RequestDraft,
+        error: impl Into<String>,
+        sensitive_values: &[String],
+    ) -> Self {
+        Self::new(request, None, Some(error.into()), sensitive_values)
     }
 
     fn new(
         request: &RequestDraft,
         response: Option<ResponseSummary>,
         error: Option<String>,
+        sensitive_values: &[String],
     ) -> Self {
         let created_at = Utc::now();
         let sequence = NEXT_HISTORY_ID.fetch_add(1, Ordering::Relaxed);
@@ -70,9 +95,9 @@ impl HistoryEntry {
         Self {
             id,
             created_at,
-            request: redact_request(request),
+            request: redact_request(request, sensitive_values),
             response,
-            error,
+            error: error.map(|error| redact_secret_values(&error, sensitive_values)),
         }
     }
 }
@@ -129,6 +154,7 @@ impl RequestHistory {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Serialize, Deserialize)]
 struct HistoryFile {
     version: u32,
@@ -136,18 +162,21 @@ struct HistoryFile {
     entries: Vec<HistoryEntry>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub struct HistoryStore {
     path: PathBuf,
     max_entries: usize,
 }
 
+#[cfg(test)]
 impl Default for HistoryStore {
     fn default() -> Self {
         Self::new(default_history_path(), DEFAULT_HISTORY_LIMIT)
     }
 }
 
+#[cfg(test)]
 impl HistoryStore {
     pub fn new(path: impl Into<PathBuf>, max_entries: usize) -> Self {
         Self {
@@ -221,6 +250,7 @@ impl HistoryStore {
     }
 }
 
+#[cfg(test)]
 fn default_history_path() -> PathBuf {
     dirs::data_local_dir()
         .or_else(dirs::data_dir)
@@ -229,6 +259,7 @@ fn default_history_path() -> PathBuf {
         .join("history.json")
 }
 
+#[cfg(test)]
 fn temporary_path_for(path: &Path) -> PathBuf {
     let file_name = path
         .file_name()
@@ -237,19 +268,158 @@ fn temporary_path_for(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{file_name}.tmp"))
 }
 
-fn redact_request(request: &RequestDraft) -> RequestDraft {
+fn redact_request(request: &RequestDraft, sensitive_values: &[String]) -> RequestDraft {
     let mut redacted = request.clone();
+    let mut known_secrets = sensitive_values.to_vec();
+    for header in &request.headers {
+        if is_sensitive_header(&header.name) && !header.value.is_empty() {
+            known_secrets.push(header.value.clone());
+            if let Some((scheme, credential)) = header.value.split_once(' ')
+                && matches!(
+                    scheme.to_ascii_lowercase().as_str(),
+                    "bearer" | "basic" | "token"
+                )
+                && !credential.is_empty()
+            {
+                known_secrets.push(credential.to_owned());
+            }
+        }
+    }
+
     redacted.headers = redacted
         .headers
         .into_iter()
         .map(|mut header| {
             if is_sensitive_header(&header.name) {
                 header.value = REDACTED_VALUE.to_owned();
+            } else {
+                header.value = redact_secret_values(&header.value, &known_secrets);
             }
             header
         })
         .collect();
+    redacted.body_fields = redacted
+        .body_fields
+        .into_iter()
+        .map(|mut field| {
+            let sensitive_name = is_sensitive_field(&field.name);
+            field.name = redact_secret_values(&field.name, &known_secrets);
+            field.value = if sensitive_name {
+                REDACTED_VALUE.to_owned()
+            } else {
+                redact_secret_values(&field.value, &known_secrets)
+            };
+            field
+        })
+        .collect();
+    redacted.url = redact_url(&request.url, &known_secrets);
+    redacted.body = redact_body(request, &known_secrets);
     redacted
+}
+
+fn redact_url(value: &str, sensitive_values: &[String]) -> String {
+    let Ok(mut url) = url::Url::parse(value) else {
+        return redact_secret_values(value, sensitive_values);
+    };
+
+    if !url.username().is_empty() {
+        let _ = url.set_username(REDACTED_VALUE);
+    }
+    if url.password().is_some() {
+        let _ = url.set_password(Some(REDACTED_VALUE));
+    }
+    if url.query().is_some() {
+        let pairs = url
+            .query_pairs()
+            .map(|(key, value)| {
+                let value = if is_sensitive_field(&key) {
+                    REDACTED_VALUE.to_owned()
+                } else {
+                    redact_secret_values(&value, sensitive_values)
+                };
+                (key.into_owned(), value)
+            })
+            .collect::<Vec<_>>();
+        url.set_query(None);
+        let mut query = url.query_pairs_mut();
+        for (key, value) in pairs {
+            query.append_pair(&key, &value);
+        }
+    }
+
+    redact_secret_values(url.as_str(), sensitive_values)
+}
+
+fn redact_body(request: &RequestDraft, sensitive_values: &[String]) -> String {
+    if request.body.is_empty() {
+        return String::new();
+    }
+
+    if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&request.body)
+        && redact_json_value(&mut json)
+    {
+        let serialized = if request.body.contains('\n') {
+            serde_json::to_string_pretty(&json)
+        } else {
+            serde_json::to_string(&json)
+        };
+        if let Ok(serialized) = serialized {
+            return redact_secret_values(&serialized, sensitive_values);
+        }
+    }
+
+    let is_form = request.headers.iter().any(|header| {
+        header.enabled
+            && header.name.eq_ignore_ascii_case("content-type")
+            && header
+                .value
+                .to_ascii_lowercase()
+                .contains("application/x-www-form-urlencoded")
+    });
+    if is_form {
+        let pairs = url::form_urlencoded::parse(request.body.as_bytes())
+            .map(|(key, value)| {
+                let value = if is_sensitive_field(&key) {
+                    REDACTED_VALUE.to_owned()
+                } else {
+                    redact_secret_values(&value, sensitive_values)
+                };
+                (key.into_owned(), value)
+            })
+            .collect::<Vec<_>>();
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        for (key, value) in pairs {
+            serializer.append_pair(&key, &value);
+        }
+        return serializer.finish();
+    }
+
+    redact_secret_values(&request.body, sensitive_values)
+}
+
+fn redact_json_value(value: &mut serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut changed = false;
+            for (key, value) in object {
+                if is_sensitive_field(key) {
+                    *value = serde_json::Value::String(REDACTED_VALUE.to_owned());
+                    changed = true;
+                } else {
+                    changed |= redact_json_value(value);
+                }
+            }
+            changed
+        }
+        serde_json::Value::Array(values) => {
+            let mut changed = false;
+            for value in values {
+                changed |= redact_json_value(value);
+            }
+            changed
+        }
+        _ => false,
+    }
 }
 
 fn is_sensitive_header(name: &str) -> bool {
@@ -267,9 +437,29 @@ fn is_sensitive_header(name: &str) -> bool {
         || normalized.ends_with("-api-key")
 }
 
+fn is_sensitive_field(name: &str) -> bool {
+    let normalized = name.trim().to_ascii_lowercase().replace('-', "_");
+    matches!(
+        normalized.as_str(),
+        "authorization"
+            | "auth"
+            | "password"
+            | "passwd"
+            | "pwd"
+            | "api_key"
+            | "apikey"
+            | "access_key"
+            | "private_key"
+            | "client_secret"
+    ) || normalized.contains("token")
+        || normalized.contains("secret")
+        || normalized.ends_with("_password")
+        || normalized.ends_with("_api_key")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::super::HeaderEntry;
+    use super::super::{BodyField, BodyMode, HeaderEntry};
     use super::*;
     use std::time::Duration;
 
@@ -297,6 +487,7 @@ mod tests {
                 HeaderEntry::new("Accept", "application/json"),
             ],
             body: String::new(),
+            ..RequestDraft::default()
         };
 
         let entry = HistoryEntry::completed(&request, &response(200));
@@ -307,6 +498,86 @@ mod tests {
             request.headers[0].value, "Bearer secret",
             "redaction must not mutate the active request"
         );
+    }
+
+    #[test]
+    fn history_redacts_known_secrets_and_sensitive_url_and_json_fields() {
+        let request = RequestDraft {
+            method: "POST".to_owned(),
+            url: "https://user:url-pass@example.com/items?api_key=literal-key&value=rotated%20secret"
+                .to_owned(),
+            headers: vec![HeaderEntry::new("Authorization", "Bearer header-token")],
+            body: r#"{"token":"literal-body","nested":{"password":"body-pass"},"echo":"rotated secret"}"#
+                .to_owned(),
+            ..RequestDraft::default()
+        };
+
+        let entry = HistoryEntry::failed_with_secrets(
+            &request,
+            "request failed for rotated%20secret",
+            &["rotated secret".to_owned()],
+        );
+        let serialized = serde_json::to_string(&entry).unwrap();
+
+        for secret in [
+            "literal-key",
+            "literal-body",
+            "url-pass",
+            "body-pass",
+            "header-token",
+            "rotated secret",
+            "rotated%20secret",
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "history leaked secret spelling {secret:?}: {serialized}"
+            );
+        }
+        assert_eq!(entry.request.headers[0].value, REDACTED_VALUE);
+        assert!(entry.request.body.contains(REDACTED_VALUE));
+    }
+
+    #[test]
+    fn history_redacts_sensitive_form_fields() {
+        let request = RequestDraft {
+            method: "POST".to_owned(),
+            url: "https://example.com/login".to_owned(),
+            headers: vec![HeaderEntry::new(
+                "Content-Type",
+                "application/x-www-form-urlencoded",
+            )],
+            body: "username=alice&password=hunter2&access_token=abc".to_owned(),
+            ..RequestDraft::default()
+        };
+
+        let entry = HistoryEntry::completed(&request, &response(200));
+        assert!(!entry.request.body.contains("hunter2"));
+        assert!(!entry.request.body.contains("abc"));
+        assert!(entry.request.body.contains("%5BREDACTED%5D"));
+    }
+
+    #[test]
+    fn history_redacts_structured_body_fields() {
+        let mut request = RequestDraft::new("POST", "https://example.com/login");
+        request.body_mode = BodyMode::FormUrlEncoded;
+        request.body_fields = vec![
+            BodyField::text("username", "alice"),
+            BodyField::text("password", "hunter2"),
+            BodyField::text("note", "rotated secret"),
+        ];
+
+        let entry = HistoryEntry::completed_with_secrets(
+            &request,
+            &response(200),
+            &["rotated secret".to_owned()],
+        );
+        let serialized = serde_json::to_string(&entry.request).unwrap();
+
+        assert!(serialized.contains("alice"));
+        assert!(!serialized.contains("hunter2"));
+        assert!(!serialized.contains("rotated secret"));
+        assert_eq!(entry.request.body_fields[1].value, REDACTED_VALUE);
+        assert_eq!(entry.request.body_fields[2].value, REDACTED_VALUE);
     }
 
     #[test]
