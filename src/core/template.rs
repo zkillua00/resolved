@@ -4,7 +4,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::request::RequestDraft;
+use super::request::{BodyMode, RequestDraft};
 use super::workspace::{Environment, RequestScripts};
 
 const MAX_VARIABLE_DEPTH: usize = 32;
@@ -164,9 +164,10 @@ fn secret_spellings(value: &str) -> Vec<String> {
 
 /// Resolve all enabled outgoing request fields against one environment.
 ///
-/// Disabled header rows are deliberately left untouched because the request
-/// layer does not send them. This lets users keep incomplete templated headers
-/// disabled without blocking an otherwise valid request.
+/// Disabled header and structured-body rows are deliberately left untouched
+/// because the request layer does not send them. Inactive body representations
+/// are also preserved without expansion, so stale hidden editor contents cannot
+/// block a request that will not put them on the wire.
 pub fn resolve_request(
     template: &RequestDraft,
     environment: Option<&Environment>,
@@ -182,13 +183,22 @@ pub fn resolve_request(
         header.name = resolver.resolve_text(&header.name, TemplateField::HeaderName(index))?;
         header.value = resolver.resolve_text(&header.value, TemplateField::HeaderValue(index))?;
     }
-    request.body = resolver.resolve_text(&request.body, TemplateField::Body)?;
-    for (index, field) in request.body_fields.iter_mut().enumerate() {
-        if !field.enabled {
-            continue;
+    match request.body_mode {
+        BodyMode::None => {}
+        BodyMode::Raw => {
+            request.body = resolver.resolve_text(&request.body, TemplateField::Body)?;
         }
-        field.name = resolver.resolve_text(&field.name, TemplateField::BodyFieldName(index))?;
-        field.value = resolver.resolve_text(&field.value, TemplateField::BodyFieldValue(index))?;
+        BodyMode::FormUrlEncoded | BodyMode::MultipartFormData => {
+            for (index, field) in request.body_fields.iter_mut().enumerate() {
+                if !field.enabled {
+                    continue;
+                }
+                field.name =
+                    resolver.resolve_text(&field.name, TemplateField::BodyFieldName(index))?;
+                field.value =
+                    resolver.resolve_text(&field.value, TemplateField::BodyFieldValue(index))?;
+            }
+        }
     }
 
     Ok(ResolvedRequest {
@@ -444,6 +454,95 @@ mod tests {
         );
         assert_eq!(resolved.request.body_fields[2], template.body_fields[2]);
         assert_eq!(resolved.sensitive_values, vec!["private-token"]);
+    }
+
+    #[test]
+    fn none_body_mode_ignores_stale_raw_and_structured_templates() {
+        let mut request = RequestDraft::new("POST", "https://example.com/no-body");
+        request.body_mode = BodyMode::None;
+        request.body = "{{missing_raw}}".to_owned();
+        request.body_fields = vec![BodyField::text(
+            "{{missing_field_name}}",
+            "{{missing_field_value}}",
+        )];
+
+        let resolved = resolve_request(&request, None).unwrap();
+
+        assert_eq!(resolved.request.body, request.body);
+        assert_eq!(resolved.request.body_fields, request.body_fields);
+        assert!(resolved.used_variables.is_empty());
+    }
+
+    #[test]
+    fn raw_body_mode_resolves_raw_and_ignores_stale_structured_templates() {
+        let environment = environment(vec![variable("payload", "resolved", true, false)]);
+        let mut request = RequestDraft::new("POST", "https://example.com/raw");
+        request.body_mode = BodyMode::Raw;
+        request.body = "{{payload}}".to_owned();
+        request.body_fields = vec![BodyField::text(
+            "{{missing_field_name}}",
+            "{{missing_field_value}}",
+        )];
+
+        let resolved = resolve_request(&request, Some(&environment)).unwrap();
+
+        assert_eq!(resolved.request.body, "resolved");
+        assert_eq!(resolved.request.body_fields, request.body_fields);
+        assert_eq!(resolved.used_variables, vec!["payload"]);
+    }
+
+    #[test]
+    fn structured_body_modes_resolve_fields_and_ignore_stale_raw_template() {
+        let environment = environment(vec![
+            variable("field_name", "username", true, false),
+            variable("field_value", "Ada", true, false),
+        ]);
+
+        for mode in [BodyMode::FormUrlEncoded, BodyMode::MultipartFormData] {
+            let mut disabled =
+                BodyField::text("{{missing_disabled_name}}", "{{missing_disabled_value}}");
+            disabled.enabled = false;
+            let mut request = RequestDraft::new("POST", "https://example.com/form");
+            request.body_mode = mode;
+            request.body = "{{missing_raw}}".to_owned();
+            request.body_fields = vec![
+                BodyField::text("{{field_name}}", "{{field_value}}"),
+                disabled.clone(),
+            ];
+
+            let resolved = resolve_request(&request, Some(&environment)).unwrap();
+
+            assert_eq!(resolved.request.body, request.body);
+            assert_eq!(resolved.request.body_fields[0].name, "username");
+            assert_eq!(resolved.request.body_fields[0].value, "Ada");
+            assert_eq!(resolved.request.body_fields[1], disabled);
+            assert_eq!(resolved.used_variables, vec!["field_name", "field_value"]);
+        }
+    }
+
+    #[test]
+    fn active_body_representation_still_reports_missing_variables() {
+        let mut raw = RequestDraft::new("POST", "https://example.com/raw");
+        raw.body_mode = BodyMode::Raw;
+        raw.body = "{{missing_raw}}".to_owned();
+        assert_eq!(
+            resolve_request(&raw, None),
+            Err(VariableResolutionError::UndefinedVariable {
+                field: TemplateField::Body,
+                name: "missing_raw".to_owned(),
+            })
+        );
+
+        let mut form = RequestDraft::new("POST", "https://example.com/form");
+        form.body_mode = BodyMode::FormUrlEncoded;
+        form.body_fields = vec![BodyField::text("name", "{{missing_field}}")];
+        assert_eq!(
+            resolve_request(&form, None),
+            Err(VariableResolutionError::UndefinedVariable {
+                field: TemplateField::BodyFieldValue(0),
+                name: "missing_field".to_owned(),
+            })
+        );
     }
 
     #[test]

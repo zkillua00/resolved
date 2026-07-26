@@ -1,0 +1,362 @@
+diff --git a/src/input/state.rs b/src/input/state.rs
+--- a/src/input/state.rs
++++ b/src/input/state.rs
+@@ -5,10 +5,11 @@
+ use anyhow::Result;
+ use gpui::{
+     Action, App, AppContext, Bounds, ClipboardItem, Context, Entity, EntityInputHandler,
+-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
+-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
+-    Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, SharedString, Styled as _, Subscription,
+-    Task, UTF16Selection, Window, actions, div, point, prelude::FluentBuilder as _, px,
++    EventEmitter, FocusHandle, Focusable, HighlightStyle, InteractiveElement as _, IntoElement,
++    KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
++    ParentElement as _, Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, SharedString,
++    Styled as _, Subscription, Task, UTF16Selection, Window, actions, div, point,
++    prelude::FluentBuilder as _, px,
+ };
+ use ropey::{Rope, RopeSlice};
+ use serde::Deserialize;
+@@ -284,6 +285,8 @@ pub struct InputState {
+     pub(super) input_bounds: Bounds<Pixels>,
+     /// The text bounds
+     pub(super) last_bounds: Option<Bounds<Pixels>>,
++    /// Application-provided semantic highlight ranges, stored as UTF-8 byte offsets.
++    pub(super) semantic_highlights: Vec<(Range<usize>, HighlightStyle)>,
+     pub(super) last_selected_range: Option<Selection>,
+     pub(super) selecting: bool,
+     pub(super) size: Size,
+@@ -390,6 +393,7 @@ impl InputState {
+             mode: InputMode::default(),
+             last_layout: None,
+             last_bounds: None,
++            semantic_highlights: Vec::new(),
+             last_selected_range: None,
+             last_cursor: None,
+             scroll_handle: ScrollHandle::new(),
+@@ -549,6 +553,27 @@ impl InputState {
+         self.mode.diagnostics_mut()
+     }
+ 
++    /// Replace application-provided semantic highlights.
++    ///
++    /// Incoming ranges use LSP line/character positions. They are converted to
++    /// UTF-8 byte offsets immediately so painting does not need to repeat the
++    /// conversion on every frame.
++    pub fn set_semantic_highlights(
++        &mut self,
++        highlights: Vec<(lsp_types::Range, HighlightStyle)>,
++        cx: &mut Context<Self>,
++    ) {
++        self.semantic_highlights = highlights
++            .into_iter()
++            .filter_map(|(range, style)| {
++                let start = self.text.position_to_offset(&range.start);
++                let end = self.text.position_to_offset(&range.end);
++                (start < end).then_some((start..end, style))
++            })
++            .collect();
++        cx.notify();
++    }
++
+     /// Set placeholder
+     pub fn set_placeholder(
+         &mut self,
+@@ -1993,6 +2018,7 @@ impl EntityInputHandler for InputState {
+         if let Some(diagnostics) = self.mode.diagnostics_mut() {
+             diagnostics.reset(&self.text)
+         }
++        self.semantic_highlights.clear();
+         self.text_wrapper
+             .update(&self.text, &range, &Rope::from(new_text), cx);
+         self.mode
+@@ -2048,6 +2074,7 @@ impl EntityInputHandler for InputState {
+         if let Some(diagnostics) = self.mode.diagnostics_mut() {
+             diagnostics.reset(&self.text)
+         }
++        self.semantic_highlights.clear();
+         self.text_wrapper
+             .update(&self.text, &range, &Rope::from(new_text), cx);
+         self.mode
+diff --git a/src/input/element.rs b/src/input/element.rs
+--- a/src/input/element.rs
++++ b/src/input/element.rs
+@@ -20,6 +20,50 @@
+ pub(super) const RIGHT_MARGIN: Pixels = px(10.);
+ pub(super) const LINE_NUMBER_RIGHT_MARGIN: Pixels = px(10.);
+ 
++/// Overlay application-owned semantic styles in a stable order.
++///
++/// GPUI's general-purpose `combine_highlights` intentionally treats active
++/// styles as an unordered set. That is fine for independent attributes, but
++/// semantic template colors must win over a syntax foreground color
++/// deterministically. The base styles cover the visible byte range, so each
++/// semantic range can be applied by splitting the affected base segments.
++fn overlay_semantic_highlights(
++    mut base: Vec<(Range<usize>, HighlightStyle)>,
++    overlays: impl IntoIterator<Item = (Range<usize>, HighlightStyle)>,
++) -> Vec<(Range<usize>, HighlightStyle)> {
++    for (overlay_range, overlay_style) in overlays {
++        if overlay_range.is_empty() {
++            continue;
++        }
++
++        let mut next = Vec::with_capacity(base.len() + 2);
++        for (range, style) in base {
++            if range.end <= overlay_range.start || range.start >= overlay_range.end {
++                next.push((range, style));
++                continue;
++            }
++
++            let overlap_start = range.start.max(overlay_range.start);
++            let overlap_end = range.end.min(overlay_range.end);
++            if range.start < overlap_start {
++                next.push((range.start..overlap_start, style));
++            }
++
++            let mut combined = style.highlight(overlay_style);
++            if overlay_style.color.is_some() {
++                combined.color = overlay_style.color;
++            }
++            next.push((overlap_start..overlap_end, combined));
++
++            if overlap_end < range.end {
++                next.push((overlap_end..range.end, style));
++            }
++        }
++        base = next;
++    }
++    base
++}
++
+ pub(super) struct TextElement {
+     pub(crate) state: Entity<InputState>,
+     placeholder: SharedString,
+@@ -744,39 +744,45 @@ impl TextElement {
+         let text = &state.text;
+         let is_multi_line = state.mode.is_multi_line();
++        let has_visible_semantic_highlights = state.semantic_highlights.iter().any(|(range, _)| {
++            range.start < visible_byte_range.end && range.end > visible_byte_range.start
++        });
++        if !state.mode.is_code_editor() && !has_visible_semantic_highlights {
++            return None;
++        }
+ 
+-        let (highlighter, diagnostics) = match &state.mode {
+-            InputMode::CodeEditor {
+-                highlighter,
+-                diagnostics,
+-                ..
+-            } => (highlighter.borrow(), diagnostics),
+-            _ => return None,
+-        };
+-        let highlighter = highlighter.as_ref()?;
+-
+         let mut offset = visible_byte_range.start;
+-        let mut styles = vec![];
+-
+-        for line in text
+-            .iter_lines()
+-            .skip(visible_range.start)
+-            .take(visible_range.len())
++        let mut styles = vec![(visible_byte_range.clone(), HighlightStyle::default())];
++        let mut diagnostic_styles = Vec::new();
++
++        if let InputMode::CodeEditor {
++            highlighter,
++            diagnostics,
++            ..
++        } = &state.mode
+         {
+-            let line_len = if is_multi_line {
+-                // +1 for `\n`
+-                line.len() + 1
+-            } else {
+-                line.len()
+-            };
++            if let Some(highlighter) = highlighter.borrow().as_ref() {
++                for line in text
++                    .iter_lines()
++                    .skip(visible_range.start)
++                    .take(visible_range.len())
++                {
++                    let line_len = if is_multi_line {
++                        // +1 for `\n`
++                        line.len() + 1
++                    } else {
++                        line.len()
++                    };
+ 
+-            let range = offset..offset + line_len;
+-            let line_styles = highlighter.styles(&range, &cx.theme().highlight_theme);
+-            styles = gpui::combine_highlights(styles, line_styles).collect();
++                    let range = offset..offset + line_len;
++                    let line_styles = highlighter.styles(&range, &cx.theme().highlight_theme);
++                    styles = gpui::combine_highlights(styles, line_styles).collect();
+ 
+-            offset = range.end;
+-        }
++                    offset = range.end;
++                }
++            }
+ 
+-        let diagnostic_styles = diagnostics.styles_for_range(&visible_byte_range, cx);
++            diagnostic_styles = diagnostics.styles_for_range(&visible_byte_range, cx);
++        }
+ 
+         // hover definition style
+         if let Some(hover_style) = self.layout_hover_definition(cx) {
+@@ -786,6 +786,16 @@ impl TextElement {
+         // Combine marker styles
+         styles = gpui::combine_highlights(diagnostic_styles, styles).collect();
+ 
++        let semantic_styles = state
++            .semantic_highlights
++            .iter()
++            .filter_map(|(range, style)| {
++                let start = range.start.max(visible_byte_range.start);
++                let end = range.end.min(visible_byte_range.end);
++                (start < end).then_some((start..end, *style))
++            });
++        styles = overlay_semantic_highlights(styles, semantic_styles);
++
+         Some(styles)
+     }
+ }
+diff --git a/src/input/lsp/completions.rs b/src/input/lsp/completions.rs
+--- a/src/input/lsp/completions.rs
++++ b/src/input/lsp/completions.rs
+@@ -67,6 +67,14 @@ pub trait CompletionProvider {
+         DEFAULT_INLINE_COMPLETION_DEBOUNCE
+     }
+ 
++    /// Whether this provider implements inline ghost-text completions.
++    ///
++    /// Menu-only providers can opt out to avoid cloning the Rope and spawning a
++    /// debounce task on every edit.
++    fn supports_inline_completion(&self) -> bool {
++        true
++    }
++
+     fn resolve_completions(
+         &self,
+         _completion_indices: Vec<usize>,
+@@ -85,6 +93,23 @@ pub trait CompletionProvider {
+         new_text: &str,
+         cx: &mut Context<InputState>,
+     ) -> bool;
++
++    /// Determines whether completion should run with access to the current
++    /// buffer and cursor position after the edit.
++    ///
++    /// Providers that do not need buffer context retain the original behavior.
++    /// Context-sensitive providers can override this to avoid scheduling
++    /// completion work for edits outside their language construct.
++    fn is_completion_trigger_in_text(
++        &self,
++        _text: &Rope,
++        _cursor_offset: usize,
++        edit_start: usize,
++        new_text: &str,
++        cx: &mut Context<InputState>,
++    ) -> bool {
++        self.is_completion_trigger(edit_start, new_text, cx)
++    }
+ }
+ 
+ pub(crate) struct InlineCompletion {
+@@ -119,14 +144,14 @@ impl InputState {
+             return;
+         };
+ 
+-        // Always schedule inline completion (debounced).
+-        // It will check if menu is open before showing the suggestion.
+-        self.schedule_inline_completion(window, cx);
++        if provider.supports_inline_completion() {
++            self.schedule_inline_completion(window, cx);
++        }
+ 
+         let start = range.end;
+         let new_offset = self.cursor();
+ 
+-        if !provider.is_completion_trigger(start, new_text, cx) {
++        if !provider.is_completion_trigger_in_text(&self.text, new_offset, start, new_text, cx) {
+             return;
+         }
+ 
+diff --git a/src/input/popovers/completion_menu.rs b/src/input/popovers/completion_menu.rs
+--- a/src/input/popovers/completion_menu.rs
++++ b/src/input/popovers/completion_menu.rs
+@@ -22,6 +22,18 @@ use crate::{
+     list::{List, ListDelegate, ListEvent, ListState},
+ };
+ 
++fn matching_label_prefix_len(label: &str, query: &str) -> usize {
++    let mut matched_len = 0;
++    for ((byte_offset, label_character), query_character) in label.char_indices().zip(query.chars())
++    {
++        if !label_character.eq_ignore_ascii_case(&query_character) {
++            break;
++        }
++        matched_len = byte_offset + label_character.len_utf8();
++    }
++    matched_len
++}
++
+ struct ContextMenuDelegate {
+     query: SharedString,
+     menu: Entity<CompletionMenu>,
+@@ -86,19 +98,22 @@ impl RenderOnce for CompletionMenuItem {
+         let item = self.item;
+ 
+         let deprecated = item.deprecated.unwrap_or(false);
+-        let matched_len = item
+-            .filter_text
+-            .as_ref()
+-            .map(|s| s.len())
+-            .unwrap_or(self.highlight_prefix.len());
+-
+-        let highlights = vec![(
+-            0..matched_len,
+-            HighlightStyle {
+-                color: Some(cx.theme().blue),
+-                ..Default::default()
+-            },
+-        )];
++        // `filter_text` is an alternate search key, not a byte range into
++        // `label`. Only highlight a real, UTF-8-safe prefix shared by the
++        // visible label and the user's current query.
++        let matched_len = matching_label_prefix_len(&item.label, &self.highlight_prefix);
++        let highlights = (matched_len > 0)
++            .then(|| {
++                (
++                    0..matched_len,
++                    HighlightStyle {
++                        color: Some(cx.theme().blue),
++                        ..Default::default()
++                    },
++                )
++            })
++            .into_iter()
++            .collect::<Vec<_>>();
+ 
+         h_flex()
+             .id(self.ix)
+@@ -466,3 +481,17 @@ impl Render for CompletionMenu {
+         .into_any_element()
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::matching_label_prefix_len;
++
++    #[test]
++    fn completion_highlight_is_bounded_to_a_real_label_prefix() {
++        assert_eq!(matching_label_prefix_len("request", "req"), 3);
++        assert_eq!(matching_label_prefix_len("Request", "req"), 3);
++        assert_eq!(matching_label_prefix_len("url", "api.request."), 0);
++        assert_eq!(matching_label_prefix_len("名-value", "名-"), 4);
++        assert_eq!(matching_label_prefix_len("éclair", "é"), 2);
++    }
++}

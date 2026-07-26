@@ -51,6 +51,14 @@ complete the phase-appropriate `api` surface and enabled variable names from the
 active environment. Literal reads of missing or disabled variables receive
 editor warnings without exposing variable values to the completion engine.
 
+URL, header, raw-body, and structured-body fields also understand request
+templates while editing. Typing `{{` inserts the matching braces and opens
+active-environment variable completion. Existing, disabled, and missing
+references use distinct theme colors; hover shows the active value while
+masking secrets. Clicking a missing reference opens a compact value editor that
+can persist it to the active environment, and disabled references can be
+re-enabled without changing their stored value or secret status.
+
 ## Request bodies
 
 - **None** sends no payload, even if a previous raw editor value remains.
@@ -230,10 +238,11 @@ scripts/cargo.sh run
 
 GPUI's `runtime_shaders` feature is enabled, so the normal build works with Apple
 Command Line Tools and does not require the full Xcode Metal command-line
-compiler. The wrapper obtains the verified crates.io GPUI 0.2.2 archive from
-Cargo's local cache when available (or crates.io otherwise), applies the small
-Metal renderer patch, and then forwards its arguments to Cargo. The generated
-`vendor/gpui-0.2.2/` directory is ignored by Git.
+compiler. The wrapper obtains the verified crates.io GPUI 0.2.2 and GPUI
+Component 0.5.1 archives from Cargo's local cache when available (or crates.io
+otherwise), applies the small renderer and input-integration patches, and then
+forwards its arguments to Cargo. The generated `vendor/gpui-0.2.2/` and
+`vendor/gpui-component-0.5.1/` directories are ignored by Git.
 
 To build a launchable application bundle:
 

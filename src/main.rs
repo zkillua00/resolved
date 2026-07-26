@@ -12,6 +12,7 @@ mod core;
 mod debug_overlay;
 mod instance_guard;
 mod script_intelligence;
+mod template_intelligence;
 mod theme;
 mod web_preview;
 

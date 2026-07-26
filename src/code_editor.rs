@@ -1,19 +1,24 @@
-use std::rc::Rc;
+use std::{rc::Rc, time::Duration};
 
 use gpui::{
     App, AppContext as _, Context, Corner, DismissEvent, Entity, EntityInputHandler, EventEmitter,
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, ParentElement as _, Pixels, Point, Render, SharedString, Styled as _,
-    Subscription, Window, anchored, deferred, div, px,
+    Subscription, Task, Timer, Window, anchored, deferred, div, px,
 };
 use gpui_component::{
     ActiveTheme as _, RopeExt as _,
     highlighter::Diagnostic,
-    input::{CompletionProvider, Copy, Cut, Input, InputEvent, InputState, Paste, SelectAll},
+    input::{
+        CompletionProvider, Copy, Cut, HoverProvider, Input, InputEvent, InputState, Paste,
+        SelectAll,
+    },
     menu::{PopupMenu, PopupMenuItem},
 };
 
 use crate::theme::surface_lowest;
+
+const DIAGNOSTIC_REFRESH_DEBOUNCE: Duration = Duration::from_millis(120);
 
 /// A syntax-highlighting language understood by `gpui-component`.
 ///
@@ -98,6 +103,7 @@ pub struct CodeEditorConfig {
     auto_close: bool,
     format_action: bool,
     completion_provider: Option<Rc<dyn CompletionProvider>>,
+    hover_provider: Option<Rc<dyn HoverProvider>>,
     diagnostic_provider: Option<DiagnosticProvider>,
 }
 
@@ -114,6 +120,7 @@ impl Default for CodeEditorConfig {
             auto_close: true,
             format_action: false,
             completion_provider: None,
+            hover_provider: None,
             diagnostic_provider: None,
         }
     }
@@ -171,6 +178,11 @@ impl CodeEditorConfig {
         self
     }
 
+    pub fn hover_provider(mut self, provider: Rc<dyn HoverProvider>) -> Self {
+        self.hover_provider = Some(provider);
+        self
+    }
+
     pub fn diagnostic_provider(
         mut self,
         provider: impl Fn(&str) -> Vec<Diagnostic> + 'static,
@@ -202,6 +214,7 @@ pub struct CodeEditor {
     context_menu: Option<Entity<PopupMenu>>,
     context_menu_position: Point<Pixels>,
     diagnostic_provider: Option<DiagnosticProvider>,
+    diagnostic_refresh_task: Task<()>,
     _input_subscription: Subscription,
     _context_menu_subscription: Option<Subscription>,
 }
@@ -220,6 +233,7 @@ impl CodeEditor {
             auto_close,
             format_action,
             completion_provider,
+            hover_provider,
             diagnostic_provider,
         } = config;
         let completion_enabled = completion_provider.is_some();
@@ -239,16 +253,18 @@ impl CodeEditor {
                 state = state.default_value(initial_value);
             }
             state.lsp.completion_provider = completion_provider;
+            state.lsp.hover_provider = hover_provider;
             state
         });
 
         let input_subscription = cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
             cx.emit(event.clone());
             if matches!(event, InputEvent::Change) && this.diagnostic_provider.is_some() {
-                let this = cx.entity().downgrade();
-                cx.defer(move |cx| {
+                this.diagnostic_refresh_task = cx.spawn(async move |this, cx| {
+                    Timer::after(DIAGNOSTIC_REFRESH_DEBOUNCE).await;
                     if let Some(this) = this.upgrade() {
-                        this.update(cx, |this, cx| this.refresh_diagnostics(cx));
+                        this.update(cx, |this, cx| this.refresh_diagnostics(cx))
+                            .ok();
                     }
                 });
             }
@@ -265,6 +281,7 @@ impl CodeEditor {
             context_menu: None,
             context_menu_position: Point::default(),
             diagnostic_provider,
+            diagnostic_refresh_task: Task::ready(()),
             _input_subscription: input_subscription,
             _context_menu_subscription: None,
         };
@@ -298,6 +315,7 @@ impl CodeEditor {
         let value = value.into();
         self.input
             .update(cx, |input, cx| input.set_value(value, window, cx));
+        self.diagnostic_refresh_task = Task::ready(());
         self.refresh_diagnostics(cx);
     }
 
@@ -514,6 +532,10 @@ fn apply_pair_edit(
     window: &mut Window,
     cx: &mut Context<InputState>,
 ) -> bool {
+    if apply_template_pair_edit(input, typed, window, cx) {
+        return true;
+    }
+
     let selection = EntityInputHandler::selected_text_range(input, true, window, cx)
         .expect("InputState always provides a selection");
     let cursor = input.cursor();
@@ -582,6 +604,56 @@ fn apply_pair_edit(
         window,
         cx,
     );
+    true
+}
+
+/// Handles the language-independent `{{…}}` editing contract used by request
+/// templates. On the second opening brace, the missing closing braces are
+/// installed silently and the typed brace is inserted through the platform
+/// text path so completion providers still receive their trigger.
+pub(crate) fn apply_template_pair_edit(
+    input: &mut InputState,
+    typed: &str,
+    window: &mut Window,
+    cx: &mut Context<InputState>,
+) -> bool {
+    let Some(typed_char) = typed.chars().next() else {
+        return false;
+    };
+    if typed.chars().count() != 1 {
+        return false;
+    }
+
+    let selection = EntityInputHandler::selected_text_range(input, true, window, cx)
+        .expect("InputState always provides a selection");
+    if !selection.range.is_empty() {
+        return false;
+    }
+
+    let cursor = input.cursor();
+    if typed_char == '}' && input.text().char_at(cursor) == Some('}') {
+        let point = input.text().offset_to_position(cursor + 1);
+        input.set_cursor_position(point, window, cx);
+        return true;
+    }
+
+    if typed_char != '{'
+        || cursor == 0
+        || input.text().char_at(cursor.saturating_sub(1)) != Some('{')
+    {
+        return false;
+    }
+
+    let existing_closers = usize::from(input.text().char_at(cursor) == Some('}'))
+        + usize::from(input.text().char_at(cursor + 1) == Some('}'));
+    let missing_closers = 2usize.saturating_sub(existing_closers);
+    if missing_closers > 0 {
+        input.replace("}".repeat(missing_closers), window, cx);
+        let before_closers = input.text().offset_to_position(cursor);
+        input.set_cursor_position(before_closers, window, cx);
+    }
+
+    EntityInputHandler::replace_text_in_range(input, Some(selection.range), typed, window, cx);
     true
 }
 

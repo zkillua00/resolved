@@ -17,6 +17,8 @@ use lsp_types::{
 const DIAGNOSTIC_SOURCE: &str = "api-tester";
 const MISSING_VARIABLE_CODE: &str = "missing-script-variable";
 const DISABLED_VARIABLE_CODE: &str = "disabled-script-variable";
+const COMPLETION_CONTEXT_LIMIT: usize = 512;
+const VARIABLE_CONTEXT_PADDING: usize = 96;
 
 /// The script editor currently being completed.
 ///
@@ -141,6 +143,10 @@ impl ScriptCompletionProvider {
 }
 
 impl CompletionProvider for ScriptCompletionProvider {
+    fn supports_inline_completion(&self) -> bool {
+        false
+    }
+
     fn completions(
         &self,
         text: &Rope,
@@ -165,6 +171,75 @@ impl CompletionProvider for ScriptCompletionProvider {
                 character.is_alphanumeric() || matches!(character, '_' | '$' | '.' | '"' | '\'')
             })
     }
+
+    fn is_completion_trigger_in_text(
+        &self,
+        text: &Rope,
+        cursor_offset: usize,
+        _edit_start: usize,
+        new_text: &str,
+        _cx: &mut Context<InputState>,
+    ) -> bool {
+        if new_text.is_empty()
+            || !new_text.chars().all(|character| {
+                character.is_alphanumeric() || matches!(character, '_' | '$' | '.' | '"' | '\'')
+            })
+        {
+            return false;
+        }
+
+        script_completion_is_active(text, cursor_offset, self.phase, &self.variables.borrow())
+    }
+}
+
+fn script_completion_is_active(
+    text: &Rope,
+    requested_cursor: usize,
+    phase: ScriptEditorPhase,
+    variables: &ScriptVariableCatalog,
+) -> bool {
+    let cursor = requested_cursor.min(text.len());
+    let longest_variable_name = variables
+        .variable_names()
+        .map(|name| name.chars().count())
+        .max()
+        .unwrap_or_default();
+    let scan_limit = COMPLETION_CONTEXT_LIMIT
+        .max(longest_variable_name.saturating_add(VARIABLE_CONTEXT_PADDING));
+    let mut characters = text
+        .chars_at(cursor)
+        .reversed()
+        .take(scan_limit)
+        .collect::<Vec<_>>();
+    characters.reverse();
+    let source = characters.into_iter().collect::<String>();
+    let offset = source.len();
+    let lexed = lex(&source);
+
+    if lexed.ended_in_comment_or_template {
+        return false;
+    }
+
+    if let Some(context) = variable_string_completion_context(&lexed.tokens, offset) {
+        return match context.namespace {
+            VariableNamespace::Environment => variables
+                .environment_names()
+                .any(|name| name.starts_with(&context.typed)),
+            VariableNamespace::Variables => variables
+                .variable_names()
+                .any(|name| name.starts_with(&context.typed)),
+        };
+    }
+
+    if lexed.ended_in_quoted_string {
+        return false;
+    }
+
+    member_completion_context(&lexed.tokens, offset).is_some_and(|context| {
+        specs_for_path(&context.path, phase)
+            .iter()
+            .any(|spec| spec.label.starts_with(&context.typed))
+    })
 }
 
 /// Emits conservative warnings for missing literal variable reads.
@@ -1257,6 +1332,57 @@ mod tests {
 
         let later_global = labels(pre.completion_items_for_source("const value = 1;\nap", 19));
         assert_eq!(later_global, ["api"]);
+    }
+
+    #[test]
+    fn completion_trigger_uses_a_bounded_relevant_context() {
+        let variables = catalog();
+
+        let ordinary = Rope::from("const ordinaryName = 1");
+        assert!(!script_completion_is_active(
+            &ordinary,
+            ordinary.len(),
+            ScriptEditorPhase::PreRequest,
+            &variables,
+        ));
+
+        let member = Rope::from("api.request.");
+        assert!(script_completion_is_active(
+            &member,
+            member.len(),
+            ScriptEditorPhase::PreRequest,
+            &variables,
+        ));
+
+        let pre_response = Rope::from("api.response.");
+        assert!(!script_completion_is_active(
+            &pre_response,
+            pre_response.len(),
+            ScriptEditorPhase::PreRequest,
+            &variables,
+        ));
+        assert!(script_completion_is_active(
+            &pre_response,
+            pre_response.len(),
+            ScriptEditorPhase::PostResponse,
+            &variables,
+        ));
+
+        let variable = Rope::from(r#"api.environment.get("ba"#);
+        assert!(script_completion_is_active(
+            &variable,
+            variable.len(),
+            ScriptEditorPhase::PreRequest,
+            &variables,
+        ));
+
+        let comment = Rope::from("// api.request.");
+        assert!(!script_completion_is_active(
+            &comment,
+            comment.len(),
+            ScriptEditorPhase::PreRequest,
+            &variables,
+        ));
     }
 
     #[test]

@@ -1,20 +1,22 @@
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     rc::Rc,
     sync::Arc,
+    time::Duration,
 };
 
 use chrono::Local;
 use gpui::{
-    AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity,
-    EntityInputHandler, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, PathPromptOptions, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Corner, Entity, EntityId,
+    EntityInputHandler, Focusable as _, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, ParentElement as _, PathPromptOptions, Pixels, Point, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Timer, Window,
+    anchored, deferred, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, IconName, Root, Selectable as _, Sizable as _,
-    StyledExt as _, WindowExt as _,
+    ActiveTheme as _, Disableable as _, IconName, Root, RopeExt as _, Selectable as _,
+    Sizable as _, StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     checkbox::Checkbox,
     dialog::DialogButtonProps,
@@ -31,7 +33,9 @@ use reqwest::Client;
 use tokio::{runtime::Runtime, task::AbortHandle};
 
 use crate::{
-    code_editor::{CodeEditor, CodeEditorConfig, CodeEditorEvent, CodeLanguage},
+    code_editor::{
+        CodeEditor, CodeEditorConfig, CodeEditorEvent, CodeLanguage, apply_template_pair_edit,
+    },
     core::{
         BodyField, BodyFieldKind, BodyMode, DatabaseStore, Environment, EnvironmentMutation,
         HeaderEntry, HistoryEntry, PostResponseResult, PreRequestResult, REDACTED_VALUE,
@@ -44,11 +48,19 @@ use crate::{
     script_intelligence::{
         ScriptCompletionProvider, ScriptEditorPhase, ScriptVariableCatalog, diagnostics_for_source,
     },
+    template_intelligence::{
+        TemplateClassification, TemplateCompletionProvider, TemplateHighlightColors,
+        TemplateHoverProvider, TemplateVariableCatalog, TemplateVariableCatalogHandle,
+        scan_template_spans, semantic_style_spans,
+    },
     theme::{
-        outline_variant, primary_bright, surface, surface_container, surface_low, surface_lowest,
+        outline_variant, primary_bright, primary_lavender, surface, surface_container, surface_low,
+        surface_lowest,
     },
     web_preview::{HtmlPreview, can_preview},
 };
+
+const TEMPLATE_HIGHLIGHT_DEBOUNCE: Duration = Duration::from_millis(90);
 
 const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 
@@ -163,6 +175,23 @@ struct EnvironmentVariableRow {
     _subscriptions: Vec<Subscription>,
 }
 
+#[derive(Clone)]
+enum TemplateVariableAction {
+    Create,
+    Enable { variable_id: String },
+}
+
+#[derive(Clone)]
+struct TemplateVariablePopover {
+    name: String,
+    expected_environment_id: Option<String>,
+    environment_name: Option<String>,
+    action: TemplateVariableAction,
+    value: Entity<InputState>,
+    position: Point<Pixels>,
+    error: Option<String>,
+}
+
 pub struct ApiTester {
     method: Entity<InputState>,
     url: Entity<InputState>,
@@ -221,6 +250,9 @@ pub struct ApiTester {
     next_variable_row_id: usize,
     pending_delete: Option<PendingDelete>,
     script_variable_catalog: Rc<RefCell<ScriptVariableCatalog>>,
+    template_variable_catalog: TemplateVariableCatalogHandle,
+    template_highlight_tasks: HashMap<EntityId, Task<()>>,
+    template_variable_popover: Option<TemplateVariablePopover>,
     debug_overlay: Entity<DebugOverlay>,
     preview: Option<Entity<HtmlPreview>>,
     _subscriptions: Vec<Subscription>,
@@ -233,16 +265,24 @@ pub struct ApiTester {
 impl ApiTester {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let script_variable_catalog = ScriptVariableCatalog::default().shared();
+        let template_variable_catalog = TemplateVariableCatalog::default().shared();
         let method = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("METHOD")
                 .default_value("GET")
         });
+        let url_template_catalog = Rc::clone(&template_variable_catalog);
         let url = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("https://api.example.com/users")
-                .default_value("https://httpbin.org/get")
+            template_input_state(
+                window,
+                cx,
+                url_template_catalog,
+                "https://api.example.com/users",
+                "https://httpbin.org/get",
+            )
         });
+        let body_completion_catalog = Rc::clone(&template_variable_catalog);
+        let body_hover_catalog = Rc::clone(&template_variable_catalog);
         let body = cx.new(|cx| {
             CodeEditor::new(
                 CodeEditorConfig::default()
@@ -250,7 +290,11 @@ impl ApiTester {
                     .placeholder("Raw request body · ⌘F to search")
                     .rows(12)
                     .soft_wrap(false)
-                    .format_action(true),
+                    .format_action(true)
+                    .completion_provider(Rc::new(TemplateCompletionProvider::new(
+                        body_completion_catalog,
+                    )))
+                    .hover_provider(Rc::new(TemplateHoverProvider::new(body_hover_catalog))),
                 window,
                 cx,
             )
@@ -392,6 +436,9 @@ impl ApiTester {
             .first()
             .map(|collection| collection.id.clone());
         update_script_variable_catalog(&script_variable_catalog, &workspace);
+        template_variable_catalog
+            .borrow_mut()
+            .replace_environment(workspace.active_environment());
         let selected_environment_id = workspace.active_environment_id.clone().or_else(|| {
             workspace
                 .environments
@@ -450,6 +497,10 @@ impl ApiTester {
         );
 
         let url_subscription = cx.subscribe_in(&url, window, |this, _, event, window, cx| {
+            if matches!(event, InputEvent::Change) {
+                let input = this.url.clone();
+                this.schedule_template_input_refresh(&input, cx);
+            }
             if matches!(event, InputEvent::PressEnter { .. }) {
                 this.start_request(window, cx);
             } else {
@@ -463,7 +514,13 @@ impl ApiTester {
                 cx.notify();
             }
         });
-        let body_subscription = cx.subscribe(&body, |_, _, _: &InputEvent, cx| cx.notify());
+        let body_subscription = cx.subscribe(&body, |this, editor, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let input = editor.read(cx).input_state();
+                this.schedule_template_input_refresh(&input, cx);
+            }
+            cx.notify();
+        });
         let body_format_subscription =
             cx.subscribe_in(&body, window, |this, _, event, window, cx| {
                 if matches!(event, CodeEditorEvent::FormatRequested) {
@@ -557,6 +614,9 @@ impl ApiTester {
             next_variable_row_id: 0,
             pending_delete: None,
             script_variable_catalog,
+            template_variable_catalog,
+            template_highlight_tasks: HashMap::new(),
+            template_variable_popover: None,
             debug_overlay,
             preview: None,
             _subscriptions: vec![
@@ -574,6 +634,7 @@ impl ApiTester {
             ],
         };
         this.push_header_row("", "", true, window, cx);
+        this.refresh_variable_intelligence(cx);
         this.loaded_request_baseline = this.request_template(cx);
         this
     }
@@ -691,18 +752,17 @@ impl ApiTester {
         let value = value.into();
         let id = self.next_header_id;
         self.next_header_id = self.next_header_id.wrapping_add(1);
-        let name_state = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Key")
-                .default_value(name)
-        });
-        let value_state = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Value")
-                .default_value(value)
-        });
+        let name_catalog = Rc::clone(&self.template_variable_catalog);
+        let name_state = cx.new(|cx| template_input_state(window, cx, name_catalog, "Key", name));
+        let value_catalog = Rc::clone(&self.template_variable_catalog);
+        let value_state =
+            cx.new(|cx| template_input_state(window, cx, value_catalog, "Value", value));
+        let name_template_input = name_state.clone();
         let name_subscription =
             cx.subscribe_in(&name_state, window, move |this, _, event, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.schedule_template_input_refresh(&name_template_input, cx);
+                }
                 if matches!(event, InputEvent::PressEnter { .. })
                     && let Some(row) = this.headers.iter().find(|row| row.id == id)
                 {
@@ -710,13 +770,19 @@ impl ApiTester {
                 }
                 cx.notify();
             });
+        let value_template_input = value_state.clone();
         let value_subscription =
             cx.subscribe_in(&value_state, window, move |this, _, event, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.schedule_template_input_refresh(&value_template_input, cx);
+                }
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     this.focus_next_header_row(id, window, cx);
                 }
                 cx.notify();
             });
+        self.refresh_template_input(&name_state, cx);
+        self.refresh_template_input(&value_state, cx);
         self.headers.push(HeaderRow {
             id,
             name: name_state,
@@ -864,22 +930,22 @@ impl ApiTester {
         let value = value.into();
         let id = self.next_body_field_id;
         self.next_body_field_id = self.next_body_field_id.wrapping_add(1);
-        let name_state = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Key")
-                .default_value(name)
-        });
-        let value_state = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(if kind == BodyFieldKind::File {
-                    "Choose or enter a file path"
-                } else {
-                    "Value"
-                })
-                .default_value(value)
-        });
+        let name_catalog = Rc::clone(&self.template_variable_catalog);
+        let name_state = cx.new(|cx| template_input_state(window, cx, name_catalog, "Key", name));
+        let value_catalog = Rc::clone(&self.template_variable_catalog);
+        let value_placeholder = if kind == BodyFieldKind::File {
+            "Choose or enter a file path"
+        } else {
+            "Value"
+        };
+        let value_state =
+            cx.new(|cx| template_input_state(window, cx, value_catalog, value_placeholder, value));
+        let name_template_input = name_state.clone();
         let name_subscription =
             cx.subscribe_in(&name_state, window, move |this, _, event, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.schedule_template_input_refresh(&name_template_input, cx);
+                }
                 if matches!(event, InputEvent::PressEnter { .. })
                     && let Some(row) = this.body_fields.iter().find(|row| row.id == id)
                 {
@@ -887,13 +953,19 @@ impl ApiTester {
                 }
                 cx.notify();
             });
+        let value_template_input = value_state.clone();
         let value_subscription =
             cx.subscribe_in(&value_state, window, move |this, _, event, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.schedule_template_input_refresh(&value_template_input, cx);
+                }
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     this.focus_next_body_field_row(id, window, cx);
                 }
                 cx.notify();
             });
+        self.refresh_template_input(&name_state, cx);
+        self.refresh_template_input(&value_state, cx);
         self.body_fields.push(BodyFieldRow {
             id,
             name: name_state,
@@ -1052,12 +1124,318 @@ impl ApiTester {
         }
     }
 
-    fn refresh_script_intelligence(&mut self, cx: &mut Context<Self>) {
+    fn refresh_variable_intelligence(&mut self, cx: &mut Context<Self>) {
+        self.template_highlight_tasks.clear();
         update_script_variable_catalog(&self.script_variable_catalog, &self.workspace);
+        self.template_variable_catalog
+            .borrow_mut()
+            .replace_environment(self.workspace.active_environment());
         self.pre_request_script
             .update(cx, |editor, cx| editor.refresh_diagnostics(cx));
         self.post_response_script
             .update(cx, |editor, cx| editor.refresh_diagnostics(cx));
+
+        let mut inputs =
+            Vec::with_capacity(2 + self.headers.len() * 2 + self.body_fields.len() * 2);
+        inputs.push(self.url.clone());
+        inputs.push(self.body.read(cx).input_state());
+        for row in &self.headers {
+            inputs.push(row.name.clone());
+            inputs.push(row.value.clone());
+        }
+        for row in &self.body_fields {
+            inputs.push(row.name.clone());
+            inputs.push(row.value.clone());
+        }
+        for input in inputs {
+            self.refresh_template_input(&input, cx);
+        }
+    }
+
+    fn refresh_template_input(&self, input: &Entity<InputState>, cx: &mut Context<Self>) {
+        let source = input.read(cx).value().to_string();
+        let colors = TemplateHighlightColors {
+            valid: primary_lavender(),
+            warning: cx.theme().warning,
+            error: cx.theme().red,
+        };
+        let catalog = self.template_variable_catalog.borrow();
+        let semantic_highlights = semantic_style_spans(&source, &catalog, colors);
+        drop(catalog);
+
+        input.update(cx, |input, cx| {
+            input.set_semantic_highlights(semantic_highlights, cx);
+        });
+    }
+
+    fn schedule_template_input_refresh(
+        &mut self,
+        input: &Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) {
+        let input_id = input.entity_id();
+        let input = input.downgrade();
+        let task = cx.spawn(async move |this, cx| {
+            Timer::after(TEMPLATE_HIGHLIGHT_DEBOUNCE).await;
+            let (Some(this), Some(input)) = (this.upgrade(), input.upgrade()) else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.refresh_template_input(&input, cx);
+            })
+            .ok();
+        });
+        self.template_highlight_tasks.insert(input_id, task);
+    }
+
+    fn focused_single_line_template_input(
+        &self,
+        window: &Window,
+        cx: &App,
+    ) -> Option<Entity<InputState>> {
+        std::iter::once(self.url.clone())
+            .chain(
+                self.headers
+                    .iter()
+                    .flat_map(|row| [row.name.clone(), row.value.clone()]),
+            )
+            .chain(
+                self.body_fields
+                    .iter()
+                    .flat_map(|row| [row.name.clone(), row.value.clone()]),
+            )
+            .find(|input| input.read(cx).focus_handle(cx).is_focused(window))
+    }
+
+    fn capture_template_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.is_held {
+            return;
+        }
+        let modifiers = event.keystroke.modifiers;
+        if modifiers.platform || modifiers.control || modifiers.function {
+            return;
+        }
+        let Some(typed) = event.keystroke.key_char.as_deref() else {
+            return;
+        };
+        if typed.chars().count() != 1 {
+            return;
+        }
+        let Some(input) = self.focused_single_line_template_input(window, cx) else {
+            return;
+        };
+        let handled = input.update(cx, |input, cx| {
+            if EntityInputHandler::marked_text_range(input, window, cx).is_some() {
+                return false;
+            }
+            apply_template_pair_edit(input, typed, window, cx)
+        });
+        if handled {
+            cx.stop_propagation();
+        }
+    }
+
+    fn open_template_variable_popover(
+        &mut self,
+        input: Entity<InputState>,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.button != MouseButton::Left {
+            return;
+        }
+        let Some(clicked_utf16) = input.update(cx, |input, cx| {
+            EntityInputHandler::character_index_for_point(input, event.position, window, cx)
+        }) else {
+            self.template_variable_popover = None;
+            cx.notify();
+            return;
+        };
+        let source = input.read(cx).value().to_string();
+        let clicked_offset = input.read(cx).text().offset_utf16_to_offset(clicked_utf16);
+        let Some(span) = scan_template_spans(&source).into_iter().find(|span| {
+            span.complete && span.range.start <= clicked_offset && clicked_offset < span.range.end
+        }) else {
+            self.template_variable_popover = None;
+            cx.notify();
+            return;
+        };
+        let name = span.name(&source).to_owned();
+        let catalog = self.template_variable_catalog.borrow();
+        let action = match span.classification(&source, &catalog) {
+            TemplateClassification::Missing => TemplateVariableAction::Create,
+            TemplateClassification::Disabled => {
+                let Some(variable) = catalog.variable(&name) else {
+                    return;
+                };
+                TemplateVariableAction::Enable {
+                    variable_id: variable.id.clone(),
+                }
+            }
+            TemplateClassification::Available | TemplateClassification::Invalid(_) => {
+                drop(catalog);
+                self.template_variable_popover = None;
+                cx.notify();
+                return;
+            }
+        };
+        let expected_environment_id = catalog.environment_id().map(ToOwned::to_owned);
+        let environment_name = catalog.environment_name().map(ToOwned::to_owned);
+        drop(catalog);
+
+        let value = cx.new(|cx| InputState::new(window, cx).placeholder("Variable value"));
+        let should_focus_value =
+            matches!(action, TemplateVariableAction::Create) && expected_environment_id.is_some();
+        self.template_variable_popover = Some(TemplateVariablePopover {
+            name,
+            expected_environment_id,
+            environment_name,
+            action,
+            value: value.clone(),
+            position: event.position,
+            error: None,
+        });
+        if should_focus_value {
+            value.read(cx).focus_handle(cx).focus(window);
+        }
+        cx.notify();
+    }
+
+    fn template_variable_mutation_blocker(
+        &self,
+        popover: &TemplateVariablePopover,
+        cx: &App,
+    ) -> Option<String> {
+        let Some(expected_environment_id) = popover.expected_environment_id.as_deref() else {
+            return Some("Select an active environment before creating variables.".to_owned());
+        };
+        if self.workspace.active_environment_id.as_deref() != Some(expected_environment_id) {
+            return Some(
+                "The active environment changed. Close this popover and try again.".to_owned(),
+            );
+        }
+        if !self.workspace_writable {
+            return Some("Environment storage is read-only for this session.".to_owned());
+        }
+        if self.sending {
+            return Some(
+                "Wait for the current request to finish before changing variables.".to_owned(),
+            );
+        }
+        if self.active_environment_editor_is_dirty(cx) {
+            return Some("Save or revert the active environment's pending edits first.".to_owned());
+        }
+        None
+    }
+
+    fn apply_template_variable_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(popover) = self.template_variable_popover.clone() else {
+            return;
+        };
+        if self
+            .template_variable_mutation_blocker(&popover, cx)
+            .is_some()
+        {
+            if let Some(current) = self.template_variable_popover.as_mut() {
+                // Mutation blockers are derived from live application state and
+                // rendered directly by the popover. Do not cache one as a
+                // persistence error or it can outlive the condition that caused it.
+                current.error = None;
+            }
+            cx.notify();
+            return;
+        }
+        let environment_id = popover
+            .expected_environment_id
+            .as_deref()
+            .expect("mutation blocker requires an active environment");
+        let mut candidate = self.workspace.clone();
+        let result = match &popover.action {
+            TemplateVariableAction::Create => candidate
+                .add_environment_variable(
+                    environment_id,
+                    popover.name.clone(),
+                    popover.value.read(cx).value().to_string(),
+                    true,
+                    false,
+                )
+                .map(|_| ()),
+            TemplateVariableAction::Enable { variable_id } => {
+                let variable = candidate
+                    .environment(environment_id)
+                    .and_then(|environment| {
+                        environment
+                            .variables
+                            .iter()
+                            .find(|variable| variable.id == *variable_id)
+                    })
+                    .cloned();
+                variable.map_or_else(
+                    || {
+                        Err(crate::core::WorkspaceMutationError::NotFound {
+                            kind: "variable",
+                            id: variable_id.clone(),
+                        })
+                    },
+                    |variable| {
+                        candidate.update_environment_variable(
+                            environment_id,
+                            variable_id,
+                            variable.key,
+                            variable.value,
+                            true,
+                            variable.secret,
+                        )
+                    },
+                )
+            }
+        };
+        if let Err(error) = result {
+            if let Some(current) = self.template_variable_popover.as_mut() {
+                current.error = Some(error.to_string());
+            }
+            cx.notify();
+            return;
+        }
+        if let Err(error) = self.commit_workspace(candidate) {
+            if let Some(current) = self.template_variable_popover.as_mut() {
+                current.error = Some(error);
+            }
+            cx.notify();
+            return;
+        }
+
+        if self.selected_environment_id.as_deref() == Some(environment_id) {
+            self.reload_environment_editor(window, cx);
+        }
+        self.refresh_variable_intelligence(cx);
+        self.request_notice = Some(match popover.action {
+            TemplateVariableAction::Create => {
+                format!("Created environment variable '{}'.", popover.name)
+            }
+            TemplateVariableAction::Enable { .. } => {
+                format!("Enabled environment variable '{}'.", popover.name)
+            }
+        });
+        self.template_variable_popover = None;
+        cx.notify();
+    }
+
+    fn close_template_variable_popover(&mut self, cx: &mut Context<Self>) {
+        self.template_variable_popover = None;
+        cx.notify();
+    }
+
+    fn open_environments_from_template(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_tab = SidebarTab::Environments;
+        self.template_variable_popover = None;
+        cx.notify();
     }
 
     fn start_request(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1606,7 +1984,7 @@ impl ApiTester {
 
         self.commit_workspace(candidate)
             .map_err(|error| format!("Script environment update was not saved: {error}"))?;
-        self.refresh_script_intelligence(cx);
+        self.refresh_variable_intelligence(cx);
         if self.selected_environment_id.as_deref() == Some(environment_id) {
             self.reload_environment_editor(window, cx);
         }
@@ -1904,6 +2282,7 @@ impl ApiTester {
             .unwrap_or_default();
         self.saved_request_name
             .update(cx, |input, cx| input.set_value(request_name, window, cx));
+        self.refresh_variable_intelligence(cx);
         self.loaded_request_baseline = self.request_template(cx);
         self.pending_request_load_key = None;
         self.request_notice = None;
@@ -2512,7 +2891,7 @@ impl ApiTester {
                 if result.is_ok() && self.commit_workspace(candidate).is_ok() {
                     self.selected_environment_id = Some(id);
                     self.reload_environment_editor(window, cx);
-                    self.refresh_script_intelligence(cx);
+                    self.refresh_variable_intelligence(cx);
                     self.sidebar_tab = SidebarTab::Environments;
                 } else if let Err(error) = result {
                     self.workspace_warning = Some(error.to_string());
@@ -2572,14 +2951,14 @@ impl ApiTester {
     }
 
     fn activate_environment(&mut self, id: Option<String>, cx: &mut Context<Self>) {
-        if !self.workspace_writable {
+        if !self.workspace_writable || self.sending {
             return;
         }
         let mut candidate = self.workspace.clone();
         match candidate.set_active_environment(id.as_deref()) {
             Ok(()) => {
                 if self.commit_workspace(candidate).is_ok() {
-                    self.refresh_script_intelligence(cx);
+                    self.refresh_variable_intelligence(cx);
                 }
             }
             Err(error) => self.workspace_warning = Some(error.to_string()),
@@ -2653,7 +3032,7 @@ impl ApiTester {
             Ok(()) => {
                 if self.commit_workspace(candidate).is_ok() {
                     self.reload_environment_editor(window, cx);
-                    self.refresh_script_intelligence(cx);
+                    self.refresh_variable_intelligence(cx);
                 }
             }
             Err(error) => self.workspace_warning = Some(error.to_string()),
@@ -2754,7 +3133,7 @@ impl ApiTester {
                             .map(|environment| environment.id.clone());
                         self.reload_environment_editor(window, cx);
                     }
-                    self.refresh_script_intelligence(cx);
+                    self.refresh_variable_intelligence(cx);
                 }
             }
             Err(error) => self.workspace_warning = Some(error.to_string()),
@@ -2857,6 +3236,7 @@ impl ApiTester {
             .and_then(|id| self.workspace.environment(id))
             .map(|environment| environment.name.as_str())
             .unwrap_or("No environment selected");
+        let can_switch_environment = self.workspace_writable && !self.sending;
         let this = cx.entity().downgrade();
 
         h_flex()
@@ -2915,6 +3295,7 @@ impl ApiTester {
                         let menu = menu.min_w(px(220.)).item(
                             PopupMenuItem::new("No environment")
                                 .checked(active_environment_id.is_none())
+                                .disabled(!can_switch_environment)
                                 .on_click(move |_, _, cx| {
                                     if let Some(this) = no_environment_this.upgrade() {
                                         this.update(cx, |this, cx| {
@@ -2927,18 +3308,21 @@ impl ApiTester {
                             let environment_id = id.clone();
                             let checked = active_environment_id.as_deref() == Some(id.as_str());
                             let environment_this = this.clone();
-                            menu.item(PopupMenuItem::new(name.clone()).checked(checked).on_click(
-                                move |_, _, cx| {
-                                    if let Some(this) = environment_this.upgrade() {
-                                        this.update(cx, |this, cx| {
-                                            this.activate_environment(
-                                                Some(environment_id.clone()),
-                                                cx,
-                                            );
-                                        });
-                                    }
-                                },
-                            ))
+                            menu.item(
+                                PopupMenuItem::new(name.clone())
+                                    .checked(checked)
+                                    .disabled(!can_switch_environment)
+                                    .on_click(move |_, _, cx| {
+                                        if let Some(this) = environment_this.upgrade() {
+                                            this.update(cx, |this, cx| {
+                                                this.activate_environment(
+                                                    Some(environment_id.clone()),
+                                                    cx,
+                                                );
+                                            });
+                                        }
+                                    }),
+                            )
                         })
                     }),
             )
@@ -2978,6 +3362,7 @@ impl ApiTester {
             .unwrap_or("No collection");
         let can_save =
             !self.sending && self.workspace_writable && self.selected_collection_id.is_some();
+        let can_switch_environment = self.workspace_writable && !self.sending;
         let dirty = self.request_is_dirty(cx);
 
         h_flex()
@@ -3063,6 +3448,7 @@ impl ApiTester {
                                 let menu = menu.min_w(px(220.)).item(
                                     PopupMenuItem::new("No environment")
                                         .checked(active_environment_id.is_none())
+                                        .disabled(!can_switch_environment)
                                         .on_click(move |_, _, cx| {
                                             if let Some(this) = no_environment_this.upgrade() {
                                                 this.update(cx, |this, cx| {
@@ -3077,8 +3463,10 @@ impl ApiTester {
                                         active_environment_id.as_deref() == Some(id.as_str());
                                     let environment_this = this.clone();
                                     menu.item(
-                                        PopupMenuItem::new(name.clone()).checked(checked).on_click(
-                                            move |_, _, cx| {
+                                        PopupMenuItem::new(name.clone())
+                                            .checked(checked)
+                                            .disabled(!can_switch_environment)
+                                            .on_click(move |_, _, cx| {
                                                 if let Some(this) = environment_this.upgrade() {
                                                     this.update(cx, |this, cx| {
                                                         this.activate_environment(
@@ -3087,8 +3475,7 @@ impl ApiTester {
                                                         );
                                                     });
                                                 }
-                                            },
-                                        ),
+                                            }),
                                     )
                                 });
                                 let manage_this = this.clone();
@@ -4779,11 +5166,172 @@ impl ApiTester {
         }
     }
 
+    fn render_template_variable_popover(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let popover = self.template_variable_popover.clone()?;
+        let blocker = self.template_variable_mutation_blocker(&popover, cx);
+        let has_environment = popover.expected_environment_id.is_some();
+        let is_create = matches!(popover.action, TemplateVariableAction::Create);
+        let title = if is_create {
+            "Create environment variable"
+        } else {
+            "Enable environment variable"
+        };
+        let action_label = if is_create { "Create" } else { "Enable" };
+        let template = format!("{{{{{}}}}}", popover.name);
+        let environment = popover
+            .environment_name
+            .clone()
+            .unwrap_or_else(|| "No active environment".to_owned());
+        let apply_this = cx.entity().downgrade();
+        let close_this = apply_this.clone();
+        let outside_this = apply_this.clone();
+
+        let content = v_flex()
+            .id("template-variable-popover")
+            .w(px(340.))
+            .gap_3()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(outline_variant())
+            .bg(surface_container())
+            .shadow_lg()
+            .on_mouse_down_out(move |_, _, cx| {
+                if let Some(this) = outside_this.upgrade() {
+                    this.update(cx, |this, cx| this.close_template_variable_popover(cx));
+                }
+            })
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().font_semibold().child(title))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{template} · {environment}")),
+                    ),
+            )
+            .when(!has_environment, |this| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().warning)
+                        .child("Choose an active environment before creating this variable."),
+                )
+                .child(
+                    Button::new("template-open-environments")
+                        .label("Open environments")
+                        .small()
+                        .outline()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_environments_from_template(cx);
+                        })),
+                )
+            })
+            .when(has_environment && is_create, |this| {
+                this.child(
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_semibold()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("VALUE"),
+                        )
+                        .child(
+                            div()
+                                .h(px(38.))
+                                .w_full()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(outline_variant())
+                                .bg(surface_lowest())
+                                .child(
+                                    Input::new(&popover.value)
+                                        .appearance(false)
+                                        .small()
+                                        .size_full()
+                                        .px_3()
+                                        .disabled(blocker.is_some()),
+                                ),
+                        ),
+                )
+            })
+            .when(has_environment && !is_create, |this| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(
+                            "This variable exists but is disabled. Enable it without changing its value or secret status.",
+                        ),
+                )
+            })
+            .when_some(popover.error.clone().or_else(|| blocker.clone()), |this, message| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().red)
+                        .child(message),
+                )
+            })
+            .when(has_environment, |this| {
+                this.child(
+                    h_flex()
+                        .w_full()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("template-variable-cancel")
+                                .label("Cancel")
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    if let Some(this) = close_this.upgrade() {
+                                        this.update(cx, |this, cx| {
+                                            this.close_template_variable_popover(cx)
+                                        });
+                                    }
+                                }),
+                        )
+                        .child(
+                            Button::new("template-variable-apply")
+                                .label(action_label)
+                                .small()
+                                .primary()
+                                .disabled(blocker.is_some())
+                                .on_click(move |_, window, cx| {
+                                    if let Some(this) = apply_this.upgrade() {
+                                        this.update(cx, |this, cx| {
+                                            this.apply_template_variable_action(window, cx)
+                                        });
+                                    }
+                                }),
+                        ),
+                )
+            });
+
+        Some(
+            deferred(
+                anchored()
+                    .position(popover.position)
+                    .anchor(Corner::TopLeft)
+                    .snap_to_window_with_margin(px(12.))
+                    .child(content),
+            )
+            .with_priority(4)
+            .into_any_element(),
+        )
+    }
+
     fn render_url_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let method = self.method.read(cx).value().trim().to_ascii_uppercase();
         let color = method_color(&method, cx);
         let selected_method = method.clone();
         let this = cx.entity().downgrade();
+        let url_template_input = self.url.clone();
         let action = if self.sending {
             Button::new("cancel-request")
                 .label("Cancel")
@@ -4933,6 +5481,17 @@ impl ApiTester {
                         div()
                             .flex_1()
                             .min_w_0()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event, window, cx| {
+                                    this.open_template_variable_popover(
+                                        url_template_input.clone(),
+                                        event,
+                                        window,
+                                        cx,
+                                    );
+                                }),
+                            )
                             .child(Input::new(&self.url).appearance(false).large()),
                     ),
             )
@@ -4949,6 +5508,8 @@ impl ApiTester {
                 let id = row.id;
                 let action_this = this.clone();
                 let group_id: SharedString = format!("header-row-actions-{id}").into();
+                let name_template_input = row.name.clone();
+                let value_template_input = row.value.clone();
                 h_flex()
                     .id(("header-grid-row", id))
                     .group(group_id.clone())
@@ -4989,6 +5550,17 @@ impl ApiTester {
                             .h_full()
                             .border_l_1()
                             .border_color(outline_variant())
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event, window, cx| {
+                                    this.open_template_variable_popover(
+                                        name_template_input.clone(),
+                                        event,
+                                        window,
+                                        cx,
+                                    );
+                                }),
+                            )
                             .child(
                                 Input::new(&row.name)
                                     .appearance(false)
@@ -5004,6 +5576,17 @@ impl ApiTester {
                             .h_full()
                             .border_l_1()
                             .border_color(outline_variant())
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event, window, cx| {
+                                    this.open_template_variable_popover(
+                                        value_template_input.clone(),
+                                        event,
+                                        window,
+                                        cx,
+                                    );
+                                }),
+                            )
                             .child(
                                 Input::new(&row.value)
                                     .appearance(false)
@@ -5258,6 +5841,8 @@ impl ApiTester {
                 let kind_this = this.clone();
                 let action_this = this.clone();
                 let group_id: SharedString = format!("body-field-row-actions-{id}").into();
+                let name_template_input = row.name.clone();
+                let value_template_input = row.value.clone();
                 h_flex()
                     .id(("body-field-grid-row", id))
                     .group(group_id.clone())
@@ -5343,6 +5928,17 @@ impl ApiTester {
                             .h_full()
                             .border_l_1()
                             .border_color(outline_variant())
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event, window, cx| {
+                                    this.open_template_variable_popover(
+                                        name_template_input.clone(),
+                                        event,
+                                        window,
+                                        cx,
+                                    );
+                                }),
+                            )
                             .child(
                                 Input::new(&row.name)
                                     .appearance(false)
@@ -5358,6 +5954,17 @@ impl ApiTester {
                             .h_full()
                             .border_l_1()
                             .border_color(outline_variant())
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event, window, cx| {
+                                    this.open_template_variable_popover(
+                                        value_template_input.clone(),
+                                        event,
+                                        window,
+                                        cx,
+                                    );
+                                }),
+                            )
                             .child(
                                 div().flex_1().min_w_0().h_full().child(
                                     Input::new(&row.value)
@@ -5595,7 +6202,24 @@ impl ApiTester {
                         .child("Choose Raw or a form mode above to add one."),
                 )
                 .into_any_element(),
-            BodyMode::Raw => self.body.clone().into_any_element(),
+            BodyMode::Raw => {
+                let body_template_input = self.body.read(cx).input_state();
+                div()
+                    .size_full()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event, window, cx| {
+                            this.open_template_variable_popover(
+                                body_template_input.clone(),
+                                event,
+                                window,
+                                cx,
+                            );
+                        }),
+                    )
+                    .child(self.body.clone())
+                    .into_any_element()
+            }
             BodyMode::FormUrlEncoded => self.render_body_fields_editor(false, cx),
             BodyMode::MultipartFormData => self.render_body_fields_editor(true, cx),
         };
@@ -6079,6 +6703,7 @@ impl Render for ApiTester {
             .overflow_hidden()
             .bg(surface())
             .text_color(cx.theme().foreground)
+            .capture_key_down(cx.listener(Self::capture_template_key_down))
             .child(self.render_title_bar(cx))
             .child(
                 h_flex()
@@ -6123,6 +6748,7 @@ impl Render for ApiTester {
                     ),
             )
             .child(self.debug_overlay.clone())
+            .children(self.render_template_variable_popover(cx))
             .children(Root::render_dialog_layer(window, cx))
     }
 }
@@ -6217,6 +6843,22 @@ fn update_script_variable_catalog(
     catalog
         .borrow_mut()
         .replace(enabled_names, disabled_names, std::iter::empty::<String>());
+}
+
+fn template_input_state(
+    window: &mut Window,
+    cx: &mut Context<InputState>,
+    catalog: TemplateVariableCatalogHandle,
+    placeholder: impl Into<SharedString>,
+    default_value: impl Into<SharedString>,
+) -> InputState {
+    let hover_catalog = Rc::clone(&catalog);
+    let mut state = InputState::new(window, cx)
+        .placeholder(placeholder)
+        .default_value(default_value);
+    state.lsp.completion_provider = Some(Rc::new(TemplateCompletionProvider::new(catalog)));
+    state.lsp.hover_provider = Some(Rc::new(TemplateHoverProvider::new(hover_catalog)));
+    state
 }
 
 fn format_raw_body_source(language: RawBodyLanguage, source: &str) -> Result<String, String> {

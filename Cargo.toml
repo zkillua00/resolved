@@ -49,3 +49,4 @@ strip = "symbols"
 
 [patch.crates-io]
 gpui = { path = "vendor/gpui-0.2.2" }
+gpui-component = { path = "vendor/gpui-component-0.5.1" }
