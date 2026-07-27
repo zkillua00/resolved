@@ -17,7 +17,36 @@ diff --git a/src/input/state.rs b/src/input/state.rs
  };
  use ropey::{Rope, RopeSlice};
  use serde::Deserialize;
-@@ -284,6 +285,8 @@ pub struct InputState {
+@@ -222,6 +223,28 @@ pub(crate) fn init(cx: &mut App) {
+     number_input::init(cx);
+ }
+
++fn previous_word_start_in_line(line_start: usize, text_before_cursor: &str) -> usize {
++    UnicodeSegmentation::split_word_bound_indices(text_before_cursor)
++        .rfind(|(_, segment)| !segment.trim_start().is_empty())
++        .map(|(offset, _)| line_start + offset)
++        .unwrap_or(line_start)
++}
++
++fn previous_line_break_start(text: &Rope, line_start: usize) -> usize {
++    if line_start == 0 {
++        return 0;
++    }
++
++    let newline_start = text.clip_offset(line_start - 1, Bias::Left);
++    if text.char_at(newline_start) == Some('\n') && newline_start > 0 {
++        let possible_carriage_return = text.clip_offset(newline_start - 1, Bias::Left);
++        if text.char_at(possible_carriage_return) == Some('\r') {
++            return possible_carriage_return;
++        }
++    }
++    newline_start
++}
++
+ #[derive(Clone)]
+ pub(super) struct LastLayout {
+     /// The visible range (no wrap) of lines in the viewport, the value is row (0-based) index.
+@@ -284,6 +307,8 @@ pub struct InputState {
      pub(super) input_bounds: Bounds<Pixels>,
      /// The text bounds
      pub(super) last_bounds: Option<Bounds<Pixels>>,
@@ -26,7 +55,7 @@ diff --git a/src/input/state.rs b/src/input/state.rs
      pub(super) last_selected_range: Option<Selection>,
      pub(super) selecting: bool,
      pub(super) size: Size,
-@@ -390,6 +393,7 @@ impl InputState {
+@@ -390,6 +415,7 @@ impl InputState {
              mode: InputMode::default(),
              last_layout: None,
              last_bounds: None,
@@ -34,7 +63,7 @@ diff --git a/src/input/state.rs b/src/input/state.rs
              last_selected_range: None,
              last_cursor: None,
              scroll_handle: ScrollHandle::new(),
-@@ -549,6 +553,27 @@ impl InputState {
+@@ -549,6 +575,27 @@ impl InputState {
          self.mode.diagnostics_mut()
      }
  
@@ -62,7 +91,29 @@ diff --git a/src/input/state.rs b/src/input/state.rs
      /// Set placeholder
      pub fn set_placeholder(
          &mut self,
-@@ -1993,6 +2018,7 @@ impl EntityInputHandler for InputState {
+@@ -921,13 +968,15 @@ impl InputState {
+     pub(super) fn previous_start_of_word(&mut self) -> usize {
+         let offset = self.selected_range.start;
+         let offset = self.offset_from_utf16(self.offset_to_utf16(offset));
+-        // FIXME: Avoid to_string
+-        let left_part = self.text.slice(0..offset).to_string();
++        let row = self.text.offset_to_point(offset).row;
++        let line_start = self.text.line_start_offset(row);
++        if offset == line_start {
++            return previous_line_break_start(&self.text, line_start);
++        }
+
+-        UnicodeSegmentation::split_word_bound_indices(left_part.as_str())
+-            .rfind(|(_, s)| !s.trim_start().is_empty())
+-            .map(|(i, _)| i)
+-            .unwrap_or(0)
++        // FIXME: Avoid to_string
++        let text_before_cursor = self.text.slice(line_start..offset).to_string();
++        previous_word_start_in_line(line_start, &text_before_cursor)
+     }
+
+     /// Return the next end offset of the next word.
+@@ -1993,6 +2042,7 @@ impl EntityInputHandler for InputState {
          if let Some(diagnostics) = self.mode.diagnostics_mut() {
              diagnostics.reset(&self.text)
          }
@@ -70,7 +121,7 @@ diff --git a/src/input/state.rs b/src/input/state.rs
          self.text_wrapper
              .update(&self.text, &range, &Rope::from(new_text), cx);
          self.mode
-@@ -2048,6 +2074,7 @@ impl EntityInputHandler for InputState {
+@@ -2048,6 +2098,7 @@ impl EntityInputHandler for InputState {
          if let Some(diagnostics) = self.mode.diagnostics_mut() {
              diagnostics.reset(&self.text)
          }
@@ -78,6 +129,46 @@ diff --git a/src/input/state.rs b/src/input/state.rs
          self.text_wrapper
              .update(&self.text, &range, &Rope::from(new_text), cx);
          self.mode
+@@ -2176,3 +2227,39 @@ impl Render for InputState {
+             .children(self.hover_popover.clone())
+     }
+ }
++
++#[cfg(test)]
++mod word_boundary_tests {
++    use super::{previous_line_break_start, previous_word_start_in_line};
++    use ropey::Rope;
++
++    #[test]
++    fn previous_word_stays_within_the_current_line() {
++        assert_eq!(previous_word_start_in_line(0, "alpha beta gamma"), 11);
++        assert_eq!(previous_word_start_in_line(7, "    next"), 11);
++        assert_eq!(previous_word_start_in_line(7, "    "), 7);
++
++        let url = "https://httpbin.org/get";
++        assert_eq!(
++            previous_word_start_in_line(0, url),
++            url.rfind("get").unwrap()
++        );
++    }
++
++    #[test]
++    fn previous_word_uses_utf8_byte_offsets() {
++        let text = "éclair 😀 中";
++        assert_eq!(
++            previous_word_start_in_line(0, text),
++            text.rfind('中').unwrap()
++        );
++    }
++
++    #[test]
++    fn line_break_is_deleted_without_crossing_into_the_previous_line() {
++        assert_eq!(previous_line_break_start(&Rope::from("alpha\n"), 6), 5);
++        assert_eq!(previous_line_break_start(&Rope::from("alpha\r\n"), 7), 5);
++        assert_eq!(previous_line_break_start(&Rope::from("é\n"), 3), 2);
++        assert_eq!(previous_line_break_start(&Rope::from("alpha"), 0), 0);
++    }
++}
 diff --git a/src/input/element.rs b/src/input/element.rs
 --- a/src/input/element.rs
 +++ b/src/input/element.rs

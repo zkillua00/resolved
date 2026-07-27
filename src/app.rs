@@ -48,6 +48,7 @@ use crate::{
         format_body, is_probably_text, resolve_request, spawn_request,
     },
     debug_overlay::DebugOverlay,
+    request_dirty::{RequestDirtyPart, RequestDirtyState},
     script_intelligence::{
         ScriptCompletionProvider, ScriptEditorPhase, ScriptVariableCatalog, diagnostics_for_source,
     },
@@ -267,6 +268,7 @@ pub struct ApiTester {
     selected_collection_id: Option<String>,
     active_saved_request_id: Option<String>,
     detached_request_dirty: bool,
+    request_dirty: RequestDirtyState,
     loaded_request_baseline: RequestTemplate,
     pending_request_load_key: Option<String>,
     request_notice: Option<String>,
@@ -286,6 +288,7 @@ pub struct ApiTester {
     template_variable_catalog: TemplateVariableCatalogHandle,
     template_highlight_tasks: HashMap<EntityId, Task<()>>,
     template_variable_popover: Option<TemplateVariablePopover>,
+    focused_template_input: Option<Entity<InputState>>,
     debug_overlay: Entity<DebugOverlay>,
     preview: Option<Entity<HtmlPreview>>,
     _subscriptions: Vec<Subscription>,
@@ -529,30 +532,31 @@ impl ApiTester {
                 .expect("failed to create the network runtime"),
         );
 
-        let url_subscription = cx.subscribe_in(&url, window, |this, _, event, window, cx| {
+        let url_subscription = cx.subscribe_in(&url, window, |this, input, event, window, cx| {
+            this.track_template_input_focus(input, event);
             if matches!(event, InputEvent::Change) {
                 let input = this.url.clone();
                 this.schedule_template_input_refresh(&input, cx);
+                this.refresh_request_dirty_part(RequestDirtyPart::Url, cx);
             }
             if matches!(event, InputEvent::PressEnter { .. }) {
                 this.start_request(window, cx);
-            } else {
-                cx.notify();
             }
         });
         let method_subscription = cx.subscribe_in(&method, window, |this, _, event, window, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.refresh_request_dirty_part(RequestDirtyPart::Method, cx);
+            }
             if matches!(event, InputEvent::PressEnter { .. }) {
                 this.start_request(window, cx);
-            } else {
-                cx.notify();
             }
         });
         let body_subscription = cx.subscribe(&body, |this, editor, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 let input = editor.read(cx).input_state();
                 this.schedule_template_input_refresh(&input, cx);
+                this.refresh_request_dirty_part(RequestDirtyPart::RawBody, cx);
             }
-            cx.notify();
         });
         let body_format_subscription =
             cx.subscribe_in(&body, window, |this, _, event, window, cx| {
@@ -561,33 +565,25 @@ impl ApiTester {
                 }
             });
         let pre_request_subscription =
-            cx.subscribe(&pre_request_script, |_, _, _: &InputEvent, cx| cx.notify());
-        let post_response_subscription = cx
-            .subscribe(&post_response_script, |_, _, _: &InputEvent, cx| {
-                cx.notify()
+            cx.subscribe(&pre_request_script, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.refresh_request_dirty_part(RequestDirtyPart::PreScript, cx);
+                }
             });
-        let environment_name_subscription =
-            cx.subscribe(&environment_name, |_, _, _: &InputEvent, cx| cx.notify());
-        let collection_search_subscription =
-            cx.subscribe(&collection_search, |_, _, _: &InputEvent, cx| cx.notify());
-        let environment_search_subscription =
-            cx.subscribe(&environment_search, |_, _, _: &InputEvent, cx| cx.notify());
+        let post_response_subscription =
+            cx.subscribe(&post_response_script, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.refresh_request_dirty_part(RequestDirtyPart::PostScript, cx);
+                }
+            });
         let collection_name_subscription =
             cx.subscribe_in(&collection_name, window, |this, _, event, _, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     this.rename_collection(cx);
                     this.renaming_collection_id = None;
+                    cx.notify();
                 }
-                cx.notify();
             });
-        let collection_delete_confirmation_subscription = cx.subscribe_in(
-            &collection_delete_confirmation,
-            window,
-            |_, _, _: &InputEvent, window, cx| {
-                window.refresh();
-                cx.notify();
-            },
-        );
 
         let mut this = Self {
             method,
@@ -631,6 +627,7 @@ impl ApiTester {
             selected_collection_id,
             active_saved_request_id: None,
             detached_request_dirty: false,
+            request_dirty: RequestDirtyState::default(),
             loaded_request_baseline: RequestTemplate::default(),
             pending_request_load_key: None,
             request_notice: None,
@@ -650,6 +647,7 @@ impl ApiTester {
             template_variable_catalog,
             template_highlight_tasks: HashMap::new(),
             template_variable_popover: None,
+            focused_template_input: None,
             debug_overlay,
             preview: None,
             _subscriptions: vec![
@@ -659,16 +657,13 @@ impl ApiTester {
                 body_format_subscription,
                 pre_request_subscription,
                 post_response_subscription,
-                environment_name_subscription,
-                collection_search_subscription,
-                environment_search_subscription,
                 collection_name_subscription,
-                collection_delete_confirmation_subscription,
             ],
         };
         this.push_header_row("", "", true, window, cx);
         this.refresh_variable_intelligence(cx);
         this.loaded_request_baseline = this.request_template(cx);
+        this.request_dirty.clear();
         this
     }
 
@@ -710,7 +705,6 @@ impl ApiTester {
                                 {
                                     row.value.read(cx).focus_handle(cx).focus(window);
                                 }
-                                cx.notify();
                             },
                         );
                         let value_row_id = variable_id.clone();
@@ -721,7 +715,6 @@ impl ApiTester {
                                 if matches!(event, InputEvent::PressEnter { .. }) {
                                     this.focus_next_environment_row(&value_row_id, window, cx);
                                 }
-                                cx.notify();
                             },
                         );
                         EnvironmentVariableRow {
@@ -753,7 +746,6 @@ impl ApiTester {
             {
                 row.value.read(cx).focus_handle(cx).focus(window);
             }
-            cx.notify();
         });
         let value_row_id = id.clone();
         let value_subscription =
@@ -761,7 +753,6 @@ impl ApiTester {
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     this.focus_next_environment_row(&value_row_id, window, cx);
                 }
-                cx.notify();
             });
         self.environment_variables.push(EnvironmentVariableRow {
             id,
@@ -771,6 +762,7 @@ impl ApiTester {
             secret: false,
             _subscriptions: vec![key_subscription, value_subscription],
         });
+        cx.notify();
     }
 
     fn push_header_row(
@@ -791,29 +783,37 @@ impl ApiTester {
         let value_state =
             cx.new(|cx| template_input_state(window, cx, value_catalog, "Value", value));
         let name_template_input = name_state.clone();
-        let name_subscription =
-            cx.subscribe_in(&name_state, window, move |this, _, event, window, cx| {
+        let name_subscription = cx.subscribe_in(
+            &name_state,
+            window,
+            move |this, input, event, window, cx| {
+                this.track_template_input_focus(input, event);
                 if matches!(event, InputEvent::Change) {
                     this.schedule_template_input_refresh(&name_template_input, cx);
+                    this.refresh_request_dirty_part(RequestDirtyPart::Headers, cx);
                 }
                 if matches!(event, InputEvent::PressEnter { .. })
                     && let Some(row) = this.headers.iter().find(|row| row.id == id)
                 {
                     row.value.read(cx).focus_handle(cx).focus(window);
                 }
-                cx.notify();
-            });
+            },
+        );
         let value_template_input = value_state.clone();
-        let value_subscription =
-            cx.subscribe_in(&value_state, window, move |this, _, event, window, cx| {
+        let value_subscription = cx.subscribe_in(
+            &value_state,
+            window,
+            move |this, input, event, window, cx| {
+                this.track_template_input_focus(input, event);
                 if matches!(event, InputEvent::Change) {
                     this.schedule_template_input_refresh(&value_template_input, cx);
+                    this.refresh_request_dirty_part(RequestDirtyPart::Headers, cx);
                 }
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     this.focus_next_header_row(id, window, cx);
                 }
-                cx.notify();
-            });
+            },
+        );
         self.refresh_template_input(&name_state, cx);
         self.refresh_template_input(&value_state, cx);
         self.headers.push(HeaderRow {
@@ -823,6 +823,10 @@ impl ApiTester {
             enabled,
             _subscriptions: vec![name_subscription, value_subscription],
         });
+        self.refresh_request_dirty_part(RequestDirtyPart::Headers, cx);
+        if !self.request_dirty.is_hydrating() {
+            cx.notify();
+        }
     }
 
     fn focus_next_header_row(
@@ -877,6 +881,7 @@ impl ApiTester {
         if self.headers.is_empty() {
             self.push_header_row("", "", true, window, cx);
         }
+        self.refresh_request_dirty_part(RequestDirtyPart::Headers, cx);
         cx.notify();
     }
 
@@ -974,29 +979,37 @@ impl ApiTester {
         let value_state =
             cx.new(|cx| template_input_state(window, cx, value_catalog, value_placeholder, value));
         let name_template_input = name_state.clone();
-        let name_subscription =
-            cx.subscribe_in(&name_state, window, move |this, _, event, window, cx| {
+        let name_subscription = cx.subscribe_in(
+            &name_state,
+            window,
+            move |this, input, event, window, cx| {
+                this.track_template_input_focus(input, event);
                 if matches!(event, InputEvent::Change) {
                     this.schedule_template_input_refresh(&name_template_input, cx);
+                    this.refresh_request_dirty_part(RequestDirtyPart::BodyFields, cx);
                 }
                 if matches!(event, InputEvent::PressEnter { .. })
                     && let Some(row) = this.body_fields.iter().find(|row| row.id == id)
                 {
                     row.value.read(cx).focus_handle(cx).focus(window);
                 }
-                cx.notify();
-            });
+            },
+        );
         let value_template_input = value_state.clone();
-        let value_subscription =
-            cx.subscribe_in(&value_state, window, move |this, _, event, window, cx| {
+        let value_subscription = cx.subscribe_in(
+            &value_state,
+            window,
+            move |this, input, event, window, cx| {
+                this.track_template_input_focus(input, event);
                 if matches!(event, InputEvent::Change) {
                     this.schedule_template_input_refresh(&value_template_input, cx);
+                    this.refresh_request_dirty_part(RequestDirtyPart::BodyFields, cx);
                 }
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     this.focus_next_body_field_row(id, window, cx);
                 }
-                cx.notify();
-            });
+            },
+        );
         self.refresh_template_input(&name_state, cx);
         self.refresh_template_input(&value_state, cx);
         self.body_fields.push(BodyFieldRow {
@@ -1007,6 +1020,10 @@ impl ApiTester {
             kind,
             _subscriptions: vec![name_subscription, value_subscription],
         });
+        self.refresh_request_dirty_part(RequestDirtyPart::BodyFields, cx);
+        if !self.request_dirty.is_hydrating() {
+            cx.notify();
+        }
     }
 
     fn focus_next_body_field_row(
@@ -1056,6 +1073,7 @@ impl ApiTester {
         if self.body_fields.is_empty() {
             self.push_body_field_row("", "", true, BodyFieldKind::Text, window, cx);
         }
+        self.refresh_request_dirty_part(RequestDirtyPart::BodyFields, cx);
         cx.notify();
     }
 
@@ -1081,6 +1099,7 @@ impl ApiTester {
                 cx,
             );
         });
+        self.refresh_request_dirty_part(RequestDirtyPart::BodyFields, cx);
         cx.notify();
     }
 
@@ -1127,8 +1146,73 @@ impl ApiTester {
         }
     }
 
-    fn request_is_dirty(&self, cx: &App) -> bool {
-        self.detached_request_dirty || self.request_template(cx) != self.loaded_request_baseline
+    fn request_is_dirty(&self) -> bool {
+        self.detached_request_dirty || self.request_dirty.any()
+    }
+
+    fn refresh_request_dirty_part(&mut self, part: RequestDirtyPart, cx: &mut Context<Self>) {
+        if self.request_dirty.is_hydrating() {
+            return;
+        }
+
+        let part_is_dirty = self.request_part_is_dirty(part, cx);
+        self.request_dirty.set(part, part_is_dirty);
+    }
+
+    fn request_part_is_dirty(&self, part: RequestDirtyPart, cx: &App) -> bool {
+        let baseline = &self.loaded_request_baseline;
+        match part {
+            RequestDirtyPart::Method => {
+                let current = self.method.read(cx).value();
+                !current
+                    .trim()
+                    .eq_ignore_ascii_case(baseline.request.method.as_str())
+            }
+            RequestDirtyPart::Url => {
+                !input_text_equals(&self.url, baseline.request.url.as_str(), cx)
+            }
+            RequestDirtyPart::Headers => {
+                self.headers.len() != baseline.request.headers.len()
+                    || self
+                        .headers
+                        .iter()
+                        .zip(&baseline.request.headers)
+                        .any(|(current, saved)| {
+                            current.enabled != saved.enabled
+                                || !input_text_equals(&current.name, saved.name.as_str(), cx)
+                                || !input_text_equals(&current.value, saved.value.as_str(), cx)
+                        })
+            }
+            RequestDirtyPart::RawBody => {
+                let input = self.body.read(cx).input_state();
+                !input_text_equals(&input, baseline.request.body.as_str(), cx)
+            }
+            RequestDirtyPart::BodyMode => self.body_mode != baseline.request.body_mode,
+            RequestDirtyPart::RawBodyLanguage => {
+                self.raw_body_language != baseline.request.raw_body_language
+            }
+            RequestDirtyPart::BodyFields => {
+                self.body_fields.len() != baseline.request.body_fields.len()
+                    || self
+                        .body_fields
+                        .iter()
+                        .zip(&baseline.request.body_fields)
+                        .any(|(current, saved)| {
+                            current.enabled != saved.enabled
+                                || current.kind != saved.kind
+                                || !input_text_equals(&current.name, saved.name.as_str(), cx)
+                                || !input_text_equals(&current.value, saved.value.as_str(), cx)
+                        })
+            }
+            RequestDirtyPart::PreScript => {
+                let input = self.pre_request_script.read(cx).input_state();
+                !input_text_equals(&input, baseline.scripts.pre_request.as_str(), cx)
+            }
+            RequestDirtyPart::PostScript => {
+                let input = self.post_response_script.read(cx).input_state();
+                !input_text_equals(&input, baseline.scripts.post_response.as_str(), cx)
+            }
+        }
     }
 
     fn active_environment_editor_is_dirty(&self, cx: &App) -> bool {
@@ -1186,7 +1270,7 @@ impl ApiTester {
     }
 
     fn refresh_template_input(&self, input: &Entity<InputState>, cx: &mut Context<Self>) {
-        let source = input.read(cx).value().to_string();
+        let source = input.read(cx).text().to_string();
         let colors = TemplateHighlightColors {
             valid: primary_lavender(),
             warning: cx.theme().warning,
@@ -1206,6 +1290,9 @@ impl ApiTester {
         input: &Entity<InputState>,
         cx: &mut Context<Self>,
     ) {
+        if self.request_dirty.is_hydrating() {
+            return;
+        }
         let input_id = input.entity_id();
         let input = input.downgrade();
         let task = cx.spawn(async move |this, cx| {
@@ -1226,18 +1313,25 @@ impl ApiTester {
         window: &Window,
         cx: &App,
     ) -> Option<Entity<InputState>> {
-        std::iter::once(self.url.clone())
-            .chain(
-                self.headers
-                    .iter()
-                    .flat_map(|row| [row.name.clone(), row.value.clone()]),
-            )
-            .chain(
-                self.body_fields
-                    .iter()
-                    .flat_map(|row| [row.name.clone(), row.value.clone()]),
-            )
-            .find(|input| input.read(cx).focus_handle(cx).is_focused(window))
+        self.focused_template_input
+            .as_ref()
+            .filter(|input| input.read(cx).focus_handle(cx).is_focused(window))
+            .cloned()
+    }
+
+    fn track_template_input_focus(&mut self, input: &Entity<InputState>, event: &InputEvent) {
+        match event {
+            InputEvent::Focus => self.focused_template_input = Some(input.clone()),
+            InputEvent::Blur
+                if self
+                    .focused_template_input
+                    .as_ref()
+                    .is_some_and(|focused| focused.entity_id() == input.entity_id()) =>
+            {
+                self.focused_template_input = None;
+            }
+            _ => {}
+        }
     }
 
     fn capture_template_key_down(
@@ -1257,6 +1351,9 @@ impl ApiTester {
             return;
         };
         if typed.chars().count() != 1 {
+            return;
+        }
+        if !matches!(typed, "{" | "}") {
             return;
         }
         let Some(input) = self.focused_single_line_template_input(window, cx) else {
@@ -1290,7 +1387,7 @@ impl ApiTester {
             cx.notify();
             return;
         };
-        let source = input.read(cx).value().to_string();
+        let source = input.read(cx).text().to_string();
         let clicked_offset = input.read(cx).text().offset_utf16_to_offset(clicked_utf16);
         let Some(span) = scan_template_spans(&source).into_iter().find(|span| {
             span.complete && span.range.start <= clicked_offset && clicked_offset < span.range.end
@@ -1476,7 +1573,7 @@ impl ApiTester {
             return;
         }
 
-        let validation_error = if self.method.read(cx).value().trim().is_empty() {
+        let validation_error = if input_text_is_blank(&self.method, cx) {
             Some("HTTP method cannot be empty.".to_owned())
         } else if self.active_environment_editor_is_dirty(cx) {
             Some(
@@ -2116,12 +2213,14 @@ impl ApiTester {
         if mode == BodyMode::Raw {
             self.update_body_language(cx);
         }
+        self.refresh_request_dirty_part(RequestDirtyPart::BodyMode, cx);
         cx.notify();
     }
 
     fn select_raw_body_language(&mut self, language: RawBodyLanguage, cx: &mut Context<Self>) {
         self.raw_body_language = language;
         self.update_body_language(cx);
+        self.refresh_request_dirty_part(RequestDirtyPart::RawBodyLanguage, cx);
         cx.notify();
     }
 
@@ -2218,7 +2317,7 @@ impl ApiTester {
         if self.sending {
             return;
         }
-        if self.request_is_dirty(cx)
+        if self.request_is_dirty()
             && self.pending_request_load_key.as_deref() != Some(load_key.as_str())
         {
             self.pending_request_load_key = Some(load_key);
@@ -2231,6 +2330,7 @@ impl ApiTester {
             return;
         }
 
+        self.request_dirty.begin_hydration();
         let RequestTemplate { request, scripts } = template;
         self.body_mode = request.body_mode;
         self.raw_body_language = request.raw_body_language;
@@ -2317,6 +2417,7 @@ impl ApiTester {
             .update(cx, |input, cx| input.set_value(request_name, window, cx));
         self.refresh_variable_intelligence(cx);
         self.loaded_request_baseline = self.request_template(cx);
+        self.request_dirty.end_hydration();
         self.pending_request_load_key = None;
         self.request_notice = None;
         self.hide_preview(cx);
@@ -2625,6 +2726,7 @@ impl ApiTester {
                         .update(cx, |input, cx| input.set_value(name, window, cx));
                     self.loaded_request_baseline = self.request_template(cx);
                     self.detached_request_dirty = false;
+                    self.request_dirty.clear();
                     self.pending_request_load_key = None;
                     self.request_notice = None;
                 }
@@ -2965,7 +3067,7 @@ impl ApiTester {
         else {
             return false;
         };
-        if self.environment_name.read(cx).value().as_ref() != environment.name {
+        if !input_text_equals(&self.environment_name, environment.name.as_str(), cx) {
             return true;
         }
         if self.environment_variables.len() != environment.variables.len() {
@@ -2976,8 +3078,8 @@ impl ApiTester {
             .zip(&environment.variables)
             .any(|(row, variable)| {
                 row.id != variable.id
-                    || row.key.read(cx).value().as_ref() != variable.key
-                    || row.value.read(cx).value().as_ref() != variable.value
+                    || !input_text_equals(&row.key, variable.key.as_str(), cx)
+                    || !input_text_equals(&row.value, variable.value.as_str(), cx)
                     || row.enabled != variable.enabled
                     || row.secret != variable.secret
             })
@@ -3259,7 +3361,7 @@ impl ApiTester {
     fn request_header_count(&self, cx: &App) -> usize {
         self.headers
             .iter()
-            .filter(|row| row.enabled && !row.name.read(cx).value().trim().is_empty())
+            .filter(|row| row.enabled && !input_text_is_blank(&row.name, cx))
             .count()
     }
 
@@ -3410,7 +3512,7 @@ impl ApiTester {
         let can_save =
             !self.sending && self.workspace_writable && self.selected_collection_id.is_some();
         let can_switch_environment = self.workspace_writable && !self.sending;
-        let dirty = self.request_is_dirty(cx);
+        let dirty = self.request_is_dirty();
 
         h_flex()
             .h(px(64.))
@@ -3759,7 +3861,6 @@ impl ApiTester {
             .enumerate()
             .map(|(index, entry)| {
                 let history_id = entry.id.clone();
-                let request = entry.request.clone();
                 let status = entry.response.as_ref().map(|response| response.status);
                 let status_text: SharedString = status
                     .map(|status| status.to_string())
@@ -3785,7 +3886,16 @@ impl ApiTester {
                     .cursor_pointer()
                     .hover(|style| style.bg(cx.theme().sidebar_accent))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.load_history(history_id.clone(), request.clone(), window, cx);
+                        let Some(request) = this
+                            .history
+                            .entries()
+                            .iter()
+                            .find(|entry| entry.id == history_id)
+                            .map(|entry| entry.request.clone())
+                        else {
+                            return;
+                        };
+                        this.load_history(history_id.clone(), request, window, cx);
                     }))
                     .child(
                         h_flex()
@@ -3919,11 +4029,14 @@ impl ApiTester {
                 .iter()
                 .enumerate()
                 .filter_map(|(index, request)| {
+                    if !searching || collection_matches {
+                        return Some(index);
+                    }
                     let draft = &request.definition.request;
                     let matches = request.name.to_lowercase().contains(&query)
                         || draft.method.to_lowercase().contains(&query)
                         || draft.url.to_lowercase().contains(&query);
-                    (!searching || collection_matches || matches).then_some(index)
+                    matches.then_some(index)
                 })
                 .collect::<Vec<_>>();
 
@@ -4088,7 +4201,6 @@ impl ApiTester {
                 let request_id = request.id.clone();
                 let load_id = request_id.clone();
                 let load_collection_id = collection_id.clone();
-                let definition = request.definition.clone();
                 let selected = self.active_saved_request_id.as_deref() == Some(&request.id)
                     && self.selected_collection_id.as_deref() == Some(&collection.id);
                 let method = request.definition.request.method.clone();
@@ -4127,8 +4239,15 @@ impl ApiTester {
                                 .gap_2()
                                 .cursor_pointer()
                                 .on_click(cx.listener(move |this, _, window, cx| {
+                                    let Some(definition) = this
+                                        .workspace
+                                        .saved_request(&load_id)
+                                        .map(|(_, request)| request.definition.clone())
+                                    else {
+                                        return;
+                                    };
                                     this.load_template(
-                                        definition.clone(),
+                                        definition,
                                         Some(load_collection_id.clone()),
                                         Some(load_id.clone()),
                                         load_key.clone(),
@@ -4988,9 +5107,9 @@ impl ApiTester {
         let environment_id = environment.id.clone();
         let environment_name = environment.name.clone();
         let editor_dirty = self.environment_editor_is_dirty(cx);
-        let active_editor_dirty = self.active_environment_editor_is_dirty(cx);
         let selected_is_active =
             self.workspace.active_environment_id.as_deref() == Some(environment_id.as_str());
+        let active_editor_dirty = selected_is_active && editor_dirty;
         let variable_count = self.environment_variables.len();
         let can_mutate = !self.sending && self.workspace_writable;
         let activate_id = environment_id.clone();
@@ -5585,6 +5704,10 @@ impl ApiTester {
                                             this.headers.iter_mut().find(|row| row.id == id)
                                         {
                                             row.enabled = *checked;
+                                            this.refresh_request_dirty_part(
+                                                RequestDirtyPart::Headers,
+                                                cx,
+                                            );
                                             cx.notify();
                                         }
                                     })),
@@ -5918,6 +6041,10 @@ impl ApiTester {
                                             this.body_fields.iter_mut().find(|row| row.id == id)
                                         {
                                             row.enabled = *checked;
+                                            this.refresh_request_dirty_part(
+                                                RequestDirtyPart::BodyFields,
+                                                cx,
+                                            );
                                             cx.notify();
                                         }
                                     })),
@@ -6093,7 +6220,7 @@ impl ApiTester {
         let enabled_count = self
             .body_fields
             .iter()
-            .filter(|row| row.enabled && !row.name.read(cx).value().trim().is_empty())
+            .filter(|row| row.enabled && !input_text_is_blank(&row.name, cx))
             .count();
 
         v_flex()
@@ -6987,6 +7114,16 @@ impl Render for ApiTester {
             .children(self.render_template_variable_popover(cx))
             .children(Root::render_dialog_layer(window, cx))
     }
+}
+
+fn input_text_equals(input: &Entity<InputState>, expected: &str, cx: &App) -> bool {
+    let input = input.read(cx);
+    let text = input.text();
+    text.len() == expected.len() && text.chars().eq(expected.chars())
+}
+
+fn input_text_is_blank(input: &Entity<InputState>, cx: &App) -> bool {
+    input.read(cx).text().chars().all(char::is_whitespace)
 }
 
 fn compact_url(url: &str) -> String {

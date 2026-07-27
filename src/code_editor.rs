@@ -456,6 +456,13 @@ impl CodeEditor {
         if typed.chars().count() != 1 {
             return;
         }
+        let typed_char = typed.chars().next().expect("one typed character");
+        if !matches!(
+            typed_char,
+            '(' | ')' | '[' | ']' | '{' | '}' | '\'' | '"' | '`'
+        ) {
+            return;
+        }
 
         let handled = self.input.update(cx, |input, cx| {
             if EntityInputHandler::marked_text_range(input, window, cx).is_some() {
@@ -621,6 +628,9 @@ pub(crate) fn apply_template_pair_edit(
         return false;
     };
     if typed.chars().count() != 1 {
+        return false;
+    }
+    if !matches!(typed_char, '{' | '}') {
         return false;
     }
 

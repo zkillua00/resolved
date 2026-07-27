@@ -1,9 +1,10 @@
 use std::{
+    cell::RefCell,
     cmp::Ordering,
     collections::VecDeque,
     mem::MaybeUninit,
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc,
         atomic::{AtomicBool, Ordering as AtomicOrdering},
     },
     time::{Duration, Instant},
@@ -138,7 +139,7 @@ impl FrameHistory {
 /// never blocks the UI thread.
 pub struct DebugOverlay {
     visible: bool,
-    frame_history: Arc<Mutex<FrameHistory>>,
+    frame_history: RefCell<FrameHistory>,
     resource_sample: Option<ResourceSample>,
     sampler_enabled: Arc<AtomicBool>,
     _resource_sampler: Task<()>,
@@ -173,7 +174,7 @@ impl DebugOverlay {
 
         Self {
             visible: false,
-            frame_history: Arc::new(Mutex::new(FrameHistory::new(FRAME_HISTORY_CAPACITY))),
+            frame_history: RefCell::new(FrameHistory::new(FRAME_HISTORY_CAPACITY)),
             resource_sample: None,
             sampler_enabled,
             _resource_sampler: resource_sampler,
@@ -194,7 +195,7 @@ impl DebugOverlay {
         }
 
         self.visible = visible;
-        lock_frame_history(&self.frame_history).reset();
+        self.frame_history.borrow_mut().reset();
         self.sampler_enabled.store(visible, AtomicOrdering::Release);
         if visible {
             self.resource_sample = None;
@@ -203,16 +204,16 @@ impl DebugOverlay {
     }
 
     /// Record one redraw of the application view. Hidden overlays keep this
-    /// path to a single atomic load.
+    /// path to a single UI-thread-local branch.
     pub fn record_ui_frame(&self) {
-        if self.sampler_enabled.load(AtomicOrdering::Acquire) {
-            lock_frame_history(&self.frame_history).record_frame(Instant::now());
+        if self.visible {
+            self.frame_history.borrow_mut().record_frame(Instant::now());
         }
     }
 
     #[allow(dead_code)]
     pub fn frame_stats(&self) -> FrameStats {
-        lock_frame_history(&self.frame_history).stats()
+        self.frame_history.borrow().stats()
     }
 
     #[allow(dead_code)]
@@ -227,7 +228,7 @@ impl Render for DebugOverlay {
             return div();
         }
 
-        let frame_stats = lock_frame_history(&self.frame_history).live_stats(Instant::now());
+        let frame_stats = self.frame_history.borrow().live_stats(Instant::now());
         let (cpu, rss, footprint) = match self.resource_sample {
             Some(sample) => (
                 format_cpu_percent(sample.cpu_percent),
@@ -361,12 +362,6 @@ fn format_ui_fps(fps: f64, sample_count: usize) -> String {
     } else {
         format!("{fps:.1}")
     }
-}
-
-fn lock_frame_history(history: &Arc<Mutex<FrameHistory>>) -> MutexGuard<'_, FrameHistory> {
-    history
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn format_frame_ms(milliseconds: f64, sample_count: usize) -> String {

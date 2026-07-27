@@ -11,6 +11,7 @@ mod code_editor;
 mod core;
 mod debug_overlay;
 mod instance_guard;
+mod request_dirty;
 mod script_intelligence;
 mod template_intelligence;
 mod theme;
