@@ -19,12 +19,14 @@ use gpui_component::{
     Sizable as _, StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     checkbox::Checkbox,
+    clipboard::Clipboard,
     dialog::DialogButtonProps,
     h_flex,
     input::{Input, InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenuItem},
     popover::Popover,
     resizable::{h_resizable, resizable_panel, v_resizable},
+    scroll::ScrollableElement as _,
     tab::TabBar,
     tooltip::Tooltip,
     v_flex,
@@ -40,9 +42,10 @@ use crate::{
         BodyField, BodyFieldKind, BodyMode, DatabaseStore, Environment, EnvironmentMutation,
         HeaderEntry, HistoryEntry, PostResponseResult, PreRequestResult, REDACTED_VALUE,
         RawBodyLanguage, RequestDraft, RequestError, RequestHistory, RequestScripts, RequestTask,
-        RequestTemplate, ResponseData, ScriptCancellation, ScriptDiagnostic, ScriptEnvironment,
-        ScriptError, ScriptReport, ScriptScope, Workspace, build_client, execute_post_response,
-        execute_pre_request, format_body, is_probably_text, resolve_request, spawn_request,
+        RequestTemplate, ResponseData, STANDARD_HTTP_METHODS, ScriptCancellation, ScriptDiagnostic,
+        ScriptEnvironment, ScriptError, ScriptErrorKind, ScriptLogLevel, ScriptPhase, ScriptReport,
+        ScriptScope, Workspace, build_client, execute_post_response, execute_pre_request,
+        format_body, is_probably_text, resolve_request, spawn_request,
     },
     debug_overlay::DebugOverlay,
     script_intelligence::{
@@ -61,8 +64,6 @@ use crate::{
 };
 
 const TEMPLATE_HIGHLIGHT_DEBOUNCE: Duration = Duration::from_millis(90);
-
-const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RequestTab {
@@ -98,6 +99,38 @@ enum ResponseTab {
     Headers,
     Preview,
     Scripts,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScriptConsoleTone {
+    Neutral,
+    Info,
+    Warning,
+    Danger,
+    Success,
+    Debug,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ScriptConsoleRow {
+    label: String,
+    message: String,
+    detail: Option<String>,
+    copy_value: String,
+    tone: ScriptConsoleTone,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ScriptConsoleSection {
+    key: String,
+    title: String,
+    duration: Option<Duration>,
+    rows: Vec<ScriptConsoleRow>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ScriptConsoleModel {
+    sections: Vec<ScriptConsoleSection>,
 }
 
 impl ResponseTab {
@@ -3144,6 +3177,7 @@ impl ApiTester {
     fn select_response_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.response_tab = ResponseTab::from_index(index);
         self.preview_error = None;
+        self.copied = false;
 
         if self.response_tab == ResponseTab::Preview {
             self.show_preview(window, cx);
@@ -3185,6 +3219,11 @@ impl ApiTester {
     }
 
     fn copy_response(&mut self, cx: &mut Context<Self>) {
+        if self.response_tab == ResponseTab::Scripts {
+            self.copy_script_results(cx);
+            return;
+        }
+
         let Some(response) = &self.response else {
             return;
         };
@@ -3198,13 +3237,21 @@ impl ApiTester {
                 .join("\n"),
             ResponseTab::Body => self.response_editor.read(cx).value(cx).to_string(),
             ResponseTab::Preview => format_body(&response.body, self.pretty_body),
-            ResponseTab::Scripts => script_report_text(
-                self.pre_script_report.as_ref(),
-                self.post_script_report.as_ref(),
-                self.script_diagnostic.as_ref(),
-            ),
+            ResponseTab::Scripts => unreachable!("script copying is handled without a response"),
         };
         cx.write_to_clipboard(ClipboardItem::new_string(value));
+        self.copied = true;
+        cx.notify();
+    }
+
+    fn copy_script_results(&mut self, cx: &mut Context<Self>) {
+        let model = script_console_model(
+            self.pre_script_report.as_ref(),
+            self.post_script_report.as_ref(),
+            self.script_diagnostic.as_ref(),
+            self.request_error.as_deref(),
+        );
+        cx.write_to_clipboard(ClipboardItem::new_string(model.copy_all_text()));
         self.copied = true;
         cx.notify();
     }
@@ -5402,7 +5449,7 @@ impl ApiTester {
                                             .border_color(outline_variant())
                                             .bg(surface_container())
                                             .overflow_hidden()
-                                            .children(METHODS.iter().enumerate().map(
+                                            .children(STANDARD_HTTP_METHODS.iter().enumerate().map(
                                                 |(index, method)| {
                                                     let method = (*method).to_owned();
                                                     let click_method = method.clone();
@@ -6357,42 +6404,243 @@ impl ApiTester {
     }
 
     fn render_script_results(&self, cx: &mut Context<Self>) -> AnyElement {
-        let report = script_report_text(
+        let model = script_console_model(
             self.pre_script_report.as_ref(),
             self.post_script_report.as_ref(),
             self.script_diagnostic.as_ref(),
+            self.request_error.as_deref(),
         );
-        div()
-            .id("script-results-scroll")
+        let row_count = model.row_count();
+        let copy_label = if self.copied { "Copied" } else { "Copy all" };
+        let generation = self.request_generation;
+        let sections = model
+            .sections
+            .iter()
+            .enumerate()
+            .map(|(section_index, section)| {
+                let section_key = section.key.clone();
+                let duration = section
+                    .duration
+                    .map(format_script_duration)
+                    .unwrap_or_default();
+                let section_meta = if duration.is_empty() {
+                    format!(
+                        "{} {}",
+                        section.rows.len(),
+                        if section.rows.len() == 1 {
+                            "entry"
+                        } else {
+                            "entries"
+                        }
+                    )
+                } else {
+                    format!(
+                        "{duration} · {} {}",
+                        section.rows.len(),
+                        if section.rows.len() == 1 {
+                            "entry"
+                        } else {
+                            "entries"
+                        }
+                    )
+                };
+                let rows = section.rows.iter().enumerate().map(|(row_index, row)| {
+                    let group_id: SharedString = format!(
+                        "script-console-row-group-{generation}-{section_key}-{section_index}-{row_index}"
+                    )
+                    .into();
+                    let row_id: SharedString = format!(
+                        "script-console-row-{generation}-{section_key}-{section_index}-{row_index}"
+                    )
+                    .into();
+                    let copy_id: SharedString = format!(
+                        "copy-script-console-row-{generation}-{section_key}-{section_index}-{row_index}"
+                    )
+                    .into();
+                    let copy_hint_id: SharedString = format!(
+                        "copy-script-console-row-hint-{generation}-{section_key}-{section_index}-{row_index}"
+                    )
+                    .into();
+                    let tone_color = script_console_tone_color(row.tone, cx);
+                    let tone_background = script_console_tone_background(row.tone, cx);
+
+                    h_flex()
+                        .id(row_id)
+                        .group(group_id.clone())
+                        .w_full()
+                        .min_h(px(42.))
+                        .items_start()
+                        .px_3()
+                        .py_2()
+                        .gap_2()
+                        .border_b_1()
+                        .border_color(outline_variant())
+                        .bg(tone_background)
+                        .hover(|style| style.bg(surface_low()))
+                        .child(
+                            div()
+                                .w(px(20.))
+                                .h(px(22.))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    gpui_component::Icon::new(script_console_tone_icon(row.tone))
+                                        .with_size(px(14.))
+                                        .text_color(tone_color),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w(px(64.))
+                                .h(px(22.))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .text_xs()
+                                .font_semibold()
+                                .text_color(tone_color)
+                                .child(row.label.clone()),
+                        )
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_size(cx.theme().mono_font_size)
+                                .line_height(px(19.))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .whitespace_normal()
+                                        .child(row.message.clone()),
+                                )
+                                .when_some(row.detail.clone(), |this, detail| {
+                                    this.child(
+                                        div()
+                                            .mt_1()
+                                            .pl_2()
+                                            .border_l_1()
+                                            .border_color(tone_color.opacity(0.5))
+                                            .whitespace_normal()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(detail),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id(copy_hint_id)
+                                .w(px(28.))
+                                .h(px(24.))
+                                .flex_shrink_0()
+                                .opacity(0.55)
+                                .group_hover(group_id, |style| style.opacity(1.))
+                                .tooltip(|window, cx| {
+                                    Tooltip::new("Copy message").build(window, cx)
+                                })
+                                .child(
+                                    Clipboard::new(copy_id).value(row.copy_value.clone()),
+                                ),
+                        )
+                        .into_any_element()
+                });
+
+                v_flex()
+                    .w_full()
+                    .child(
+                        h_flex()
+                            .h(px(34.))
+                            .flex_shrink_0()
+                            .px_3()
+                            .gap_2()
+                            .border_b_1()
+                            .border_color(outline_variant())
+                            .bg(cx.theme().muted.opacity(0.34))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_semibold()
+                                    .text_color(cx.theme().foreground)
+                                    .child(section.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(section_meta),
+                            ),
+                    )
+                    .children(rows)
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+
+        v_flex()
             .size_full()
-            .overflow_scroll()
-            .p_3()
             .rounded_md()
             .border_1()
-            .border_color(
-                if self.script_diagnostic.is_some() || self.request_error.is_some() {
-                    cx.theme().danger
-                } else {
-                    cx.theme().border
-                },
+            .border_color(outline_variant())
+            .overflow_hidden()
+            .bg(surface_lowest())
+            .child(
+                h_flex()
+                    .h(px(40.))
+                    .flex_shrink_0()
+                    .px_3()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(outline_variant())
+                    .bg(surface_low())
+                    .child(
+                        gpui_component::Icon::new(IconName::SquareTerminal)
+                            .with_size(px(15.))
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(div().text_sm().font_semibold().child("Script console"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "{row_count} {}",
+                                if row_count == 1 { "entry" } else { "entries" }
+                            )),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new(("copy-all-script-output", generation))
+                            .icon(if self.copied {
+                                IconName::Check
+                            } else {
+                                IconName::Copy
+                            })
+                            .label(copy_label)
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.copy_script_results(cx);
+                            })),
+                    ),
             )
-            .bg(cx.theme().muted.opacity(0.32))
-            .font_family(cx.theme().mono_font_family.clone())
-            .text_size(cx.theme().mono_font_size)
-            .line_height(px(19.))
-            .when_some(self.request_error.clone(), |this, error| {
-                this.child(
-                    div()
-                        .mb_3()
-                        .p_2()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(cx.theme().danger)
-                        .text_color(cx.theme().danger)
-                        .child(error),
-                )
-            })
-            .child(report)
+            .child(
+                div()
+                    .id(("script-results-scroll", generation))
+                    .flex_1()
+                    .min_h_0()
+                    .when(model.sections.is_empty(), |this| {
+                        this.flex()
+                            .items_center()
+                            .justify_center()
+                            .p_4()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("No script has run yet.")
+                    })
+                    .children(sections)
+                    .overflow_y_scrollbar(),
+            )
             .into_any_element()
     }
 
@@ -6487,12 +6735,15 @@ impl ApiTester {
 
     fn render_response_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(response) = &self.response else {
+            let has_script_console = self.pre_script_report.is_some()
+                || self.post_script_report.is_some()
+                || self.script_diagnostic.is_some();
             let state_label = if self.sending {
                 "Waiting for response…"
-            } else if self.request_error.is_some() {
-                "Request failed"
             } else if self.script_diagnostic.is_some() {
                 "Script failed"
+            } else if self.request_error.is_some() {
+                "Request failed"
             } else {
                 "No response yet"
             };
@@ -6520,70 +6771,51 @@ impl ApiTester {
                     v_flex()
                         .flex_1()
                         .min_h_0()
-                        .items_center()
-                        .justify_center()
-                        .gap_2()
-                        .p_4()
-                        .text_color(cx.theme().muted_foreground)
-                        .when_some(self.request_error.clone(), |this, error| {
-                            this.child(
-                                div()
-                                    .max_w(px(640.))
-                                    .px_4()
-                                    .py_3()
-                                    .rounded_lg()
-                                    .border_1()
-                                    .border_color(cx.theme().danger)
-                                    .bg(cx.theme().danger.opacity(0.08))
-                                    .text_color(cx.theme().danger)
-                                    .text_sm()
-                                    .child(error),
-                            )
+                        .when(has_script_console, |this| {
+                            this.p_4().child(self.render_script_results(cx))
                         })
-                        .when(self.script_diagnostic.is_some(), |this| {
-                            this.child(
-                                div()
-                                    .id("script-diagnostic-scroll")
-                                    .max_w(px(720.))
-                                    .max_h(px(240.))
-                                    .overflow_y_scroll()
-                                    .px_4()
-                                    .py_3()
-                                    .rounded_lg()
-                                    .border_1()
-                                    .border_color(cx.theme().danger)
-                                    .bg(surface_lowest())
-                                    .font_family(cx.theme().mono_font_family.clone())
-                                    .text_xs()
-                                    .child(script_report_text(
-                                        self.pre_script_report.as_ref(),
-                                        self.post_script_report.as_ref(),
-                                        self.script_diagnostic.as_ref(),
-                                    )),
-                            )
-                        })
-                        .when(self.request_error.is_none() && !self.sending, |this| {
-                            this.child(
-                                div()
-                                    .text_base()
-                                    .font_semibold()
-                                    .text_color(cx.theme().foreground)
-                                    .child("Ready to send"),
-                            )
-                            .child(
-                                div().text_sm().child(
-                                    "Choose a method, enter a URL, then press Send or Return.",
-                                ),
-                            )
-                        })
-                        .when(self.sending, |this| {
-                            this.child(
-                                div()
-                                    .text_base()
-                                    .font_semibold()
-                                    .text_color(cx.theme().foreground)
-                                    .child("Waiting for response…"),
-                            )
+                        .when(!has_script_console, |this| {
+                            this.items_center()
+                                .justify_center()
+                                .gap_2()
+                                .p_4()
+                                .text_color(cx.theme().muted_foreground)
+                                .when_some(self.request_error.clone(), |this, error| {
+                                    this.child(
+                                        div()
+                                            .max_w(px(640.))
+                                            .px_4()
+                                            .py_3()
+                                            .rounded_lg()
+                                            .border_1()
+                                            .border_color(cx.theme().danger)
+                                            .bg(cx.theme().danger.opacity(0.08))
+                                            .text_color(cx.theme().danger)
+                                            .text_sm()
+                                            .child(error),
+                                    )
+                                })
+                                .when(self.request_error.is_none() && !self.sending, |this| {
+                                    this.child(
+                                        div()
+                                            .text_base()
+                                            .font_semibold()
+                                            .text_color(cx.theme().foreground)
+                                            .child("Ready to send"),
+                                    )
+                                    .child(div().text_sm().child(
+                                        "Choose a method, enter a URL, then press Send or Return.",
+                                    ))
+                                })
+                                .when(self.sending, |this| {
+                                    this.child(
+                                        div()
+                                            .text_base()
+                                            .font_semibold()
+                                            .text_color(cx.theme().foreground)
+                                            .child("Waiting for response…"),
+                                    )
+                                })
                         }),
                 )
                 .into_any_element();
@@ -6630,14 +6862,18 @@ impl ApiTester {
                                         })),
                                 )
                             })
-                            .child(
-                                Button::new("copy-response")
-                                    .label(if self.copied { "Copied" } else { "Copy" })
-                                    .small()
-                                    .ghost()
-                                    .rounded(px(18.))
-                                    .on_click(cx.listener(|this, _, _, cx| this.copy_response(cx))),
-                            ),
+                            .when(self.response_tab != ResponseTab::Scripts, |this| {
+                                this.child(
+                                    Button::new("copy-response")
+                                        .label(if self.copied { "Copied" } else { "Copy" })
+                                        .small()
+                                        .ghost()
+                                        .rounded(px(18.))
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.copy_response(cx)),
+                                        ),
+                                )
+                            }),
                     ),
             )
             .child(
@@ -6921,54 +7157,227 @@ fn compact_label(value: &str, max_chars: usize) -> String {
     format!("{prefix}…{suffix}")
 }
 
-fn script_report_text(
+impl ScriptConsoleModel {
+    fn row_count(&self) -> usize {
+        self.sections.iter().map(|section| section.rows.len()).sum()
+    }
+
+    fn copy_all_text(&self) -> String {
+        if self.sections.is_empty() {
+            return "No script has run yet.".to_owned();
+        }
+
+        self.sections
+            .iter()
+            .map(|section| {
+                let mut lines = vec![match section.duration {
+                    Some(duration) => {
+                        format!("{} · {}", section.title, format_script_duration(duration))
+                    }
+                    None => section.title.clone(),
+                }];
+                lines.extend(section.rows.iter().map(|row| {
+                    let mut text = format!("[{}] {}", row.label, row.message);
+                    if let Some(detail) = row.detail.as_deref() {
+                        for line in detail.lines() {
+                            text.push_str("\n    ");
+                            text.push_str(line);
+                        }
+                    }
+                    text
+                }));
+                lines.join("\n")
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+}
+
+fn script_console_model(
     pre: Option<&ScriptReport>,
     post: Option<&ScriptReport>,
     diagnostic: Option<&ScriptDiagnostic>,
-) -> String {
-    let mut lines = Vec::new();
+    request_error: Option<&str>,
+) -> ScriptConsoleModel {
+    let mut sections = Vec::new();
+    let mut diagnostic_rendered = false;
+
     for report in [pre, post].into_iter().flatten() {
-        lines.push(format!(
-            "{} · {:.2} ms",
-            report.phase,
-            report.duration.as_secs_f64() * 1_000.0
-        ));
-        if report.logs.is_empty() && report.tests.is_empty() {
-            lines.push("  No console output or tests.".to_owned());
-        }
+        let mut rows = Vec::new();
+
         for log in &report.logs {
-            lines.push(format!("  [{:?}] {}", log.level, log.message));
+            let (label, tone) = match log.level {
+                ScriptLogLevel::Log => ("LOG", ScriptConsoleTone::Neutral),
+                ScriptLogLevel::Info => ("INFO", ScriptConsoleTone::Info),
+                ScriptLogLevel::Warn => ("WARN", ScriptConsoleTone::Warning),
+                ScriptLogLevel::Error => ("ERROR", ScriptConsoleTone::Danger),
+                ScriptLogLevel::Debug => ("DEBUG", ScriptConsoleTone::Debug),
+            };
+            rows.push(ScriptConsoleRow {
+                label: label.to_owned(),
+                message: log.message.clone(),
+                detail: None,
+                copy_value: log.message.clone(),
+                tone,
+            });
         }
+
         for test in &report.tests {
-            let status = if test.passed { "PASS" } else { "FAIL" };
-            let detail = test
-                .message
-                .as_deref()
-                .map(|message| format!(" · {message}"))
-                .unwrap_or_default();
-            lines.push(format!("  [{status}] {}{detail}", test.name));
+            let label = if test.passed { "PASS" } else { "FAIL" };
+            let mut copy_value = format!("[{label}] {}", test.name);
+            if let Some(message) = test.message.as_deref() {
+                copy_value.push('\n');
+                copy_value.push_str(message);
+            }
+            rows.push(ScriptConsoleRow {
+                label: label.to_owned(),
+                message: test.name.clone(),
+                detail: test.message.clone(),
+                copy_value,
+                tone: if test.passed {
+                    ScriptConsoleTone::Success
+                } else {
+                    ScriptConsoleTone::Danger
+                },
+            });
         }
+
         if report.response_body_truncated {
-            lines.push("  Response body was truncated for the script runtime.".to_owned());
+            let message = "Response body was truncated for the script runtime.".to_owned();
+            rows.push(ScriptConsoleRow {
+                label: "NOTICE".to_owned(),
+                message: message.clone(),
+                detail: None,
+                copy_value: message,
+                tone: ScriptConsoleTone::Warning,
+            });
         }
-        lines.push(String::new());
+
+        if let Some(diagnostic) = diagnostic.filter(|item| item.phase == report.phase) {
+            rows.push(script_diagnostic_console_row(diagnostic));
+            diagnostic_rendered = true;
+        }
+
+        if rows.is_empty() {
+            let message = "No console output or tests.".to_owned();
+            rows.push(ScriptConsoleRow {
+                label: "EMPTY".to_owned(),
+                message: message.clone(),
+                detail: None,
+                copy_value: message,
+                tone: ScriptConsoleTone::Neutral,
+            });
+        }
+
+        sections.push(ScriptConsoleSection {
+            key: report.phase.to_string(),
+            title: script_phase_title(report.phase).to_owned(),
+            duration: Some(report.duration),
+            rows,
+        });
     }
 
-    if let Some(diagnostic) = diagnostic {
-        lines.push(format!(
-            "{} {:?} in {}",
-            diagnostic.phase, diagnostic.kind, diagnostic.filename
-        ));
-        lines.push(format!("  {}", diagnostic.message));
-        if let Some(stack) = diagnostic.stack.as_deref() {
-            lines.push(stack.to_owned());
-        }
+    if let Some(diagnostic) = diagnostic.filter(|_| !diagnostic_rendered) {
+        sections.push(ScriptConsoleSection {
+            key: diagnostic.phase.to_string(),
+            title: script_phase_title(diagnostic.phase).to_owned(),
+            duration: None,
+            rows: vec![script_diagnostic_console_row(diagnostic)],
+        });
     }
 
-    if lines.is_empty() {
-        "No script has run yet.".to_owned()
-    } else {
-        lines.join("\n").trim_end().to_owned()
+    // Script failures already carry a structured diagnostic. Avoid presenting
+    // the same error a second time through the request-level fallback string.
+    if diagnostic.is_none()
+        && let Some(error) = request_error.filter(|error| !error.trim().is_empty())
+    {
+        sections.push(ScriptConsoleSection {
+            key: "request".to_owned(),
+            title: "Request".to_owned(),
+            duration: None,
+            rows: vec![ScriptConsoleRow {
+                label: "ERROR".to_owned(),
+                message: error.to_owned(),
+                detail: None,
+                copy_value: error.to_owned(),
+                tone: ScriptConsoleTone::Danger,
+            }],
+        });
+    }
+
+    ScriptConsoleModel { sections }
+}
+
+fn script_diagnostic_console_row(diagnostic: &ScriptDiagnostic) -> ScriptConsoleRow {
+    let label = script_error_kind_label(diagnostic.kind);
+    let message = format!("{}: {}", diagnostic.filename, diagnostic.message);
+    let mut copy_value = format!("[{label}] {message}");
+    if let Some(stack) = diagnostic.stack.as_deref() {
+        copy_value.push('\n');
+        copy_value.push_str(stack);
+    }
+    ScriptConsoleRow {
+        label: label.to_owned(),
+        message,
+        detail: diagnostic.stack.clone(),
+        copy_value,
+        tone: ScriptConsoleTone::Danger,
+    }
+}
+
+fn script_phase_title(phase: ScriptPhase) -> &'static str {
+    match phase {
+        ScriptPhase::PreRequest => "Pre-request",
+        ScriptPhase::PostResponse => "Post-response",
+    }
+}
+
+fn script_error_kind_label(kind: ScriptErrorKind) -> &'static str {
+    match kind {
+        ScriptErrorKind::SourceLimit => "SOURCE",
+        ScriptErrorKind::BodyLimit => "BODY",
+        ScriptErrorKind::Cancelled => "CANCEL",
+        ScriptErrorKind::TimedOut => "TIMEOUT",
+        ScriptErrorKind::MemoryLimit => "MEMORY",
+        ScriptErrorKind::Syntax => "SYNTAX",
+        ScriptErrorKind::Runtime => "RUNTIME",
+        ScriptErrorKind::OutputLimit => "OUTPUT",
+        ScriptErrorKind::Engine => "ENGINE",
+    }
+}
+
+fn format_script_duration(duration: Duration) -> String {
+    format!("{:.2} ms", duration.as_secs_f64() * 1_000.0)
+}
+
+fn script_console_tone_color(tone: ScriptConsoleTone, cx: &App) -> Hsla {
+    match tone {
+        ScriptConsoleTone::Neutral | ScriptConsoleTone::Debug => cx.theme().muted_foreground,
+        ScriptConsoleTone::Info => cx.theme().info,
+        ScriptConsoleTone::Warning => cx.theme().warning,
+        ScriptConsoleTone::Danger => cx.theme().danger,
+        ScriptConsoleTone::Success => cx.theme().success,
+    }
+}
+
+fn script_console_tone_background(tone: ScriptConsoleTone, cx: &App) -> Hsla {
+    match tone {
+        ScriptConsoleTone::Info => cx.theme().info.opacity(0.025),
+        ScriptConsoleTone::Warning => cx.theme().warning.opacity(0.045),
+        ScriptConsoleTone::Danger => cx.theme().danger.opacity(0.055),
+        ScriptConsoleTone::Success => cx.theme().success.opacity(0.025),
+        ScriptConsoleTone::Neutral | ScriptConsoleTone::Debug => surface_lowest(),
+    }
+}
+
+fn script_console_tone_icon(tone: ScriptConsoleTone) -> IconName {
+    match tone {
+        ScriptConsoleTone::Neutral => IconName::SquareTerminal,
+        ScriptConsoleTone::Info => IconName::Info,
+        ScriptConsoleTone::Warning => IconName::TriangleAlert,
+        ScriptConsoleTone::Danger => IconName::CircleX,
+        ScriptConsoleTone::Success => IconName::CircleCheck,
+        ScriptConsoleTone::Debug => IconName::Inspector,
     }
 }
 
@@ -7017,6 +7426,7 @@ fn status_color(status: u16, cx: &App) -> Hsla {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{ScriptLog, ScriptTestResult};
 
     #[test]
     fn raw_json_formatter_pretty_prints_without_changing_values() {
@@ -7037,5 +7447,184 @@ mod tests {
         let error = format_raw_body_source(RawBodyLanguage::Yaml, source).unwrap_err();
         assert!(error.contains("not available for YAML"));
         assert_eq!(source, "name: value");
+    }
+
+    #[test]
+    fn script_console_builds_level_and_test_rows_with_stable_copy_text() {
+        let report = ScriptReport {
+            phase: ScriptPhase::PreRequest,
+            duration: Duration::from_micros(420),
+            logs: vec![
+                ScriptLog {
+                    level: ScriptLogLevel::Log,
+                    message: "plain".to_owned(),
+                },
+                ScriptLog {
+                    level: ScriptLogLevel::Info,
+                    message: "bilgi 🧪".to_owned(),
+                },
+                ScriptLog {
+                    level: ScriptLogLevel::Warn,
+                    message: "careful".to_owned(),
+                },
+                ScriptLog {
+                    level: ScriptLogLevel::Error,
+                    message: "boom".to_owned(),
+                },
+                ScriptLog {
+                    level: ScriptLogLevel::Debug,
+                    message: "details".to_owned(),
+                },
+            ],
+            tests: vec![
+                ScriptTestResult {
+                    name: "created".to_owned(),
+                    passed: true,
+                    message: None,
+                },
+                ScriptTestResult {
+                    name: "has token".to_owned(),
+                    passed: false,
+                    message: Some("expected value\nreceived none".to_owned()),
+                },
+            ],
+            response_body_truncated: true,
+        };
+
+        let model = script_console_model(Some(&report), None, None, None);
+        assert_eq!(
+            model.sections[0]
+                .rows
+                .iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "LOG", "INFO", "WARN", "ERROR", "DEBUG", "PASS", "FAIL", "NOTICE"
+            ]
+        );
+        assert_eq!(model.sections[0].rows[1].copy_value, "bilgi 🧪");
+        assert_eq!(
+            model.sections[0].rows[6].copy_value,
+            "[FAIL] has token\nexpected value\nreceived none"
+        );
+        assert_eq!(
+            model.copy_all_text(),
+            concat!(
+                "Pre-request · 0.42 ms\n",
+                "[LOG] plain\n",
+                "[INFO] bilgi 🧪\n",
+                "[WARN] careful\n",
+                "[ERROR] boom\n",
+                "[DEBUG] details\n",
+                "[PASS] created\n",
+                "[FAIL] has token\n",
+                "    expected value\n",
+                "    received none\n",
+                "[NOTICE] Response body was truncated for the script runtime."
+            )
+        );
+    }
+
+    #[test]
+    fn script_console_keeps_diagnostics_copyable_without_an_http_response() {
+        let report = ScriptReport {
+            phase: ScriptPhase::PreRequest,
+            duration: Duration::from_millis(3),
+            logs: vec![ScriptLog {
+                level: ScriptLogLevel::Info,
+                message: "before failure".to_owned(),
+            }],
+            tests: Vec::new(),
+            response_body_truncated: false,
+        };
+        let diagnostic = ScriptDiagnostic {
+            phase: ScriptPhase::PreRequest,
+            kind: ScriptErrorKind::Runtime,
+            filename: "pre-request.js",
+            message: "patladı".to_owned(),
+            stack: Some("at pre-request.js:4\nat <eval>".to_owned()),
+        };
+
+        let model = script_console_model(
+            Some(&report),
+            None,
+            Some(&diagnostic),
+            Some("duplicate fallback error"),
+        );
+        assert_eq!(model.sections.len(), 1);
+        assert_eq!(model.sections[0].rows.len(), 2);
+        assert_eq!(
+            model.sections[0].rows[1].copy_value,
+            "[RUNTIME] pre-request.js: patladı\nat pre-request.js:4\nat <eval>"
+        );
+        let copied = model.copy_all_text();
+        assert!(copied.contains("[INFO] before failure"));
+        assert!(copied.contains("[RUNTIME] pre-request.js: patladı"));
+        assert!(copied.contains("    at pre-request.js:4"));
+        assert!(!copied.contains("duplicate fallback error"));
+    }
+
+    #[test]
+    fn script_console_includes_network_failure_after_pre_script_output() {
+        let report = ScriptReport {
+            phase: ScriptPhase::PreRequest,
+            duration: Duration::from_millis(1),
+            logs: Vec::new(),
+            tests: Vec::new(),
+            response_body_truncated: false,
+        };
+
+        let model = script_console_model(Some(&report), None, None, Some("connection refused"));
+        assert_eq!(model.sections.len(), 2);
+        assert_eq!(model.sections[0].rows[0].label, "EMPTY");
+        assert_eq!(model.sections[1].title, "Request");
+        assert_eq!(model.sections[1].rows[0].copy_value, "connection refused");
+        assert!(model.copy_all_text().contains("[ERROR] connection refused"));
+    }
+
+    #[test]
+    fn script_console_keeps_pre_request_before_post_response() {
+        let pre = ScriptReport {
+            phase: ScriptPhase::PreRequest,
+            duration: Duration::from_millis(1),
+            logs: vec![ScriptLog {
+                level: ScriptLogLevel::Log,
+                message: "pre".to_owned(),
+            }],
+            tests: Vec::new(),
+            response_body_truncated: false,
+        };
+        let post = ScriptReport {
+            phase: ScriptPhase::PostResponse,
+            duration: Duration::from_millis(2),
+            logs: vec![ScriptLog {
+                level: ScriptLogLevel::Info,
+                message: "post".to_owned(),
+            }],
+            tests: Vec::new(),
+            response_body_truncated: false,
+        };
+
+        let model = script_console_model(Some(&pre), Some(&post), None, None);
+        assert_eq!(
+            model
+                .sections
+                .iter()
+                .map(|section| section.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Pre-request", "Post-response"]
+        );
+        assert_eq!(
+            model.copy_all_text(),
+            "Pre-request · 1.00 ms\n[LOG] pre\n\n\
+             Post-response · 2.00 ms\n[INFO] post"
+        );
+    }
+
+    #[test]
+    fn empty_script_console_has_a_copyable_empty_state() {
+        let model = script_console_model(None, None, None, None);
+        assert_eq!(model.row_count(), 0);
+        assert_eq!(model.copy_all_text(), "No script has run yet.");
     }
 }

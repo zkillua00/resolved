@@ -911,6 +911,7 @@ fn run_engine(
                 ));
             }
             let mut caught_redactor = redactor.clone();
+            let mut caught_output = None;
             if let Ok(value) = ctx.eval::<Value<'_>, _>("__API_TESTER_FINISH()")
                 && let Ok(output) = rquickjs_serde::from_value_strict::<EngineOutput>(value)
             {
@@ -919,8 +920,18 @@ fn run_engine(
                     secret_names,
                     &output.environment_mutations,
                 );
+                if serde_json::to_vec(&output)
+                    .is_ok_and(|encoded| encoded.len() <= MAX_SCRIPT_RESULT_BYTES)
+                {
+                    caught_output = Some(output);
+                }
             }
-            return Err(caught_error(phase, caught, duration, &caught_redactor));
+            let mut error = caught_error(phase, caught, duration, &caught_redactor);
+            if let Some(output) = caught_output {
+                error.report =
+                    report_from_output(phase, &output, duration, false, &caught_redactor);
+            }
+            return Err(error);
         }
 
         let value: Value<'_> = ctx.eval("__API_TESTER_FINISH()").map_err(|error| {
@@ -977,9 +988,24 @@ fn report_from_run(
     response_body_truncated: bool,
     redactor: &SecretRedactor,
 ) -> ScriptReport {
+    report_from_output(
+        phase,
+        &run.output,
+        run.duration,
+        response_body_truncated,
+        redactor,
+    )
+}
+
+fn report_from_output(
+    phase: ScriptPhase,
+    output: &EngineOutput,
+    duration: Duration,
+    response_body_truncated: bool,
+    redactor: &SecretRedactor,
+) -> ScriptReport {
     let mut used_bytes = 0;
-    let logs = run
-        .output
+    let logs = output
         .logs
         .iter()
         .take(MAX_SCRIPT_LOG_ENTRIES)
@@ -997,8 +1023,7 @@ fn report_from_run(
             })
         })
         .collect();
-    let tests = run
-        .output
+    let tests = output
         .tests
         .iter()
         .map(|test| ScriptTestResult {
@@ -1010,7 +1035,7 @@ fn report_from_run(
 
     ScriptReport {
         phase,
-        duration: run.duration,
+        duration,
         logs,
         tests,
         response_body_truncated,
@@ -1369,6 +1394,29 @@ console.info(api.response.durationMs);
                 .as_deref()
                 .is_some_and(|stack| stack.contains("pre-request.js"))
         );
+    }
+
+    #[test]
+    fn runtime_errors_retain_console_output_recorded_before_throwing() {
+        let mut scope = ScriptScope::default();
+        scope.environment.insert_secret("token", "console-secret");
+        let error = execute_pre_request(
+            r#"
+console.info("before", api.environment.get("token"));
+throw new Error("broken");
+"#,
+            &request(),
+            &scope,
+            &ScriptCancellation::new(),
+        )
+        .expect_err("thrown error must fail");
+
+        assert_eq!(error.diagnostic.kind, ScriptErrorKind::Runtime);
+        assert_eq!(error.report.phase, ScriptPhase::PreRequest);
+        assert_eq!(error.report.logs.len(), 1);
+        assert_eq!(error.report.logs[0].level, ScriptLogLevel::Info);
+        assert_eq!(error.report.logs[0].message, "before [REDACTED]");
+        assert!(error.report.tests.is_empty());
     }
 
     #[test]

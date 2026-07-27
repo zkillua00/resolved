@@ -48,8 +48,10 @@ parentheses, and quote marks, including closer overtyping. The raw editor's
 context menu can format valid JSON as one undoable whole-buffer edit; invalid
 JSON and languages without a safe formatter are left unchanged. Script editors
 complete the phase-appropriate `api` surface and enabled variable names from the
-active environment. Literal reads of missing or disabled variables receive
-editor warnings without exposing variable values to the completion engine.
+active environment. Pre-request assignments also complete canonical HTTP
+methods, body modes, raw-body languages, and structured-field kinds inside
+quoted values. Literal reads of missing or disabled variables receive editor
+warnings without exposing variable values to the completion engine.
 
 URL, header, raw-body, and structured-body fields also understand request
 templates while editing. Typing `{{` inserts the matching braces and opens
@@ -158,11 +160,14 @@ The exposed API is deliberately small:
   post-response scripts. Test callbacks must be synchronous; Promise-returning
   callbacks are recorded as unsupported failures.
 - `console.log`, `info`, `warn`, `error`, and `debug`, captured in the Scripts
-  response tab.
+  response tab. The script console groups pre-request and post-response output
+  into level-colored rows; each row can be copied independently and Copy all
+  remains available even when no HTTP response was produced.
 
 A post-response script failure does not discard the received response. Script
 diagnostics, captured logs, and test results remain available in the Scripts
-tab, and Cancel interrupts the pre-script, network request, or post-script.
+tab. Logs written before a runtime exception are retained as debugging context,
+and Cancel interrupts the pre-script, network request, or post-script.
 
 ### Script limits and security boundary
 

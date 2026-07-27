@@ -14,6 +14,8 @@ use lsp_types::{
     Diagnostic, DiagnosticSeverity, Documentation, NumberOrString, Position, Range, TextEdit,
 };
 
+use crate::core::{BodyFieldKind, BodyMode, RawBodyLanguage, STANDARD_HTTP_METHODS};
+
 const DIAGNOSTIC_SOURCE: &str = "api-tester";
 const MISSING_VARIABLE_CODE: &str = "missing-script-variable";
 const DISABLED_VARIABLE_CODE: &str = "disabled-script-variable";
@@ -218,6 +220,15 @@ fn script_completion_is_active(
 
     if lexed.ended_in_comment_or_template {
         return false;
+    }
+
+    if let Some(context) = request_literal_completion_context(&source, &lexed.tokens, offset, phase)
+    {
+        return context
+            .kind
+            .values()
+            .into_iter()
+            .any(|value| literal_value_matches(value, &context.typed));
     }
 
     if let Some(context) = variable_string_completion_context(&lexed.tokens, offset) {
@@ -544,6 +555,33 @@ fn completion_items(
         return Vec::new();
     }
 
+    if let Some(string_context) =
+        request_literal_completion_context(prefix, &lexed.tokens, offset, phase)
+    {
+        let replace_end = quoted_content_end(
+            source,
+            string_context.replace_start,
+            offset,
+            string_context.quote,
+        );
+        return string_context
+            .kind
+            .values()
+            .into_iter()
+            .filter(|value| literal_value_matches(value, &string_context.typed))
+            .map(|value| {
+                request_literal_completion_item(
+                    source,
+                    string_context.replace_start,
+                    replace_end,
+                    value,
+                    string_context.quote,
+                    string_context.kind,
+                )
+            })
+            .collect();
+    }
+
     if let Some(string_context) = variable_string_completion_context(&lexed.tokens, offset) {
         let names: Box<dyn Iterator<Item = &str> + '_> = match string_context.namespace {
             VariableNamespace::Environment => Box::new(variables.environment_names()),
@@ -658,6 +696,106 @@ fn variable_completion_item(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestLiteralKind {
+    Method,
+    BodyMode,
+    RawBodyLanguage,
+    BodyFieldKind,
+}
+
+impl RequestLiteralKind {
+    fn values(self) -> Vec<&'static str> {
+        match self {
+            Self::Method => STANDARD_HTTP_METHODS.to_vec(),
+            Self::BodyMode => BodyMode::all()
+                .iter()
+                .map(|mode| mode.as_db_str())
+                .collect(),
+            Self::RawBodyLanguage => RawBodyLanguage::all()
+                .iter()
+                .map(|language| language.as_db_str())
+                .collect(),
+            Self::BodyFieldKind => BodyFieldKind::all()
+                .iter()
+                .map(|kind| kind.as_db_str())
+                .collect(),
+        }
+    }
+
+    const fn detail(self) -> &'static str {
+        match self {
+            Self::Method => "common HTTP method",
+            Self::BodyMode => "request body mode",
+            Self::RawBodyLanguage => "raw body language",
+            Self::BodyFieldKind => "body field kind",
+        }
+    }
+
+    const fn documentation(self) -> &'static str {
+        match self {
+            Self::Method => {
+                "Common HTTP method. The request editor still accepts custom extension methods."
+            }
+            Self::BodyMode => "Canonical body mode accepted by the script runtime.",
+            Self::RawBodyLanguage => {
+                "Canonical raw-body syntax language accepted by the script runtime."
+            }
+            Self::BodyFieldKind => {
+                "Canonical structured-body field kind accepted by the script runtime."
+            }
+        }
+    }
+}
+
+fn request_literal_completion_item(
+    source: &str,
+    replace_start: usize,
+    replace_end: usize,
+    value: &str,
+    quote: char,
+    kind: RequestLiteralKind,
+) -> CompletionItem {
+    CompletionItem {
+        label: value.to_owned(),
+        kind: Some(CompletionItemKind::ENUM_MEMBER),
+        detail: Some(kind.detail().to_owned()),
+        documentation: Some(Documentation::String(kind.documentation().to_owned())),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range: source_range(source, replace_start, replace_end),
+            new_text: escape_for_quote(value, quote),
+        })),
+        ..Default::default()
+    }
+}
+
+fn quoted_content_end(
+    source: &str,
+    content_start: usize,
+    cursor_offset: usize,
+    quote: char,
+) -> usize {
+    let Some(literal_start) = content_start.checked_sub(quote.len_utf8()) else {
+        return cursor_offset;
+    };
+    let literal = parse_string_literal(source, literal_start, quote);
+    if literal.content_start != content_start {
+        return cursor_offset;
+    }
+
+    if literal.terminated {
+        literal.span.end.saturating_sub(quote.len_utf8())
+    } else {
+        literal.span.end.max(cursor_offset)
+    }
+}
+
+fn literal_value_matches(value: &str, typed: &str) -> bool {
+    value
+        .get(..typed.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(typed))
+}
+
 fn escape_for_quote(name: &str, quote: char) -> String {
     let mut escaped = String::with_capacity(name.len());
     for character in name.chars() {
@@ -747,6 +885,193 @@ fn dotted_identifier_path(tokens: &[Token]) -> Option<Vec<String>> {
 
     reversed.reverse();
     Some(reversed)
+}
+
+#[derive(Debug)]
+struct RequestLiteralCompletionContext {
+    kind: RequestLiteralKind,
+    typed: String,
+    replace_start: usize,
+    quote: char,
+}
+
+fn request_literal_completion_context(
+    source: &str,
+    tokens: &[Token],
+    offset: usize,
+    phase: ScriptEditorPhase,
+) -> Option<RequestLiteralCompletionContext> {
+    if phase != ScriptEditorPhase::PreRequest {
+        return None;
+    }
+
+    let argument = tokens.last()?.string_literal()?;
+    if argument.terminated || argument.span.end != offset {
+        return None;
+    }
+
+    let separator_index = tokens.len().checked_sub(2)?;
+    let separator = tokens.get(separator_index)?;
+    let target_tokens = &tokens[..separator_index];
+    let kind = if token_source_is(source, separator, "=") {
+        request_assignment_literal_kind(source, target_tokens)
+    } else if token_source_is(source, separator, ":") {
+        body_field_object_literal_kind(source, target_tokens)
+    } else {
+        None
+    }?;
+
+    Some(RequestLiteralCompletionContext {
+        kind,
+        typed: argument.value.clone()?,
+        replace_start: argument.content_start,
+        quote: argument.quote,
+    })
+}
+
+fn request_assignment_literal_kind(
+    source: &str,
+    target_tokens: &[Token],
+) -> Option<RequestLiteralKind> {
+    if let Some(path) = dotted_identifier_path(target_tokens) {
+        return match path.as_slice() {
+            [api, request, method]
+                if api == "api" && request == "request" && method == "method" =>
+            {
+                Some(RequestLiteralKind::Method)
+            }
+            [api, request, body_mode]
+                if api == "api" && request == "request" && body_mode == "bodyMode" =>
+            {
+                Some(RequestLiteralKind::BodyMode)
+            }
+            [api, request, language]
+                if api == "api" && request == "request" && language == "rawBodyLanguage" =>
+            {
+                Some(RequestLiteralKind::RawBodyLanguage)
+            }
+            _ => None,
+        };
+    }
+
+    body_field_kind_assignment_target(source, target_tokens)
+        .then_some(RequestLiteralKind::BodyFieldKind)
+}
+
+fn body_field_kind_assignment_target(source: &str, tokens: &[Token]) -> bool {
+    if tokens.len() < 7
+        || tokens.last().and_then(Token::identifier) != Some("kind")
+        || !matches!(
+            tokens.get(tokens.len() - 2).map(|token| &token.kind),
+            Some(TokenKind::Dot)
+        )
+    {
+        return false;
+    }
+
+    let right_bracket_index = tokens.len() - 3;
+    if !token_source_is(source, &tokens[right_bracket_index], "]") {
+        return false;
+    }
+
+    let Some(left_bracket_index) = (0..right_bracket_index)
+        .rev()
+        .find(|index| token_source_is(source, &tokens[*index], "["))
+    else {
+        return false;
+    };
+
+    if tokens[left_bracket_index + 1..right_bracket_index]
+        .iter()
+        .any(|token| token_source_is(source, token, "[") || token_source_is(source, token, "]"))
+    {
+        return false;
+    }
+
+    let Some(index_text) = source
+        .get(tokens[left_bracket_index].span.end..tokens[right_bracket_index].span.start)
+        .map(str::trim)
+    else {
+        return false;
+    };
+    if !simple_body_field_index(index_text) {
+        return false;
+    }
+
+    dotted_identifier_path(&tokens[..left_bracket_index]).is_some_and(|path| {
+        matches!(
+            path.as_slice(),
+            [api, request, body_fields]
+                if api == "api" && request == "request" && body_fields == "bodyFields"
+        )
+    })
+}
+
+fn simple_body_field_index(index: &str) -> bool {
+    if index.is_empty() {
+        return false;
+    }
+    if index.bytes().all(|byte| byte.is_ascii_digit()) {
+        return true;
+    }
+
+    let mut characters = index.chars();
+    characters.next().is_some_and(is_identifier_start) && characters.all(is_identifier_continue)
+}
+
+fn body_field_object_literal_kind(
+    source: &str,
+    target_tokens: &[Token],
+) -> Option<RequestLiteralKind> {
+    if target_tokens.last().and_then(Token::identifier) != Some("kind") {
+        return None;
+    }
+
+    let mut nested_braces = 0usize;
+    let mut object_start = None;
+    for index in (0..target_tokens.len().saturating_sub(1)).rev() {
+        let token = &target_tokens[index];
+        if token_source_is(source, token, "}") {
+            nested_braces = nested_braces.saturating_add(1);
+        } else if token_source_is(source, token, "{") {
+            if nested_braces == 0 {
+                object_start = Some(index);
+                break;
+            }
+            nested_braces -= 1;
+        }
+    }
+    let object_start = object_start?;
+    if object_start < 4
+        || !matches!(
+            target_tokens.get(object_start - 1).map(|token| &token.kind),
+            Some(TokenKind::LeftParen)
+        )
+        || target_tokens
+            .get(object_start - 2)
+            .and_then(Token::identifier)
+            != Some("push")
+        || !matches!(
+            target_tokens.get(object_start - 3).map(|token| &token.kind),
+            Some(TokenKind::Dot)
+        )
+    {
+        return None;
+    }
+
+    dotted_identifier_path(&target_tokens[..object_start - 3])
+        .is_some_and(|path| {
+            matches!(
+                path.as_slice(),
+                [api, request, body_fields]
+                    if api == "api" && request == "request" && body_fields == "bodyFields"
+            )
+        })
+        .then_some(RequestLiteralKind::BodyFieldKind)
+}
+
+fn token_source_is(source: &str, token: &Token, expected: &str) -> bool {
+    source.get(token.span.clone()) == Some(expected)
 }
 
 #[derive(Debug)]
@@ -1262,6 +1587,13 @@ mod tests {
         items.into_iter().map(|item| item.label).collect()
     }
 
+    fn completion_text_edit(item: &CompletionItem) -> &TextEdit {
+        match item.text_edit.as_ref() {
+            Some(CompletionTextEdit::Edit(edit)) => edit,
+            other => panic!("expected a plain completion text edit, got {other:?}"),
+        }
+    }
+
     fn catalog() -> ScriptVariableCatalog {
         ScriptVariableCatalog::from_names(
             ["api_token", "base_url", "shared"],
@@ -1399,6 +1731,156 @@ mod tests {
         let environment_only =
             labels(provider.completion_items_for_source(r#"api.environment.get("c"#, 22));
         assert!(environment_only.is_empty());
+    }
+
+    #[test]
+    fn request_literal_completions_cover_runtime_enum_values() {
+        let provider = provider(ScriptEditorPhase::PreRequest, catalog());
+
+        let methods = r#"api.request.method = ""#;
+        assert_eq!(
+            labels(provider.completion_items_for_source(methods, methods.len())),
+            STANDARD_HTTP_METHODS
+        );
+
+        let body_mode = r#"api.request.bodyMode = "m"#;
+        assert_eq!(
+            labels(provider.completion_items_for_source(body_mode, body_mode.len())),
+            ["multipart_form_data"]
+        );
+
+        let language = r#"api.request.rawBodyLanguage = 'type"#;
+        assert_eq!(
+            labels(provider.completion_items_for_source(language, language.len())),
+            ["typescript"]
+        );
+
+        for source in [
+            r#"api.request.bodyFields[0].kind = "f"#,
+            r#"api.request.bodyFields[ fieldIndex ].kind = "f"#,
+            r#"api.request.bodyFields.push({ enabled: true, kind: "f"#,
+        ] {
+            assert_eq!(
+                labels(provider.completion_items_for_source(source, source.len())),
+                ["file"],
+                "unexpected body-field completion for {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn request_literal_completion_replaces_only_the_quoted_prefix() {
+        let provider = provider(ScriptEditorPhase::PreRequest, catalog());
+        let source = "const şehir = 1;\napi.request.method = 'po';";
+        let cursor = source.find("'po").expect("quoted method") + "'po".len();
+        let items = provider.completion_items_for_source(source, cursor);
+
+        assert_eq!(labels(items.clone()), ["POST"]);
+        let edit = completion_text_edit(&items[0]);
+        assert_eq!(edit.range.start, Position::new(1, 22));
+        assert_eq!(edit.range.end, Position::new(1, 24));
+        assert_eq!(edit.new_text, "POST");
+        assert_eq!(&source[cursor..], "';");
+    }
+
+    #[test]
+    fn request_literal_completion_replaces_an_existing_value_suffix() {
+        let provider = provider(ScriptEditorPhase::PreRequest, catalog());
+        let source = r#"api.request.method = "PST";"#;
+        let content_start = source.find("PST").expect("method value");
+        let cursor = content_start + 1;
+        let items = provider.completion_items_for_source(source, cursor);
+
+        assert_eq!(labels(items.clone()), ["POST", "PUT", "PATCH"]);
+        let edit = completion_text_edit(&items[0]);
+        assert_eq!(edit.range.start, Position::new(0, 22));
+        assert_eq!(edit.range.end, Position::new(0, 25));
+        assert_eq!(edit.new_text, "POST");
+        assert_eq!(
+            format!(
+                "{}{}{}",
+                &source[..content_start],
+                edit.new_text,
+                &source[content_start + 3..]
+            ),
+            r#"api.request.method = "POST";"#
+        );
+    }
+
+    #[test]
+    fn request_literal_completions_reject_readonly_and_unrelated_strings() {
+        let pre = provider(ScriptEditorPhase::PreRequest, catalog());
+        let post = provider(ScriptEditorPhase::PostResponse, catalog());
+
+        for source in [
+            r#"api.request.method == "G"#,
+            r#"api.request.method += "G"#,
+            r#"foo.api.request.method = "G"#,
+            r#"api.request.url = "h"#,
+            r#"api.request.bodyFields[i + 1].kind = "f"#,
+            r#"rows.push({ kind: "f"#,
+            r#"// api.request.method = "G"#,
+            r#"const example = `api.request.method = "G`"#,
+            r#"api.request.method = "PURG"#,
+        ] {
+            assert!(
+                pre.completion_items_for_source(source, source.len())
+                    .is_empty(),
+                "unexpected request literal completion for {source:?}"
+            );
+        }
+
+        let readonly = r#"api.request.bodyMode = "r"#;
+        assert!(
+            post.completion_items_for_source(readonly, readonly.len())
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn request_literal_completion_trigger_is_context_aware() {
+        let variables = catalog();
+        for source in [
+            r#"api.request.method = ""#,
+            r#"api.request.bodyMode = "form"#,
+            r#"api.request.rawBodyLanguage = "ja"#,
+            r#"api.request.bodyFields[0].kind = "t"#,
+        ] {
+            let rope = Rope::from(source);
+            assert!(
+                script_completion_is_active(
+                    &rope,
+                    rope.len(),
+                    ScriptEditorPhase::PreRequest,
+                    &variables,
+                ),
+                "completion should be active for {source:?}"
+            );
+        }
+
+        for source in [
+            r#"api.request.method = "PURG"#,
+            r#"api.request.url = "https"#,
+        ] {
+            let rope = Rope::from(source);
+            assert!(
+                !script_completion_is_active(
+                    &rope,
+                    rope.len(),
+                    ScriptEditorPhase::PreRequest,
+                    &variables,
+                ),
+                "completion should be inactive for {source:?}"
+            );
+        }
+
+        let readonly = Rope::from(r#"api.request.method = "G"#);
+        assert!(!script_completion_is_active(
+            &readonly,
+            readonly.len(),
+            ScriptEditorPhase::PostResponse,
+            &variables,
+        ));
     }
 
     #[test]

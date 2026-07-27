@@ -14,6 +14,11 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_USER_AGENT: &str = concat!("api-tester/", env!("CARGO_PKG_VERSION"));
 const MAX_BUFFERED_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
 
+/// Common HTTP methods offered by editable method controls and script
+/// completions. Custom extension methods remain valid when entered manually.
+pub const STANDARD_HTTP_METHODS: &[&str] =
+    &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+
 /// One editable request header.
 ///
 /// Disabled entries remain in the editor but are not added to the outgoing
