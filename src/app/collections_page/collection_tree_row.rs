@@ -25,12 +25,14 @@ impl ApiTester {
         h_flex()
             .id(("collection-tree-row", collection_index))
             .w_full()
-            .h(px(44.))
+            .h(px(38.))
             .px_1()
             .gap_1()
-            .rounded_md()
-            .when(selected, |this| this.bg(cx.theme().sidebar_accent))
-            .hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.72)))
+            .rounded_sm()
+            .when(selected, |this| {
+                this.bg(cx.theme().sidebar_accent.opacity(0.42))
+            })
+            .hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.52)))
             .child(
                 Button::new(("toggle-collection", collection_index))
                     .icon(if expanded {
