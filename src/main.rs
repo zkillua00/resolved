@@ -211,13 +211,13 @@ fn main() {
                     let view_for_close = view.downgrade();
                     window.on_window_should_close(cx, move |_, cx| {
                         view_for_close
-                            .update(cx, |view, cx| view.flush_request_tabs(cx))
+                            .update(cx, |view, cx| view.flush_local_state(cx))
                             .unwrap_or(true)
                     });
                     let view_for_quit = view.downgrade();
                     cx.on_action(move |_: &QuitApp, cx| {
                         let saved = view_for_quit
-                            .update(cx, |view, cx| view.flush_request_tabs(cx))
+                            .update(cx, |view, cx| view.flush_local_state(cx))
                             .unwrap_or(true);
                         if saved {
                             cx.quit();

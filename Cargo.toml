@@ -43,6 +43,7 @@ url = { version = "2.5", features = ["serde"] }
 wry = "=0.53.3"
 
 [dev-dependencies]
+gpui = { version = "=0.2.2", features = ["test-support"] }
 tempfile = "3.23"
 
 [profile.release]

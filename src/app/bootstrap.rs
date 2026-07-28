@@ -125,7 +125,7 @@ impl ApiTester {
             history_writable,
             workspace_writable,
             request_tabs_writable,
-            settings,
+            mut settings,
             mut settings_warning,
             settings_writable,
         ) = match database_store.initialize() {
@@ -222,6 +222,23 @@ impl ApiTester {
                 false,
             ),
         };
+        if settings_writable {
+            let mut candidate = settings.clone();
+            if let Ok(true) = crate::theme::reconcile_catalog(&mut candidate.theme) {
+                match database_store.save_app_settings(&candidate) {
+                    Ok(()) => settings = candidate,
+                    Err(error) => {
+                        let warning = format!(
+                            "The active CSS theme could not be added to the theme library: {error}"
+                        );
+                        settings_warning = Some(match settings_warning {
+                            Some(existing) => format!("{existing}\n{warning}"),
+                            None => warning,
+                        });
+                    }
+                }
+            }
+        }
         let navigation_compact = settings.navigation_compact;
         if let Err(error) = shortcuts::apply_key_bindings(cx, &base_key_bindings, &settings) {
             let warning = format!(
@@ -239,6 +256,12 @@ impl ApiTester {
                 "Stored CSS theme is invalid; the built-in theme is active and the stored source was left untouched: {error}"
             );
             tracing::error!("{warning}");
+            settings_warning = Some(match settings_warning {
+                Some(existing) => format!("{existing}\n{warning}"),
+                None => warning,
+            });
+        }
+        if let Some(warning) = super::settings_actions::theme_catalog_warning(&settings) {
             settings_warning = Some(match settings_warning {
                 Some(existing) => format!("{existing}\n{warning}"),
                 None => warning,
@@ -419,7 +442,7 @@ impl ApiTester {
                 }
             });
         let quit_subscription = cx.on_app_quit(|this, cx| {
-            this.flush_request_tabs(cx);
+            this.flush_local_state(cx);
             async {}
         });
         let shortcut_target = cx.entity().downgrade();
@@ -496,6 +519,14 @@ impl ApiTester {
             base_key_bindings,
             recording_shortcut_id: None,
             settings_notice: None,
+            theme_editor: None,
+            theme_editor_path: None,
+            theme_editor_baseline: String::new(),
+            theme_editor_dirty: false,
+            theme_editor_disk_source: None,
+            theme_editor_validation_task: None,
+            theme_editor_persist_task: None,
+            theme_editor_subscription: None,
             selected_environment_id,
             collection_search,
             environment_search,

@@ -8,7 +8,10 @@ use gpui::{Hsla, Rgba};
 use gpui_component::ThemeMode;
 use thiserror::Error;
 
-use super::palette::ApiTheme;
+use super::{
+    palette::ApiTheme,
+    schema::{THEME_PROPERTIES, ThemePropertyKind, theme_property},
+};
 
 pub const BUILTIN_THEME_CSS: &str = include_str!("../../assets/themes/api-tester-dark.css");
 const MAX_THEME_BYTES: usize = 256 * 1024;
@@ -16,99 +19,6 @@ const MAX_RESOLUTION_DEPTH: usize = 64;
 const MAX_VAR_SUBSTITUTIONS: usize = 4_096;
 const MAX_RESOLVED_VALUE_BYTES: usize = 64 * 1024;
 const MAX_TOTAL_RESOLUTION_WORK: usize = 4 * 1024 * 1024;
-
-const REQUIRED_COLOR_PROPERTIES: &[&str] = &[
-    "--api-surface",
-    "--api-surface-lowest",
-    "--api-surface-low",
-    "--api-surface-container",
-    "--api-surface-high",
-    "--api-surface-highest",
-    "--api-foreground",
-    "--api-muted-foreground",
-    "--api-outline",
-    "--api-primary",
-    "--api-primary-hover",
-    "--api-primary-active",
-    "--api-primary-foreground",
-    "--api-selection",
-    "--api-danger",
-    "--api-danger-foreground",
-    "--api-warning",
-    "--api-warning-foreground",
-    "--api-success",
-    "--api-success-foreground",
-    "--api-info",
-    "--api-info-foreground",
-    "--api-red",
-    "--api-green",
-    "--api-blue",
-    "--api-yellow",
-    "--api-magenta",
-    "--api-cyan",
-];
-
-const COLOR_PROPERTIES: &[&str] = &[
-    "--api-surface",
-    "--api-surface-lowest",
-    "--api-surface-low",
-    "--api-surface-container",
-    "--api-surface-high",
-    "--api-surface-highest",
-    "--api-foreground",
-    "--api-muted-foreground",
-    "--api-outline",
-    "--api-primary",
-    "--api-primary-hover",
-    "--api-primary-active",
-    "--api-primary-foreground",
-    "--api-selection",
-    "--api-secondary-active",
-    "--api-secondary-foreground",
-    "--api-danger",
-    "--api-danger-hover",
-    "--api-danger-active",
-    "--api-danger-foreground",
-    "--api-warning",
-    "--api-warning-hover",
-    "--api-warning-active",
-    "--api-warning-foreground",
-    "--api-success",
-    "--api-success-hover",
-    "--api-success-active",
-    "--api-success-foreground",
-    "--api-info",
-    "--api-info-hover",
-    "--api-info-active",
-    "--api-info-foreground",
-    "--api-red",
-    "--api-red-light",
-    "--api-green",
-    "--api-green-light",
-    "--api-blue",
-    "--api-blue-light",
-    "--api-yellow",
-    "--api-yellow-light",
-    "--api-magenta",
-    "--api-magenta-light",
-    "--api-cyan",
-    "--api-cyan-light",
-    "--api-editor-background",
-    "--api-editor-foreground",
-    "--api-editor-active-line",
-    "--api-editor-line-number",
-    "--api-editor-active-line-number",
-    "--api-syntax-property",
-    "--api-syntax-string",
-    "--api-syntax-number",
-    "--api-syntax-boolean",
-    "--api-syntax-keyword",
-    "--api-syntax-comment",
-    "--api-syntax-punctuation",
-    "--api-syntax-variable",
-    "--api-syntax-type",
-    "--api-syntax-function",
-];
 
 /// A deterministic error produced while parsing the API Tester CSS contract.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -179,14 +89,9 @@ pub fn parse_theme_css(source: &str) -> Result<ApiTheme, ThemeCssError> {
     }
 
     let declarations = parse_root(source)?;
-    for required in ["--api-theme-name", "--api-appearance"] {
-        if !declarations.contains_key(required) {
-            return Err(ThemeCssError::MissingProperty(required.to_owned()));
-        }
-    }
-    for required in REQUIRED_COLOR_PROPERTIES {
-        if !declarations.contains_key(*required) {
-            return Err(ThemeCssError::MissingProperty((*required).to_owned()));
+    for required in THEME_PROPERTIES.iter().filter(|property| property.required) {
+        if !declarations.contains_key(required.name) {
+            return Err(ThemeCssError::MissingProperty(required.name.to_owned()));
         }
     }
 
@@ -200,15 +105,18 @@ pub fn parse_theme_css(source: &str) -> Result<ApiTheme, ThemeCssError> {
     )?;
 
     let mut colors = BTreeMap::new();
-    for property in COLOR_PROPERTIES {
-        if !declarations.contains_key(*property) {
+    for property in THEME_PROPERTIES
+        .iter()
+        .filter(|property| property.kind == ThemePropertyKind::Color)
+    {
+        if !declarations.contains_key(property.name) {
             continue;
         }
-        let resolved = resolver.resolve_property(property)?;
-        let (line, column) = display_location(declarations[*property].location);
+        let resolved = resolver.resolve_property(property.name)?;
+        let (line, column) = display_location(declarations[property.name].location);
         let parsed =
             csscolorparser::parse(&resolved).map_err(|error| ThemeCssError::InvalidValue {
-                property: (*property).to_owned(),
+                property: property.name.to_owned(),
                 value: resolved.clone(),
                 message: error.to_string(),
                 line,
@@ -219,7 +127,7 @@ pub fn parse_theme_css(source: &str) -> Result<ApiTheme, ThemeCssError> {
             .all(f32::is_finite)
         {
             return Err(ThemeCssError::InvalidValue {
-                property: (*property).to_owned(),
+                property: property.name.to_owned(),
                 value: resolved,
                 message: "color channels must be finite".to_owned(),
                 line,
@@ -227,7 +135,7 @@ pub fn parse_theme_css(source: &str) -> Result<ApiTheme, ThemeCssError> {
             });
         }
         colors.insert(
-            (*property).to_owned(),
+            property.name.to_owned(),
             Hsla::from(Rgba {
                 r: parsed.r.clamp(0.0, 1.0),
                 g: parsed.g.clamp(0.0, 1.0),
@@ -322,8 +230,7 @@ fn parse_declarations<'i, 't>(
 }
 
 fn is_known_api_property(property: &str) -> bool {
-    matches!(property, "--api-theme-name" | "--api-appearance")
-        || COLOR_PROPERTIES.contains(&property)
+    theme_property(property).is_some()
 }
 
 fn is_allowed_property(property: &str) -> bool {

@@ -8,10 +8,15 @@ use std::sync::Arc;
 use gpui::{App, BorrowAppContext as _, Global, Hsla, px};
 use gpui_component::Theme;
 
+use crate::core::{SavedTheme, ThemeSettings};
+
 mod css;
+mod intelligence;
 mod palette;
+mod schema;
 
 pub use css::ThemeCssError as ThemeError;
+pub(crate) use intelligence::{ThemeCssIntelligence, theme_css_diagnostics};
 #[allow(unused_imports)]
 pub use palette::{ApiPalette, ApiTheme};
 
@@ -89,6 +94,98 @@ pub fn parse_css(source: &str) -> Result<ApiTheme, ThemeError> {
     css::parse_theme_css(source)
 }
 
+/// Reconcile the active compatibility snapshot with the saved-theme catalog.
+///
+/// Builds before the catalog stored only `css_source` and `source_path`. A
+/// valid legacy snapshot becomes a saved theme once, while an older build
+/// selecting the built-in theme clears a stale catalog selection.
+pub(crate) fn reconcile_catalog(settings: &mut ThemeSettings) -> Result<bool, ThemeError> {
+    let Some(source) = settings.css_source.as_deref() else {
+        let changed = settings.active_theme_id.take().is_some() || settings.source_path.is_some();
+        settings.source_path = None;
+        return Ok(changed);
+    };
+
+    if let Some(active_id) = settings.active_theme_id.as_deref()
+        && settings.saved_theme(active_id).is_some_and(|saved| {
+            saved.css_source == source && saved.source_path == settings.source_path
+        })
+    {
+        return Ok(false);
+    }
+
+    if let Some(saved) = settings
+        .saved_themes
+        .iter()
+        .find(|saved| saved.css_source == source && saved.source_path == settings.source_path)
+    {
+        let changed = settings.active_theme_id.as_deref() != Some(saved.id.as_str());
+        settings.active_theme_id = Some(saved.id.clone());
+        return Ok(changed);
+    }
+
+    let parsed = parse_css(source)?;
+    if let Some(source_path) = settings.source_path.as_ref() {
+        let active_index = settings.active_theme_id.as_deref().and_then(|active_id| {
+            settings.saved_themes.iter().position(|saved| {
+                saved.id == active_id && saved.source_path.as_ref() == Some(source_path)
+            })
+        });
+        if let Some(index) = active_index.or_else(|| {
+            settings
+                .saved_themes
+                .iter()
+                .position(|saved| saved.source_path.as_ref() == Some(source_path))
+        }) {
+            let saved = &mut settings.saved_themes[index];
+            let changed = saved.css_source != source
+                || settings.active_theme_id.as_deref() != Some(saved.id.as_str());
+            saved.css_source = source.to_owned();
+            settings.active_theme_id = Some(saved.id.clone());
+            return Ok(changed);
+        }
+    }
+
+    let name = unique_catalog_name(&settings.saved_themes, parsed.name.as_ref());
+    let saved = SavedTheme::new(name, source.to_owned(), settings.source_path.clone());
+    settings.active_theme_id = Some(saved.id.clone());
+    settings.saved_themes.push(saved);
+    Ok(true)
+}
+
+fn unique_catalog_name(saved_themes: &[SavedTheme], requested: &str) -> String {
+    const MAX_NAME_CHARS: usize = 80;
+    let requested = requested
+        .trim()
+        .chars()
+        .take(MAX_NAME_CHARS)
+        .collect::<String>();
+    let requested = if requested.is_empty() {
+        "Untitled theme".to_owned()
+    } else {
+        requested
+    };
+    if !saved_themes
+        .iter()
+        .any(|saved| saved.name.eq_ignore_ascii_case(&requested))
+    {
+        return requested;
+    }
+    (2usize..)
+        .map(|suffix| {
+            let suffix = format!(" ({suffix})");
+            let keep = MAX_NAME_CHARS.saturating_sub(suffix.chars().count());
+            let base = requested.chars().take(keep).collect::<String>();
+            format!("{}{suffix}", base.trim_end())
+        })
+        .find(|candidate| {
+            !saved_themes
+                .iter()
+                .any(|saved| saved.name.eq_ignore_ascii_case(candidate))
+        })
+        .expect("theme name suffix search is unbounded")
+}
+
 /// Atomically install a previously validated theme and redraw all GPUI windows.
 pub fn apply(theme: ApiTheme, cx: &mut App) {
     let theme = Arc::new(theme);
@@ -127,4 +224,75 @@ pub fn parse_and_apply(source: &str, cx: &mut App) -> Result<(), ThemeError> {
     let theme = parse_css(source)?;
     apply(theme, cx);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_active_snapshot_is_promoted_once() {
+        let mut settings = ThemeSettings {
+            source_path: Some("/tmp/legacy.css".into()),
+            css_source: Some(bundled_css().to_owned()),
+            ..Default::default()
+        };
+
+        assert!(reconcile_catalog(&mut settings).unwrap());
+        let active_id = settings.active_theme_id.clone().unwrap();
+        let active = settings.saved_theme(&active_id).unwrap();
+        assert_eq!(active.css_source, bundled_css());
+        assert_eq!(active.source_path, settings.source_path);
+        assert!(!reconcile_catalog(&mut settings).unwrap());
+        assert_eq!(settings.saved_themes.len(), 1);
+    }
+
+    #[test]
+    fn built_in_projection_clears_a_stale_selection_without_losing_catalog() {
+        let saved = SavedTheme::new("Saved", bundled_css(), None);
+        let mut settings = ThemeSettings {
+            active_theme_id: Some(saved.id.clone()),
+            saved_themes: vec![saved],
+            source_path: Some("/tmp/stale.css".into()),
+            ..Default::default()
+        };
+
+        assert!(reconcile_catalog(&mut settings).unwrap());
+        assert_eq!(settings.active_theme_id, None);
+        assert_eq!(settings.source_path, None);
+        assert_eq!(settings.saved_themes.len(), 1);
+    }
+
+    #[test]
+    fn legacy_change_at_a_known_path_updates_the_existing_record() {
+        let mut old_source = bundled_css().to_owned();
+        old_source = old_source.replace("#141217", "#151218");
+        let saved = SavedTheme::new("Existing", old_source, Some("/tmp/shared-theme.css".into()));
+        let mut settings = ThemeSettings {
+            saved_themes: vec![saved],
+            source_path: Some("/tmp/shared-theme.css".into()),
+            css_source: Some(bundled_css().to_owned()),
+            ..Default::default()
+        };
+
+        assert!(reconcile_catalog(&mut settings).unwrap());
+        assert_eq!(settings.saved_themes.len(), 1);
+        assert_eq!(settings.saved_themes[0].css_source, bundled_css());
+        assert_eq!(
+            settings.active_theme_id.as_deref(),
+            Some(settings.saved_themes[0].id.as_str())
+        );
+    }
+
+    #[test]
+    fn invalid_legacy_snapshot_is_left_untouched() {
+        let mut settings = ThemeSettings {
+            css_source: Some(":root {}".into()),
+            ..Default::default()
+        };
+        let before = settings.clone();
+
+        assert!(reconcile_catalog(&mut settings).is_err());
+        assert_eq!(settings, before);
+    }
 }

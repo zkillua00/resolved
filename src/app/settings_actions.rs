@@ -1,5 +1,3 @@
-use std::{fs, path::Path};
-
 use gpui::Keystroke;
 
 use super::*;
@@ -131,90 +129,6 @@ impl ApiTester {
         }
     }
 
-    pub(super) fn choose_css_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let receiver = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Choose CSS theme".into()),
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = receiver.await else {
-                return;
-            };
-            let Some(path) = paths.into_iter().next() else {
-                return;
-            };
-            let result = read_css_theme(&path);
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(source) => this.install_css_theme(Some(path.clone()), source, cx),
-                Err(error) => {
-                    this.settings_notice = Some(error);
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
-    pub(super) fn reload_css_theme(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.settings.theme.source_path.clone() else {
-            self.settings_notice = Some("This theme has no source file to reload.".to_owned());
-            cx.notify();
-            return;
-        };
-        match read_css_theme(&path) {
-            Ok(source) => self.install_css_theme(Some(path), source, cx),
-            Err(error) => {
-                self.settings_notice = Some(error);
-                cx.notify();
-            }
-        }
-    }
-
-    pub(super) fn reset_css_theme(&mut self, cx: &mut Context<Self>) {
-        let mut candidate = self.settings.clone();
-        candidate.theme = Default::default();
-        match self.commit_settings(candidate, false, cx) {
-            Ok(()) => {
-                crate::theme::configure(cx);
-                self.refresh_variable_intelligence(cx);
-                self.settings_notice = Some("Built-in Material Dark theme restored.".to_owned());
-            }
-            Err(error) => self.settings_notice = Some(error),
-        }
-        cx.notify();
-    }
-
-    fn install_css_theme(
-        &mut self,
-        source_path: Option<std::path::PathBuf>,
-        source: String,
-        cx: &mut Context<Self>,
-    ) {
-        let parsed = match crate::theme::parse_css(&source) {
-            Ok(theme) => theme,
-            Err(error) => {
-                self.settings_notice = Some(format!("Theme was not applied: {error}"));
-                cx.notify();
-                return;
-            }
-        };
-        let theme_name = parsed.name.to_string();
-        let mut candidate = self.settings.clone();
-        candidate.theme.source_path = source_path;
-        candidate.theme.css_source = Some(source);
-        match self.commit_settings(candidate, false, cx) {
-            Ok(()) => {
-                crate::theme::apply(parsed, cx);
-                self.refresh_variable_intelligence(cx);
-                self.settings_notice = Some(format!("Applied “{theme_name}”."));
-            }
-            Err(error) => self.settings_notice = Some(error),
-        }
-        cx.notify();
-    }
-
     pub(super) fn commit_settings(
         &mut self,
         candidate: AppSettings,
@@ -269,33 +183,67 @@ fn semantic_settings_warning(settings: &AppSettings) -> Option<String> {
             "Stored CSS theme is invalid; the built-in theme remains active until it is corrected: {error}"
         ));
     }
+    if let Some(catalog_warning) = theme_catalog_warning(settings) {
+        warnings.push(catalog_warning);
+    }
     (!warnings.is_empty()).then(|| warnings.join("\n"))
 }
 
-fn read_css_theme(path: &Path) -> Result<String, String> {
-    const MAX_THEME_BYTES: u64 = 256 * 1024;
-
-    if !path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("css"))
-    {
-        return Err("Theme files must use the .css extension.".to_owned());
+pub(super) fn theme_catalog_warning(settings: &AppSettings) -> Option<String> {
+    let mut warnings = Vec::new();
+    let mut theme_ids = BTreeSet::new();
+    let mut source_paths = BTreeSet::new();
+    for theme in &settings.theme.saved_themes {
+        if theme.id.trim().is_empty()
+            || theme.name.trim().is_empty()
+            || !theme_ids.insert(theme.id.as_str())
+        {
+            warnings.push(
+                "The saved theme library contains a missing name or a missing or duplicate identifier; affected themes cannot be selected safely."
+                    .to_owned(),
+            );
+            break;
+        }
+        if let Some(path) = theme.source_path.as_ref()
+            && !source_paths.insert(path)
+        {
+            warnings.push(format!(
+                "More than one saved theme references {}; reload cannot safely choose which entry to update.",
+                path.display()
+            ));
+            break;
+        }
     }
-    let metadata = fs::metadata(path)
-        .map_err(|error| format!("Theme file could not be inspected: {error}"))?;
-    if metadata.len() > MAX_THEME_BYTES {
-        return Err(format!(
-            "Theme file is too large ({} bytes; maximum is {MAX_THEME_BYTES}).",
-            metadata.len()
+    if let Some(theme) = settings
+        .theme
+        .saved_themes
+        .iter()
+        .find(|theme| crate::theme::parse_css(&theme.css_source).is_err())
+    {
+        warnings.push(format!(
+            "Saved theme “{}” contains invalid CSS and cannot be selected until it is replaced.",
+            theme.name
         ));
     }
-    fs::read_to_string(path).map_err(|error| {
-        format!(
-            "Theme file could not be read as UTF-8 at {}: {error}",
-            path.display()
-        )
-    })
+    if let Some(active_id) = settings.theme.active_theme_id.as_deref() {
+        match settings.theme.saved_theme(active_id) {
+            Some(active) => {
+                if settings.theme.css_source.as_deref() != Some(active.css_source.as_str())
+                    || settings.theme.source_path != active.source_path
+                {
+                    warnings.push(format!(
+                        "Selected theme “{}” does not match the active CSS snapshot; reselect it to restore a consistent theme.",
+                        active.name
+                    ));
+                }
+            }
+            None => warnings.push(
+                "The selected saved theme is missing from the theme library; choose another theme."
+                    .to_owned(),
+            ),
+        }
+    }
+    (!warnings.is_empty()).then(|| warnings.join("\n"))
 }
 
 #[cfg(test)]
@@ -323,6 +271,25 @@ mod tests {
         let mut settings = AppSettings::default();
         settings.theme.css_source = Some(crate::theme::bundled_css().to_owned());
         assert!(semantic_settings_warning(&settings).is_none());
+    }
+
+    #[test]
+    fn semantic_warning_validates_saved_theme_identity_and_active_projection() {
+        let mut settings = AppSettings::default();
+        let saved = SavedTheme::new("Saved", crate::theme::bundled_css(), None);
+        settings.theme.active_theme_id = Some(saved.id.clone());
+        settings.theme.css_source = Some(crate::theme::bundled_css().to_owned());
+        settings.theme.saved_themes.push(saved.clone());
+        assert!(semantic_settings_warning(&settings).is_none());
+
+        settings.theme.saved_themes.push(saved);
+        let warning = semantic_settings_warning(&settings).unwrap();
+        assert!(warning.contains("duplicate identifier"));
+
+        settings.theme.saved_themes.pop();
+        settings.theme.css_source = Some(":root {}".into());
+        let warning = semantic_settings_warning(&settings).unwrap();
+        assert!(warning.contains("does not match the active CSS snapshot"));
     }
 
     #[test]

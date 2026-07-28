@@ -2012,7 +2012,7 @@ fn required_when_response<T>(value: Option<T>, field: &'static str) -> Result<T,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{ShortcutOverride, ThemeSettings};
+    use crate::core::{SavedTheme, ShortcutOverride, ThemeSettings};
 
     fn database() -> (tempfile::TempDir, DatabaseStore) {
         let directory = tempfile::tempdir().unwrap();
@@ -3288,6 +3288,11 @@ mod tests {
     #[test]
     fn app_settings_round_trip_increments_version_and_rejects_corrupt_state() {
         let (_directory, store) = database();
+        let saved_theme = SavedTheme::new(
+            "SQLite Ocean",
+            ":root { --api-background: #14121a; }",
+            Some(PathBuf::from("/tmp/theme.css")),
+        );
         let settings = AppSettings {
             shortcuts: std::collections::BTreeMap::from([
                 (
@@ -3297,8 +3302,13 @@ mod tests {
                 ("request.close_tab".to_owned(), ShortcutOverride::Disabled),
             ]),
             theme: ThemeSettings {
+                saved_themes: vec![saved_theme.clone()],
+                active_theme_id: Some(saved_theme.id),
                 source_path: Some(PathBuf::from("/tmp/theme.css")),
                 css_source: Some(":root { --api-background: #14121a; }".to_owned()),
+                draft_source: Some(":root { --api-background: #20202a; }".to_owned()),
+                draft_path: Some(PathBuf::from("/tmp/theme-draft.css")),
+                draft_disk_source: Some(":root { --api-background: #14121a; }".to_owned()),
                 ..Default::default()
             },
             navigation_compact: true,

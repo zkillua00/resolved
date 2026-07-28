@@ -2,11 +2,30 @@
  * API Tester theme files intentionally use a small, deterministic subset of
  * CSS: one :root rule containing the custom properties documented here.
  * Values may refer to other custom properties with var().
+ *
+ * Required tokens must remain present. Optional tokens may be removed to use
+ * the fallback described in their section. Hover a token in API Tester's
+ * Appearance editor for its exact type, requirement, default, and UI impact.
  */
 :root {
+    /*
+     * Theme metadata (required)
+     * name: default library name when this CSS is imported or saved.
+     * appearance: chooses the dark/light GPUI component baseline.
+     */
     --api-theme-name: "API Tester Material Dark";
     --api-appearance: dark;
 
+    /*
+     * Surfaces and text (required)
+     * surface: main window/workspace/table/tab background.
+     * surface-lowest: deepest recessed and editor surfaces.
+     * surface-low: navigation, sidebars, and group boxes.
+     * surface-container: nested containers, popovers, active editor line.
+     * surface-high/highest: hover and elevated control surfaces.
+     * foreground/muted-foreground: primary and secondary text.
+     * outline: borders, dividers, inputs, and table rows.
+     */
     --api-surface: #14121a;
     --api-surface-lowest: #0f0d14;
     --api-surface-low: #1c1a22;
@@ -17,6 +36,13 @@
     --api-muted-foreground: #cac4d0;
     --api-outline: #49454f;
 
+    /*
+     * Primary interaction
+     * primary, hover, and active: buttons, links, active labels, and caret.
+     * primary-foreground: content drawn on primary-colored surfaces.
+     * selection: selected text/rows, sidebar entries, and drop targets.
+     * secondary-* are optional refinements with semantic fallbacks.
+     */
     --api-primary: #e9ddff;
     --api-primary-hover: #d0bcff;
     --api-primary-active: #b9a6ed;
@@ -25,6 +51,13 @@
     --api-secondary-active: #5a526a;
     --api-secondary-foreground: #e9def9;
 
+    /*
+     * Status colors
+     * Base and foreground tokens are required. Hover and active refinements
+     * are optional and fall back to their corresponding base color.
+     * These drive destructive actions, warnings/modified state, successful
+     * requests, and informational notices.
+     */
     --api-danger: #8c1d18;
     --api-danger-hover: #a52a24;
     --api-danger-active: #71120e;
@@ -42,6 +75,12 @@
     --api-info-active: #2c4d77;
     --api-info-foreground: #d7e9ff;
 
+    /*
+     * Semantic palette
+     * Base red/green/blue/yellow/magenta/cyan tokens are required and color
+     * HTTP methods, charts, statuses, and selected syntax captures.
+     * The matching *-light tokens are optional softer accents.
+     */
     --api-red: #ffb4ab;
     --api-red-light: #ffdad6;
     --api-green: #4ade80;
@@ -55,12 +94,23 @@
     --api-cyan: #67e8f9;
     --api-cyan-light: #c9f8ff;
 
+    /*
+     * Code editor chrome (optional)
+     * Controls the canvas, text, active line, and line-number colors.
+     * Removing a token restores its semantic surface/foreground fallback.
+     */
     --api-editor-background: var(--api-surface-lowest);
     --api-editor-foreground: var(--api-foreground);
     --api-editor-active-line: var(--api-surface-container);
     --api-editor-line-number: #948f9a;
     --api-editor-active-line-number: var(--api-primary-hover);
 
+    /*
+     * Syntax highlighting (optional)
+     * Maps tree-sitter property, string, number, boolean, keyword, comment,
+     * punctuation, variable, type, and function captures throughout editors.
+     * Unspecified captures continue using GPUI's dark/light baseline.
+     */
     --api-syntax-property: var(--api-primary-hover);
     --api-syntax-string: #ffd9e3;
     --api-syntax-number: #efb8c8;

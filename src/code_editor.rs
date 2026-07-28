@@ -514,6 +514,10 @@ impl Render for CodeEditor {
             .id("code-editor")
             .size_full()
             .relative()
+            // A code editor is its own scroll surface. Occluding hitboxes
+            // behind it keeps an enclosing list or page from handling the
+            // same wheel event before InputState consumes it.
+            .occlude()
             .rounded_lg()
             .border_1()
             .border_color(cx.api_outline_variant())
@@ -735,4 +739,200 @@ fn has_odd_escape_prefix(input: &InputState, cursor: usize) -> bool {
         count += 1;
     }
     count % 2 == 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{
+        ListAlignment, ListState, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, div,
+        list, point, px, size,
+    };
+    use gpui_component::setting::{SettingGroup, SettingItem, SettingPage, Settings};
+
+    struct NestedScrollView {
+        editor: Entity<CodeEditor>,
+        outer_scroll: ListState,
+    }
+
+    impl Render for NestedScrollView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let editor = self.editor.clone();
+            list(self.outer_scroll.clone(), move |index, _, _| {
+                if index == 0 {
+                    div()
+                        .w_full()
+                        .h(px(100.))
+                        .child(editor.clone())
+                        .into_any_element()
+                } else {
+                    div().w_full().h(px(400.)).into_any_element()
+                }
+            })
+            .size_full()
+        }
+    }
+
+    struct SettingsEditorView {
+        editor: Entity<CodeEditor>,
+    }
+
+    impl Render for SettingsEditorView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let editor = self.editor.clone();
+            Settings::new("nested-editor-settings")
+                .sidebar_width(px(180.))
+                .page(
+                    SettingPage::new("Appearance")
+                        .default_open(true)
+                        .resettable(false)
+                        .group(
+                            SettingGroup::new()
+                                .title("CSS editor")
+                                .item(SettingItem::render(move |_, _, _| {
+                                    div()
+                                        .debug_selector(|| "settings-css-editor".to_owned())
+                                        .w_full()
+                                        .h(px(520.))
+                                        .child(editor.clone())
+                                })),
+                        ),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn nested_css_editor_owns_wheel_and_remains_interactive(cx: &mut TestAppContext) {
+        let editor_source = format!(
+            "/* Unicode must not invalidate highlight byte ranges: → — */\n{}",
+            crate::theme::bundled_css()
+        );
+        let outer_scroll = ListState::new(2, ListAlignment::Top, px(100.));
+        let mut editor = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            crate::theme::configure(cx);
+            let intelligence = Rc::new(crate::theme::ThemeCssIntelligence);
+            let code_editor = cx.new(|cx| {
+                CodeEditor::new(
+                    CodeEditorConfig::default()
+                        .language(CodeLanguage::Css)
+                        .initial_value(editor_source.clone())
+                        .rows(6)
+                        .completion_provider(intelligence.clone())
+                        .hover_provider(intelligence)
+                        .diagnostic_provider(crate::theme::theme_css_diagnostics),
+                    window,
+                    cx,
+                )
+            });
+            editor = Some(code_editor.clone());
+            let view = cx.new(|_| NestedScrollView {
+                editor: code_editor,
+                outer_scroll: outer_scroll.clone(),
+            });
+            gpui_component::Root::new(view, window, cx)
+        });
+        cx.simulate_resize(size(px(240.), px(120.)));
+        cx.run_until_parked();
+
+        let editor = editor.expect("the window builder installs the editor");
+        let input = cx.read(|cx| editor.read(cx).input_state());
+        cx.simulate_click(point(px(80.), px(40.)), Modifiers::none());
+        assert!(
+            cx.update(|window, cx| input.read(cx).focus_handle(cx).is_focused(window)),
+            "the editor must remain focusable inside an occluding scroll surface"
+        );
+        let cursor_before_scroll = cx.read(|cx| input.read(cx).cursor());
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(40.), px(40.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-80.))),
+            ..Default::default()
+        });
+        assert_eq!(outer_scroll.logical_scroll_top().item_ix, 0);
+        assert_eq!(outer_scroll.logical_scroll_top().offset_in_item, px(0.));
+
+        cx.simulate_click(point(px(80.), px(40.)), Modifiers::none());
+        assert!(
+            cx.read(|cx| input.read(cx).cursor()) > cursor_before_scroll,
+            "scrolling over the editor must move its inner viewport"
+        );
+
+        let value_before_typing = cx.read(|cx| input.read(cx).value());
+        cx.simulate_input("x");
+        assert_ne!(
+            cx.read(|cx| input.read(cx).value()),
+            value_before_typing,
+            "the focused editor must accept text input"
+        );
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(40.), px(110.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-80.))),
+            ..Default::default()
+        });
+        assert!(
+            outer_scroll.logical_scroll_top().item_ix > 0
+                || outer_scroll.logical_scroll_top().offset_in_item > px(0.)
+        );
+    }
+
+    #[gpui::test]
+    fn css_editor_is_focusable_inside_settings_item(cx: &mut TestAppContext) {
+        let editor_source = format!(
+            "/* Unicode must not invalidate highlight byte ranges: → — */\n{}",
+            crate::theme::bundled_css()
+        );
+        let mut editor = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            crate::theme::configure(cx);
+            let intelligence = Rc::new(crate::theme::ThemeCssIntelligence);
+            let code_editor = cx.new(|cx| {
+                CodeEditor::new(
+                    CodeEditorConfig::default()
+                        .language(CodeLanguage::Css)
+                        .initial_value(editor_source)
+                        .rows(28)
+                        .completion_provider(intelligence.clone())
+                        .hover_provider(intelligence)
+                        .diagnostic_provider(crate::theme::theme_css_diagnostics),
+                    window,
+                    cx,
+                )
+            });
+            editor = Some(code_editor.clone());
+            let view = cx.new(|_| SettingsEditorView {
+                editor: code_editor,
+            });
+            gpui_component::Root::new(view, window, cx)
+        });
+        cx.simulate_resize(size(px(900.), px(700.)));
+        cx.run_until_parked();
+
+        let editor_bounds = cx
+            .debug_bounds("settings-css-editor")
+            .expect("the settings item must lay out its editor");
+        assert!(editor_bounds.size.width > px(400.));
+        assert_eq!(editor_bounds.size.height, px(520.));
+
+        let editor = editor.expect("the window builder installs the editor");
+        let input = cx.read(|cx| editor.read(cx).input_state());
+        cx.simulate_click(
+            editor_bounds.origin + point(px(80.), px(40.)),
+            Modifiers::none(),
+        );
+        assert!(
+            cx.update(|window, cx| input.read(cx).focus_handle(cx).is_focused(window)),
+            "the CSS editor must accept pointer focus inside a SettingItem"
+        );
+        let value_before_typing = cx.read(|cx| input.read(cx).value());
+        cx.simulate_input("x");
+        assert_ne!(
+            cx.read(|cx| input.read(cx).value()),
+            value_before_typing,
+            "the focused settings CSS editor must accept text input"
+        );
+    }
 }

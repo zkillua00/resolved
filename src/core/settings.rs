@@ -1,6 +1,13 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
+
+static NEXT_THEME_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Persisted application preferences that are independent from request data.
 ///
@@ -26,19 +33,83 @@ pub enum ShortcutOverride {
     Disabled,
 }
 
+/// One validated CSS theme retained in the user's theme catalog.
+///
+/// The identifier is stable across renames and edits. `css_source` is the
+/// durable snapshot, while `source_path` is optional provenance for workflows
+/// that also keep a CSS file on disk.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SavedTheme {
+    pub id: String,
+    pub name: String,
+    pub css_source: String,
+    pub source_path: Option<PathBuf>,
+    /// Preserve metadata written by a newer application version.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl SavedTheme {
+    pub fn new(
+        name: impl Into<String>,
+        css_source: impl Into<String>,
+        source_path: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            id: new_theme_id(),
+            name: name.into(),
+            css_source: css_source.into(),
+            source_path,
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
 /// CSS theme source retained by the application.
 ///
-/// `css_source` is the durable snapshot used at startup. `source_path` is
-/// optional provenance for reload/reveal workflows and is not required for the
-/// selected theme to remain usable.
+/// `saved_themes` owns the catalog. `active_theme_id` selects one of those
+/// entries. When it is `None`, an empty `css_source` selects the built-in theme;
+/// a populated source is a backward-compatible, unsaved custom snapshot. The
+/// existing `css_source` and `source_path` fields remain the durable
+/// active-theme projection used at startup.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ThemeSettings {
+    pub saved_themes: Vec<SavedTheme>,
+    pub active_theme_id: Option<String>,
     pub source_path: Option<PathBuf>,
     pub css_source: Option<String>,
+    /// Unapplied in-app work, kept separate from the last valid theme so a
+    /// restart can recover the editor without changing the application UI.
+    pub draft_source: Option<String>,
+    /// File handed to an external editor before it becomes the active source.
+    /// Keeping it here makes the preferred-editor workflow round-trip across
+    /// restarts.
+    pub draft_path: Option<PathBuf>,
+    /// Last file contents known to match `draft_path` (or the active source
+    /// while an in-app draft is open). This prevents both false conflicts
+    /// after restart and accidental overwrites of later external edits.
+    pub draft_disk_source: Option<String>,
     /// Preserve future theme metadata across read-modify-write cycles.
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl ThemeSettings {
+    pub fn saved_theme(&self, id: &str) -> Option<&SavedTheme> {
+        self.saved_themes.iter().find(|theme| theme.id == id)
+    }
+}
+
+fn new_theme_id() -> String {
+    let created_at = Utc::now();
+    let sequence = NEXT_THEME_ID.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "theme-{}-{}-{sequence}",
+        created_at.timestamp_micros(),
+        std::process::id()
+    )
 }
 
 #[cfg(test)]
@@ -56,6 +127,11 @@ mod tests {
 
     #[test]
     fn settings_round_trip_preserves_stable_override_representations() {
+        let saved_theme = SavedTheme::new(
+            "Material Dark",
+            ":root { --api-background: #14121a; }",
+            Some(PathBuf::from("/tmp/api-tester-theme.css")),
+        );
         let settings = AppSettings {
             shortcuts: BTreeMap::from([
                 (
@@ -65,8 +141,13 @@ mod tests {
                 ("request.close_tab".to_owned(), ShortcutOverride::Disabled),
             ]),
             theme: ThemeSettings {
+                saved_themes: vec![saved_theme.clone()],
+                active_theme_id: Some(saved_theme.id),
                 source_path: Some(PathBuf::from("/tmp/api-tester-theme.css")),
                 css_source: Some(":root { --api-background: #14121a; }".to_owned()),
+                draft_source: Some(":root { --api-background: #20202a; }".to_owned()),
+                draft_path: Some(PathBuf::from("/tmp/api-tester-theme-draft.css")),
+                draft_disk_source: Some(":root { --api-background: #14121a; }".to_owned()),
                 ..Default::default()
             },
             navigation_compact: true,
@@ -122,6 +203,79 @@ mod tests {
                 .get("theme")
                 .and_then(|theme| theme.get("future_theme_field")),
             Some(&serde_json::json!(["ocean", 2]))
+        );
+    }
+
+    #[test]
+    fn pre_catalog_theme_settings_remain_readable() {
+        let settings: ThemeSettings = serde_json::from_str(
+            r#"{
+                "source_path": "/tmp/legacy-theme.css",
+                "css_source": ":root { --api-theme-name: \"Legacy\"; }",
+                "draft_source": ":root { --api-theme-name: \"Draft\"; }"
+            }"#,
+        )
+        .unwrap();
+
+        assert!(settings.saved_themes.is_empty());
+        assert_eq!(settings.active_theme_id, None);
+        assert_eq!(
+            settings.source_path,
+            Some(PathBuf::from("/tmp/legacy-theme.css"))
+        );
+        assert_eq!(
+            settings.css_source.as_deref(),
+            Some(":root { --api-theme-name: \"Legacy\"; }")
+        );
+        assert_eq!(
+            settings.draft_source.as_deref(),
+            Some(":root { --api-theme-name: \"Draft\"; }")
+        );
+    }
+
+    #[test]
+    fn saved_theme_ids_are_unique_and_lookup_is_stable() {
+        let first = SavedTheme::new("First", "first source", None);
+        let second = SavedTheme::new(
+            "Second",
+            "second source",
+            Some(PathBuf::from("/tmp/second.css")),
+        );
+
+        assert!(first.id.starts_with("theme-"));
+        assert_ne!(first.id, second.id);
+
+        let settings = ThemeSettings {
+            saved_themes: vec![first.clone(), second.clone()],
+            active_theme_id: Some(second.id.clone()),
+            ..Default::default()
+        };
+        assert_eq!(settings.saved_theme(&first.id), Some(&first));
+        assert_eq!(settings.saved_theme(&second.id), Some(&second));
+        assert_eq!(settings.saved_theme("missing"), None);
+    }
+
+    #[test]
+    fn saved_theme_round_trip_preserves_future_metadata() {
+        let theme: SavedTheme = serde_json::from_str(
+            r#"{
+                "id": "theme-existing",
+                "name": "Ocean",
+                "css_source": ":root {}",
+                "source_path": "/tmp/ocean.css",
+                "future_theme_property": { "revision": 3 }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            theme.extra.get("future_theme_property"),
+            Some(&serde_json::json!({ "revision": 3 }))
+        );
+        let encoded = serde_json::to_value(theme).unwrap();
+        assert_eq!(
+            encoded.get("future_theme_property"),
+            Some(&serde_json::json!({ "revision": 3 }))
         );
     }
 }

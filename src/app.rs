@@ -1,6 +1,7 @@
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashMap},
+    path::PathBuf,
     rc::Rc,
     sync::Arc,
     time::Duration,
@@ -8,11 +9,11 @@ use std::{
 
 use chrono::Local;
 use gpui::{
-    AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Corner, Entity, EntityId,
-    EntityInputHandler, Focusable as _, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, ParentElement as _, PathPromptOptions, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Timer, Window, anchored,
-    deferred, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, Axis, ClickEvent, ClipboardItem, Context, Corner, Entity,
+    EntityId, EntityInputHandler, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, ParentElement as _, PathPromptOptions, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Timer, Window,
+    anchored, deferred, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Root, RopeExt as _, Selectable as _,
@@ -45,10 +46,10 @@ use crate::{
         RequestError, RequestHistory, RequestScripts, RequestTabAssociation, RequestTabCloseScope,
         RequestTabGroup, RequestTabGroupColor, RequestTabGroupId, RequestTabId, RequestTabRecord,
         RequestTabs, RequestTask, RequestTemplate, ResponseData, STANDARD_HTTP_METHODS,
-        SavedRequest, ScriptCancellation, ScriptDiagnostic, ScriptEnvironment, ScriptError,
-        ScriptErrorKind, ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope, ShortcutOverride,
-        Workspace, build_client, execute_post_response, execute_pre_request, format_body,
-        is_probably_text, resolve_request, spawn_request,
+        SavedRequest, SavedTheme, ScriptCancellation, ScriptDiagnostic, ScriptEnvironment,
+        ScriptError, ScriptErrorKind, ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope,
+        ShortcutOverride, Workspace, build_client, execute_post_response, execute_pre_request,
+        format_body, is_probably_text, resolve_request, spawn_request,
     },
     debug_overlay::DebugOverlay,
     request_dirty::{RequestDirtyPart, RequestDirtyState},
@@ -111,6 +112,8 @@ mod sidebar_tab;
 mod template_variable_popover;
 mod template_variable_popover_model;
 mod template_variables;
+mod theme_css_actions;
+mod theme_css_editor;
 mod title_bar;
 mod ui_utils;
 
@@ -129,6 +132,8 @@ use ui_utils::*;
 
 const TEMPLATE_HIGHLIGHT_DEBOUNCE: Duration = Duration::from_millis(90);
 const REQUEST_TABS_PERSIST_DEBOUNCE: Duration = Duration::from_millis(450);
+const THEME_EDITOR_VALIDATION_DEBOUNCE: Duration = Duration::from_millis(100);
+const THEME_EDITOR_PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
 
 pub struct ApiTester {
     method: Entity<InputState>,
@@ -189,6 +194,14 @@ pub struct ApiTester {
     base_key_bindings: Vec<gpui::KeyBinding>,
     recording_shortcut_id: Option<ShortcutId>,
     settings_notice: Option<String>,
+    theme_editor: Option<Entity<CodeEditor>>,
+    theme_editor_path: Option<PathBuf>,
+    theme_editor_baseline: String,
+    theme_editor_dirty: bool,
+    theme_editor_disk_source: Option<String>,
+    theme_editor_validation_task: Option<Task<()>>,
+    theme_editor_persist_task: Option<Task<()>>,
+    theme_editor_subscription: Option<Subscription>,
     selected_environment_id: Option<String>,
     collection_search: Entity<InputState>,
     environment_search: Entity<InputState>,

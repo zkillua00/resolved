@@ -96,19 +96,39 @@ impl fmt::Display for ShortcutId {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ShortcutCategory {
-    Request,
+    RequestTabs,
+    ActiveRequest,
     Navigation,
-    View,
+    Interface,
     Application,
 }
 
 impl ShortcutCategory {
+    pub const ALL: [Self; 5] = [
+        Self::RequestTabs,
+        Self::ActiveRequest,
+        Self::Navigation,
+        Self::Interface,
+        Self::Application,
+    ];
+
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Request => "Request",
+            Self::RequestTabs => "Request tabs",
+            Self::ActiveRequest => "Active request",
             Self::Navigation => "Navigation",
-            Self::View => "View",
+            Self::Interface => "Interface",
             Self::Application => "Application",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::RequestTabs => "Create, close, and move between request tabs.",
+            Self::ActiveRequest => "Send, save, focus, and format the active request.",
+            Self::Navigation => "Open the primary API Tester workspaces.",
+            Self::Interface => "Show or hide supporting interface surfaces.",
+            Self::Application => "Application-wide commands.",
         }
     }
 }
@@ -126,55 +146,55 @@ pub const SHORTCUT_DESCRIPTORS: &[ShortcutDescriptor] = &[
     ShortcutDescriptor {
         id: ShortcutId::NewRequestTab,
         label: "New request tab",
-        category: ShortcutCategory::Request,
+        category: ShortcutCategory::RequestTabs,
         default_binding: "cmd-t",
     },
     ShortcutDescriptor {
         id: ShortcutId::CloseRequestTab,
         label: "Close request tab",
-        category: ShortcutCategory::Request,
+        category: ShortcutCategory::RequestTabs,
         default_binding: "cmd-w",
     },
     ShortcutDescriptor {
         id: ShortcutId::ActivateNextRequestTab,
         label: "Next request tab",
-        category: ShortcutCategory::Request,
+        category: ShortcutCategory::RequestTabs,
         default_binding: "ctrl-tab",
     },
     ShortcutDescriptor {
         id: ShortcutId::ActivatePreviousRequestTab,
         label: "Previous request tab",
-        category: ShortcutCategory::Request,
+        category: ShortcutCategory::RequestTabs,
         default_binding: "ctrl-shift-tab",
     },
     ShortcutDescriptor {
         id: ShortcutId::SendOrCancelRequest,
         label: "Send or cancel request",
-        category: ShortcutCategory::Request,
+        category: ShortcutCategory::ActiveRequest,
         default_binding: "cmd-enter",
     },
     ShortcutDescriptor {
         id: ShortcutId::SaveRequest,
         label: "Save request",
-        category: ShortcutCategory::Request,
+        category: ShortcutCategory::ActiveRequest,
         default_binding: "cmd-s",
     },
     ShortcutDescriptor {
         id: ShortcutId::SaveRequestAs,
         label: "Save request as",
-        category: ShortcutCategory::Request,
+        category: ShortcutCategory::ActiveRequest,
         default_binding: "cmd-shift-s",
     },
     ShortcutDescriptor {
         id: ShortcutId::FocusRequestUrl,
         label: "Focus request URL",
-        category: ShortcutCategory::Request,
+        category: ShortcutCategory::ActiveRequest,
         default_binding: "cmd-l",
     },
     ShortcutDescriptor {
         id: ShortcutId::FormatRawBody,
         label: "Format raw body",
-        category: ShortcutCategory::Request,
+        category: ShortcutCategory::ActiveRequest,
         default_binding: "alt-shift-f",
     },
     ShortcutDescriptor {
@@ -204,13 +224,13 @@ pub const SHORTCUT_DESCRIPTORS: &[ShortcutDescriptor] = &[
     ShortcutDescriptor {
         id: ShortcutId::ToggleNavigation,
         label: "Toggle navigation size",
-        category: ShortcutCategory::View,
+        category: ShortcutCategory::Interface,
         default_binding: "cmd-\\",
     },
     ShortcutDescriptor {
         id: ShortcutId::ToggleMetrics,
         label: "Toggle metrics",
-        category: ShortcutCategory::View,
+        category: ShortcutCategory::Interface,
         default_binding: "cmd-shift-m",
     },
     ShortcutDescriptor {
@@ -589,6 +609,39 @@ mod tests {
                 Some(descriptor.id)
             );
             assert!(normalize_binding(descriptor.default_binding).is_ok());
+        }
+    }
+
+    #[test]
+    fn descriptor_sections_are_nonempty_and_follow_the_declared_order() {
+        let category_order = ShortcutCategory::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(index, category)| (category, index))
+            .collect::<BTreeMap<_, _>>();
+        let mut counts = BTreeMap::new();
+        let mut previous = 0;
+
+        for (descriptor_index, descriptor) in SHORTCUT_DESCRIPTORS.iter().enumerate() {
+            let index = category_order[&descriptor.category];
+            if descriptor_index > 0 {
+                assert!(
+                    index >= previous,
+                    "{} appears outside its declared section order",
+                    descriptor.id
+                );
+            }
+            previous = index;
+            *counts.entry(descriptor.category).or_insert(0usize) += 1;
+        }
+
+        for category in ShortcutCategory::ALL {
+            assert!(
+                counts.get(&category).is_some_and(|count| *count > 0),
+                "{} must contain at least one shortcut",
+                category.label()
+            );
+            assert!(!category.description().trim().is_empty());
         }
     }
 

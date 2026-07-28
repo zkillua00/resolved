@@ -28,8 +28,11 @@ WKWebView through `gpui-wry` only when the Preview tab is selected.
 - Nested collection folders with search-preserved ancestry, request moves, and
   safe folder reparenting
 - Persistent collections, saved requests, environments, and secret variables
-- Persistent, live-configurable keyboard shortcuts with macOS-native defaults
-- CSS themes mapped into GPUI controls and editor syntax colors
+- Persistent, live-configurable keyboard shortcuts, organized into five
+  task-focused sections with macOS-native defaults
+- A persistent CSS theme library mapped into GPUI controls and editor syntax
+  colors, with instant switching, an intelligent in-app editor, and a macOS
+  preferred-editor workflow
 - Request identity and Save/Update actions beside the main request editor
 - Direct active-environment switching from the title bar
 - `{{variable}}` expansion in URLs, header names and values, and request bodies
@@ -150,6 +153,17 @@ Reset shortcuts restores all defaults. Invalid or conflicting assignments are
 left unapplied. Valid changes are persisted to SQLite and take effect
 immediately, including while an input or code editor is focused.
 
+Bindings are divided into five sections so related commands remain easy to
+scan:
+
+| Section | Commands |
+| --- | --- |
+| Request tabs | Create, close, and move between request tabs |
+| Active request | Send or cancel, save, focus the URL, and format the raw body |
+| Navigation | Open Collections, Environments, History, or Settings |
+| Interface | Toggle navigation density or the performance HUD |
+| Application | Quit the application |
+
 | Action | Default |
 | --- | --- |
 | New / close request tab | `⌘T` / `⌘W` |
@@ -164,10 +178,39 @@ immediately, including while an input or code editor is focused.
 | Toggle metrics | `⌘⇧M` |
 | Quit | `⌘Q` |
 
-The Appearance page accepts a UTF-8 `.css` file through Choose CSS. Reload
-re-reads the selected path, while Use built-in restores Material Dark. A
-validated source snapshot is stored with the settings, so the selected theme
-survives restart independently of the original file.
+The Appearance page offers two complementary editing workflows:
+
+- **Edit CSS here** opens a native, lazily created CSS editor inside API Tester.
+  It provides syntax highlighting, automatic delimiter closing, completion for
+  the required `:root` selector, supported `--api-*` properties, declared
+  custom-property references inside `var()`, and metadata values. Hovering a
+  supported property shows whether it is required, its category, default value,
+  and the UI surfaces it affects. Parser diagnostics update while editing.
+- **Open in preferred editor** materializes the current source as a `.css` file
+  and asks macOS to open it with the system's preferred application for CSS
+  files. **Reload from disk** brings external edits back into the in-app
+  buffer. If an in-app draft has diverged from that file, opening it externally
+  publishes a fresh managed copy instead of replacing a file the other editor
+  may still own.
+
+Import CSS… also accepts an existing UTF-8 `.css` file. The in-app editor can
+Revert to the active snapshot or load the fully commented Default template,
+whose sections explain where each token affects the interface. Loading the
+template changes only the draft. **Save changes** updates the selected saved
+theme, while **Save as new theme…** asks for a library name, stores a separate
+SQLite snapshot, and selects it. Closing the editor releases it without losing
+its recoverable draft; replacing a dirty buffer from disk requires
+confirmation.
+
+The Current theme picker keeps Material Dark pinned above every saved theme.
+Imported CSS joins the same library, saved themes can be switched immediately,
+and deleting the selected entry returns to Material Dark. When a real source
+file still exists it is left on disk; SQLite-only themes warn that removal
+deletes their only saved copy. Switching, importing, and deletion stay disabled
+while a recoverable draft or preferred-editor copy is pending, so none of those
+actions can silently discard editor work. Reload accepts the external copy;
+Discard external copy stops tracking it while leaving the file on disk. The
+catalog and active selection live in the existing SQLite settings record.
 
 Theme CSS is deliberately a color-configuration format rather than arbitrary
 web styling: it must contain exactly one `:root` rule, a quoted
@@ -175,9 +218,14 @@ web styling: it must contain exactly one `:root` rule, a quoted
 semantic `--api-*` color properties. Values may reference another declared
 token with `var()`. The bundled
 [assets/themes/api-tester-dark.css](assets/themes/api-tester-dark.css) is the
-canonical token contract and a starting template for custom themes. A valid
-theme updates GPUI Component colors and editor syntax highlighting atomically;
-invalid files leave the active theme unchanged.
+canonical, fully documented token contract and a starting template for custom
+themes. Saving validates and commits the SQLite snapshot before updating GPUI
+Component colors and editor syntax highlighting; it never overwrites a file an
+external editor might change concurrently. A CSS file is created only for the
+preferred-editor workflow. Every library entry contains a durable snapshot, so
+switching and restart do not depend on the original file. Unapplied editor work
+is persisted separately for recovery after restart, while invalid drafts never
+replace the active theme.
 
 ## Pre-request and post-response scripts
 
