@@ -5,6 +5,7 @@ impl ApiTester {
         &self,
         collection_index: usize,
         request_index: usize,
+        depth: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let collection = &self.workspace.collections[collection_index];
@@ -13,11 +14,9 @@ impl ApiTester {
         let request_id = request.id.clone();
         let load_id = request_id.clone();
         let load_collection_id = collection_id.clone();
-        let selected = self.active_saved_request_id.as_deref() == Some(&request.id)
-            && self.selected_collection_id.as_deref() == Some(&collection.id);
+        let selected = self.active_saved_request_id.as_deref() == Some(&request.id);
         let method = request.definition.request.method.clone();
         let color = method_color(&method, cx);
-        let load_key = format!("saved:{collection_id}:{load_id}");
         let row_element_id: SharedString =
             format!("saved-request-row-{}-{}", collection.id, request.id).into();
         let action_group_id: SharedString =
@@ -30,13 +29,30 @@ impl ApiTester {
         let actions_collection_id = collection_id;
         let actions_request_id = request_id;
         let can_mutate = !self.sending && self.workspace_writable;
+        let selected_same_collection =
+            self.selected_collection_id.as_deref() == Some(collection.id.as_str());
+        let move_target = selected_same_collection
+            .then(|| self.selected_folder_id.clone())
+            .flatten();
+        let move_label = if !selected_same_collection {
+            "Select a destination in this collection".to_owned()
+        } else if let Some(folder_id) = move_target.as_deref() {
+            let folder_name = collection
+                .folder(folder_id)
+                .map(|folder| folder.name.as_str())
+                .unwrap_or("selected folder");
+            format!("Move to “{folder_name}”")
+        } else {
+            "Move to collection root".to_owned()
+        };
+        let can_move = can_mutate && selected_same_collection && request.folder_id != move_target;
 
         h_flex()
             .id(row_element_id)
             .group(action_group_id.clone())
             .w_full()
             .h(px(42.))
-            .pl_9()
+            .pl(px(24. + (depth as f32 * 16.)))
             .pr_1()
             .gap_1()
             .rounded_md()
@@ -51,18 +67,9 @@ impl ApiTester {
                     .gap_2()
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        let Some(definition) = this
-                            .workspace
-                            .saved_request(&load_id)
-                            .map(|(_, request)| request.definition.clone())
-                        else {
-                            return;
-                        };
-                        this.load_template(
-                            definition,
-                            Some(load_collection_id.clone()),
-                            Some(load_id.clone()),
-                            load_key.clone(),
+                        this.open_saved_request_tab(
+                            load_collection_id.clone(),
+                            load_id.clone(),
                             window,
                             cx,
                         );
@@ -113,6 +120,9 @@ impl ApiTester {
                                 let delete_this = actions_this.clone();
                                 let delete_collection_id = actions_collection_id.clone();
                                 let delete_request_id = actions_request_id.clone();
+                                let move_this = actions_this.clone();
+                                let move_collection_id = actions_collection_id.clone();
+                                let move_request_id = actions_request_id.clone();
 
                                 menu.item(
                                     PopupMenuItem::new("Rename").disabled(!can_mutate).on_click(
@@ -144,6 +154,21 @@ impl ApiTester {
                                                     this.duplicate_saved_request(
                                                         duplicate_collection_id.clone(),
                                                         duplicate_request_id.clone(),
+                                                        cx,
+                                                    );
+                                                });
+                                            }
+                                        }),
+                                )
+                                .item(
+                                    PopupMenuItem::new(move_label.clone())
+                                        .disabled(!can_move)
+                                        .on_click(move |_, _, cx| {
+                                            if let Some(this) = move_this.upgrade() {
+                                                this.update(cx, |this, cx| {
+                                                    this.move_saved_request_to_selected_folder(
+                                                        move_collection_id.clone(),
+                                                        move_request_id.clone(),
                                                         cx,
                                                     );
                                                 });

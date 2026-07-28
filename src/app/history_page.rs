@@ -46,14 +46,7 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.load_template(
-            RequestTemplate::new(request),
-            None,
-            None,
-            format!("history:{history_id}"),
-            window,
-            cx,
-        );
+        self.open_history_request_tab(history_id, request, window, cx);
     }
 
     pub(super) fn render_history(&self, cx: &mut Context<Self>) -> AnyElement {

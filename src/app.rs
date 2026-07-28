@@ -39,13 +39,15 @@ use crate::{
         CodeEditor, CodeEditorConfig, CodeEditorEvent, CodeLanguage, apply_template_pair_edit,
     },
     core::{
-        BodyField, BodyFieldKind, BodyMode, DatabaseStore, Environment, EnvironmentMutation,
-        HeaderEntry, HistoryEntry, PostResponseResult, PreRequestResult, REDACTED_VALUE,
-        RawBodyLanguage, RequestDraft, RequestError, RequestHistory, RequestScripts, RequestTask,
-        RequestTemplate, ResponseData, STANDARD_HTTP_METHODS, ScriptCancellation, ScriptDiagnostic,
-        ScriptEnvironment, ScriptError, ScriptErrorKind, ScriptLogLevel, ScriptPhase, ScriptReport,
-        ScriptScope, Workspace, build_client, execute_post_response, execute_pre_request,
-        format_body, is_probably_text, resolve_request, spawn_request,
+        BodyField, BodyFieldKind, BodyMode, Collection, DEFAULT_REQUEST_TAB_TITLE, DatabaseStore,
+        Environment, EnvironmentMutation, HeaderEntry, HistoryEntry, PostResponseResult,
+        PreRequestResult, REDACTED_VALUE, RawBodyLanguage, RequestDraft, RequestError,
+        RequestHistory, RequestScripts, RequestTabAssociation, RequestTabId, RequestTabs,
+        RequestTask, RequestTemplate, ResponseData, STANDARD_HTTP_METHODS, SavedRequest,
+        ScriptCancellation, ScriptDiagnostic, ScriptEnvironment, ScriptError, ScriptErrorKind,
+        ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope, Workspace, build_client,
+        execute_post_response, execute_pre_request, format_body, is_probably_text, resolve_request,
+        spawn_request,
     },
     debug_overlay::DebugOverlay,
     request_dirty::{RequestDirtyPart, RequestDirtyState},
@@ -67,6 +69,7 @@ use crate::{
 // Composition root only. Page/workspace behavior and every concrete render
 // component live in their dedicated child modules under `src/app/`.
 mod bootstrap;
+mod collection_folder_actions;
 mod collections_actions;
 mod collections_page;
 mod environment_browser;
@@ -84,7 +87,11 @@ mod pending_delete;
 mod persistence;
 mod request_actions;
 mod request_body_editor;
-mod request_tab;
+mod request_pane;
+mod request_tab_reconciliation;
+mod request_tab_runtime;
+mod request_tab_strip;
+mod request_tabs_actions;
 mod request_url_bar;
 mod request_workspace;
 mod response_actions;
@@ -108,7 +115,8 @@ use environment_variable_grid::EnvironmentVariableRow;
 use execution_stage::*;
 use headers_editor::HeaderRow;
 use pending_delete::*;
-use request_tab::*;
+use request_pane::*;
+use request_tab_runtime::*;
 use response_tab::*;
 use script_console_model::*;
 use sidebar_tab::*;
@@ -117,6 +125,7 @@ use template_variables::*;
 use ui_utils::*;
 
 const TEMPLATE_HIGHLIGHT_DEBOUNCE: Duration = Duration::from_millis(90);
+const REQUEST_TABS_PERSIST_DEBOUNCE: Duration = Duration::from_millis(450);
 
 pub struct ApiTester {
     method: Entity<InputState>,
@@ -131,7 +140,7 @@ pub struct ApiTester {
     raw_body_language: RawBodyLanguage,
     body_fields: Vec<request_body_editor::BodyFieldRow>,
     next_body_field_id: usize,
-    request_tab: RequestTab,
+    request_pane: RequestPane,
     response_tab: ResponseTab,
     pretty_body: bool,
     sending: bool,
@@ -158,18 +167,27 @@ pub struct ApiTester {
     sidebar_tab: SidebarTab,
     navigation_compact: bool,
     selected_collection_id: Option<String>,
+    selected_folder_id: Option<String>,
     active_saved_request_id: Option<String>,
     detached_request_dirty: bool,
     request_dirty: RequestDirtyState,
     loaded_request_baseline: RequestTemplate,
-    pending_request_load_key: Option<String>,
     request_notice: Option<String>,
+    request_tabs: RequestTabs,
+    last_persisted_request_tabs: RequestTabs,
+    request_tab_runtime: HashMap<String, RequestTabRuntime>,
+    request_tabs_persist_task: Option<Task<()>>,
+    request_tabs_warning: Option<String>,
+    request_tabs_writable: bool,
     selected_environment_id: Option<String>,
     collection_search: Entity<InputState>,
     environment_search: Entity<InputState>,
     expanded_collection_ids: BTreeSet<String>,
+    expanded_folder_ids: BTreeSet<String>,
     renaming_collection_id: Option<String>,
+    renaming_folder_id: Option<String>,
     collection_name: Entity<InputState>,
+    folder_name: Entity<InputState>,
     collection_delete_confirmation: Entity<InputState>,
     saved_request_name: Entity<InputState>,
     environment_name: Entity<InputState>,

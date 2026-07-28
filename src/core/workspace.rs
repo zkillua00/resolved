@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
@@ -57,6 +57,8 @@ pub struct Collection {
     pub id: String,
     pub name: String,
     #[serde(default)]
+    pub folders: Vec<CollectionFolder>,
+    #[serde(default)]
     pub requests: Vec<SavedRequest>,
 }
 
@@ -65,7 +67,99 @@ impl Collection {
         Ok(Self {
             id: new_id("collection"),
             name: checked_name("collection", name.into())?,
+            folders: Vec::new(),
             requests: Vec::new(),
+        })
+    }
+
+    pub fn folder(&self, id: &str) -> Option<&CollectionFolder> {
+        self.folders.iter().find(|folder| folder.id == id)
+    }
+
+    pub fn folder_path_ids(&self, id: &str) -> Result<Vec<String>, WorkspaceMutationError> {
+        self.ensure_folder_exists(Some(id))?;
+        let mut path = Vec::new();
+        let mut current_id = Some(id);
+        let mut seen = HashSet::new();
+
+        while let Some(folder_id) = current_id {
+            if !seen.insert(folder_id) {
+                return Err(WorkspaceMutationError::FolderCycle {
+                    folder_id: id.to_owned(),
+                });
+            }
+            let folder =
+                self.folder(folder_id)
+                    .ok_or_else(|| WorkspaceMutationError::NotFound {
+                        kind: "folder",
+                        id: folder_id.to_owned(),
+                    })?;
+            path.push(folder.id.clone());
+            current_id = folder.parent_folder_id.as_deref();
+        }
+        path.reverse();
+        Ok(path)
+    }
+
+    fn folder_mut(&mut self, id: &str) -> Result<&mut CollectionFolder, WorkspaceMutationError> {
+        self.folders
+            .iter_mut()
+            .find(|folder| folder.id == id)
+            .ok_or_else(|| WorkspaceMutationError::NotFound {
+                kind: "folder",
+                id: id.to_owned(),
+            })
+    }
+
+    fn ensure_folder_exists(&self, id: Option<&str>) -> Result<(), WorkspaceMutationError> {
+        if let Some(id) = id
+            && self.folder(id).is_none()
+        {
+            return Err(WorkspaceMutationError::NotFound {
+                kind: "folder",
+                id: id.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn folder_descendant_ids(&self, id: &str) -> HashSet<String> {
+        let mut descendant_ids = HashSet::from([id.to_owned()]);
+        loop {
+            let previous_len = descendant_ids.len();
+            for folder in &self.folders {
+                if folder
+                    .parent_folder_id
+                    .as_deref()
+                    .is_some_and(|parent_id| descendant_ids.contains(parent_id))
+                {
+                    descendant_ids.insert(folder.id.clone());
+                }
+            }
+            if descendant_ids.len() == previous_len {
+                return descendant_ids;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CollectionFolder {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub parent_folder_id: Option<String>,
+}
+
+impl CollectionFolder {
+    pub fn new(
+        name: impl Into<String>,
+        parent_folder_id: Option<String>,
+    ) -> Result<Self, WorkspaceMutationError> {
+        Ok(Self {
+            id: new_id("folder"),
+            name: checked_name("folder", name.into())?,
+            parent_folder_id,
         })
     }
 }
@@ -74,6 +168,8 @@ impl Collection {
 pub struct SavedRequest {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub folder_id: Option<String>,
     pub definition: RequestTemplate,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -88,6 +184,7 @@ impl SavedRequest {
         Ok(Self {
             id: new_id("request"),
             name: checked_name("request", name.into())?,
+            folder_id: None,
             definition,
             created_at: now,
             updated_at: now,
@@ -211,6 +308,8 @@ pub struct EnvironmentVariable {
 impl Workspace {
     pub fn validate(&self) -> Result<(), WorkspaceValidationError> {
         let mut collection_ids = HashSet::new();
+        let mut folder_ids = HashSet::new();
+        let mut folder_owners = HashMap::new();
         let mut request_ids = HashSet::new();
         let mut environment_ids = HashSet::new();
         let mut variable_ids = HashSet::new();
@@ -219,9 +318,82 @@ impl Workspace {
             validate_id("collection", &collection.id, &mut collection_ids)?;
             validate_name("collection", &collection.id, &collection.name)?;
 
+            for folder in &collection.folders {
+                validate_id("folder", &folder.id, &mut folder_ids)?;
+                validate_name("folder", &folder.id, &folder.name)?;
+                folder_owners.insert(folder.id.as_str(), collection.id.as_str());
+            }
+        }
+
+        for collection in &self.collections {
+            let folder_parents = collection
+                .folders
+                .iter()
+                .map(|folder| (folder.id.as_str(), folder.parent_folder_id.as_deref()))
+                .collect::<HashMap<_, _>>();
+
+            for folder in &collection.folders {
+                if let Some(parent_id) = folder.parent_folder_id.as_deref() {
+                    match folder_owners.get(parent_id).copied() {
+                        None => {
+                            return Err(WorkspaceValidationError::DanglingFolderParent {
+                                collection_id: collection.id.clone(),
+                                folder_id: folder.id.clone(),
+                                parent_folder_id: parent_id.to_owned(),
+                            });
+                        }
+                        Some(parent_collection_id)
+                            if parent_collection_id != collection.id.as_str() =>
+                        {
+                            return Err(WorkspaceValidationError::FolderParentOutsideCollection {
+                                collection_id: collection.id.clone(),
+                                folder_id: folder.id.clone(),
+                                parent_folder_id: parent_id.to_owned(),
+                                parent_collection_id: parent_collection_id.to_owned(),
+                            });
+                        }
+                        Some(_) => {}
+                    }
+                }
+
+                let mut path = HashSet::new();
+                let mut current_id = Some(folder.id.as_str());
+                while let Some(id) = current_id {
+                    if !path.insert(id) {
+                        return Err(WorkspaceValidationError::FolderCycle {
+                            collection_id: collection.id.clone(),
+                            folder_id: folder.id.clone(),
+                        });
+                    }
+                    current_id = folder_parents.get(id).copied().flatten();
+                }
+            }
+
             for request in &collection.requests {
                 validate_id("request", &request.id, &mut request_ids)?;
                 validate_name("request", &request.id, &request.name)?;
+                if let Some(folder_id) = request.folder_id.as_deref() {
+                    match folder_owners.get(folder_id).copied() {
+                        None => {
+                            return Err(WorkspaceValidationError::DanglingRequestFolder {
+                                collection_id: collection.id.clone(),
+                                request_id: request.id.clone(),
+                                folder_id: folder_id.to_owned(),
+                            });
+                        }
+                        Some(folder_collection_id)
+                            if folder_collection_id != collection.id.as_str() =>
+                        {
+                            return Err(WorkspaceValidationError::RequestFolderOutsideCollection {
+                                collection_id: collection.id.clone(),
+                                request_id: request.id.clone(),
+                                folder_id: folder_id.to_owned(),
+                                folder_collection_id: folder_collection_id.to_owned(),
+                            });
+                        }
+                        Some(_) => {}
+                    }
+                }
             }
         }
 
@@ -322,15 +494,110 @@ impl Workspace {
         Ok(self.collections.remove(index))
     }
 
+    pub fn create_collection_folder(
+        &mut self,
+        collection_id: &str,
+        parent_folder_id: Option<&str>,
+        name: impl Into<String>,
+    ) -> Result<String, WorkspaceMutationError> {
+        let collection = self.collection_mut(collection_id)?;
+        collection.ensure_folder_exists(parent_folder_id)?;
+        let folder = CollectionFolder::new(name, parent_folder_id.map(str::to_owned))?;
+        let id = folder.id.clone();
+        collection.folders.push(folder);
+        Ok(id)
+    }
+
+    pub fn rename_collection_folder(
+        &mut self,
+        collection_id: &str,
+        folder_id: &str,
+        name: impl Into<String>,
+    ) -> Result<(), WorkspaceMutationError> {
+        let name = checked_name("folder", name.into())?;
+        let folder = self.collection_mut(collection_id)?.folder_mut(folder_id)?;
+        folder.name = name;
+        Ok(())
+    }
+
+    pub fn move_collection_folder(
+        &mut self,
+        collection_id: &str,
+        folder_id: &str,
+        parent_folder_id: Option<&str>,
+    ) -> Result<(), WorkspaceMutationError> {
+        let collection = self.collection_mut(collection_id)?;
+        collection.ensure_folder_exists(Some(folder_id))?;
+        collection.ensure_folder_exists(parent_folder_id)?;
+
+        if parent_folder_id.is_some_and(|parent_id| {
+            parent_id == folder_id
+                || collection
+                    .folder_descendant_ids(folder_id)
+                    .contains(parent_id)
+        }) {
+            return Err(WorkspaceMutationError::FolderCycle {
+                folder_id: folder_id.to_owned(),
+            });
+        }
+
+        collection.folder_mut(folder_id)?.parent_folder_id = parent_folder_id.map(str::to_owned);
+        Ok(())
+    }
+
+    /// Remove a folder, all of its descendant folders, and every request
+    /// assigned anywhere in that subtree.
+    pub fn remove_collection_folder(
+        &mut self,
+        collection_id: &str,
+        folder_id: &str,
+    ) -> Result<CollectionFolder, WorkspaceMutationError> {
+        let collection = self.collection_mut(collection_id)?;
+        let folder = collection
+            .folders
+            .iter()
+            .find(|folder| folder.id == folder_id)
+            .cloned()
+            .ok_or_else(|| WorkspaceMutationError::NotFound {
+                kind: "folder",
+                id: folder_id.to_owned(),
+            })?;
+        let removed_folder_ids = collection.folder_descendant_ids(folder_id);
+        collection
+            .folders
+            .retain(|folder| !removed_folder_ids.contains(folder.id.as_str()));
+        collection.requests.retain(|request| {
+            request
+                .folder_id
+                .as_deref()
+                .is_none_or(|id| !removed_folder_ids.contains(id))
+        });
+        Ok(folder)
+    }
+
+    #[allow(dead_code)]
     pub fn create_saved_request(
         &mut self,
         collection_id: &str,
         name: impl Into<String>,
         definition: RequestTemplate,
     ) -> Result<String, WorkspaceMutationError> {
-        let request = SavedRequest::new(name, definition)?;
+        self.create_saved_request_in_folder(collection_id, None, name, definition)
+    }
+
+    pub fn create_saved_request_in_folder(
+        &mut self,
+        collection_id: &str,
+        folder_id: Option<&str>,
+        name: impl Into<String>,
+        definition: RequestTemplate,
+    ) -> Result<String, WorkspaceMutationError> {
+        let collection = self.collection_mut(collection_id)?;
+        collection.ensure_folder_exists(folder_id)?;
+        let mut request = SavedRequest::new(name, definition)?;
+        request.folder_id = folder_id.map(str::to_owned);
         let id = request.id.clone();
-        self.collection_mut(collection_id)?.requests.push(request);
+        collection.requests.push(request);
         Ok(id)
     }
 
@@ -350,7 +617,9 @@ impl Workspace {
                 id: request_id.to_owned(),
             })?;
         let definition = collection.requests[source_index].definition.clone();
-        let duplicate = SavedRequest::new(name, definition)?;
+        let folder_id = collection.requests[source_index].folder_id.clone();
+        let mut duplicate = SavedRequest::new(name, definition)?;
+        duplicate.folder_id = folder_id;
         let id = duplicate.id.clone();
         collection.requests.insert(source_index + 1, duplicate);
         Ok(id)
@@ -396,6 +665,27 @@ impl Workspace {
                 id: request_id.to_owned(),
             })?;
         Ok(collection.requests.remove(index))
+    }
+
+    pub fn move_saved_request(
+        &mut self,
+        collection_id: &str,
+        request_id: &str,
+        folder_id: Option<&str>,
+    ) -> Result<(), WorkspaceMutationError> {
+        let collection = self.collection_mut(collection_id)?;
+        collection.ensure_folder_exists(folder_id)?;
+        let request = collection
+            .requests
+            .iter_mut()
+            .find(|request| request.id == request_id)
+            .ok_or_else(|| WorkspaceMutationError::NotFound {
+                kind: "request",
+                id: request_id.to_owned(),
+            })?;
+        request.folder_id = folder_id.map(str::to_owned);
+        request.updated_at = Utc::now();
+        Ok(())
     }
 
     pub fn environment(&self, id: &str) -> Option<&Environment> {
@@ -554,6 +844,9 @@ pub enum WorkspaceMutationError {
     #[error("{kind} '{id}' was not found")]
     NotFound { kind: &'static str, id: String },
 
+    #[error("folder '{folder_id}' cannot be moved beneath itself or one of its descendants")]
+    FolderCycle { folder_id: String },
+
     #[error("environment '{environment_id}' already has a variable named '{key}'")]
     DuplicateVariableKey { environment_id: String, key: String },
 }
@@ -568,6 +861,50 @@ pub enum WorkspaceValidationError {
 
     #[error("{kind} '{id}' has an empty name")]
     EmptyName { kind: &'static str, id: String },
+
+    #[error(
+        "folder '{folder_id}' in collection '{collection_id}' references missing parent folder '{parent_folder_id}'"
+    )]
+    DanglingFolderParent {
+        collection_id: String,
+        folder_id: String,
+        parent_folder_id: String,
+    },
+
+    #[error(
+        "folder '{folder_id}' in collection '{collection_id}' references parent folder '{parent_folder_id}' from collection '{parent_collection_id}'"
+    )]
+    FolderParentOutsideCollection {
+        collection_id: String,
+        folder_id: String,
+        parent_folder_id: String,
+        parent_collection_id: String,
+    },
+
+    #[error("folder '{folder_id}' in collection '{collection_id}' forms a parent cycle")]
+    FolderCycle {
+        collection_id: String,
+        folder_id: String,
+    },
+
+    #[error(
+        "request '{request_id}' in collection '{collection_id}' references missing folder '{folder_id}'"
+    )]
+    DanglingRequestFolder {
+        collection_id: String,
+        request_id: String,
+        folder_id: String,
+    },
+
+    #[error(
+        "request '{request_id}' in collection '{collection_id}' references folder '{folder_id}' from collection '{folder_collection_id}'"
+    )]
+    RequestFolderOutsideCollection {
+        collection_id: String,
+        request_id: String,
+        folder_id: String,
+        folder_collection_id: String,
+    },
 
     #[error("active environment '{id}' does not exist")]
     DanglingActiveEnvironment { id: String },
@@ -900,8 +1237,16 @@ mod tests {
         let mut workspace = Workspace::default();
 
         let collection_id = workspace.create_collection("My API").unwrap();
+        let folder_id = workspace
+            .create_collection_folder(&collection_id, None, "Users")
+            .unwrap();
         let request_id = workspace
-            .create_saved_request(&collection_id, "List users", template("{{base_url}}/users"))
+            .create_saved_request_in_folder(
+                &collection_id,
+                Some(&folder_id),
+                "List users",
+                template("{{base_url}}/users"),
+            )
             .unwrap();
         let environment_id = workspace.create_environment("Development").unwrap();
         workspace
@@ -924,6 +1269,15 @@ mod tests {
         let loaded = store.load().unwrap();
 
         assert_eq!(loaded, workspace);
+        assert_eq!(
+            loaded
+                .saved_request(&request_id)
+                .unwrap()
+                .1
+                .folder_id
+                .as_deref(),
+            Some(folder_id.as_str())
+        );
         assert_eq!(
             loaded
                 .saved_request(&request_id)
@@ -992,6 +1346,31 @@ mod tests {
             WorkspaceStore::new(path).load().unwrap(),
             Workspace::default()
         );
+    }
+
+    #[test]
+    fn legacy_collection_and_request_json_default_to_the_collection_root() {
+        let mut workspace = Workspace::default();
+        let collection_id = workspace.create_collection("Legacy").unwrap();
+        workspace
+            .create_saved_request(
+                &collection_id,
+                "Root request",
+                template("https://example.com"),
+            )
+            .unwrap();
+        let mut json = serde_json::to_value(&workspace).unwrap();
+        let collection = json["collections"][0].as_object_mut().unwrap();
+        collection.remove("folders");
+        collection["requests"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("folder_id");
+
+        let loaded: Workspace = serde_json::from_value(json).unwrap();
+        assert_eq!(loaded, workspace);
+        assert!(loaded.collections[0].folders.is_empty());
+        assert_eq!(loaded.collections[0].requests[0].folder_id, None);
     }
 
     #[test]
@@ -1133,6 +1512,231 @@ mod tests {
     }
 
     #[test]
+    fn collection_folders_support_nesting_paths_renames_and_safe_moves() {
+        let mut workspace = Workspace::default();
+        let collection_id = workspace.create_collection("Requests").unwrap();
+        let root_id = workspace
+            .create_collection_folder(&collection_id, None, "Users")
+            .unwrap();
+        let child_id = workspace
+            .create_collection_folder(&collection_id, Some(&root_id), "Admin")
+            .unwrap();
+        let sibling_id = workspace
+            .create_collection_folder(&collection_id, None, "Health")
+            .unwrap();
+
+        workspace
+            .rename_collection_folder(&collection_id, &child_id, "Administrators")
+            .unwrap();
+        workspace
+            .move_collection_folder(&collection_id, &sibling_id, Some(&child_id))
+            .unwrap();
+
+        let collection = workspace.collection(&collection_id).unwrap();
+        assert_eq!(
+            collection.folder_path_ids(&sibling_id).unwrap(),
+            [root_id.clone(), child_id.clone(), sibling_id.clone()]
+        );
+        assert_eq!(collection.folder(&child_id).unwrap().name, "Administrators");
+
+        let before_cycle = workspace.clone();
+        assert_eq!(
+            workspace.move_collection_folder(&collection_id, &root_id, Some(&sibling_id)),
+            Err(WorkspaceMutationError::FolderCycle {
+                folder_id: root_id.clone(),
+            })
+        );
+        assert_eq!(workspace, before_cycle);
+        workspace.validate().unwrap();
+    }
+
+    #[test]
+    fn saved_requests_can_move_between_root_and_nested_folders() {
+        let mut workspace = Workspace::default();
+        let collection_id = workspace.create_collection("Requests").unwrap();
+        let folder_id = workspace
+            .create_collection_folder(&collection_id, None, "Users")
+            .unwrap();
+        let root_request_id = workspace
+            .create_saved_request(&collection_id, "Root", template("https://example.com/root"))
+            .unwrap();
+        let nested_request_id = workspace
+            .create_saved_request_in_folder(
+                &collection_id,
+                Some(&folder_id),
+                "Nested",
+                template("https://example.com/nested"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            workspace
+                .saved_request(&root_request_id)
+                .unwrap()
+                .1
+                .folder_id,
+            None
+        );
+        assert_eq!(
+            workspace
+                .saved_request(&nested_request_id)
+                .unwrap()
+                .1
+                .folder_id
+                .as_deref(),
+            Some(folder_id.as_str())
+        );
+
+        workspace
+            .move_saved_request(&collection_id, &root_request_id, Some(&folder_id))
+            .unwrap();
+        let duplicate_id = workspace
+            .duplicate_saved_request(&collection_id, &root_request_id, "Root copy")
+            .unwrap();
+        assert_eq!(
+            workspace
+                .saved_request(&duplicate_id)
+                .unwrap()
+                .1
+                .folder_id
+                .as_deref(),
+            Some(folder_id.as_str())
+        );
+
+        workspace
+            .move_saved_request(&collection_id, &nested_request_id, None)
+            .unwrap();
+        assert_eq!(
+            workspace
+                .saved_request(&nested_request_id)
+                .unwrap()
+                .1
+                .folder_id,
+            None
+        );
+        workspace.validate().unwrap();
+    }
+
+    #[test]
+    fn removing_collection_folder_cascades_to_descendants_and_their_requests() {
+        let mut workspace = Workspace::default();
+        let collection_id = workspace.create_collection("Requests").unwrap();
+        let removed_root_id = workspace
+            .create_collection_folder(&collection_id, None, "Removed")
+            .unwrap();
+        let removed_child_id = workspace
+            .create_collection_folder(&collection_id, Some(&removed_root_id), "Child")
+            .unwrap();
+        let retained_folder_id = workspace
+            .create_collection_folder(&collection_id, None, "Retained")
+            .unwrap();
+        let root_request_id = workspace
+            .create_saved_request(
+                &collection_id,
+                "Collection root",
+                template("https://example.com/root"),
+            )
+            .unwrap();
+        let removed_request_id = workspace
+            .create_saved_request_in_folder(
+                &collection_id,
+                Some(&removed_child_id),
+                "Removed request",
+                template("https://example.com/removed"),
+            )
+            .unwrap();
+        let retained_request_id = workspace
+            .create_saved_request_in_folder(
+                &collection_id,
+                Some(&retained_folder_id),
+                "Retained request",
+                template("https://example.com/retained"),
+            )
+            .unwrap();
+
+        let removed = workspace
+            .remove_collection_folder(&collection_id, &removed_root_id)
+            .unwrap();
+        assert_eq!(removed.id, removed_root_id);
+        let collection = workspace.collection(&collection_id).unwrap();
+        assert!(collection.folder(&removed_root_id).is_none());
+        assert!(collection.folder(&removed_child_id).is_none());
+        assert!(collection.folder(&retained_folder_id).is_some());
+        assert!(workspace.saved_request(&removed_request_id).is_none());
+        assert!(workspace.saved_request(&root_request_id).is_some());
+        assert!(workspace.saved_request(&retained_request_id).is_some());
+        workspace.validate().unwrap();
+    }
+
+    #[test]
+    fn validation_rejects_invalid_folder_graphs_and_request_ownership() {
+        let mut workspace = Workspace {
+            collections: vec![
+                Collection {
+                    id: "one".to_owned(),
+                    name: "One".to_owned(),
+                    folders: vec![CollectionFolder {
+                        id: "folder-one".to_owned(),
+                        name: "One".to_owned(),
+                        parent_folder_id: Some("missing".to_owned()),
+                    }],
+                    requests: Vec::new(),
+                },
+                Collection {
+                    id: "two".to_owned(),
+                    name: "Two".to_owned(),
+                    folders: vec![CollectionFolder {
+                        id: "folder-two".to_owned(),
+                        name: "Two".to_owned(),
+                        parent_folder_id: None,
+                    }],
+                    requests: Vec::new(),
+                },
+            ],
+            ..Workspace::default()
+        };
+        assert!(matches!(
+            workspace.validate(),
+            Err(WorkspaceValidationError::DanglingFolderParent {
+                folder_id,
+                parent_folder_id,
+                ..
+            }) if folder_id == "folder-one" && parent_folder_id == "missing"
+        ));
+
+        workspace.collections[0].folders[0].parent_folder_id = Some("folder-two".to_owned());
+        assert!(matches!(
+            workspace.validate(),
+            Err(WorkspaceValidationError::FolderParentOutsideCollection {
+                folder_id,
+                parent_folder_id,
+                ..
+            }) if folder_id == "folder-one" && parent_folder_id == "folder-two"
+        ));
+
+        workspace.collections[0].folders[0].parent_folder_id = Some("folder-one".to_owned());
+        assert!(matches!(
+            workspace.validate(),
+            Err(WorkspaceValidationError::FolderCycle { folder_id, .. })
+                if folder_id == "folder-one"
+        ));
+
+        workspace.collections[0].folders[0].parent_folder_id = None;
+        let mut request =
+            SavedRequest::new("Wrong owner", template("https://example.com")).unwrap();
+        request.folder_id = Some("folder-two".to_owned());
+        workspace.collections[0].requests.push(request);
+        assert!(matches!(
+            workspace.validate(),
+            Err(WorkspaceValidationError::RequestFolderOutsideCollection {
+                folder_id,
+                folder_collection_id,
+                ..
+            }) if folder_id == "folder-two" && folder_collection_id == "two"
+        ));
+    }
+
+    #[test]
     fn environment_crud_clears_deleted_active_environment() {
         let mut workspace = Workspace::default();
         let environment_id = workspace.create_environment("Development").unwrap();
@@ -1210,11 +1814,13 @@ mod tests {
                 Collection {
                     id: "same".to_owned(),
                     name: "One".to_owned(),
+                    folders: Vec::new(),
                     requests: Vec::new(),
                 },
                 Collection {
                     id: "same".to_owned(),
                     name: "Two".to_owned(),
+                    folders: Vec::new(),
                     requests: Vec::new(),
                 },
             ],

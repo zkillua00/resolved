@@ -1,12 +1,12 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum RequestTab {
+pub(super) enum RequestPane {
     Headers,
     Body,
     PreRequest,
     PostResponse,
 }
 
-impl RequestTab {
+impl RequestPane {
     pub(super) fn index(self) -> usize {
         match self {
             Self::Headers => 0,

@@ -36,17 +36,37 @@ impl Render for ApiTester {
                                         )
                                         .child(
                                             resizable_panel().child(
-                                                v_resizable("request-response-split")
+                                                v_flex()
+                                                    .size_full()
+                                                    .min_h_0()
+                                                    .child(self.render_request_tab_strip(cx))
                                                     .child(
-                                                        resizable_panel()
-                                                            .size(px(480.))
-                                                            .size_range(px(360.)..px(900.))
-                                                            .child(self.render_request_panel(cx)),
-                                                    )
-                                                    .child(
-                                                        resizable_panel()
-                                                            .size_range(px(240.)..px(1_400.))
-                                                            .child(self.render_response_panel(cx)),
+                                                        div().flex_1().min_h_0().child(
+                                                            v_resizable("request-response-split")
+                                                                .child(
+                                                                    resizable_panel()
+                                                                        .size(px(480.))
+                                                                        .size_range(
+                                                                            px(360.)..px(900.),
+                                                                        )
+                                                                        .child(
+                                                                            self.render_request_panel(
+                                                                                cx,
+                                                                            ),
+                                                                        ),
+                                                                )
+                                                                .child(
+                                                                    resizable_panel()
+                                                                        .size_range(
+                                                                            px(240.)..px(1_400.),
+                                                                        )
+                                                                        .child(
+                                                                            self.render_response_panel(
+                                                                                cx,
+                                                                            ),
+                                                                        ),
+                                                                ),
+                                                        ),
                                                     ),
                                             ),
                                         ),

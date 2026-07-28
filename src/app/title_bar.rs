@@ -20,20 +20,54 @@ impl ApiTester {
             .map(|environment| (environment.id.clone(), environment.name.clone()))
             .collect::<Vec<_>>();
         let this = cx.entity().downgrade();
-        let request_name = self
-            .active_saved_request_id
-            .as_deref()
-            .and_then(|id| self.workspace.saved_request(id))
-            .map(|(_, request)| request.name.as_str())
-            .unwrap_or("Unsaved request");
-        let collection_name = self
-            .selected_collection_id
-            .as_deref()
+        let active_request_tab = self.request_tabs.active();
+        let request_name = active_request_tab.display_title();
+        let request_name_width =
+            ((request_name.chars().count() as f32 * 8.) + 20.).clamp(96., 240.);
+        let collection_name = active_request_tab
+            .association()
+            .collection_id()
             .and_then(|id| self.workspace.collection(id))
             .map(|collection| collection.name.as_str())
+            .or_else(|| {
+                self.selected_collection_id
+                    .as_deref()
+                    .and_then(|id| self.workspace.collection(id))
+                    .map(|collection| collection.name.as_str())
+            })
             .unwrap_or("No collection");
-        let can_save =
-            !self.sending && self.workspace_writable && self.selected_collection_id.is_some();
+        let folder_path = active_request_tab
+            .association()
+            .collection_id()
+            .and_then(|collection_id| self.workspace.collection(collection_id))
+            .and_then(|collection| {
+                active_request_tab
+                    .association()
+                    .folder_id()
+                    .and_then(|folder_id| collection.folder_path_ids(folder_id).ok())
+                    .map(|path| {
+                        path.into_iter()
+                            .filter_map(|folder_id| {
+                                collection
+                                    .folder(&folder_id)
+                                    .map(|folder| folder.name.clone())
+                            })
+                            .collect::<Vec<_>>()
+                    })
+            })
+            .unwrap_or_default();
+        let request_path = std::iter::once(collection_name.to_owned())
+            .chain(folder_path)
+            .collect::<Vec<_>>()
+            .join(" / ");
+        let has_saved_request = active_request_tab
+            .association()
+            .saved_request_id()
+            .is_some();
+        let can_save = !self.sending
+            && self.workspace_writable
+            && (active_request_tab.association().collection_id().is_some()
+                || self.selected_collection_id.is_some());
         let can_switch_environment = self.workspace_writable && !self.sending;
         let dirty = self.request_is_dirty();
 
@@ -49,6 +83,7 @@ impl ApiTester {
             .child(
                 h_flex()
                     .min_w_0()
+                    .flex_1()
                     .gap_6()
                     .child(
                         div()
@@ -71,16 +106,32 @@ impl ApiTester {
                     .child(
                         h_flex()
                             .min_w_0()
+                            .flex_1()
                             .gap_2()
                             .child(
-                                div()
+                                h_flex()
                                     .min_w_0()
-                                    .max_w(px(360.))
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!("{collection_name} / {request_name}")),
+                                    .max_w(px(520.))
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .max_w(px(300.))
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(format!("{request_path} /")),
+                                    )
+                                    .child(
+                                        Input::new(&self.saved_request_name)
+                                            .small()
+                                            .appearance(false)
+                                            .focus_bordered(false)
+                                            .flex_shrink_0()
+                                            .w(px(request_name_width))
+                                            .px_0(),
+                                    ),
                             )
                             .when(dirty, |this| {
                                 this.child(
@@ -101,11 +152,6 @@ impl ApiTester {
                 h_flex()
                     .flex_shrink_0()
                     .gap_3()
-                    .child(
-                        div()
-                            .w(px(190.))
-                            .child(Input::new(&self.saved_request_name).small()),
-                    )
                     .child(
                         Button::new("active-environment")
                             .icon(IconName::Settings2)
@@ -167,11 +213,7 @@ impl ApiTester {
                     )
                     .child(
                         Button::new("title-save-request")
-                            .label(if self.active_saved_request_id.is_some() {
-                                "Update"
-                            } else {
-                                "Save"
-                            })
+                            .label(if has_saved_request { "Update" } else { "Save" })
                             .large()
                             .h(px(38.))
                             .outline()
@@ -181,7 +223,7 @@ impl ApiTester {
                                 this.save_current_request(false, window, cx);
                             })),
                     )
-                    .when(self.active_saved_request_id.is_some(), |this| {
+                    .when(has_saved_request, |this| {
                         this.child(
                             Button::new("title-save-request-copy")
                                 .label("Save as")

@@ -286,36 +286,50 @@ impl ApiTester {
         cx.notify();
     }
 
+    fn normalized_header_entries(&self, cx: &App) -> Vec<HeaderEntry> {
+        self.headers
+            .iter()
+            .filter_map(|row| {
+                let name = row.name.read(cx).value().to_string();
+                let value = row.value.read(cx).value().to_string();
+                if name.trim().is_empty() && value.trim().is_empty() {
+                    return None;
+                }
+                let mut header = HeaderEntry::new(name, value);
+                header.enabled = row.enabled;
+                Some(header)
+            })
+            .collect()
+    }
+
+    fn normalized_body_fields(&self, cx: &App) -> Vec<BodyField> {
+        self.body_fields
+            .iter()
+            .filter_map(|row| {
+                let name = row.name.read(cx).value().to_string();
+                let value = row.value.read(cx).value().to_string();
+                if name.trim().is_empty() && value.trim().is_empty() {
+                    return None;
+                }
+                Some(BodyField {
+                    enabled: row.enabled,
+                    name,
+                    value,
+                    kind: row.kind,
+                })
+            })
+            .collect()
+    }
+
     pub(super) fn draft(&self, cx: &App) -> RequestDraft {
         let method = self.method.read(cx).value().trim().to_ascii_uppercase();
-        let headers = self
-            .headers
-            .iter()
-            .map(|row| {
-                let mut header = HeaderEntry::new(
-                    row.name.read(cx).value().to_string(),
-                    row.value.read(cx).value().to_string(),
-                );
-                header.enabled = row.enabled;
-                header
-            })
-            .collect();
 
         let mut draft = RequestDraft::new(method, self.url.read(cx).value().to_string());
-        draft.headers = headers;
+        draft.headers = self.normalized_header_entries(cx);
         draft.body = self.body.read(cx).value(cx).to_string();
         draft.body_mode = self.body_mode;
         draft.raw_body_language = self.raw_body_language;
-        draft.body_fields = self
-            .body_fields
-            .iter()
-            .map(|row| BodyField {
-                enabled: row.enabled,
-                name: row.name.read(cx).value().to_string(),
-                value: row.value.read(cx).value().to_string(),
-                kind: row.kind,
-            })
-            .collect();
+        draft.body_fields = self.normalized_body_fields(cx);
         draft
     }
 
@@ -330,7 +344,9 @@ impl ApiTester {
     }
 
     pub(super) fn request_is_dirty(&self) -> bool {
-        self.detached_request_dirty || self.request_dirty.any()
+        self.detached_request_dirty
+            || self.request_dirty.any()
+            || self.request_tabs.active().is_dirty()
     }
 
     pub(super) fn refresh_request_dirty_part(
@@ -344,6 +360,24 @@ impl ApiTester {
 
         let part_is_dirty = self.request_part_is_dirty(part, cx);
         self.request_dirty.set(part, part_is_dirty);
+        self.schedule_request_tabs_persist(cx);
+    }
+
+    pub(super) fn refresh_all_request_dirty_parts(&mut self, cx: &mut Context<Self>) {
+        for part in [
+            RequestDirtyPart::Method,
+            RequestDirtyPart::Url,
+            RequestDirtyPart::Headers,
+            RequestDirtyPart::RawBody,
+            RequestDirtyPart::BodyMode,
+            RequestDirtyPart::RawBodyLanguage,
+            RequestDirtyPart::BodyFields,
+            RequestDirtyPart::PreScript,
+            RequestDirtyPart::PostScript,
+        ] {
+            let dirty = self.request_part_is_dirty(part, cx);
+            self.request_dirty.set(part, dirty);
+        }
     }
 
     pub(super) fn request_part_is_dirty(&self, part: RequestDirtyPart, cx: &App) -> bool {
@@ -359,16 +393,7 @@ impl ApiTester {
                 !input_text_equals(&self.url, baseline.request.url.as_str(), cx)
             }
             RequestDirtyPart::Headers => {
-                self.headers.len() != baseline.request.headers.len()
-                    || self
-                        .headers
-                        .iter()
-                        .zip(&baseline.request.headers)
-                        .any(|(current, saved)| {
-                            current.enabled != saved.enabled
-                                || !input_text_equals(&current.name, saved.name.as_str(), cx)
-                                || !input_text_equals(&current.value, saved.value.as_str(), cx)
-                        })
+                self.normalized_header_entries(cx) != baseline.request.headers
             }
             RequestDirtyPart::RawBody => {
                 let input = self.body.read(cx).input_state();
@@ -379,17 +404,7 @@ impl ApiTester {
                 self.raw_body_language != baseline.request.raw_body_language
             }
             RequestDirtyPart::BodyFields => {
-                self.body_fields.len() != baseline.request.body_fields.len()
-                    || self
-                        .body_fields
-                        .iter()
-                        .zip(&baseline.request.body_fields)
-                        .any(|(current, saved)| {
-                            current.enabled != saved.enabled
-                                || current.kind != saved.kind
-                                || !input_text_equals(&current.name, saved.name.as_str(), cx)
-                                || !input_text_equals(&current.value, saved.value.as_str(), cx)
-                        })
+                self.normalized_body_fields(cx) != baseline.request.body_fields
             }
             RequestDirtyPart::PreScript => {
                 let input = self.pre_request_script.read(cx).input_state();
@@ -509,31 +524,14 @@ impl ApiTester {
         .detach();
     }
 
-    pub(super) fn load_template(
+    pub(super) fn load_template_unchecked(
         &mut self,
         template: RequestTemplate,
         collection_id: Option<String>,
         saved_request_id: Option<String>,
-        load_key: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.sending {
-            return;
-        }
-        if self.request_is_dirty()
-            && self.pending_request_load_key.as_deref() != Some(load_key.as_str())
-        {
-            self.pending_request_load_key = Some(load_key);
-            self.request_notice = Some(
-                "Unsaved request changes were kept. Click the same saved request or history entry again to discard them."
-                    .to_owned(),
-            );
-            self.request_error = None;
-            cx.notify();
-            return;
-        }
-
         self.request_dirty.begin_hydration();
         let RequestTemplate { request, scripts } = template;
         self.body_mode = request.body_mode;
@@ -622,7 +620,6 @@ impl ApiTester {
         self.refresh_variable_intelligence(cx);
         self.loaded_request_baseline = self.request_template(cx);
         self.request_dirty.end_hydration();
-        self.pending_request_load_key = None;
         self.request_notice = None;
         self.hide_preview(cx);
         cx.notify();

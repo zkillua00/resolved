@@ -21,6 +21,10 @@ WKWebView through `gpui-wry` only when the Preview tab is selected.
 - Reusable code editors with line numbers and tree-sitter syntax highlighting
 - Pretty JSON, content-aware response highlighting, and clipboard copy
 - Sandboxed JavaScript pre-request and post-response scripts
+- Persistent request tabs with independent drafts, dirty-close protection, and
+  restoration across launches
+- Nested collection folders with search-preserved ancestry, request moves, and
+  safe folder reparenting
 - Persistent collections, saved requests, environments, and secret variables
 - Request identity and Save/Update actions beside the main request editor
 - Direct active-environment switching from the title bar
@@ -81,23 +85,32 @@ other custom headers remain untouched.
 
 ## Collections and environments
 
-A collection contains named request templates, including their headers, body,
-and scripts. Environments contain enabled or disabled key/value variables; one
-environment can be active at a time. The current collection/request identity
-and Save/Update actions stay visible above the request editor. Modified requests
-are marked, and loading another saved request or history entry requires a
-second click before unsaved edits are discarded. The title bar environment menu
-switches the active environment without opening its editor. Unsaved edits to
-the active environment are visibly marked and must be saved or reverted before
-sending, so the values on screen cannot silently differ from the request.
+A collection contains nested folders and named request templates, including
+their headers, body, and scripts. Folder search retains the matching request's
+ancestor path, and folders can be renamed, moved under another valid folder, or
+returned to the collection root. Environments contain enabled or disabled
+key/value variables; one environment can be active at a time.
+
+Each open request has its own persistent tab, draft, saved-request identity,
+response state for the current run, and modified indicator. Switching tabs
+snapshots the active editor without discarding another tab's pending changes.
+Closing a dirty tab asks before discarding it, and quitting flushes the current
+draft immediately. Workspace changes that also change a tab's saved identity or
+folder are committed together in one SQLite transaction.
+
+The current collection/folder/request breadcrumb and Save/Update actions stay
+visible above the request editor. The title bar environment menu switches the
+active environment without opening its editor. Unsaved edits to the active
+environment are visibly marked and must be saved or reverted before sending, so
+the values on screen cannot silently differ from the request.
 Marking a variable as secret masks it in the editor and includes its value in
 script and network diagnostic redaction.
 History stores the effective outgoing request as a sanitized sent snapshot,
 redacting known secrets and sensitive fields in URLs, headers, JSON/form bodies,
 and errors. Loading history restores that sent snapshot without scripts; use a
 saved request when placeholder-preserving scripts and templates are required.
-Collection, environment, saved-request, and history deletion require a second
-confirmation click.
+Collection and folder deletion use name-confirmation modals; request,
+environment, and history deletion use explicit confirmation.
 
 Enabled variables from the active environment are expanded immediately before
 the network request:
@@ -217,15 +230,16 @@ State is stored in the macOS local application-data directory under
 
 The database uses foreign keys, WAL mode, a short bounded busy timeout, explicit
 forward-only schema migrations, normalized body-field tables, transactional
-aggregate writes, and a startup integrity check. Schema v2 migrates earlier
-saved requests and history to Raw/JSON body metadata without losing their body
-text. It is embedded behind a storage interface; there is no localhost database
-server or open port. A process-level workspace lock rejects a second app
-instance so stale in-memory aggregates cannot overwrite each other. Existing
-`history.json` and `workspace.json` files from earlier builds are imported
-independently once and retained as untouched backups. Loading a redacted history
-entry leaves its sensitive value blank and disabled rather than putting the
-redaction marker into a request.
+aggregate writes, and a startup integrity check. Schema v2 adds request-body
+metadata, schema v3 adds nested collection folders, and schema v4 adds
+persistent request-tab state; earlier rows migrate without losing request
+content. It is embedded behind a storage interface; there is no localhost
+database server or open port. A process-level workspace lock rejects a second
+app instance so stale in-memory aggregates cannot overwrite each other.
+Existing `history.json` and `workspace.json` files from earlier builds are
+imported independently once and retained as untouched backups. Loading a
+redacted history entry leaves its sensitive value blank and disabled rather
+than putting the redaction marker into a request.
 
 Secret environment values are masked in the UI and redacted from diagnostics,
 but the SQLite database is not encrypted. Multipart file paths are also ordinary
@@ -285,9 +299,10 @@ scripts/cargo.sh clippy --all-targets --all-features -- -D warnings
 The test suite covers request validation, raw/none/URL-encoded/multipart wire
 serialization, file upload errors, a real loopback HTTP exchange, response
 formatting, reusable editor configuration, performance sampling, SQLite
-migrations/transactions/legacy import, workspace persistence, variable
-resolution across structured bodies, bounded script execution, history
-bounds/persistence/redaction, and preview detection and CSP injection. A
+migrations/transactions/legacy import, nested-folder validation and
+persistence, request-tab identity/dirty semantics, atomic workspace/tab saves,
+variable resolution across structured bodies, bounded script execution,
+history bounds/persistence/redaction, and preview detection and CSP injection. A
 cohesive smoke test also carries one saved request through SQLite reload,
 pre-script mutation, environment resolution, a real loopback request,
 post-script tests/mutation, and sanitized history reload. Loopback tests may

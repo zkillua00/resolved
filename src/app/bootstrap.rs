@@ -1,3 +1,4 @@
+use super::request_tab_reconciliation::reconcile_restored_request_tabs;
 use super::*;
 
 impl ApiTester {
@@ -115,8 +116,11 @@ impl ApiTester {
             workspace,
             history_warning,
             workspace_warning,
+            request_tabs,
+            mut request_tabs_warning,
             history_writable,
             workspace_writable,
+            request_tabs_writable,
         ) = match database_store.initialize() {
             Ok(()) => {
                 let import_warning = database_store
@@ -145,6 +149,17 @@ impl ApiTester {
                             false,
                         ),
                     };
+                let (request_tabs, request_tabs_warning, request_tabs_writable) =
+                    match database_store.load_request_tabs() {
+                        Ok(request_tabs) => (request_tabs, None, true),
+                        Err(error) => (
+                            RequestTabs::default(),
+                            Some(format!(
+                                "Request tabs could not be restored and will not be overwritten: {error}"
+                            )),
+                            false,
+                        ),
+                    };
                 let workspace_warning = match (workspace_load_warning, import_warning) {
                     (Some(load), Some(import)) => Some(format!("{load}\n{import}")),
                     (Some(load), None) => Some(load),
@@ -156,8 +171,11 @@ impl ApiTester {
                     workspace,
                     history_warning,
                     workspace_warning,
+                    request_tabs,
+                    request_tabs_warning,
                     history_writable,
                     workspace_writable,
+                    request_tabs_writable,
                 )
             }
             Err(error) => (
@@ -169,14 +187,63 @@ impl ApiTester {
                 Some(format!(
                     "Database could not be opened and workspace will not be overwritten: {error}"
                 )),
+                RequestTabs::default(),
+                Some(format!(
+                    "Database could not be opened and request tabs will not be overwritten: {error}"
+                )),
+                false,
                 false,
                 false,
             ),
         };
-        let selected_collection_id = workspace
-            .collections
-            .first()
-            .map(|collection| collection.id.clone());
+        let mut last_persisted_request_tabs = request_tabs.clone();
+        let mut request_tabs = request_tabs;
+        let request_tabs_changed =
+            reconcile_restored_request_tabs(&mut request_tabs, &workspace, workspace_writable);
+        if request_tabs_changed && request_tabs_writable {
+            match database_store.save_request_tabs(&request_tabs) {
+                Ok(()) => last_persisted_request_tabs = request_tabs.clone(),
+                Err(error) => {
+                    request_tabs_warning =
+                        Some(format!("Repaired request tabs could not be saved: {error}"));
+                }
+            }
+        }
+
+        let selected_collection_id = request_tabs
+            .active()
+            .association()
+            .collection_id()
+            .and_then(|id| workspace.collection(id))
+            .map(|collection| collection.id.clone())
+            .or_else(|| {
+                workspace
+                    .collections
+                    .first()
+                    .map(|collection| collection.id.clone())
+            });
+        let selected_folder_id = request_tabs
+            .active()
+            .association()
+            .folder_id()
+            .filter(|folder_id| {
+                selected_collection_id
+                    .as_deref()
+                    .and_then(|id| workspace.collection(id))
+                    .is_some_and(|collection| collection.folder(folder_id).is_some())
+            })
+            .map(ToOwned::to_owned);
+        let expanded_folder_ids = selected_collection_id
+            .as_deref()
+            .and_then(|collection_id| workspace.collection(collection_id))
+            .and_then(|collection| {
+                selected_folder_id
+                    .as_deref()
+                    .and_then(|folder_id| collection.folder_path_ids(folder_id).ok())
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         update_script_variable_catalog(&script_variable_catalog, &workspace);
         template_variable_catalog
             .borrow_mut()
@@ -211,10 +278,11 @@ impl ApiTester {
                 .placeholder("Collection name")
                 .default_value(selected_collection_name)
         });
+        let folder_name = cx.new(|cx| InputState::new(window, cx).placeholder("Folder name"));
         let collection_delete_confirmation =
             cx.new(|cx| InputState::new(window, cx).placeholder("Type the collection name"));
         let saved_request_name =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Request name"));
+            cx.new(|cx| InputState::new(window, cx).placeholder(DEFAULT_REQUEST_TAB_TITLE));
         let environment_name = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Environment name")
@@ -290,6 +358,22 @@ impl ApiTester {
                     cx.notify();
                 }
             });
+        let folder_name_subscription =
+            cx.subscribe_in(&folder_name, window, |this, _, event, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.finish_collection_folder_rename(cx);
+                }
+            });
+        let saved_request_name_subscription =
+            cx.subscribe(&saved_request_name, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.update_active_request_tab_title(cx);
+                }
+            });
+        let quit_subscription = cx.on_app_quit(|this, cx| {
+            this.flush_request_tabs(cx);
+            async {}
+        });
 
         let mut this = Self {
             method,
@@ -304,7 +388,7 @@ impl ApiTester {
             raw_body_language: RawBodyLanguage::Json,
             body_fields: Vec::new(),
             next_body_field_id: 0,
-            request_tab: RequestTab::Headers,
+            request_pane: RequestPane::Headers,
             response_tab: ResponseTab::Body,
             pretty_body: true,
             sending: false,
@@ -331,18 +415,27 @@ impl ApiTester {
             sidebar_tab: SidebarTab::Collections,
             navigation_compact: false,
             selected_collection_id,
+            selected_folder_id,
             active_saved_request_id: None,
             detached_request_dirty: false,
             request_dirty: RequestDirtyState::default(),
             loaded_request_baseline: RequestTemplate::default(),
-            pending_request_load_key: None,
             request_notice: None,
+            request_tabs,
+            last_persisted_request_tabs,
+            request_tab_runtime: HashMap::new(),
+            request_tabs_persist_task: None,
+            request_tabs_warning,
+            request_tabs_writable,
             selected_environment_id,
             collection_search,
             environment_search,
             expanded_collection_ids,
+            expanded_folder_ids,
             renaming_collection_id: None,
+            renaming_folder_id: None,
             collection_name,
+            folder_name,
             collection_delete_confirmation,
             saved_request_name,
             environment_name,
@@ -364,12 +457,16 @@ impl ApiTester {
                 pre_request_subscription,
                 post_response_subscription,
                 collection_name_subscription,
+                folder_name_subscription,
+                saved_request_name_subscription,
+                quit_subscription,
             ],
         };
         this.push_header_row("", "", true, window, cx);
         this.refresh_variable_intelligence(cx);
         this.loaded_request_baseline = this.request_template(cx);
         this.request_dirty.clear();
+        this.restore_active_request_tab(window, cx);
         this
     }
 }

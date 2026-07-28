@@ -50,7 +50,6 @@ impl ApiTester {
             return;
         }
 
-        self.pending_request_load_key = None;
         self.request_notice = None;
         let template = self.request_template(cx);
         let environment_id = self.workspace.active_environment_id.clone();

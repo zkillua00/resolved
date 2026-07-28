@@ -38,7 +38,9 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) {
         if self.selected_collection_id.as_deref() == Some(&id) {
+            self.selected_folder_id = None;
             self.sidebar_tab = SidebarTab::Collections;
+            self.update_active_unsaved_request_tab_location(Some(id), None, cx);
             cx.notify();
             return;
         }
@@ -46,15 +48,16 @@ impl ApiTester {
             return;
         };
         self.selected_collection_id = Some(id);
-        if self.active_saved_request_id.take().is_some() {
-            self.detached_request_dirty = true;
-        }
+        self.selected_folder_id = None;
         self.collection_name.update(cx, |input, cx| {
             input.set_value(collection.name.clone(), window, cx)
         });
-        self.saved_request_name
-            .update(cx, |input, cx| input.set_value("", window, cx));
         self.sidebar_tab = SidebarTab::Collections;
+        self.update_active_unsaved_request_tab_location(
+            self.selected_collection_id.clone(),
+            None,
+            cx,
+        );
         cx.notify();
     }
 
@@ -216,31 +219,21 @@ impl ApiTester {
             return false;
         }
         let deleting_selected = self.selected_collection_id.as_deref() == Some(id.as_str());
-        let deleting_active_request =
-            self.active_saved_request_id
-                .as_deref()
-                .is_some_and(|request_id| {
-                    self.workspace.collection(&id).is_some_and(|collection| {
-                        collection
-                            .requests
-                            .iter()
-                            .any(|request| request.id == request_id)
-                    })
-                });
         let mut candidate = self.workspace.clone();
         match candidate.remove_collection(&id) {
             Ok(_) => {
-                if self.commit_workspace(candidate).is_ok() {
+                self.snapshot_active_request_tab(cx);
+                let mut candidate_request_tabs = self.request_tabs.clone();
+                candidate_request_tabs.detach_collection(&id);
+                if self
+                    .commit_workspace_and_request_tabs(candidate, candidate_request_tabs)
+                    .is_ok()
+                {
                     self.expanded_collection_ids.remove(&id);
                     if self.renaming_collection_id.as_deref() == Some(id.as_str()) {
                         self.renaming_collection_id = None;
                     }
-                    if deleting_active_request {
-                        self.active_saved_request_id = None;
-                        self.detached_request_dirty = true;
-                        self.saved_request_name
-                            .update(cx, |input, cx| input.set_value("", window, cx));
-                    }
+                    self.sync_active_request_tab_identity();
                     if deleting_selected {
                         self.selected_collection_id = self
                             .workspace
@@ -255,6 +248,7 @@ impl ApiTester {
                             .unwrap_or_default();
                         self.collection_name
                             .update(cx, |input, cx| input.set_value(name, window, cx));
+                        self.selected_folder_id = None;
                     }
                     self.request_notice = Some("Collection deleted.".to_owned());
                     cx.notify();
@@ -276,12 +270,31 @@ impl ApiTester {
         if !self.workspace_writable {
             return;
         }
-        let Some(collection_id) = self.selected_collection_id.clone() else {
+        let active_association = self.request_tabs.active().association().clone();
+        let update_id = (!save_as)
+            .then(|| active_association.saved_request_id().map(ToOwned::to_owned))
+            .flatten();
+        let collection_id = if update_id.is_some() {
+            active_association.collection_id().map(ToOwned::to_owned)
+        } else {
+            self.selected_collection_id
+                .clone()
+                .or_else(|| active_association.collection_id().map(ToOwned::to_owned))
+        };
+        let Some(collection_id) = collection_id else {
             self.workspace_warning =
                 Some("Create or select a collection before saving this request.".to_owned());
             cx.notify();
             return;
         };
+        let folder_id = if update_id.is_some() {
+            active_association.folder_id().map(ToOwned::to_owned)
+        } else if self.selected_collection_id.as_deref() == Some(collection_id.as_str()) {
+            self.selected_folder_id.clone()
+        } else {
+            active_association.folder_id().map(ToOwned::to_owned)
+        };
+        self.snapshot_active_request_tab(cx);
         let definition = self.request_template(cx);
         let entered_name = self.saved_request_name.read(cx).value().trim().to_owned();
         let name = if entered_name.is_empty() {
@@ -290,16 +303,6 @@ impl ApiTester {
             entered_name
         };
 
-        let update_id = (!save_as)
-            .then(|| self.active_saved_request_id.clone())
-            .flatten()
-            .filter(|id| {
-                self.workspace
-                    .collection(&collection_id)
-                    .is_some_and(|collection| {
-                        collection.requests.iter().any(|request| request.id == *id)
-                    })
-            });
         let mut candidate = self.workspace.clone();
         let result = if let Some(id) = update_id {
             candidate
@@ -307,24 +310,52 @@ impl ApiTester {
                 .and_then(|()| candidate.rename_saved_request(&collection_id, &id, name))
                 .map(|()| id)
         } else {
-            candidate.create_saved_request(&collection_id, name, definition)
+            candidate.create_saved_request_in_folder(
+                &collection_id,
+                folder_id.as_deref(),
+                name,
+                definition,
+            )
         };
 
         match result {
             Ok(id) => {
-                if self.commit_workspace(candidate).is_ok() {
-                    self.active_saved_request_id = Some(id.clone());
-                    let name = self
-                        .workspace
-                        .saved_request(&id)
-                        .map(|(_, request)| request.name.clone())
-                        .unwrap_or_default();
+                let saved = candidate
+                    .saved_request(&id)
+                    .map(|(_, request)| (request.name.clone(), request.folder_id.clone()));
+                let Some((saved_name, saved_folder_id)) = saved else {
+                    self.workspace_warning =
+                        Some("Saved request disappeared before it could be persisted.".to_owned());
+                    cx.notify();
+                    return;
+                };
+                let mut candidate_request_tabs = self.request_tabs.clone();
+                candidate_request_tabs.active_mut().mark_saved(
+                    saved_name.clone(),
+                    RequestTabAssociation::new(
+                        saved_folder_id,
+                        Some(collection_id.clone()),
+                        Some(id.clone()),
+                    ),
+                );
+                if self
+                    .commit_workspace_and_request_tabs(candidate, candidate_request_tabs)
+                    .is_ok()
+                {
+                    self.request_dirty.begin_hydration();
                     self.saved_request_name
-                        .update(cx, |input, cx| input.set_value(name, window, cx));
-                    self.loaded_request_baseline = self.request_template(cx);
-                    self.detached_request_dirty = false;
+                        .update(cx, |input, cx| input.set_value(saved_name, window, cx));
+                    self.request_dirty.end_hydration();
+                    self.loaded_request_baseline =
+                        self.request_tabs.active().baseline_template().clone();
                     self.request_dirty.clear();
-                    self.pending_request_load_key = None;
+                    self.sync_active_request_tab_identity();
+                    debug_assert_eq!(
+                        self.workspace
+                            .saved_request(&id)
+                            .map(|(_, request)| request.definition.clone()),
+                        Some(self.loaded_request_baseline.clone()),
+                    );
                     self.request_notice = None;
                 }
             }
@@ -421,10 +452,17 @@ impl ApiTester {
         let mut candidate = self.workspace.clone();
         match candidate.rename_saved_request(&collection_id, &request_id, name.clone()) {
             Ok(()) => {
-                if self.commit_workspace(candidate).is_ok() {
+                self.snapshot_active_request_tab(cx);
+                let mut candidate_request_tabs = self.request_tabs.clone();
+                candidate_request_tabs.rename_saved_request(&request_id, &name);
+                if self
+                    .commit_workspace_and_request_tabs(candidate, candidate_request_tabs)
+                    .is_ok()
+                {
                     if self.active_saved_request_id.as_deref() == Some(request_id.as_str()) {
+                        let active_title = self.request_tabs.active().title().to_owned();
                         self.saved_request_name
-                            .update(cx, |input, cx| input.set_value(name.clone(), window, cx));
+                            .update(cx, |input, cx| input.set_value(active_title, window, cx));
                     }
                     self.request_notice = Some(format!("Renamed request to “{name}”."));
                     cx.notify();
@@ -569,7 +607,7 @@ impl ApiTester {
         &mut self,
         collection_id: String,
         request_id: String,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         if !self.workspace_writable || self.sending {
@@ -581,12 +619,15 @@ impl ApiTester {
         let mut candidate = self.workspace.clone();
         match candidate.remove_saved_request(&collection_id, &request_id) {
             Ok(_) => {
-                if self.commit_workspace(candidate).is_ok() {
+                self.snapshot_active_request_tab(cx);
+                let mut candidate_request_tabs = self.request_tabs.clone();
+                candidate_request_tabs.detach_saved_request(&request_id);
+                if self
+                    .commit_workspace_and_request_tabs(candidate, candidate_request_tabs)
+                    .is_ok()
+                {
                     if self.active_saved_request_id.as_deref() == Some(request_id.as_str()) {
-                        self.active_saved_request_id = None;
-                        self.detached_request_dirty = true;
-                        self.saved_request_name
-                            .update(cx, |input, cx| input.set_value("", window, cx));
+                        self.sync_active_request_tab_identity();
                     }
                     self.request_notice = Some("Request deleted.".to_owned());
                     cx.notify();

@@ -9,13 +9,16 @@ impl ApiTester {
     ) -> AnyElement {
         let collection = &self.workspace.collections[collection_index];
         let collection_id = collection.id.clone();
-        let selected = self.selected_collection_id.as_deref() == Some(&collection.id);
+        let selected = self.selected_collection_id.as_deref() == Some(&collection.id)
+            && self.selected_folder_id.is_none();
         let renaming = self.renaming_collection_id.as_deref() == Some(&collection.id);
         let toggle_id = collection_id.clone();
         let select_id = collection_id.clone();
         let rename_id = collection_id.clone();
+        let new_folder_id = collection_id.clone();
         let delete_id = collection_id;
         let this = cx.entity().downgrade();
+        let new_folder_this = this.clone();
         let rename_this = this.clone();
         let delete_this = this;
 
@@ -114,14 +117,17 @@ impl ApiTester {
                         .dropdown_menu(move |menu, _, _| {
                             let rename_id = rename_id.clone();
                             let rename_this = rename_this.clone();
+                            let new_folder_id = new_folder_id.clone();
+                            let new_folder_this = new_folder_this.clone();
                             let delete_id = delete_id.clone();
                             let delete_this = delete_this.clone();
-                            menu.item(PopupMenuItem::new("Rename").on_click(
+                            menu.item(PopupMenuItem::new("New folder").on_click(
                                 move |_, window, cx| {
-                                    if let Some(this) = rename_this.upgrade() {
+                                    if let Some(this) = new_folder_this.upgrade() {
                                         this.update(cx, |this, cx| {
-                                            this.begin_collection_rename(
-                                                rename_id.clone(),
+                                            this.create_collection_folder(
+                                                new_folder_id.clone(),
+                                                None,
                                                 window,
                                                 cx,
                                             );
@@ -129,6 +135,14 @@ impl ApiTester {
                                     }
                                 },
                             ))
+                            .separator()
+                            .item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
+                                if let Some(this) = rename_this.upgrade() {
+                                    this.update(cx, |this, cx| {
+                                        this.begin_collection_rename(rename_id.clone(), window, cx);
+                                    });
+                                }
+                            }))
                             .item(
                                 PopupMenuItem::new("Delete…").on_click(move |_, window, cx| {
                                     let delete_this = delete_this.clone();

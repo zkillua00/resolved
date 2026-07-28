@@ -20,14 +20,15 @@ use thiserror::Error;
 use super::{
     history::{DEFAULT_HISTORY_LIMIT, HistoryEntry, RequestHistory, ResponseSummary},
     request::{BodyField, BodyFieldKind, BodyMode, HeaderEntry, RawBodyLanguage, RequestDraft},
+    request_tabs::RequestTabs,
     template::RequestTemplate,
     workspace::{
-        Collection, Environment, EnvironmentVariable, RequestScripts, SavedRequest,
-        WORKSPACE_FILE_VERSION, Workspace, WorkspaceValidationError,
+        Collection, CollectionFolder, Environment, EnvironmentVariable, RequestScripts,
+        SavedRequest, WORKSPACE_FILE_VERSION, Workspace, WorkspaceValidationError,
     },
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 2;
+const CURRENT_SCHEMA_VERSION: i64 = 4;
 const LEGACY_HISTORY_FILE_VERSION: u32 = 1;
 const LEGACY_HISTORY_IMPORT_MARKER: &str = "history-json-v1";
 const LEGACY_WORKSPACE_IMPORT_MARKER: &str = "workspace-json-v1";
@@ -212,6 +213,38 @@ CREATE TABLE history_body_fields (
     updated_at          INTEGER NOT NULL,
     version             INTEGER NOT NULL CHECK (version >= 1),
     UNIQUE(history_entry_id, position)
+);
+"#;
+
+const MIGRATION_3: &str = r#"
+CREATE TABLE collection_folders (
+    id                  TEXT PRIMARY KEY NOT NULL,
+    collection_id       TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+    parent_folder_id    TEXT REFERENCES collection_folders(id) ON DELETE CASCADE,
+    name                TEXT NOT NULL CHECK (length(trim(name)) > 0),
+    position            INTEGER NOT NULL CHECK (position >= 0),
+    created_at          INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL,
+    version             INTEGER NOT NULL CHECK (version >= 1),
+    CHECK (parent_folder_id IS NULL OR parent_folder_id <> id)
+);
+
+CREATE INDEX collection_folders_collection_parent_position_idx
+    ON collection_folders(collection_id, parent_folder_id, position, id);
+
+ALTER TABLE saved_requests
+ADD COLUMN folder_id TEXT REFERENCES collection_folders(id) ON DELETE CASCADE;
+
+CREATE INDEX saved_requests_collection_folder_position_idx
+    ON saved_requests(collection_id, folder_id, position, id);
+"#;
+
+const MIGRATION_4: &str = r#"
+CREATE TABLE request_tab_state (
+    singleton   INTEGER PRIMARY KEY CHECK (singleton = 1),
+    state_json  TEXT NOT NULL,
+    updated_at  INTEGER NOT NULL,
+    version     INTEGER NOT NULL CHECK (version >= 1)
 );
 "#;
 
@@ -413,6 +446,50 @@ impl DatabaseStore {
         let mut connection = self.open_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         save_workspace_tx(&transaction, workspace)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn save_workspace_and_request_tabs(
+        &self,
+        workspace: &Workspace,
+        request_tabs: &RequestTabs,
+    ) -> Result<(), DatabaseError> {
+        workspace.validate()?;
+        let state_json = serialize_request_tabs(request_tabs)?;
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        save_workspace_tx(&transaction, workspace)?;
+        save_request_tabs_tx(&transaction, &state_json)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn load_request_tabs(&self) -> Result<RequestTabs, DatabaseError> {
+        let connection = self.open_connection()?;
+        let state_json = connection
+            .query_row(
+                "SELECT state_json FROM request_tab_state WHERE singleton = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match state_json {
+            Some(state_json) => {
+                serde_json::from_str(&state_json).map_err(|error| DatabaseError::CorruptData {
+                    field: "request tab state",
+                    value: error.to_string(),
+                })
+            }
+            None => Ok(RequestTabs::default()),
+        }
+    }
+
+    pub fn save_request_tabs(&self, request_tabs: &RequestTabs) -> Result<(), DatabaseError> {
+        let state_json = serialize_request_tabs(request_tabs)?;
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        save_request_tabs_tx(&transaction, &state_json)?;
         transaction.commit()?;
         Ok(())
     }
@@ -719,6 +796,8 @@ fn migrate(connection: &mut Connection) -> Result<(), DatabaseError> {
         match next {
             1 => transaction.execute_batch(MIGRATION_1)?,
             2 => transaction.execute_batch(MIGRATION_2)?,
+            3 => transaction.execute_batch(MIGRATION_3)?,
+            4 => transaction.execute_batch(MIGRATION_4)?,
             _ => {
                 return Err(DatabaseError::UnsupportedSchemaVersion {
                     found: next,
@@ -744,6 +823,7 @@ fn save_workspace_tx(
     workspace.validate()?;
     let saved_at = now_micros();
     let mut collection_ids = HashSet::new();
+    let mut folder_ids = HashSet::new();
     let mut saved_request_ids = HashSet::new();
 
     for (collection_position, collection) in workspace.collections.iter().enumerate() {
@@ -765,20 +845,79 @@ fn save_workspace_tx(
             ],
         )?;
 
+        // A folder may appear after its children in the flat domain vector,
+        // while SQLite's immediate self-referential foreign key requires the
+        // parent row to exist first. Persist topologically but retain the
+        // vector index as the durable display position.
+        let mut pending_folders = collection.folders.iter().enumerate().collect::<Vec<_>>();
+        let mut persisted_folder_ids = HashSet::new();
+        while !pending_folders.is_empty() {
+            let pending_count = pending_folders.len();
+            let mut deferred_folders = Vec::new();
+
+            for (folder_position, folder) in pending_folders {
+                let parent_is_ready = folder
+                    .parent_folder_id
+                    .as_deref()
+                    .map(|parent_id| persisted_folder_ids.contains(parent_id))
+                    .unwrap_or(true);
+                if !parent_is_ready {
+                    deferred_folders.push((folder_position, folder));
+                    continue;
+                }
+
+                transaction.execute(
+                    "INSERT INTO collection_folders(
+                        id, collection_id, parent_folder_id, name, position,
+                        created_at, updated_at, version
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, 1)
+                     ON CONFLICT(id) DO UPDATE SET
+                        collection_id = excluded.collection_id,
+                        parent_folder_id = excluded.parent_folder_id,
+                        name = excluded.name,
+                        position = excluded.position,
+                        updated_at = excluded.updated_at,
+                        version = collection_folders.version + 1",
+                    params![
+                        &folder.id,
+                        &collection.id,
+                        folder.parent_folder_id.as_deref(),
+                        &folder.name,
+                        to_i64(folder_position, "collection folder position")?,
+                        saved_at,
+                    ],
+                )?;
+                persisted_folder_ids.insert(folder.id.as_str());
+                folder_ids.insert(folder.id.clone());
+            }
+
+            if deferred_folders.len() == pending_count {
+                // `Workspace::validate` rejects dangling parents and cycles,
+                // so reaching this branch means the validated domain and the
+                // persistence contract have drifted apart.
+                return Err(DatabaseError::CorruptData {
+                    field: "collection folder hierarchy",
+                    value: collection.id.clone(),
+                });
+            }
+            pending_folders = deferred_folders;
+        }
+
         for (request_position, saved_request) in collection.requests.iter().enumerate() {
             saved_request_ids.insert(saved_request.id.clone());
             let request = &saved_request.definition.request;
             let scripts = &saved_request.definition.scripts;
             transaction.execute(
                 "INSERT INTO saved_requests(
-                    id, collection_id, name, position, method, url, body,
+                    id, collection_id, folder_id, name, position, method, url, body,
                     body_mode, raw_body_language, pre_request, post_response,
                     created_at, updated_at, version
                  ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 1
                  )
                  ON CONFLICT(id) DO UPDATE SET
                     collection_id = excluded.collection_id,
+                    folder_id = excluded.folder_id,
                     name = excluded.name,
                     position = excluded.position,
                     method = excluded.method,
@@ -794,6 +933,7 @@ fn save_workspace_tx(
                 params![
                     &saved_request.id,
                     &collection.id,
+                    saved_request.folder_id.as_deref(),
                     &saved_request.name,
                     to_i64(request_position, "saved request position")?,
                     &request.method,
@@ -822,6 +962,12 @@ fn save_workspace_tx(
         "SELECT id FROM saved_requests",
         "DELETE FROM saved_requests WHERE id = ?1",
         &saved_request_ids,
+    )?;
+    delete_missing_ids(
+        transaction,
+        "SELECT id FROM collection_folders",
+        "DELETE FROM collection_folders WHERE id = ?1",
+        &folder_ids,
     )?;
     delete_missing_ids(
         transaction,
@@ -902,6 +1048,29 @@ fn save_workspace_tx(
             updated_at = excluded.updated_at,
             version = metadata.version + 1",
         params![workspace.active_environment_id.as_deref(), saved_at],
+    )?;
+    Ok(())
+}
+
+fn serialize_request_tabs(request_tabs: &RequestTabs) -> Result<String, DatabaseError> {
+    serde_json::to_string(request_tabs).map_err(|error| DatabaseError::CorruptData {
+        field: "request tab state",
+        value: error.to_string(),
+    })
+}
+
+fn save_request_tabs_tx(
+    transaction: &Transaction<'_>,
+    state_json: &str,
+) -> Result<(), DatabaseError> {
+    transaction.execute(
+        "INSERT INTO request_tab_state(singleton, state_json, updated_at, version)
+         VALUES (1, ?1, ?2, 1)
+         ON CONFLICT(singleton) DO UPDATE SET
+            state_json = excluded.state_json,
+            updated_at = excluded.updated_at,
+            version = request_tab_state.version + 1",
+        params![state_json, now_micros()],
     )?;
     Ok(())
 }
@@ -1002,11 +1171,30 @@ fn load_workspace_tx(transaction: &Transaction<'_>) -> Result<Workspace, Databas
 
     let mut collections = Vec::with_capacity(collection_rows.len());
     for (collection_id, name) in collection_rows {
+        let folder_rows = {
+            let mut statement = transaction.prepare(
+                "SELECT id, name, parent_folder_id
+                 FROM collection_folders
+                 WHERE collection_id = ?1
+                 ORDER BY position ASC, id ASC",
+            )?;
+            statement
+                .query_map(params![&collection_id], |row| {
+                    Ok(CollectionFolder {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        parent_folder_id: row.get(2)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
         let request_rows = {
             let mut statement = transaction.prepare(
                 "SELECT
-                    id, name, method, url, body, body_mode, raw_body_language,
-                    pre_request, post_response, created_at, updated_at
+                    id, folder_id, name, method, url, body, body_mode,
+                    raw_body_language, pre_request, post_response,
+                    created_at, updated_at
                  FROM saved_requests
                  WHERE collection_id = ?1
                  ORDER BY position ASC, id ASC",
@@ -1015,7 +1203,7 @@ fn load_workspace_tx(transaction: &Transaction<'_>) -> Result<Workspace, Databas
                 .query_map(params![&collection_id], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
@@ -1023,8 +1211,9 @@ fn load_workspace_tx(transaction: &Transaction<'_>) -> Result<Workspace, Databas
                         row.get::<_, String>(6)?,
                         row.get::<_, String>(7)?,
                         row.get::<_, String>(8)?,
-                        row.get::<_, i64>(9)?,
+                        row.get::<_, String>(9)?,
                         row.get::<_, i64>(10)?,
+                        row.get::<_, i64>(11)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?
@@ -1033,6 +1222,7 @@ fn load_workspace_tx(transaction: &Transaction<'_>) -> Result<Workspace, Databas
         let mut requests = Vec::with_capacity(request_rows.len());
         for (
             request_id,
+            folder_id,
             request_name,
             method,
             url,
@@ -1066,6 +1256,7 @@ fn load_workspace_tx(transaction: &Transaction<'_>) -> Result<Workspace, Databas
             )?;
             requests.push(SavedRequest {
                 id: request_id,
+                folder_id,
                 name: request_name,
                 definition: RequestTemplate {
                     request: RequestDraft {
@@ -1093,6 +1284,7 @@ fn load_workspace_tx(transaction: &Transaction<'_>) -> Result<Workspace, Databas
         collections.push(Collection {
             id: collection_id,
             name,
+            folders: folder_rows,
             requests,
         });
     }
@@ -1770,8 +1962,21 @@ mod tests {
             collections: vec![Collection {
                 id: "collection-1".to_owned(),
                 name: "Development".to_owned(),
+                folders: vec![
+                    CollectionFolder {
+                        id: "folder-1".to_owned(),
+                        name: "Users".to_owned(),
+                        parent_folder_id: None,
+                    },
+                    CollectionFolder {
+                        id: "folder-2".to_owned(),
+                        name: "Administration".to_owned(),
+                        parent_folder_id: Some("folder-1".to_owned()),
+                    },
+                ],
                 requests: vec![SavedRequest {
                     id: "request-1".to_owned(),
+                    folder_id: Some("folder-2".to_owned()),
                     name: "Create user".to_owned(),
                     definition: RequestTemplate {
                         request: RequestDraft {
@@ -1968,6 +2173,7 @@ mod tests {
                 .unwrap()
         };
         for table in [
+            "collection_folders",
             "collections",
             "environment_variables",
             "environments",
@@ -1976,6 +2182,7 @@ mod tests {
             "history_headers",
             "metadata",
             "migration_markers",
+            "request_tab_state",
             "saved_request_body_fields",
             "saved_request_headers",
             "saved_requests",
@@ -1983,14 +2190,52 @@ mod tests {
         ] {
             assert!(tables.contains(table), "missing table {table}");
         }
-        for table in ["saved_request_body_fields", "history_body_fields"] {
-            let on_delete: String = connection
-                .query_row(&format!("PRAGMA foreign_key_list({table})"), [], |row| {
-                    row.get(6)
-                })
+
+        let assert_cascade = |table: &str, column: &str, target: &str| {
+            let mut statement = connection
+                .prepare(&format!("PRAGMA foreign_key_list({table})"))
                 .unwrap();
-            assert_eq!(on_delete, "CASCADE", "{table} must cascade parent deletion");
-        }
+            let foreign_keys = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert!(
+                foreign_keys
+                    .iter()
+                    .any(
+                        |(foreign_table, foreign_column, on_delete)| foreign_table == target
+                            && foreign_column == column
+                            && on_delete == "CASCADE"
+                    ),
+                "{table}.{column} must cascade deletion from {target}; found {foreign_keys:?}"
+            );
+        };
+        assert_cascade("saved_requests", "collection_id", "collections");
+        assert_cascade("saved_requests", "folder_id", "collection_folders");
+        assert_cascade("collection_folders", "collection_id", "collections");
+        assert_cascade(
+            "collection_folders",
+            "parent_folder_id",
+            "collection_folders",
+        );
+        assert_cascade(
+            "saved_request_headers",
+            "saved_request_id",
+            "saved_requests",
+        );
+        assert_cascade(
+            "saved_request_body_fields",
+            "saved_request_id",
+            "saved_requests",
+        );
+        assert_cascade("history_body_fields", "history_entry_id", "history_entries");
     }
 
     #[test]
@@ -2072,6 +2317,13 @@ mod tests {
         assert_eq!(migrated_request.body_mode, BodyMode::Raw);
         assert_eq!(migrated_request.raw_body_language, RawBodyLanguage::Json);
         assert!(migrated_request.body_fields.is_empty());
+        let migrated_saved_request = migrated
+            .workspace
+            .saved_request("v1-request")
+            .expect("v1 saved request survives migration")
+            .1;
+        assert_eq!(migrated_saved_request.folder_id, None);
+        assert!(migrated.workspace.collections[0].folders.is_empty());
 
         let migrated_history = migrated
             .history
@@ -2102,16 +2354,16 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(schema_version, 2);
-        let saved_defaults: (String, String) = connection
+        assert_eq!(schema_version, CURRENT_SCHEMA_VERSION);
+        let saved_defaults: (String, String, Option<String>) = connection
             .query_row(
-                "SELECT body_mode, raw_body_language
+                "SELECT body_mode, raw_body_language, folder_id
                  FROM saved_requests WHERE id = 'v1-request'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        assert_eq!(saved_defaults, ("raw".to_owned(), "json".to_owned()));
+        assert_eq!(saved_defaults, ("raw".to_owned(), "json".to_owned(), None));
         let history_defaults: (String, String) = connection
             .query_row(
                 "SELECT body_mode, raw_body_language
@@ -2121,6 +2373,132 @@ mod tests {
             )
             .unwrap();
         assert_eq!(history_defaults, ("raw".to_owned(), "json".to_owned()));
+    }
+
+    #[test]
+    fn migrates_handcrafted_v2_requests_to_the_collection_root() {
+        let (_directory, store) = database();
+        let connection = Connection::open(store.path()).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE schema_version (
+                    singleton   INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    version     INTEGER NOT NULL CHECK (version >= 0),
+                    updated_at  INTEGER NOT NULL
+                 );
+                 INSERT INTO schema_version(singleton, version, updated_at)
+                 VALUES (1, 2, 1700000000000000);",
+            )
+            .unwrap();
+        connection.execute_batch(MIGRATION_1).unwrap();
+        connection.execute_batch(MIGRATION_2).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collections(
+                    id, name, position, created_at, updated_at, version
+                 ) VALUES (?1, ?2, 0, ?3, ?3, 1)",
+                params!["v2-collection", "V2 collection", 1_700_000_000_000_001_i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO saved_requests(
+                    id, collection_id, name, position, method, url, body,
+                    pre_request, post_response, created_at, updated_at, version,
+                    body_mode, raw_body_language
+                 ) VALUES (
+                    ?1, ?2, ?3, 0, ?4, ?5, ?6,
+                    '', '', ?7, ?7, 1, 'raw', 'json'
+                 )",
+                params![
+                    "v2-request",
+                    "v2-collection",
+                    "V2 request",
+                    "GET",
+                    "https://example.test/v2",
+                    "",
+                    1_700_000_000_000_002_i64,
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        store.initialize().unwrap();
+        let migrated = store.load_workspace().unwrap();
+        let collection = migrated.collection("v2-collection").unwrap();
+        assert!(collection.folders.is_empty());
+        assert_eq!(collection.requests.len(), 1);
+        assert_eq!(collection.requests[0].id, "v2-request");
+        assert_eq!(collection.requests[0].folder_id, None);
+        assert_eq!(
+            collection.requests[0].definition.request.url,
+            "https://example.test/v2"
+        );
+
+        let connection = store.open_connection().unwrap();
+        let schema_version: i64 = connection
+            .query_row(
+                "SELECT version FROM schema_version WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema_version, CURRENT_SCHEMA_VERSION);
+        let folder_id: Option<String> = connection
+            .query_row(
+                "SELECT folder_id FROM saved_requests WHERE id = 'v2-request'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(folder_id, None);
+    }
+
+    #[test]
+    fn migrates_handcrafted_v3_database_with_empty_request_tabs() {
+        let (_directory, store) = database();
+        let connection = Connection::open(store.path()).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE schema_version (
+                    singleton   INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    version     INTEGER NOT NULL CHECK (version >= 0),
+                    updated_at  INTEGER NOT NULL
+                 );
+                 INSERT INTO schema_version(singleton, version, updated_at)
+                 VALUES (1, 3, 1700000000000000);",
+            )
+            .unwrap();
+        connection.execute_batch(MIGRATION_1).unwrap();
+        connection.execute_batch(MIGRATION_2).unwrap();
+        connection.execute_batch(MIGRATION_3).unwrap();
+        drop(connection);
+
+        store.initialize().unwrap();
+        let request_tabs = store.load_request_tabs().unwrap();
+        assert_eq!(request_tabs.tabs().len(), 1);
+        assert!(!request_tabs.active().is_dirty());
+
+        let connection = store.open_connection().unwrap();
+        let schema_version: i64 = connection
+            .query_row(
+                "SELECT version FROM schema_version WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema_version, CURRENT_SCHEMA_VERSION);
+        let request_tab_table_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'request_tab_state'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(request_tab_table_count, 1);
     }
 
     #[test]
@@ -2279,7 +2657,15 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        let folder_version: i64 = connection
+            .query_row(
+                "SELECT version FROM collection_folders WHERE id = ?1",
+                params!["folder-1"],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(collection_version, 2);
+        assert_eq!(folder_version, 2);
         assert_eq!(request_version, 2);
 
         let foreign_key_violation: Option<String> = connection
@@ -2287,6 +2673,263 @@ mod tests {
             .optional()
             .unwrap();
         assert_eq!(foreign_key_violation, None);
+    }
+
+    #[test]
+    fn folder_round_trip_preserves_flat_order_when_a_child_precedes_its_parent() {
+        let (_directory, store) = database();
+        let mut workspace = sample_workspace();
+        workspace.collections[0].folders.reverse();
+
+        store.save_workspace(&workspace).unwrap();
+
+        let loaded = store.load_workspace().unwrap();
+        assert_eq!(loaded, workspace);
+        assert_eq!(
+            loaded.collections[0]
+                .folders
+                .iter()
+                .map(|folder| folder.id.as_str())
+                .collect::<Vec<_>>(),
+            ["folder-2", "folder-1"]
+        );
+    }
+
+    #[test]
+    fn folder_deletion_cascades_descendants_and_nested_request_rows() {
+        let (_directory, store) = database();
+        let mut workspace = sample_workspace();
+        let mut root_request = workspace.collections[0].requests[0].clone();
+        root_request.id = "request-root".to_owned();
+        root_request.name = "Root request".to_owned();
+        root_request.folder_id = None;
+        workspace.collections[0].requests.push(root_request);
+        store.save_workspace(&workspace).unwrap();
+
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute("DELETE FROM collection_folders WHERE id = 'folder-1'", [])
+            .unwrap();
+
+        let count = |sql: &str| {
+            connection
+                .query_row(sql, [], |row| row.get::<_, i64>(0))
+                .unwrap()
+        };
+        assert_eq!(
+            count("SELECT count(*) FROM collection_folders"),
+            0,
+            "deleting a parent folder must delete every descendant"
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM saved_requests WHERE id = 'request-1'"),
+            0,
+            "the nested request must follow its deleted folder"
+        );
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM saved_request_headers
+                 WHERE saved_request_id = 'request-1'"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM saved_request_body_fields
+                 WHERE saved_request_id = 'request-1'"
+            ),
+            0
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM saved_requests WHERE id = 'request-root'"),
+            1,
+            "a root request in the same collection must survive folder deletion"
+        );
+        let foreign_key_violation: Option<String> = connection
+            .query_row("PRAGMA foreign_key_check", [], |row| row.get(0))
+            .optional()
+            .unwrap();
+        assert_eq!(foreign_key_violation, None);
+        drop(connection);
+
+        let loaded = store.load_workspace().unwrap();
+        let collection = loaded.collection("collection-1").unwrap();
+        assert!(collection.folders.is_empty());
+        assert_eq!(
+            collection
+                .requests
+                .iter()
+                .map(|request| request.id.as_str())
+                .collect::<Vec<_>>(),
+            ["request-root"]
+        );
+        assert_eq!(collection.requests[0].folder_id, None);
+
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute("DELETE FROM collections WHERE id = 'collection-1'", [])
+            .unwrap();
+        for table in [
+            "collection_folders",
+            "saved_requests",
+            "saved_request_headers",
+            "saved_request_body_fields",
+        ] {
+            let remaining: i64 = connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(
+                remaining, 0,
+                "deleting a collection must cascade through {table}"
+            );
+        }
+    }
+
+    #[test]
+    fn moving_a_request_to_root_before_removing_its_folder_preserves_it() {
+        let (_directory, store) = database();
+        let mut workspace = sample_workspace();
+        store.save_workspace(&workspace).unwrap();
+
+        workspace.collections[0].requests[0].folder_id = None;
+        workspace.collections[0].folders.clear();
+        store.save_workspace(&workspace).unwrap();
+
+        let loaded = store.load_workspace().unwrap();
+        assert_eq!(loaded, workspace);
+        let connection = store.open_connection().unwrap();
+        let persisted: (Option<String>, i64, i64) = connection
+            .query_row(
+                "SELECT
+                    folder_id,
+                    (SELECT count(*) FROM saved_request_headers
+                     WHERE saved_request_id = saved_requests.id),
+                    (SELECT count(*) FROM saved_request_body_fields
+                     WHERE saved_request_id = saved_requests.id)
+                 FROM saved_requests
+                 WHERE id = 'request-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(persisted, (None, 2, 2));
+    }
+
+    #[test]
+    fn foreign_keys_reject_dangling_folder_relationships() {
+        let (_directory, store) = database();
+        store.save_workspace(&sample_workspace()).unwrap();
+        let connection = store.open_connection().unwrap();
+
+        assert!(
+            connection
+                .execute(
+                    "UPDATE saved_requests
+                     SET folder_id = 'missing-folder'
+                     WHERE id = 'request-1'",
+                    [],
+                )
+                .is_err(),
+            "a request cannot reference a missing folder"
+        );
+        assert!(
+            connection
+                .execute(
+                    "UPDATE collection_folders
+                     SET parent_folder_id = 'missing-folder'
+                     WHERE id = 'folder-2'",
+                    [],
+                )
+                .is_err(),
+            "a folder cannot reference a missing parent"
+        );
+
+        let stored_relationships: (Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT
+                    (SELECT folder_id FROM saved_requests WHERE id = 'request-1'),
+                    (SELECT parent_folder_id FROM collection_folders WHERE id = 'folder-2')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            stored_relationships,
+            (Some("folder-2".to_owned()), Some("folder-1".to_owned()))
+        );
+    }
+
+    #[test]
+    fn load_rejects_cross_collection_folder_relationships() {
+        let (_directory, store) = database();
+        let mut workspace = sample_workspace();
+        workspace.collections.push(Collection {
+            id: "collection-2".to_owned(),
+            name: "Other".to_owned(),
+            folders: Vec::new(),
+            requests: Vec::new(),
+        });
+        store.save_workspace(&workspace).unwrap();
+        let connection = store.open_connection().unwrap();
+
+        // Both referenced rows exist, so ordinary foreign keys alone cannot
+        // express that a request and its folder must have the same owner.
+        connection
+            .execute(
+                "UPDATE saved_requests
+                 SET collection_id = 'collection-2'
+                 WHERE id = 'request-1'",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.load_workspace(),
+            Err(DatabaseError::InvalidWorkspace(
+                WorkspaceValidationError::RequestFolderOutsideCollection {
+                    collection_id,
+                    request_id,
+                    folder_id,
+                    folder_collection_id,
+                }
+            )) if collection_id == "collection-2"
+                && request_id == "request-1"
+                && folder_id == "folder-2"
+                && folder_collection_id == "collection-1"
+        ));
+
+        connection
+            .execute(
+                "UPDATE saved_requests
+                 SET collection_id = 'collection-1',
+                     folder_id = 'folder-1'
+                 WHERE id = 'request-1'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE collection_folders
+                 SET collection_id = 'collection-2'
+                 WHERE id = 'folder-2'",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.load_workspace(),
+            Err(DatabaseError::InvalidWorkspace(
+                WorkspaceValidationError::FolderParentOutsideCollection {
+                    collection_id,
+                    folder_id,
+                    parent_folder_id,
+                    parent_collection_id,
+                }
+            )) if collection_id == "collection-2"
+                && folder_id == "folder-2"
+                && parent_folder_id == "folder-1"
+                && parent_collection_id == "collection-1"
+        ));
     }
 
     #[test]
@@ -2468,5 +3111,75 @@ mod tests {
             }
         );
         assert_history_eq(&store.load_history().unwrap(), &history);
+    }
+
+    #[test]
+    fn request_tabs_round_trip_and_corrupt_state_is_rejected() {
+        let (_directory, store) = database();
+        let mut request_tabs = RequestTabs::new();
+        request_tabs.open_new();
+        request_tabs.active_mut().set_title("Second request");
+        request_tabs
+            .active_mut()
+            .set_template(RequestTemplate::new(RequestDraft::new(
+                "GET",
+                "https://tabs.example.test",
+            )));
+
+        store.save_request_tabs(&request_tabs).unwrap();
+        assert_eq!(store.load_request_tabs().unwrap(), request_tabs);
+
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE request_tab_state SET state_json = '{broken' WHERE singleton = 1",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.load_request_tabs(),
+            Err(DatabaseError::CorruptData {
+                field: "request tab state",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn workspace_and_request_tabs_commit_atomically() {
+        let (_directory, store) = database();
+        let workspace = sample_workspace();
+        let mut request_tabs = RequestTabs::new();
+        request_tabs.active_mut().set_title("Atomic tab");
+
+        store
+            .save_workspace_and_request_tabs(&workspace, &request_tabs)
+            .unwrap();
+        assert_eq!(store.load_workspace().unwrap(), workspace);
+        assert_eq!(store.load_request_tabs().unwrap(), request_tabs);
+
+        let mut changed_workspace = workspace.clone();
+        changed_workspace.collections[0].name = "Must not commit".to_owned();
+        let mut rejected_tabs = request_tabs.clone();
+        rejected_tabs.active_mut().set_title("Must not commit");
+
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_request_tab_state_update
+                 BEFORE UPDATE ON request_tab_state
+                 BEGIN
+                    SELECT RAISE(ABORT, 'forced request tab state failure');
+                 END;",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            store.save_workspace_and_request_tabs(&changed_workspace, &rejected_tabs),
+            Err(DatabaseError::Sql(rusqlite::Error::SqliteFailure(_, _)))
+        ));
+        assert_eq!(store.load_workspace().unwrap(), workspace);
+        assert_eq!(store.load_request_tabs().unwrap(), request_tabs);
     }
 }

@@ -53,9 +53,9 @@ impl ApiTester {
                         "Pre-request".to_owned(),
                         "Post-response".to_owned(),
                     ])
-                    .selected_index(self.request_tab.index())
+                    .selected_index(self.request_pane.index())
                     .on_click(cx.listener(|this, index: &usize, _, cx| {
-                        this.request_tab = RequestTab::from_index(*index);
+                        this.request_pane = RequestPane::from_index(*index);
                         cx.notify();
                     })),
             )
@@ -63,16 +63,16 @@ impl ApiTester {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .when(self.request_tab == RequestTab::Headers, |this| {
+                    .when(self.request_pane == RequestPane::Headers, |this| {
                         this.child(self.render_headers_editor(cx))
                     })
-                    .when(self.request_tab == RequestTab::Body, |this| {
+                    .when(self.request_pane == RequestPane::Body, |this| {
                         this.child(self.render_body_editor(cx))
                     })
-                    .when(self.request_tab == RequestTab::PreRequest, |this| {
+                    .when(self.request_pane == RequestPane::PreRequest, |this| {
                         this.child(self.pre_request_script.clone())
                     })
-                    .when(self.request_tab == RequestTab::PostResponse, |this| {
+                    .when(self.request_pane == RequestPane::PostResponse, |this| {
                         this.child(self.post_response_script.clone())
                     }),
             )

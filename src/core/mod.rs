@@ -2,6 +2,7 @@ mod database;
 mod format;
 mod history;
 mod request;
+mod request_tabs;
 mod script;
 mod template;
 mod workspace;
@@ -16,6 +17,9 @@ pub use request::{
     BodyField, BodyFieldKind, BodyMode, HeaderEntry, RawBodyLanguage, RequestDraft, RequestError,
     RequestTask, ResponseData, STANDARD_HTTP_METHODS, build_client, spawn_request,
 };
+pub use request_tabs::{
+    DEFAULT_REQUEST_TAB_TITLE, RequestTabAssociation, RequestTabId, RequestTabs,
+};
 pub use script::{
     EnvironmentMutation, PostResponseResult, PreRequestResult, ScriptCancellation,
     ScriptDiagnostic, ScriptEnvironment, ScriptError, ScriptErrorKind, ScriptLogLevel, ScriptPhase,
@@ -24,4 +28,6 @@ pub use script::{
 #[cfg(test)]
 pub use script::{ScriptLog, ScriptTestResult};
 pub use template::{RequestTemplate, ResolvedRequest, resolve_request};
-pub use workspace::{Environment, RequestScripts, Workspace, WorkspaceMutationError};
+pub use workspace::{
+    Collection, Environment, RequestScripts, SavedRequest, Workspace, WorkspaceMutationError,
+};

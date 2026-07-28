@@ -1,8 +1,8 @@
 use std::borrow::Cow;
 
 use gpui::{
-    App, AppContext as _, Application, AssetSource, Bounds, SharedString, WindowBounds,
-    WindowOptions, px, size,
+    App, AppContext as _, Application, AssetSource, Bounds, KeyBinding, Menu, MenuItem,
+    SharedString, SystemMenuType, WindowBounds, WindowOptions, actions, px, size,
 };
 use gpui_component::Root;
 
@@ -20,6 +20,8 @@ mod web_preview;
 use app::ApiTester;
 use core::DatabaseStore;
 use instance_guard::InstanceGuard;
+
+actions!(api_tester, [QuitApp]);
 
 struct AppAssets;
 
@@ -85,6 +87,15 @@ fn main() {
         .run(|cx: &mut App| {
             gpui_component::init(cx);
             theme::configure(cx);
+            cx.bind_keys([KeyBinding::new("cmd-q", QuitApp, None)]);
+            cx.set_menus(vec![Menu {
+                name: "API Tester".into(),
+                items: vec![
+                    MenuItem::os_submenu("Services", SystemMenuType::Services),
+                    MenuItem::separator(),
+                    MenuItem::action("Quit API Tester", QuitApp),
+                ],
+            }]);
 
             cx.on_window_closed(|cx| {
                 if cx.windows().is_empty() {
@@ -107,6 +118,21 @@ fn main() {
                 },
                 |window, cx| {
                     let view = cx.new(|cx| ApiTester::new(window, cx));
+                    let view_for_close = view.downgrade();
+                    window.on_window_should_close(cx, move |_, cx| {
+                        view_for_close
+                            .update(cx, |view, cx| view.flush_request_tabs(cx))
+                            .unwrap_or(true)
+                    });
+                    let view_for_quit = view.downgrade();
+                    cx.on_action(move |_: &QuitApp, cx| {
+                        let saved = view_for_quit
+                            .update(cx, |view, cx| view.flush_request_tabs(cx))
+                            .unwrap_or(true);
+                        if saved {
+                            cx.quit();
+                        }
+                    });
                     cx.new(|cx| Root::new(view, window, cx))
                 },
             )
