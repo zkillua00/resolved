@@ -1,0 +1,201 @@
+use super::*;
+
+impl ApiTester {
+    pub(super) fn render_title_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.sidebar_tab == SidebarTab::Environments {
+            return self.render_environment_title_bar(cx);
+        }
+
+        let active_environment_full = self
+            .workspace
+            .active_environment()
+            .map(|environment| environment.name.clone())
+            .unwrap_or_else(|| "No environment".to_owned());
+        let active_environment = compact_label(&active_environment_full, 30);
+        let active_environment_id = self.workspace.active_environment_id.clone();
+        let environments = self
+            .workspace
+            .environments
+            .iter()
+            .map(|environment| (environment.id.clone(), environment.name.clone()))
+            .collect::<Vec<_>>();
+        let this = cx.entity().downgrade();
+        let request_name = self
+            .active_saved_request_id
+            .as_deref()
+            .and_then(|id| self.workspace.saved_request(id))
+            .map(|(_, request)| request.name.as_str())
+            .unwrap_or("Unsaved request");
+        let collection_name = self
+            .selected_collection_id
+            .as_deref()
+            .and_then(|id| self.workspace.collection(id))
+            .map(|collection| collection.name.as_str())
+            .unwrap_or("No collection");
+        let can_save =
+            !self.sending && self.workspace_writable && self.selected_collection_id.is_some();
+        let can_switch_environment = self.workspace_writable && !self.sending;
+        let dirty = self.request_is_dirty();
+
+        h_flex()
+            .h(px(64.))
+            .flex_shrink_0()
+            .pl(px(92.))
+            .pr_6()
+            .border_b_1()
+            .border_color(cx.theme().title_bar_border)
+            .bg(cx.theme().title_bar)
+            .justify_between()
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .gap_6()
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_semibold()
+                            .text_color(primary_bright())
+                            .child("API Tester"),
+                    )
+                    .child(
+                        h_flex()
+                            .h_full()
+                            .items_center()
+                            .border_b_2()
+                            .border_color(cx.theme().primary)
+                            .px_1()
+                            .text_sm()
+                            .font_semibold()
+                            .child("Workspace"),
+                    )
+                    .child(
+                        h_flex()
+                            .min_w_0()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .max_w(px(360.))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!("{collection_name} / {request_name}")),
+                            )
+                            .when(dirty, |this| {
+                                this.child(
+                                    div()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(cx.theme().warning.opacity(0.12))
+                                        .text_xs()
+                                        .font_semibold()
+                                        .text_color(cx.theme().warning)
+                                        .child("Modified"),
+                                )
+                            }),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .flex_shrink_0()
+                    .gap_3()
+                    .child(
+                        div()
+                            .w(px(190.))
+                            .child(Input::new(&self.saved_request_name).small()),
+                    )
+                    .child(
+                        Button::new("active-environment")
+                            .icon(IconName::Settings2)
+                            .label(active_environment)
+                            .large()
+                            .h(px(38.))
+                            .outline()
+                            .rounded(px(20.))
+                            .tooltip(active_environment_full)
+                            .dropdown_menu(move |menu, _, _| {
+                                let no_environment_this = this.clone();
+                                let menu = menu.min_w(px(220.)).item(
+                                    PopupMenuItem::new("No environment")
+                                        .checked(active_environment_id.is_none())
+                                        .disabled(!can_switch_environment)
+                                        .on_click(move |_, _, cx| {
+                                            if let Some(this) = no_environment_this.upgrade() {
+                                                this.update(cx, |this, cx| {
+                                                    this.activate_environment(None, cx);
+                                                });
+                                            }
+                                        }),
+                                );
+                                let menu = environments.iter().fold(menu, |menu, (id, name)| {
+                                    let environment_id = id.clone();
+                                    let checked =
+                                        active_environment_id.as_deref() == Some(id.as_str());
+                                    let environment_this = this.clone();
+                                    menu.item(
+                                        PopupMenuItem::new(name.clone())
+                                            .checked(checked)
+                                            .disabled(!can_switch_environment)
+                                            .on_click(move |_, _, cx| {
+                                                if let Some(this) = environment_this.upgrade() {
+                                                    this.update(cx, |this, cx| {
+                                                        this.activate_environment(
+                                                            Some(environment_id.clone()),
+                                                            cx,
+                                                        );
+                                                    });
+                                                }
+                                            }),
+                                    )
+                                });
+                                let manage_this = this.clone();
+                                menu.separator().item(
+                                    PopupMenuItem::new("Manage environments…").on_click(
+                                        move |_, _, cx| {
+                                            if let Some(this) = manage_this.upgrade() {
+                                                this.update(cx, |this, cx| {
+                                                    this.sidebar_tab = SidebarTab::Environments;
+                                                    cx.notify();
+                                                });
+                                            }
+                                        },
+                                    ),
+                                )
+                            }),
+                    )
+                    .child(
+                        Button::new("title-save-request")
+                            .label(if self.active_saved_request_id.is_some() {
+                                "Update"
+                            } else {
+                                "Save"
+                            })
+                            .large()
+                            .h(px(38.))
+                            .outline()
+                            .rounded(px(20.))
+                            .disabled(!can_save)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.save_current_request(false, window, cx);
+                            })),
+                    )
+                    .when(self.active_saved_request_id.is_some(), |this| {
+                        this.child(
+                            Button::new("title-save-request-copy")
+                                .label("Save as")
+                                .large()
+                                .h(px(38.))
+                                .ghost()
+                                .rounded(px(20.))
+                                .disabled(!can_save)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.save_current_request(true, window, cx);
+                                })),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+}
