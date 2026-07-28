@@ -58,7 +58,7 @@ impl ApiTester {
                 })
                 .small()
                 .text_color(if selected {
-                    primary_bright()
+                    cx.api_primary_bright()
                 } else {
                     cx.theme().muted_foreground
                 }),

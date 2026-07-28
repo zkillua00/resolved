@@ -33,9 +33,9 @@ impl ApiTester {
             .h(px(46.))
             .flex_shrink_0()
             .border_t_1()
-            .border_color(outline_variant())
-            .bg(surface())
-            .hover(|style| style.bg(surface_low()))
+            .border_color(cx.api_outline_variant())
+            .bg(cx.api_surface())
+            .hover(|style| style.bg(cx.api_surface_low()))
             .when(!row.enabled, |this| this.opacity(0.55))
             .child(
                 div()
@@ -70,7 +70,7 @@ impl ApiTester {
                         .h_full()
                         .flex_shrink_0()
                         .border_l_1()
-                        .border_color(outline_variant())
+                        .border_color(cx.api_outline_variant())
                         .flex()
                         .items_center()
                         .justify_center()
@@ -112,7 +112,7 @@ impl ApiTester {
                     .min_w_0()
                     .h_full()
                     .border_l_1()
-                    .border_color(outline_variant())
+                    .border_color(cx.api_outline_variant())
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event, window, cx| {
@@ -138,7 +138,7 @@ impl ApiTester {
                     .min_w_0()
                     .h_full()
                     .border_l_1()
-                    .border_color(outline_variant())
+                    .border_color(cx.api_outline_variant())
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event, window, cx| {
@@ -181,7 +181,7 @@ impl ApiTester {
                     .h_full()
                     .flex_shrink_0()
                     .border_l_1()
-                    .border_color(outline_variant())
+                    .border_color(cx.api_outline_variant())
                     .flex()
                     .items_center()
                     .justify_center()

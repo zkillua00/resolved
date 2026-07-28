@@ -140,7 +140,7 @@ impl ApiTester {
             .flex_shrink_0()
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
-            .bg(surface())
+            .bg(cx.api_surface())
             .child(
                 h_flex()
                     .h(px(56.))

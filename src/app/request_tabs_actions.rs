@@ -311,11 +311,16 @@ impl ApiTester {
             return;
         }
         if self.request_tabs.active_tab_id() == &tab_id {
+            if self.expand_request_tab_group_for(&tab_id) {
+                self.persist_request_tabs_now(cx);
+                cx.notify();
+            }
             return;
         }
         self.snapshot_active_request_tab(cx);
         self.hide_preview(cx);
         if self.request_tabs.activate(&tab_id) {
+            self.expand_request_tab_group_for(&tab_id);
             self.restore_active_request_tab(window, cx);
             self.persist_request_tabs_now(cx);
         }
@@ -389,6 +394,7 @@ impl ApiTester {
                 RequestTabRuntime::default(),
             );
         }
+        self.expand_request_tab_group_for(&opened.tab_id);
         self.selected_collection_id = Some(collection_id.clone());
         self.selected_folder_id = selected_folder_id.clone();
         self.expanded_collection_ids.insert(collection_id);
@@ -441,6 +447,16 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.request_close_request_tabs(tab_id, RequestTabCloseScope::Current, window, cx);
+    }
+
+    pub(super) fn request_close_request_tabs(
+        &mut self,
+        anchor_id: RequestTabId,
+        scope: RequestTabCloseScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.sending {
             self.request_notice =
                 Some("Finish or cancel the active request before closing tabs.".to_owned());
@@ -448,59 +464,108 @@ impl ApiTester {
             return;
         }
         self.snapshot_active_request_tab(cx);
-        let Some(tab) = self.request_tabs.get(&tab_id) else {
+        let close_ids = self.request_tabs.close_target_ids(&anchor_id, scope);
+        if close_ids.is_empty() {
             return;
-        };
-        if !tab.is_dirty() {
-            self.close_request_tab_now(tab_id, window, cx);
+        }
+        let dirty_titles = close_ids
+            .iter()
+            .filter_map(|id| self.request_tabs.get(id))
+            .filter(|tab| tab.is_dirty())
+            .map(|tab| tab.display_title().to_owned())
+            .collect::<Vec<_>>();
+        if dirty_titles.is_empty() {
+            self.close_request_tabs_now(close_ids, anchor_id, window, cx);
             return;
         }
 
-        let title = tab.display_title().to_owned();
         let this = cx.entity().downgrade();
+        let close_count = close_ids.len();
+        let dirty_count = dirty_titles.len();
+        let dialog_title = if close_count == 1 {
+            "Discard request changes?".to_owned()
+        } else {
+            format!("Close {close_count} request tabs?")
+        };
+        let detail = close_tabs_confirmation_detail(&dirty_titles, close_count);
         window.open_dialog(cx, move |dialog, _, cx| {
             let close_this = this.clone();
-            let close_tab_id = tab_id.clone();
+            let close_ids = close_ids.clone();
+            let anchor_id = anchor_id.clone();
             dialog
-                .title("Discard request changes?")
+                .title(dialog_title.clone())
                 .w(px(440.))
                 .confirm()
                 .button_props(
                     DialogButtonProps::default()
-                        .ok_text("Discard")
+                        .ok_text(if close_count == 1 {
+                            "Discard".to_owned()
+                        } else {
+                            format!("Close {close_count} tabs")
+                        })
                         .ok_variant(ButtonVariant::Danger),
                 )
                 .on_ok(move |_, window, cx| {
                     if let Some(this) = close_this.upgrade() {
                         this.update(cx, |this, cx| {
-                            this.close_request_tab_now(close_tab_id.clone(), window, cx);
+                            this.close_request_tabs_now(
+                                close_ids.clone(),
+                                anchor_id.clone(),
+                                window,
+                                cx,
+                            );
                         });
                     }
                     true
                 })
                 .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(format!(
-                            "“{title}” has unsaved changes. Closing it will discard the draft."
-                        )),
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(detail.clone()),
+                        )
+                        .when(dirty_count > 1, |this| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!(
+                                        "{dirty_count} tabs contain unsaved request changes."
+                                    )),
+                            )
+                        }),
                 )
         });
     }
 
-    pub(super) fn close_request_tab_now(
+    pub(super) fn close_request_tabs_now(
         &mut self,
-        tab_id: RequestTabId,
+        close_ids: Vec<RequestTabId>,
+        anchor_id: RequestTabId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let closing_active = self.request_tabs.active_tab_id() == &tab_id;
-        self.request_tab_runtime.remove(tab_id.as_str());
-        if self.request_tabs.close(&tab_id).is_none() {
+        let active_before = self.request_tabs.active_tab_id().clone();
+        let anchor_survives =
+            !close_ids.contains(&anchor_id) && self.request_tabs.get(&anchor_id).is_some();
+        let removed = self.request_tabs.close_tabs(&close_ids);
+        if removed.is_empty() {
             return;
         }
-        if closing_active {
+        for tab in &removed {
+            self.request_tab_runtime.remove(tab.id().as_str());
+        }
+        if self.request_tabs.get(&active_before).is_none() && anchor_survives {
+            let _ = self.request_tabs.activate(&anchor_id);
+        }
+        let active_after = self.request_tabs.active_tab_id().clone();
+        if active_after != active_before {
+            if let Some(group_id) = self.request_tabs.active().group_id().cloned() {
+                let _ = self.request_tabs.set_group_collapsed(&group_id, false);
+            }
             self.hide_preview(cx);
             self.restore_active_request_tab(window, cx);
         } else {
@@ -516,6 +581,36 @@ impl ApiTester {
             .saved_request_id()
             .map(ToOwned::to_owned);
         self.detached_request_dirty = active.is_detached();
+    }
+}
+
+fn close_tabs_confirmation_detail(dirty_titles: &[String], close_count: usize) -> String {
+    if dirty_titles.len() == 1 {
+        return if close_count == 1 {
+            format!(
+                "“{}” has unsaved changes. Closing it will discard the draft.",
+                dirty_titles[0]
+            )
+        } else {
+            format!(
+                "“{}” has unsaved changes. Closing these tabs will discard that draft.",
+                dirty_titles[0]
+            )
+        };
+    }
+    let preview = dirty_titles
+        .iter()
+        .take(3)
+        .map(|title| format!("“{title}”"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if dirty_titles.len() > 3 {
+        format!(
+            "{preview}, and {} more have unsaved changes. Closing these tabs will discard those drafts.",
+            dirty_titles.len() - 3
+        )
+    } else {
+        format!("{preview} have unsaved changes. Closing these tabs will discard those drafts.")
     }
 }
 
@@ -600,5 +695,21 @@ mod persistence_tests {
             durable.action(&current),
             RequestTabsPersistenceAction::VetoReadOnly
         );
+    }
+
+    #[test]
+    fn aggregate_close_confirmation_bounds_the_title_preview() {
+        let detail = close_tabs_confirmation_detail(
+            &[
+                "One".to_owned(),
+                "Two".to_owned(),
+                "Three".to_owned(),
+                "Four".to_owned(),
+            ],
+            5,
+        );
+
+        assert!(detail.contains("“One”, “Two”, “Three”, and 1 more"));
+        assert!(!detail.contains("“Four”"));
     }
 }

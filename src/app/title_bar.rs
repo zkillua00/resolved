@@ -5,6 +5,9 @@ impl ApiTester {
         if self.sidebar_tab == SidebarTab::Environments {
             return self.render_environment_title_bar(cx);
         }
+        if self.sidebar_tab == SidebarTab::Settings {
+            return self.render_settings_title_bar(cx);
+        }
 
         let active_environment_full = self
             .workspace
@@ -89,7 +92,7 @@ impl ApiTester {
                         div()
                             .text_xl()
                             .font_semibold()
-                            .text_color(primary_bright())
+                            .text_color(cx.api_primary_bright())
                             .child("API Tester"),
                     )
                     .child(

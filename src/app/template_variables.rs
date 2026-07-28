@@ -36,7 +36,7 @@ impl ApiTester {
     ) {
         let source = input.read(cx).text().to_string();
         let colors = TemplateHighlightColors {
-            valid: primary_lavender(),
+            valid: cx.api_primary_lavender(),
             warning: cx.theme().warning,
             error: cx.theme().red,
         };

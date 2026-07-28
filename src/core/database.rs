@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
+    AppSettings,
     history::{DEFAULT_HISTORY_LIMIT, HistoryEntry, RequestHistory, ResponseSummary},
     request::{BodyField, BodyFieldKind, BodyMode, HeaderEntry, RawBodyLanguage, RequestDraft},
     request_tabs::RequestTabs,
@@ -28,7 +29,10 @@ use super::{
     },
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 4;
+#[cfg(test)]
+use super::request_tabs::RequestTabGroupColor;
+
+const CURRENT_SCHEMA_VERSION: i64 = 5;
 const LEGACY_HISTORY_FILE_VERSION: u32 = 1;
 const LEGACY_HISTORY_IMPORT_MARKER: &str = "history-json-v1";
 const LEGACY_WORKSPACE_IMPORT_MARKER: &str = "workspace-json-v1";
@@ -241,6 +245,15 @@ CREATE INDEX saved_requests_collection_folder_position_idx
 
 const MIGRATION_4: &str = r#"
 CREATE TABLE request_tab_state (
+    singleton   INTEGER PRIMARY KEY CHECK (singleton = 1),
+    state_json  TEXT NOT NULL,
+    updated_at  INTEGER NOT NULL,
+    version     INTEGER NOT NULL CHECK (version >= 1)
+);
+"#;
+
+const MIGRATION_5: &str = r#"
+CREATE TABLE app_settings (
     singleton   INTEGER PRIMARY KEY CHECK (singleton = 1),
     state_json  TEXT NOT NULL,
     updated_at  INTEGER NOT NULL,
@@ -490,6 +503,35 @@ impl DatabaseStore {
         let mut connection = self.open_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         save_request_tabs_tx(&transaction, &state_json)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn load_app_settings(&self) -> Result<AppSettings, DatabaseError> {
+        let connection = self.open_connection()?;
+        let state_json = connection
+            .query_row(
+                "SELECT state_json FROM app_settings WHERE singleton = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match state_json {
+            Some(state_json) => {
+                serde_json::from_str(&state_json).map_err(|error| DatabaseError::CorruptData {
+                    field: "app settings",
+                    value: error.to_string(),
+                })
+            }
+            None => Ok(AppSettings::default()),
+        }
+    }
+
+    pub fn save_app_settings(&self, settings: &AppSettings) -> Result<(), DatabaseError> {
+        let state_json = serialize_app_settings(settings)?;
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        save_app_settings_tx(&transaction, &state_json)?;
         transaction.commit()?;
         Ok(())
     }
@@ -798,6 +840,7 @@ fn migrate(connection: &mut Connection) -> Result<(), DatabaseError> {
             2 => transaction.execute_batch(MIGRATION_2)?,
             3 => transaction.execute_batch(MIGRATION_3)?,
             4 => transaction.execute_batch(MIGRATION_4)?,
+            5 => transaction.execute_batch(MIGRATION_5)?,
             _ => {
                 return Err(DatabaseError::UnsupportedSchemaVersion {
                     found: next,
@@ -1070,6 +1113,29 @@ fn save_request_tabs_tx(
             state_json = excluded.state_json,
             updated_at = excluded.updated_at,
             version = request_tab_state.version + 1",
+        params![state_json, now_micros()],
+    )?;
+    Ok(())
+}
+
+fn serialize_app_settings(settings: &AppSettings) -> Result<String, DatabaseError> {
+    serde_json::to_string(settings).map_err(|error| DatabaseError::CorruptData {
+        field: "app settings",
+        value: error.to_string(),
+    })
+}
+
+fn save_app_settings_tx(
+    transaction: &Transaction<'_>,
+    state_json: &str,
+) -> Result<(), DatabaseError> {
+    transaction.execute(
+        "INSERT INTO app_settings(singleton, state_json, updated_at, version)
+         VALUES (1, ?1, ?2, 1)
+         ON CONFLICT(singleton) DO UPDATE SET
+            state_json = excluded.state_json,
+            updated_at = excluded.updated_at,
+            version = app_settings.version + 1",
         params![state_json, now_micros()],
     )?;
     Ok(())
@@ -1946,6 +2012,7 @@ fn required_when_response<T>(value: Option<T>, field: &'static str) -> Result<T,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{ShortcutOverride, ThemeSettings};
 
     fn database() -> (tempfile::TempDir, DatabaseStore) {
         let directory = tempfile::tempdir().unwrap();
@@ -2173,6 +2240,7 @@ mod tests {
                 .unwrap()
         };
         for table in [
+            "app_settings",
             "collection_folders",
             "collections",
             "environment_variables",
@@ -2499,6 +2567,73 @@ mod tests {
             )
             .unwrap();
         assert_eq!(request_tab_table_count, 1);
+    }
+
+    #[test]
+    fn migrates_handcrafted_v4_database_with_default_app_settings() {
+        let (_directory, store) = database();
+        let connection = Connection::open(store.path()).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE schema_version (
+                    singleton   INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    version     INTEGER NOT NULL CHECK (version >= 0),
+                    updated_at  INTEGER NOT NULL
+                 );
+                 INSERT INTO schema_version(singleton, version, updated_at)
+                 VALUES (1, 4, 1700000000000000);",
+            )
+            .unwrap();
+        connection.execute_batch(MIGRATION_1).unwrap();
+        connection.execute_batch(MIGRATION_2).unwrap();
+        connection.execute_batch(MIGRATION_3).unwrap();
+        connection.execute_batch(MIGRATION_4).unwrap();
+        let mut legacy_request_tabs = RequestTabs::new();
+        legacy_request_tabs.open_new();
+        legacy_request_tabs
+            .active_mut()
+            .set_title("Pre-group request tab");
+        let legacy_state_json = serde_json::to_string(&legacy_request_tabs).unwrap();
+        assert!(
+            !legacy_state_json.contains("\"groups\""),
+            "empty group metadata should match the pre-group JSON shape"
+        );
+        connection
+            .execute(
+                "INSERT INTO request_tab_state(singleton, state_json, updated_at, version)
+                 VALUES (1, ?1, 1700000000000000, 1)",
+                params![legacy_state_json],
+            )
+            .unwrap();
+        drop(connection);
+
+        store.initialize().unwrap();
+        assert_eq!(store.load_app_settings().unwrap(), AppSettings::default());
+        assert_eq!(store.load_request_tabs().unwrap(), legacy_request_tabs);
+
+        let connection = store.open_connection().unwrap();
+        let schema_version: i64 = connection
+            .query_row(
+                "SELECT version FROM schema_version WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema_version, CURRENT_SCHEMA_VERSION);
+        let app_settings_table_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'app_settings'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(app_settings_table_count, 1);
+        let app_settings_row_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM app_settings", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(app_settings_row_count, 0);
     }
 
     #[test]
@@ -3125,6 +3260,11 @@ mod tests {
                 "GET",
                 "https://tabs.example.test",
             )));
+        let grouped_tab_id = request_tabs.active_tab_id().clone();
+        let group_id = request_tabs
+            .create_group_for_tab(&grouped_tab_id, "Integration", RequestTabGroupColor::Blue)
+            .expect("the open tab should be groupable");
+        assert!(request_tabs.set_group_collapsed(&group_id, true));
 
         store.save_request_tabs(&request_tabs).unwrap();
         assert_eq!(store.load_request_tabs().unwrap(), request_tabs);
@@ -3140,6 +3280,54 @@ mod tests {
             store.load_request_tabs(),
             Err(DatabaseError::CorruptData {
                 field: "request tab state",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn app_settings_round_trip_increments_version_and_rejects_corrupt_state() {
+        let (_directory, store) = database();
+        let settings = AppSettings {
+            shortcuts: std::collections::BTreeMap::from([
+                (
+                    "request.send".to_owned(),
+                    ShortcutOverride::Custom("cmd-enter".to_owned()),
+                ),
+                ("request.close_tab".to_owned(), ShortcutOverride::Disabled),
+            ]),
+            theme: ThemeSettings {
+                source_path: Some(PathBuf::from("/tmp/theme.css")),
+                css_source: Some(":root { --api-background: #14121a; }".to_owned()),
+                ..Default::default()
+            },
+            navigation_compact: true,
+            ..Default::default()
+        };
+
+        store.save_app_settings(&settings).unwrap();
+        assert_eq!(store.load_app_settings().unwrap(), settings);
+        store.save_app_settings(&settings).unwrap();
+
+        let connection = store.open_connection().unwrap();
+        let version: i64 = connection
+            .query_row(
+                "SELECT version FROM app_settings WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 2);
+        connection
+            .execute(
+                "UPDATE app_settings SET state_json = '{broken' WHERE singleton = 1",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.load_app_settings(),
+            Err(DatabaseError::CorruptData {
+                field: "app settings",
                 ..
             })
         ));

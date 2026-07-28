@@ -41,7 +41,7 @@ impl ApiTester {
             .min_h_0()
             .gap_3()
             .p_4()
-            .bg(surface())
+            .bg(cx.api_surface())
             .child(self.render_url_row(cx))
             .when_some(status, |this, status| this.child(status))
             .child(

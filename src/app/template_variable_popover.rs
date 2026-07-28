@@ -31,8 +31,8 @@ impl ApiTester {
             .p_4()
             .rounded_lg()
             .border_1()
-            .border_color(outline_variant())
-            .bg(surface_container())
+            .border_color(cx.api_outline_variant())
+            .bg(cx.api_surface_container())
             .shadow_lg()
             .on_mouse_down_out(move |_, _, cx| {
                 if let Some(this) = outside_this.upgrade() {
@@ -84,8 +84,8 @@ impl ApiTester {
                                 .w_full()
                                 .rounded_md()
                                 .border_1()
-                                .border_color(outline_variant())
-                                .bg(surface_lowest())
+                                .border_color(cx.api_outline_variant())
+                                .bg(cx.api_surface_lowest())
                                 .child(
                                     Input::new(&popover.value)
                                         .appearance(false)

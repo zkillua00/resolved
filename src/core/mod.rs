@@ -4,6 +4,7 @@ mod history;
 mod request;
 mod request_tabs;
 mod script;
+mod settings;
 mod template;
 mod workspace;
 
@@ -18,7 +19,8 @@ pub use request::{
     RequestTask, ResponseData, STANDARD_HTTP_METHODS, build_client, spawn_request,
 };
 pub use request_tabs::{
-    DEFAULT_REQUEST_TAB_TITLE, RequestTabAssociation, RequestTabId, RequestTabs,
+    DEFAULT_REQUEST_TAB_TITLE, RequestTabAssociation, RequestTabCloseScope, RequestTabGroup,
+    RequestTabGroupColor, RequestTabGroupId, RequestTabId, RequestTabRecord, RequestTabs,
 };
 pub use script::{
     EnvironmentMutation, PostResponseResult, PreRequestResult, ScriptCancellation,
@@ -27,6 +29,8 @@ pub use script::{
 };
 #[cfg(test)]
 pub use script::{ScriptLog, ScriptTestResult};
+#[allow(unused_imports)]
+pub use settings::{AppSettings, ShortcutOverride, ThemeSettings};
 pub use template::{RequestTemplate, ResolvedRequest, resolve_request};
 pub use workspace::{
     Collection, Environment, RequestScripts, SavedRequest, Workspace, WorkspaceMutationError,

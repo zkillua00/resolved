@@ -41,7 +41,7 @@ impl ApiTester {
                         div()
                             .text_xl()
                             .font_semibold()
-                            .text_color(primary_bright())
+                            .text_color(cx.api_primary_bright())
                             .child("API Tester"),
                     )
                     .child(

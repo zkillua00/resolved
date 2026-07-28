@@ -17,7 +17,7 @@ impl ApiTester {
             .py_3()
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
-            .bg(surface_low())
+            .bg(cx.api_surface_low())
             .child(
                 v_flex()
                     .id("rail-collections")
@@ -114,6 +114,34 @@ impl ApiTester {
                         this.child(div().text_size(px(10.5)).font_semibold().child("History"))
                     }),
             )
+            .child(
+                v_flex()
+                    .id("rail-settings")
+                    .w(item_width)
+                    .h(item_height)
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .rounded_lg()
+                    .cursor_pointer()
+                    .text_color(cx.theme().muted_foreground)
+                    .when(self.sidebar_tab == SidebarTab::Settings, |this| {
+                        this.bg(cx.theme().sidebar_accent)
+                            .text_color(cx.theme().foreground)
+                    })
+                    .hover(|style| style.bg(cx.theme().sidebar_accent))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.sidebar_tab = SidebarTab::Settings;
+                        cx.notify();
+                    }))
+                    .when(compact, |this| {
+                        this.tooltip(|window, cx| Tooltip::new("Settings").build(window, cx))
+                    })
+                    .child(gpui_component::Icon::new(IconName::Settings2).with_size(px(18.)))
+                    .when(!compact, |this| {
+                        this.child(div().text_size(px(10.5)).font_semibold().child("Settings"))
+                    }),
+            )
             .child(div().flex_1())
             .child(
                 v_flex()
@@ -164,6 +192,7 @@ impl ApiTester {
                     })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.navigation_compact = !this.navigation_compact;
+                        this.persist_navigation_preference(cx);
                         cx.notify();
                     }))
                     .child(

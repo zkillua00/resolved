@@ -15,7 +15,7 @@ use gpui::{
     deferred, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, IconName, Root, RopeExt as _, Selectable as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Root, RopeExt as _, Selectable as _,
     Sizable as _, StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     checkbox::Checkbox,
@@ -23,7 +23,7 @@ use gpui_component::{
     dialog::DialogButtonProps,
     h_flex,
     input::{Input, InputEvent, InputState},
-    menu::{DropdownMenu as _, PopupMenuItem},
+    menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
     popover::Popover,
     resizable::{h_resizable, resizable_panel, v_resizable},
     scroll::ScrollableElement as _,
@@ -39,30 +39,29 @@ use crate::{
         CodeEditor, CodeEditorConfig, CodeEditorEvent, CodeLanguage, apply_template_pair_edit,
     },
     core::{
-        BodyField, BodyFieldKind, BodyMode, Collection, DEFAULT_REQUEST_TAB_TITLE, DatabaseStore,
-        Environment, EnvironmentMutation, HeaderEntry, HistoryEntry, PostResponseResult,
-        PreRequestResult, REDACTED_VALUE, RawBodyLanguage, RequestDraft, RequestError,
-        RequestHistory, RequestScripts, RequestTabAssociation, RequestTabId, RequestTabs,
-        RequestTask, RequestTemplate, ResponseData, STANDARD_HTTP_METHODS, SavedRequest,
-        ScriptCancellation, ScriptDiagnostic, ScriptEnvironment, ScriptError, ScriptErrorKind,
-        ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope, Workspace, build_client,
-        execute_post_response, execute_pre_request, format_body, is_probably_text, resolve_request,
-        spawn_request,
+        AppSettings, BodyField, BodyFieldKind, BodyMode, Collection, DEFAULT_REQUEST_TAB_TITLE,
+        DatabaseStore, Environment, EnvironmentMutation, HeaderEntry, HistoryEntry,
+        PostResponseResult, PreRequestResult, REDACTED_VALUE, RawBodyLanguage, RequestDraft,
+        RequestError, RequestHistory, RequestScripts, RequestTabAssociation, RequestTabCloseScope,
+        RequestTabGroup, RequestTabGroupColor, RequestTabGroupId, RequestTabId, RequestTabRecord,
+        RequestTabs, RequestTask, RequestTemplate, ResponseData, STANDARD_HTTP_METHODS,
+        SavedRequest, ScriptCancellation, ScriptDiagnostic, ScriptEnvironment, ScriptError,
+        ScriptErrorKind, ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope, ShortcutOverride,
+        Workspace, build_client, execute_post_response, execute_pre_request, format_body,
+        is_probably_text, resolve_request, spawn_request,
     },
     debug_overlay::DebugOverlay,
     request_dirty::{RequestDirtyPart, RequestDirtyState},
     script_intelligence::{
         ScriptCompletionProvider, ScriptEditorPhase, ScriptVariableCatalog, diagnostics_for_source,
     },
+    shortcuts::{self, ShortcutId},
     template_intelligence::{
         TemplateClassification, TemplateCompletionProvider, TemplateHighlightColors,
         TemplateHoverProvider, TemplateVariableCatalog, TemplateVariableCatalogHandle,
         scan_template_spans, semantic_style_spans,
     },
-    theme::{
-        outline_variant, primary_bright, primary_lavender, surface, surface_container, surface_low,
-        surface_lowest,
-    },
+    theme::ApiThemeExt as _,
     web_preview::{HtmlPreview, can_preview},
 };
 
@@ -88,6 +87,7 @@ mod persistence;
 mod request_actions;
 mod request_body_editor;
 mod request_pane;
+mod request_tab_group_actions;
 mod request_tab_reconciliation;
 mod request_tab_runtime;
 mod request_tab_strip;
@@ -102,7 +102,10 @@ mod response_tab;
 mod response_workspace;
 mod script_console;
 mod script_console_model;
+mod settings_actions;
+mod settings_page;
 mod shell;
+mod shortcut_actions;
 mod sidebar;
 mod sidebar_tab;
 mod template_variable_popover;
@@ -179,6 +182,13 @@ pub struct ApiTester {
     request_tabs_persist_task: Option<Task<()>>,
     request_tabs_warning: Option<String>,
     request_tabs_writable: bool,
+    request_tab_context_target: Option<request_tab_strip::RequestTabContextTarget>,
+    settings: AppSettings,
+    settings_warning: Option<String>,
+    settings_writable: bool,
+    base_key_bindings: Vec<gpui::KeyBinding>,
+    recording_shortcut_id: Option<ShortcutId>,
+    settings_notice: Option<String>,
     selected_environment_id: Option<String>,
     collection_search: Entity<InputState>,
     environment_search: Entity<InputState>,

@@ -8,8 +8,10 @@ impl Render for ApiTester {
             .size_full()
             .relative()
             .overflow_hidden()
-            .bg(surface())
+            .bg(cx.api_surface())
             .text_color(cx.theme().foreground)
+            .key_context(shortcuts::APP_KEY_CONTEXT)
+            .capture_any_mouse_down(cx.listener(Self::cancel_shortcut_recording_on_pointer))
             .capture_key_down(cx.listener(Self::capture_template_key_down))
             .child(self.render_title_bar(cx))
             .child(
@@ -25,7 +27,15 @@ impl Render for ApiTester {
                             .when(self.sidebar_tab == SidebarTab::Environments, |this| {
                                 this.child(self.render_environment_workspace(cx))
                             })
-                            .when(self.sidebar_tab != SidebarTab::Environments, |this| {
+                            .when(self.sidebar_tab == SidebarTab::Settings, |this| {
+                                this.child(self.render_settings_workspace(cx))
+                            })
+                            .when(
+                                !matches!(
+                                    self.sidebar_tab,
+                                    SidebarTab::Environments | SidebarTab::Settings
+                                ),
+                                |this| {
                                 this.child(
                                     h_resizable("workspace-split")
                                         .child(
@@ -71,7 +81,8 @@ impl Render for ApiTester {
                                             ),
                                         ),
                                 )
-                            }),
+                            },
+                            ),
                     ),
             )
             .child(self.debug_overlay.clone())

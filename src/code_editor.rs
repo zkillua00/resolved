@@ -16,7 +16,7 @@ use gpui_component::{
     menu::{PopupMenu, PopupMenuItem},
 };
 
-use crate::theme::surface_lowest;
+use crate::theme::ApiThemeExt as _;
 
 const DIAGNOSTIC_REFRESH_DEBOUNCE: Duration = Duration::from_millis(120);
 
@@ -516,8 +516,8 @@ impl Render for CodeEditor {
             .relative()
             .rounded_lg()
             .border_1()
-            .border_color(crate::theme::outline_variant())
-            .bg(surface_lowest())
+            .border_color(cx.api_outline_variant())
+            .bg(cx.api_surface_lowest())
             .overflow_hidden()
             .child(
                 Input::new(&self.input)

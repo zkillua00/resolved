@@ -14,7 +14,7 @@ impl ApiTester {
                 .gap_3()
                 .p_8()
                 .text_center()
-                .bg(surface())
+                .bg(cx.api_surface())
                 .child(
                     gpui_component::Icon::new(IconName::Settings2)
                         .with_size(px(28.))
@@ -63,7 +63,7 @@ impl ApiTester {
         v_flex()
             .size_full()
             .min_w_0()
-            .bg(surface())
+            .bg(cx.api_surface())
             .child(
                 h_flex()
                     .h(px(76.))
@@ -72,7 +72,7 @@ impl ApiTester {
                     .gap_4()
                     .justify_between()
                     .border_b_1()
-                    .border_color(outline_variant())
+                    .border_color(cx.api_outline_variant())
                     .child(
                         v_flex()
                             .w(px(440.))
@@ -195,14 +195,14 @@ impl ApiTester {
                     .px_6()
                     .gap_3()
                     .border_b_1()
-                    .border_color(outline_variant())
-                    .bg(surface_low())
+                    .border_color(cx.api_outline_variant())
+                    .bg(cx.api_surface_low())
                     .child(
                         div()
                             .text_xs()
                             .font_semibold()
                             .text_color(if selected_is_active {
-                                primary_bright()
+                                cx.api_primary_bright()
                             } else {
                                 cx.theme().muted_foreground
                             })

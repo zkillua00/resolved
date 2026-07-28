@@ -5,7 +5,7 @@ impl ApiTester {
         h_flex()
             .size_full()
             .min_w_0()
-            .bg(surface())
+            .bg(cx.api_surface())
             .child(self.render_environment_browser(cx))
             .child(
                 div()

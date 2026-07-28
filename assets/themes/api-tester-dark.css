@@ -1,0 +1,74 @@
+/*
+ * API Tester theme files intentionally use a small, deterministic subset of
+ * CSS: one :root rule containing the custom properties documented here.
+ * Values may refer to other custom properties with var().
+ */
+:root {
+    --api-theme-name: "API Tester Material Dark";
+    --api-appearance: dark;
+
+    --api-surface: #14121a;
+    --api-surface-lowest: #0f0d14;
+    --api-surface-low: #1c1a22;
+    --api-surface-container: #201e26;
+    --api-surface-high: #2b2931;
+    --api-surface-highest: #36343c;
+    --api-foreground: #e6e0eb;
+    --api-muted-foreground: #cac4d0;
+    --api-outline: #49454f;
+
+    --api-primary: #e9ddff;
+    --api-primary-hover: #d0bcff;
+    --api-primary-active: #b9a6ed;
+    --api-primary-foreground: #37265e;
+    --api-selection: #4a4359;
+    --api-secondary-active: #5a526a;
+    --api-secondary-foreground: #e9def9;
+
+    --api-danger: #8c1d18;
+    --api-danger-hover: #a52a24;
+    --api-danger-active: #71120e;
+    --api-danger-foreground: #ffdad6;
+    --api-warning: #f4d06f;
+    --api-warning-hover: #ffdc82;
+    --api-warning-active: #d7b34f;
+    --api-warning-foreground: #332b00;
+    --api-success: #2f6f44;
+    --api-success-hover: #3d8253;
+    --api-success-active: #245c36;
+    --api-success-foreground: #d0f8d8;
+    --api-info: #385f8e;
+    --api-info-hover: #4771a4;
+    --api-info-active: #2c4d77;
+    --api-info-foreground: #d7e9ff;
+
+    --api-red: #ffb4ab;
+    --api-red-light: #ffdad6;
+    --api-green: #4ade80;
+    --api-green-light: #b8f5c8;
+    --api-blue: #93c5fd;
+    --api-blue-light: #d7e9ff;
+    --api-yellow: var(--api-warning);
+    --api-yellow-light: #ffecb3;
+    --api-magenta: #f0abfc;
+    --api-magenta-light: #f7d5ff;
+    --api-cyan: #67e8f9;
+    --api-cyan-light: #c9f8ff;
+
+    --api-editor-background: var(--api-surface-lowest);
+    --api-editor-foreground: var(--api-foreground);
+    --api-editor-active-line: var(--api-surface-container);
+    --api-editor-line-number: #948f9a;
+    --api-editor-active-line-number: var(--api-primary-hover);
+
+    --api-syntax-property: var(--api-primary-hover);
+    --api-syntax-string: #ffd9e3;
+    --api-syntax-number: #efb8c8;
+    --api-syntax-boolean: var(--api-red);
+    --api-syntax-keyword: var(--api-primary);
+    --api-syntax-comment: #948f9a;
+    --api-syntax-punctuation: var(--api-muted-foreground);
+    --api-syntax-variable: var(--api-foreground);
+    --api-syntax-type: #ccc2dc;
+    --api-syntax-function: var(--api-primary);
+}

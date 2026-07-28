@@ -2,7 +2,11 @@ use super::request_tab_reconciliation::reconcile_restored_request_tabs;
 use super::*;
 
 impl ApiTester {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        base_key_bindings: Vec<gpui::KeyBinding>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let script_variable_catalog = ScriptVariableCatalog::default().shared();
         let template_variable_catalog = TemplateVariableCatalog::default().shared();
         let method = cx.new(|cx| {
@@ -121,6 +125,9 @@ impl ApiTester {
             history_writable,
             workspace_writable,
             request_tabs_writable,
+            settings,
+            mut settings_warning,
+            settings_writable,
         ) = match database_store.initialize() {
             Ok(()) => {
                 let import_warning = database_store
@@ -160,6 +167,17 @@ impl ApiTester {
                             false,
                         ),
                     };
+                let (settings, settings_warning, settings_writable) =
+                    match database_store.load_app_settings() {
+                        Ok(settings) => (settings, None, true),
+                        Err(error) => (
+                            AppSettings::default(),
+                            Some(format!(
+                                "Settings could not be loaded and will not be overwritten: {error}"
+                            )),
+                            false,
+                        ),
+                    };
                 let workspace_warning = match (workspace_load_warning, import_warning) {
                     (Some(load), Some(import)) => Some(format!("{load}\n{import}")),
                     (Some(load), None) => Some(load),
@@ -176,6 +194,9 @@ impl ApiTester {
                     history_writable,
                     workspace_writable,
                     request_tabs_writable,
+                    settings,
+                    settings_warning,
+                    settings_writable,
                 )
             }
             Err(error) => (
@@ -194,8 +215,35 @@ impl ApiTester {
                 false,
                 false,
                 false,
+                AppSettings::default(),
+                Some(format!(
+                    "Database could not be opened and settings will not be overwritten: {error}"
+                )),
+                false,
             ),
         };
+        let navigation_compact = settings.navigation_compact;
+        if let Err(error) = shortcuts::apply_key_bindings(cx, &base_key_bindings, &settings) {
+            let warning = format!(
+                "Stored shortcuts are invalid; defaults are active and the stored settings were left untouched: {error}"
+            );
+            tracing::error!("{warning}");
+            settings_warning = Some(warning);
+            shortcuts::apply_key_bindings(cx, &base_key_bindings, &AppSettings::default())
+                .expect("built-in shortcuts must be valid");
+        }
+        if let Some(css_source) = settings.theme.css_source.as_deref()
+            && let Err(error) = crate::theme::parse_and_apply(css_source, cx)
+        {
+            let warning = format!(
+                "Stored CSS theme is invalid; the built-in theme is active and the stored source was left untouched: {error}"
+            );
+            tracing::error!("{warning}");
+            settings_warning = Some(match settings_warning {
+                Some(existing) => format!("{existing}\n{warning}"),
+                None => warning,
+            });
+        }
         let mut last_persisted_request_tabs = request_tabs.clone();
         let mut request_tabs = request_tabs;
         let request_tabs_changed =
@@ -313,7 +361,7 @@ impl ApiTester {
                 this.schedule_template_input_refresh(&input, cx);
                 this.refresh_request_dirty_part(RequestDirtyPart::Url, cx);
             }
-            if matches!(event, InputEvent::PressEnter { .. }) {
+            if matches!(event, InputEvent::PressEnter { secondary: false }) {
                 this.start_request(window, cx);
             }
         });
@@ -321,7 +369,7 @@ impl ApiTester {
             if matches!(event, InputEvent::Change) {
                 this.refresh_request_dirty_part(RequestDirtyPart::Method, cx);
             }
-            if matches!(event, InputEvent::PressEnter { .. }) {
+            if matches!(event, InputEvent::PressEnter { secondary: false }) {
                 this.start_request(window, cx);
             }
         });
@@ -374,6 +422,20 @@ impl ApiTester {
             this.flush_request_tabs(cx);
             async {}
         });
+        let shortcut_target = cx.entity().downgrade();
+        let shortcut_capture_subscription = cx.intercept_keystrokes(move |event, _, cx| {
+            let Some(shortcut_target) = shortcut_target.upgrade() else {
+                return;
+            };
+            if shortcut_target.read(cx).recording_shortcut_id.is_none() {
+                return;
+            }
+            cx.stop_propagation();
+            let keystroke = event.keystroke.clone();
+            shortcut_target.update(cx, |this, cx| {
+                this.capture_shortcut_keystroke(keystroke, cx);
+            });
+        });
 
         let mut this = Self {
             method,
@@ -413,7 +475,7 @@ impl ApiTester {
             workspace_warning,
             workspace_writable,
             sidebar_tab: SidebarTab::Collections,
-            navigation_compact: false,
+            navigation_compact,
             selected_collection_id,
             selected_folder_id,
             active_saved_request_id: None,
@@ -427,6 +489,13 @@ impl ApiTester {
             request_tabs_persist_task: None,
             request_tabs_warning,
             request_tabs_writable,
+            request_tab_context_target: None,
+            settings,
+            settings_warning,
+            settings_writable,
+            base_key_bindings,
+            recording_shortcut_id: None,
+            settings_notice: None,
             selected_environment_id,
             collection_search,
             environment_search,
@@ -460,6 +529,7 @@ impl ApiTester {
                 folder_name_subscription,
                 saved_request_name_subscription,
                 quit_subscription,
+                shortcut_capture_subscription,
             ],
         };
         this.push_header_row("", "", true, window, cx);

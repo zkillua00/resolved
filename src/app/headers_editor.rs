@@ -18,9 +18,9 @@ impl ApiTester {
             .min_h_0()
             .rounded_lg()
             .border_1()
-            .border_color(outline_variant())
+            .border_color(cx.api_outline_variant())
             .overflow_hidden()
-            .bg(surface())
+            .bg(cx.api_surface())
             .child(
                 h_flex()
                     .h(px(42.))
@@ -28,7 +28,7 @@ impl ApiTester {
                     .flex_shrink_0()
                     .px_3()
                     .justify_between()
-                    .bg(surface_low())
+                    .bg(cx.api_surface_low())
                     .child(
                         h_flex()
                             .gap_2()
@@ -51,7 +51,7 @@ impl ApiTester {
                     .h(px(34.))
                     .w_full()
                     .flex_shrink_0()
-                    .bg(surface_low())
+                    .bg(cx.api_surface_low())
                     .text_xs()
                     .font_semibold()
                     .text_color(cx.theme().muted_foreground)
@@ -63,7 +63,7 @@ impl ApiTester {
                             .h_full()
                             .px_3()
                             .border_l_1()
-                            .border_color(outline_variant())
+                            .border_color(cx.api_outline_variant())
                             .flex()
                             .items_center()
                             .child("KEY"),
@@ -75,7 +75,7 @@ impl ApiTester {
                             .h_full()
                             .px_3()
                             .border_l_1()
-                            .border_color(outline_variant())
+                            .border_color(cx.api_outline_variant())
                             .flex()
                             .items_center()
                             .child("VALUE"),
@@ -85,7 +85,7 @@ impl ApiTester {
                             .w(px(44.))
                             .h_full()
                             .border_l_1()
-                            .border_color(outline_variant()),
+                            .border_color(cx.api_outline_variant()),
                     ),
             )
             .child(
@@ -101,7 +101,7 @@ impl ApiTester {
                             .flex_shrink_0()
                             .px_3()
                             .border_t_1()
-                            .border_color(outline_variant())
+                            .border_color(cx.api_outline_variant())
                             .child(
                                 Button::new("add-header-row")
                                     .icon(IconName::Plus)

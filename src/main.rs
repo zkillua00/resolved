@@ -1,10 +1,10 @@
 use std::borrow::Cow;
 
 use gpui::{
-    App, AppContext as _, Application, AssetSource, Bounds, KeyBinding, Menu, MenuItem,
-    SharedString, SystemMenuType, WindowBounds, WindowOptions, actions, px, size,
+    App, AppContext as _, Application, AssetSource, Bounds, Entity, Menu, MenuItem, SharedString,
+    SystemMenuType, WindowBounds, WindowOptions, px, size,
 };
-use gpui_component::Root;
+use gpui_component::{Root, WindowExt as _};
 
 mod app;
 mod code_editor;
@@ -13,6 +13,7 @@ mod debug_overlay;
 mod instance_guard;
 mod request_dirty;
 mod script_intelligence;
+mod shortcuts;
 mod template_intelligence;
 mod theme;
 mod web_preview;
@@ -20,10 +21,105 @@ mod web_preview;
 use app::ApiTester;
 use core::DatabaseStore;
 use instance_guard::InstanceGuard;
-
-actions!(api_tester, [QuitApp]);
+use shortcuts::{
+    ActivateNextRequestTab, ActivatePreviousRequestTab, CloseRequestTab, FocusRequestUrl,
+    FormatRawBody, NewRequestTab, QuitApp, SaveRequest, SaveRequestAs, SendOrCancelRequest,
+    ShowCollections, ShowEnvironments, ShowHistory, ShowSettings, ToggleMetrics, ToggleNavigation,
+};
 
 struct AppAssets;
+
+fn configure_menus(cx: &mut App) {
+    cx.set_menus(vec![
+        Menu {
+            name: "API Tester".into(),
+            items: vec![
+                MenuItem::action("Settings…", ShowSettings),
+                MenuItem::separator(),
+                MenuItem::os_submenu("Services", SystemMenuType::Services),
+                MenuItem::separator(),
+                MenuItem::action("Quit API Tester", QuitApp),
+            ],
+        },
+        Menu {
+            name: "File".into(),
+            items: vec![
+                MenuItem::action("New Request Tab", NewRequestTab),
+                MenuItem::action("Close Request Tab", CloseRequestTab),
+                MenuItem::separator(),
+                MenuItem::action("Save Request", SaveRequest),
+                MenuItem::action("Save Request As…", SaveRequestAs),
+            ],
+        },
+        Menu {
+            name: "Request".into(),
+            items: vec![MenuItem::action(
+                "Send or Cancel Request",
+                SendOrCancelRequest,
+            )],
+        },
+    ]);
+}
+
+fn register_app_action_handlers(view: &Entity<ApiTester>, cx: &mut App) {
+    macro_rules! register {
+        ($action:ty, $handler:ident) => {{
+            let view = view.downgrade();
+            cx.on_action(move |action: &$action, cx| {
+                let Some(window_handle) = cx.active_window() else {
+                    tracing::error!(
+                        "could not dispatch {} because there is no active window",
+                        stringify!($action)
+                    );
+                    return;
+                };
+                let action = action.clone();
+                let view = view.clone();
+                // Key and menu actions are dispatched while the active window
+                // is already on GPUI's update stack. Wait until the end of
+                // that effect cycle before borrowing the window again.
+                cx.defer(move |cx| {
+                    let result = window_handle.update(cx, |_, window, cx| {
+                        if window.has_active_dialog(cx) {
+                            return Ok(());
+                        }
+                        view.update(cx, |view, cx| {
+                            view.cancel_shortcut_recording(cx);
+                            view.$handler(&action, window, cx);
+                        })
+                    });
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => tracing::error!(
+                            "could not dispatch {} to API Tester: {error}",
+                            stringify!($action)
+                        ),
+                        Err(error) => tracing::error!(
+                            "could not update API Tester window for {}: {error}",
+                            stringify!($action)
+                        ),
+                    }
+                });
+            });
+        }};
+    }
+
+    register!(NewRequestTab, on_new_request_tab);
+    register!(CloseRequestTab, on_close_request_tab);
+    register!(ActivateNextRequestTab, on_activate_next_request_tab);
+    register!(ActivatePreviousRequestTab, on_activate_previous_request_tab);
+    register!(SendOrCancelRequest, on_send_or_cancel_request);
+    register!(SaveRequest, on_save_request);
+    register!(SaveRequestAs, on_save_request_as);
+    register!(FocusRequestUrl, on_focus_request_url);
+    register!(FormatRawBody, on_format_raw_body);
+    register!(ShowCollections, on_show_collections);
+    register!(ShowEnvironments, on_show_environments);
+    register!(ShowHistory, on_show_history);
+    register!(ShowSettings, on_show_settings);
+    register!(ToggleNavigation, on_toggle_navigation);
+    register!(ToggleMetrics, on_toggle_metrics);
+}
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
@@ -86,16 +182,8 @@ fn main() {
         .with_assets(AppAssets)
         .run(|cx: &mut App| {
             gpui_component::init(cx);
+            let base_key_bindings = shortcuts::capture_base_key_bindings(cx);
             theme::configure(cx);
-            cx.bind_keys([KeyBinding::new("cmd-q", QuitApp, None)]);
-            cx.set_menus(vec![Menu {
-                name: "API Tester".into(),
-                items: vec![
-                    MenuItem::os_submenu("Services", SystemMenuType::Services),
-                    MenuItem::separator(),
-                    MenuItem::action("Quit API Tester", QuitApp),
-                ],
-            }]);
 
             cx.on_window_closed(|cx| {
                 if cx.windows().is_empty() {
@@ -117,7 +205,9 @@ fn main() {
                     ..Default::default()
                 },
                 |window, cx| {
-                    let view = cx.new(|cx| ApiTester::new(window, cx));
+                    let view = cx.new(|cx| ApiTester::new(base_key_bindings.clone(), window, cx));
+                    register_app_action_handlers(&view, cx);
+                    configure_menus(cx);
                     let view_for_close = view.downgrade();
                     window.on_window_should_close(cx, move |_, cx| {
                         view_for_close

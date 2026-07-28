@@ -8,6 +8,8 @@ license = "Apache-2.0"
 [dependencies]
 anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
+csscolorparser = "=0.8.3"
+cssparser = "=0.37.0"
 dirs = "6.0"
 futures = "0.3"
 gpui = { version = "=0.2.2", features = ["runtime_shaders"] }

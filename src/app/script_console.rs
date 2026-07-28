@@ -209,7 +209,7 @@ pub(super) fn script_console_tone_background(tone: ScriptConsoleTone, cx: &App) 
         ScriptConsoleTone::Warning => cx.theme().warning.opacity(0.045),
         ScriptConsoleTone::Danger => cx.theme().danger.opacity(0.055),
         ScriptConsoleTone::Success => cx.theme().success.opacity(0.025),
-        ScriptConsoleTone::Neutral | ScriptConsoleTone::Debug => surface_lowest(),
+        ScriptConsoleTone::Neutral | ScriptConsoleTone::Debug => cx.api_surface_lowest(),
     }
 }
 
@@ -308,9 +308,9 @@ impl ApiTester {
                         .py_2()
                         .gap_2()
                         .border_b_1()
-                        .border_color(outline_variant())
+                        .border_color(cx.api_outline_variant())
                         .bg(tone_background)
-                        .hover(|style| style.bg(surface_low()))
+                        .hover(|style| style.bg(cx.api_surface_low()))
                         .child(
                             div()
                                 .w(px(20.))
@@ -390,7 +390,7 @@ impl ApiTester {
                             .px_3()
                             .gap_2()
                             .border_b_1()
-                            .border_color(outline_variant())
+                            .border_color(cx.api_outline_variant())
                             .bg(cx.theme().muted.opacity(0.34))
                             .child(
                                 div()
@@ -415,9 +415,9 @@ impl ApiTester {
             .size_full()
             .rounded_md()
             .border_1()
-            .border_color(outline_variant())
+            .border_color(cx.api_outline_variant())
             .overflow_hidden()
-            .bg(surface_lowest())
+            .bg(cx.api_surface_lowest())
             .child(
                 h_flex()
                     .h(px(40.))
@@ -425,8 +425,8 @@ impl ApiTester {
                     .px_3()
                     .gap_2()
                     .border_b_1()
-                    .border_color(outline_variant())
-                    .bg(surface_low())
+                    .border_color(cx.api_outline_variant())
+                    .bg(cx.api_surface_low())
                     .child(
                         gpui_component::Icon::new(IconName::SquareTerminal)
                             .with_size(px(15.))

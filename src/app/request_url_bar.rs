@@ -38,8 +38,8 @@ impl ApiTester {
                     .min_w_0()
                     .rounded_lg()
                     .border_1()
-                    .border_color(outline_variant())
-                    .bg(surface_container())
+                    .border_color(cx.api_outline_variant())
+                    .bg(cx.api_surface_container())
                     .overflow_hidden()
                     .child(
                         h_flex()
@@ -47,7 +47,7 @@ impl ApiTester {
                             .w(px(148.))
                             .flex_shrink_0()
                             .border_r_1()
-                            .border_color(outline_variant())
+                            .border_color(cx.api_outline_variant())
                             .bg(color.opacity(0.08))
                             .child(
                                 Popover::new("method-options")
@@ -74,8 +74,8 @@ impl ApiTester {
                                             .py_1()
                                             .rounded_lg()
                                             .border_1()
-                                            .border_color(outline_variant())
-                                            .bg(surface_container())
+                                            .border_color(cx.api_outline_variant())
+                                            .bg(cx.api_surface_container())
                                             .overflow_hidden()
                                             .children(STANDARD_HTTP_METHODS.iter().enumerate().map(
                                                 |(index, method)| {

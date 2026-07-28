@@ -38,10 +38,10 @@ impl ApiTester {
             .into_any_element()
     }
 
-    pub(super) fn render_response_body(&self, _cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_response_body(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .size_full()
-            .bg(surface_lowest())
+            .bg(cx.api_surface_lowest())
             .child(self.response_editor.clone())
             .into_any_element()
     }

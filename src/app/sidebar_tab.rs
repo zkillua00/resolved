@@ -3,4 +3,5 @@ pub(super) enum SidebarTab {
     Collections,
     Environments,
     History,
+    Settings,
 }

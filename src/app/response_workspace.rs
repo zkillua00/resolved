@@ -18,7 +18,7 @@ impl ApiTester {
             return v_flex()
                 .size_full()
                 .min_h_0()
-                .bg(surface())
+                .bg(cx.api_surface())
                 .child(
                     h_flex()
                         .h(px(56.))
@@ -26,7 +26,7 @@ impl ApiTester {
                         .px_4()
                         .gap_3()
                         .border_b_1()
-                        .border_color(outline_variant())
+                        .border_color(cx.api_outline_variant())
                         .child(div().text_base().font_semibold().child("Response"))
                         .child(
                             div()
@@ -92,7 +92,7 @@ impl ApiTester {
         v_flex()
             .size_full()
             .min_h_0()
-            .bg(surface())
+            .bg(cx.api_surface())
             .child(
                 h_flex()
                     .h(px(56.))
@@ -101,7 +101,7 @@ impl ApiTester {
                     .gap_4()
                     .justify_between()
                     .border_b_1()
-                    .border_color(outline_variant())
+                    .border_color(cx.api_outline_variant())
                     .child(
                         h_flex()
                             .min_w_0()
@@ -152,7 +152,7 @@ impl ApiTester {
                     .px_4()
                     .justify_between()
                     .border_b_1()
-                    .border_color(outline_variant())
+                    .border_color(cx.api_outline_variant())
                     .child(
                         TabBar::new("response-tabs")
                             .underline()

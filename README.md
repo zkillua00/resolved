@@ -21,11 +21,15 @@ WKWebView through `gpui-wry` only when the Preview tab is selected.
 - Reusable code editors with line numbers and tree-sitter syntax highlighting
 - Pretty JSON, content-aware response highlighting, and clipboard copy
 - Sandboxed JavaScript pre-request and post-response scripts
-- Persistent request tabs with independent drafts, dirty-close protection, and
-  restoration across launches
+- Persistent request tabs with independent drafts, named/color-coded collapsible
+  groups, dirty-close protection, and restoration across launches
+- Browser-style tab menus for closing the current, other, left, right, all, or
+  grouped tabs with one aggregate unsaved-changes confirmation
 - Nested collection folders with search-preserved ancestry, request moves, and
   safe folder reparenting
 - Persistent collections, saved requests, environments, and secret variables
+- Persistent, live-configurable keyboard shortcuts with macOS-native defaults
+- CSS themes mapped into GPUI controls and editor syntax colors
 - Request identity and Save/Update actions beside the main request editor
 - Direct active-environment switching from the title bar
 - `{{variable}}` expansion in URLs, header names and values, and request bodies
@@ -127,6 +131,54 @@ cyclic, malformed, or excessively nested references stop the request with a
 field-specific error. Saved requests keep the original placeholders rather than
 the expanded values.
 
+## Request tabs
+
+Request tabs support a right-click context menu. Close operations are resolved
+against the visible tab order and are applied atomically, so a multi-tab action
+shows at most one discard confirmation and performs one persistence write. Use
+Move to group to create or reuse a group. Group chips can be collapsed with a
+click and expose rename, color, new-tab, ungroup, and close-group actions from
+their own context menu. The chevron beside the new-tab button lists every open
+tab, including tabs inside collapsed groups.
+
+## Settings, shortcuts, and themes
+
+Open Settings from the navigation rail or with `⌘,`. On the Keyboard page,
+click a binding and press its replacement shortcut. `Escape` cancels recording,
+`Delete` or `Backspace` clears the binding, Reset restores one default, and
+Reset shortcuts restores all defaults. Invalid or conflicting assignments are
+left unapplied. Valid changes are persisted to SQLite and take effect
+immediately, including while an input or code editor is focused.
+
+| Action | Default |
+| --- | --- |
+| New / close request tab | `⌘T` / `⌘W` |
+| Next / previous request tab | `⌃⇥` / `⌃⇧⇥` |
+| Send or cancel request | `⌘↩` |
+| Save / Save as | `⌘S` / `⌘⇧S` |
+| Focus request URL | `⌘L` |
+| Format raw body | `⌥⇧F` |
+| Collections / Environments / History | `⌘1` / `⌘2` / `⌘3` |
+| Settings | `⌘,` |
+| Toggle navigation size | `⌘\` |
+| Toggle metrics | `⌘⇧M` |
+| Quit | `⌘Q` |
+
+The Appearance page accepts a UTF-8 `.css` file through Choose CSS. Reload
+re-reads the selected path, while Use built-in restores Material Dark. A
+validated source snapshot is stored with the settings, so the selected theme
+survives restart independently of the original file.
+
+Theme CSS is deliberately a color-configuration format rather than arbitrary
+web styling: it must contain exactly one `:root` rule, a quoted
+`--api-theme-name`, a `dark` or `light` `--api-appearance`, and the supported
+semantic `--api-*` color properties. Values may reference another declared
+token with `var()`. The bundled
+[assets/themes/api-tester-dark.css](assets/themes/api-tester-dark.css) is the
+canonical token contract and a starting template for custom themes. A valid
+theme updates GPUI Component colors and editor syntax highlighting atomically;
+invalid files leave the active theme unchanged.
+
 ## Pre-request and post-response scripts
 
 Scripts run as JavaScript in a fresh embedded QuickJS runtime for every phase.
@@ -226,16 +278,20 @@ State is stored in the macOS local application-data directory under
 `API Tester/`:
 
 - `api-tester.sqlite3`: the versioned SQLite database for history, collections,
-  saved requests and scripts, environments, variables, and app state
+  saved requests and scripts, environments, variables, request tabs, shortcut
+  overrides, the CSS theme snapshot, and other app settings
 
 The database uses foreign keys, WAL mode, a short bounded busy timeout, explicit
 forward-only schema migrations, normalized body-field tables, transactional
 aggregate writes, and a startup integrity check. Schema v2 adds request-body
 metadata, schema v3 adds nested collection folders, and schema v4 adds
-persistent request-tab state; earlier rows migrate without losing request
-content. It is embedded behind a storage interface; there is no localhost
-database server or open port. A process-level workspace lock rejects a second
-app instance so stale in-memory aggregates cannot overwrite each other.
+persistent request-tab state. Schema v5 adds application settings, including
+shortcuts, theme selection, and navigation density; earlier rows migrate
+without losing request content. It is embedded behind a storage interface;
+there is no localhost database server or open port. A process-level workspace
+lock rejects a second app instance so stale in-memory aggregates cannot
+overwrite each other.
+
 Existing `history.json` and `workspace.json` files from earlier builds are
 imported independently once and retained as untouched backups. Loading a
 redacted history entry leaves its sensitive value blank and disabled rather
@@ -301,15 +357,16 @@ serialization, file upload errors, a real loopback HTTP exchange, response
 formatting, reusable editor configuration, performance sampling, SQLite
 migrations/transactions/legacy import, nested-folder validation and
 persistence, request-tab identity/dirty semantics, atomic workspace/tab saves,
-variable resolution across structured bodies, bounded script execution,
-history bounds/persistence/redaction, and preview detection and CSP injection. A
-cohesive smoke test also carries one saved request through SQLite reload,
-pre-script mutation, environment resolution, a real loopback request,
+shortcut parsing, validation, and conflict detection, CSS token parsing and
+palette mapping, variable resolution across structured bodies, bounded script
+execution, history bounds/persistence/redaction, and preview detection and CSP
+injection. A cohesive smoke test also carries one saved request through SQLite
+reload, pre-script mutation, environment resolution, a real loopback request,
 post-script tests/mutation, and sanitized history reload. Loopback tests may
 need permission to bind a local socket in a restricted environment.
 
 ## Deliberate MVP limits
 
 Cookie jars, response streaming/downloads, certificate controls, proxy
-configuration UI, and collection import/export are not included yet. macOS is
-the only supported target for now.
+controls, and collection import/export are not included yet. macOS is the only
+supported target for now.

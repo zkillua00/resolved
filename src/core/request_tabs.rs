@@ -1,16 +1,18 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use chrono::Utc;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::template::RequestTemplate;
 
 pub const DEFAULT_REQUEST_TAB_TITLE: &str = "Untitled Request";
+pub const DEFAULT_REQUEST_TAB_GROUP_TITLE: &str = "Tab Group";
 
 static NEXT_REQUEST_TAB_ID: AtomicU64 = AtomicU64::new(0);
+static NEXT_REQUEST_TAB_GROUP_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Stable identity for one open request tab.
 ///
@@ -39,6 +41,145 @@ impl Default for RequestTabId {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Stable identity for a persisted tab group.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct RequestTabGroupId(String);
+
+impl RequestTabGroupId {
+    fn new() -> Self {
+        Self(new_request_tab_group_id())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn is_valid(&self) -> bool {
+        !self.0.trim().is_empty()
+    }
+}
+
+/// Semantic tab-group color intent.
+///
+/// Unknown values are retained so a newer application can add colors without
+/// making the persisted request-tab state unreadable by an older version.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RequestTabGroupColor {
+    Gray,
+    Blue,
+    Cyan,
+    Green,
+    Yellow,
+    Orange,
+    Red,
+    Pink,
+    #[default]
+    Purple,
+    Custom(String),
+}
+
+impl RequestTabGroupColor {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Gray => "gray",
+            Self::Blue => "blue",
+            Self::Cyan => "cyan",
+            Self::Green => "green",
+            Self::Yellow => "yellow",
+            Self::Orange => "orange",
+            Self::Red => "red",
+            Self::Pink => "pink",
+            Self::Purple => "purple",
+            Self::Custom(value) => value,
+        }
+    }
+}
+
+impl Serialize for RequestTabGroupColor {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for RequestTabGroupColor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "gray" => Self::Gray,
+            "blue" => Self::Blue,
+            "cyan" => Self::Cyan,
+            "green" => Self::Green,
+            "yellow" => Self::Yellow,
+            "orange" => Self::Orange,
+            "red" => Self::Red,
+            "pink" => Self::Pink,
+            "purple" => Self::Purple,
+            _ => Self::Custom(value),
+        })
+    }
+}
+
+/// Persisted presentation metadata for one tab group.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RequestTabGroup {
+    id: RequestTabGroupId,
+    title: String,
+    #[serde(default)]
+    color: RequestTabGroupColor,
+    #[serde(default)]
+    collapsed: bool,
+}
+
+impl RequestTabGroup {
+    fn new(title: impl Into<String>, color: RequestTabGroupColor) -> Self {
+        Self {
+            id: RequestTabGroupId::new(),
+            title: title.into(),
+            color,
+            collapsed: false,
+        }
+    }
+
+    pub fn id(&self) -> &RequestTabGroupId {
+        &self.id
+    }
+
+    pub fn display_title(&self) -> &str {
+        if self.title.trim().is_empty() {
+            DEFAULT_REQUEST_TAB_GROUP_TITLE
+        } else {
+            self.title.trim()
+        }
+    }
+
+    pub fn color(&self) -> &RequestTabGroupColor {
+        &self.color
+    }
+
+    pub fn is_collapsed(&self) -> bool {
+        self.collapsed
+    }
+}
+
+/// A context-menu close operation, resolved against the current tab order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestTabCloseScope {
+    Current,
+    Others,
+    ToLeft,
+    ToRight,
+    All,
+    Group,
 }
 
 /// Optional persisted location of a request tab.
@@ -94,6 +235,8 @@ impl RequestTabAssociation {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RequestTabRecord {
     id: RequestTabId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    group_id: Option<RequestTabGroupId>,
     title: String,
     association: RequestTabAssociation,
     template: RequestTemplate,
@@ -121,6 +264,7 @@ impl RequestTabRecord {
         let template = canonical_request_template(template);
         Self {
             id: RequestTabId::new(),
+            group_id: None,
             baseline_title: title.clone(),
             baseline_template: template.clone(),
             title,
@@ -144,6 +288,10 @@ impl RequestTabRecord {
 
     pub fn id(&self) -> &RequestTabId {
         &self.id
+    }
+
+    pub fn group_id(&self) -> Option<&RequestTabGroupId> {
+        self.group_id.as_ref()
     }
 
     pub fn title(&self) -> &str {
@@ -272,6 +420,8 @@ pub struct OpenRequestTabResult {
 pub struct RequestTabs {
     tabs: Vec<RequestTabRecord>,
     active_tab_id: RequestTabId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    groups: Vec<RequestTabGroup>,
 }
 
 impl RequestTabs {
@@ -281,6 +431,7 @@ impl RequestTabs {
         Self {
             tabs: vec![tab],
             active_tab_id,
+            groups: Vec::new(),
         }
     }
 
@@ -295,6 +446,150 @@ impl RequestTabs {
 
     pub fn active_tab_id(&self) -> &RequestTabId {
         &self.active_tab_id
+    }
+
+    pub fn groups(&self) -> &[RequestTabGroup] {
+        &self.groups
+    }
+
+    pub fn group(&self, id: &RequestTabGroupId) -> Option<&RequestTabGroup> {
+        self.groups.iter().find(|group| group.id == *id)
+    }
+
+    pub fn tabs_in_group(&self, id: &RequestTabGroupId) -> Vec<&RequestTabRecord> {
+        self.tabs
+            .iter()
+            .filter(|tab| tab.group_id.as_ref() == Some(id))
+            .collect()
+    }
+
+    /// Create a group containing `tab_id`.
+    ///
+    /// If the tab belonged to another group, it is moved immediately after
+    /// that old group's remaining members so both groups stay contiguous.
+    pub fn create_group_for_tab(
+        &mut self,
+        tab_id: &RequestTabId,
+        title: impl Into<String>,
+        color: RequestTabGroupColor,
+    ) -> Option<RequestTabGroupId> {
+        self.get(tab_id)?;
+        let group = RequestTabGroup::new(title, color);
+        let group_id = group.id.clone();
+        self.groups.push(group);
+        let assigned = self.set_tab_group(tab_id, Some(&group_id));
+        debug_assert!(assigned, "a newly created tab group must accept its tab");
+        Some(group_id)
+    }
+
+    /// Assign a tab to a group, or remove it from its current group.
+    ///
+    /// Group blocks are kept contiguous. Assigning inserts the tab at the end
+    /// of the destination group; ungrouping places it just after its former
+    /// group.
+    pub fn set_tab_group(
+        &mut self,
+        tab_id: &RequestTabId,
+        group_id: Option<&RequestTabGroupId>,
+    ) -> bool {
+        if let Some(group_id) = group_id
+            && self.group(group_id).is_none()
+        {
+            return false;
+        }
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == *tab_id) else {
+            return false;
+        };
+        let old_group_id = self.tabs[index].group_id.clone();
+        if old_group_id.as_ref() == group_id {
+            return false;
+        }
+
+        let mut tab = self.tabs.remove(index);
+        tab.group_id = group_id.cloned();
+
+        let insertion_index = if let Some(group_id) = group_id {
+            self.tabs
+                .iter()
+                .rposition(|candidate| candidate.group_id.as_ref() == Some(group_id))
+                .map_or_else(
+                    || {
+                        old_group_id
+                            .as_ref()
+                            .and_then(|old_group_id| {
+                                self.tabs.iter().rposition(|candidate| {
+                                    candidate.group_id.as_ref() == Some(old_group_id)
+                                })
+                            })
+                            .map_or(index.min(self.tabs.len()), |index| index + 1)
+                    },
+                    |index| index + 1,
+                )
+        } else {
+            old_group_id
+                .as_ref()
+                .and_then(|old_group_id| {
+                    self.tabs
+                        .iter()
+                        .rposition(|candidate| candidate.group_id.as_ref() == Some(old_group_id))
+                })
+                .map_or(index.min(self.tabs.len()), |index| index + 1)
+        };
+        self.tabs.insert(insertion_index, tab);
+        self.prune_empty_groups();
+        true
+    }
+
+    pub fn rename_group(&mut self, group_id: &RequestTabGroupId, title: impl Into<String>) -> bool {
+        let Some(group) = self.groups.iter_mut().find(|group| group.id == *group_id) else {
+            return false;
+        };
+        let title = title.into();
+        if group.title == title {
+            return false;
+        }
+        group.title = title;
+        true
+    }
+
+    pub fn set_group_color(
+        &mut self,
+        group_id: &RequestTabGroupId,
+        color: RequestTabGroupColor,
+    ) -> bool {
+        let Some(group) = self.groups.iter_mut().find(|group| group.id == *group_id) else {
+            return false;
+        };
+        if group.color == color {
+            return false;
+        }
+        group.color = color;
+        true
+    }
+
+    pub fn set_group_collapsed(&mut self, group_id: &RequestTabGroupId, collapsed: bool) -> bool {
+        let Some(group) = self.groups.iter_mut().find(|group| group.id == *group_id) else {
+            return false;
+        };
+        if group.collapsed == collapsed {
+            return false;
+        }
+        group.collapsed = collapsed;
+        true
+    }
+
+    /// Remove a group while leaving its tabs open and contiguous.
+    pub fn remove_group(&mut self, group_id: &RequestTabGroupId) -> bool {
+        let Some(index) = self.groups.iter().position(|group| group.id == *group_id) else {
+            return false;
+        };
+        self.groups.remove(index);
+        for tab in &mut self.tabs {
+            if tab.group_id.as_ref() == Some(group_id) {
+                tab.group_id = None;
+            }
+        }
+        true
     }
 
     pub fn active(&self) -> &RequestTabRecord {
@@ -355,6 +650,14 @@ impl RequestTabs {
         )
     }
 
+    pub fn open_new_in_group(&mut self, group_id: &RequestTabGroupId) -> Option<RequestTabId> {
+        self.group(group_id)?;
+        let tab_id = self.open_new();
+        let assigned = self.set_tab_group(&tab_id, Some(group_id));
+        debug_assert!(assigned, "an existing group must accept a new tab");
+        Some(tab_id)
+    }
+
     pub fn open_unsaved(
         &mut self,
         title: impl Into<String>,
@@ -405,21 +708,121 @@ impl RequestTabs {
     /// Closing the active tab selects the tab that shifted into its index,
     /// falling back to its previous neighbor. Closing the final tab creates
     /// and activates a fresh scratch tab.
+    #[cfg(test)]
     pub fn close(&mut self, id: &RequestTabId) -> Option<RequestTabRecord> {
-        let index = self.tabs.iter().position(|tab| tab.id == *id)?;
-        let was_active = self.active_tab_id == *id;
-        let closed = self.tabs.remove(index);
+        self.close_tabs(std::slice::from_ref(id)).pop()
+    }
 
-        if self.tabs.is_empty() {
-            let replacement = RequestTabRecord::scratch();
-            self.active_tab_id = replacement.id.clone();
-            self.tabs.push(replacement);
-        } else if was_active {
-            let next_index = index.min(self.tabs.len() - 1);
-            self.active_tab_id = self.tabs[next_index].id.clone();
+    /// Resolve a context-menu close action without mutating state.
+    ///
+    /// IDs are returned in their current visual order so callers can inspect
+    /// dirty records and present one aggregate confirmation before closing.
+    pub fn close_target_ids(
+        &self,
+        anchor: &RequestTabId,
+        scope: RequestTabCloseScope,
+    ) -> Vec<RequestTabId> {
+        if scope == RequestTabCloseScope::All {
+            return self.tabs.iter().map(|tab| tab.id.clone()).collect();
+        }
+        let Some(anchor_index) = self.tabs.iter().position(|tab| tab.id == *anchor) else {
+            return Vec::new();
+        };
+        let anchor_group_id = self.tabs[anchor_index].group_id.as_ref();
+
+        self.tabs
+            .iter()
+            .enumerate()
+            .filter(|(index, tab)| match scope {
+                RequestTabCloseScope::Current => *index == anchor_index,
+                RequestTabCloseScope::Others => *index != anchor_index,
+                RequestTabCloseScope::ToLeft => *index < anchor_index,
+                RequestTabCloseScope::ToRight => *index > anchor_index,
+                RequestTabCloseScope::All => true,
+                RequestTabCloseScope::Group => {
+                    anchor_group_id.is_some() && tab.group_id.as_ref() == anchor_group_id
+                }
+            })
+            .map(|(_, tab)| tab.id.clone())
+            .collect()
+    }
+
+    /// Close a set of tabs as one ordered model mutation.
+    ///
+    /// Unknown and duplicate IDs are ignored. If the active tab survives, it
+    /// stays active. Otherwise, selection uses the first surviving tab to its
+    /// right and then its previous neighbor. Closing every tab creates exactly
+    /// one fresh, ungrouped scratch tab.
+    pub fn close_tabs(&mut self, ids: &[RequestTabId]) -> Vec<RequestTabRecord> {
+        let requested = ids.iter().collect::<HashSet<_>>();
+        if requested.is_empty() {
+            return Vec::new();
+        }
+        let removed_active_index = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == self.active_tab_id)
+            .filter(|index| requested.contains(&self.tabs[*index].id));
+        let active_survives = removed_active_index.is_none();
+        let fallback_id = removed_active_index.and_then(|active_index| {
+            self.tabs[active_index + 1..]
+                .iter()
+                .find(|tab| !requested.contains(&tab.id))
+                .or_else(|| {
+                    self.tabs[..active_index]
+                        .iter()
+                        .rev()
+                        .find(|tab| !requested.contains(&tab.id))
+                })
+                .map(|tab| tab.id.clone())
+        });
+
+        let mut retained = Vec::with_capacity(self.tabs.len());
+        let mut removed = Vec::new();
+        for tab in self.tabs.drain(..) {
+            if requested.contains(&tab.id) {
+                removed.push(tab);
+            } else {
+                retained.push(tab);
+            }
+        }
+        if removed.is_empty() {
+            self.tabs = retained;
+            return removed;
         }
 
-        Some(closed)
+        if retained.is_empty() {
+            let replacement = RequestTabRecord::scratch();
+            self.active_tab_id = replacement.id.clone();
+            retained.push(replacement);
+            self.groups.clear();
+        } else if !active_survives {
+            self.active_tab_id =
+                fallback_id.expect("a surviving tab must provide an active fallback");
+        }
+        self.tabs = retained;
+        self.prune_empty_groups();
+        removed
+    }
+
+    #[cfg(test)]
+    pub fn close_scope(
+        &mut self,
+        anchor: &RequestTabId,
+        scope: RequestTabCloseScope,
+    ) -> Vec<RequestTabRecord> {
+        let ids = self.close_target_ids(anchor, scope);
+        self.close_tabs(&ids)
+    }
+
+    fn prune_empty_groups(&mut self) {
+        let used_group_ids = self
+            .tabs
+            .iter()
+            .filter_map(|tab| tab.group_id.as_ref())
+            .collect::<HashSet<_>>();
+        self.groups
+            .retain(|group| used_group_ids.contains(&group.id));
     }
 
     pub fn detach_saved_request(&mut self, saved_request_id: &str) -> usize {
@@ -477,6 +880,8 @@ struct PersistedRequestTabs {
     tabs: Vec<RequestTabRecord>,
     #[serde(default)]
     active_tab_id: Option<RequestTabId>,
+    #[serde(default)]
+    groups: Vec<RequestTabGroup>,
 }
 
 impl<'de> Deserialize<'de> for RequestTabs {
@@ -485,13 +890,18 @@ impl<'de> Deserialize<'de> for RequestTabs {
         D: Deserializer<'de>,
     {
         let persisted = PersistedRequestTabs::deserialize(deserializer)?;
-        Ok(normalize_tabs(persisted.tabs, persisted.active_tab_id))
+        Ok(normalize_tabs(
+            persisted.tabs,
+            persisted.active_tab_id,
+            persisted.groups,
+        ))
     }
 }
 
 fn normalize_tabs(
     mut tabs: Vec<RequestTabRecord>,
     active_tab_id: Option<RequestTabId>,
+    mut groups: Vec<RequestTabGroup>,
 ) -> RequestTabs {
     if tabs.is_empty() {
         return RequestTabs::new();
@@ -514,12 +924,82 @@ fn normalize_tabs(
         }
     }
 
+    let mut group_ids = HashSet::with_capacity(groups.len());
+    let mut group_id_replacements = HashMap::new();
+    groups.retain_mut(|group| {
+        if !group.id.is_valid() {
+            let old_id = group.id.clone();
+            let mut replacement = RequestTabGroupId::new();
+            while group_ids.contains(&replacement) {
+                replacement = RequestTabGroupId::new();
+            }
+            group_id_replacements
+                .entry(old_id)
+                .or_insert_with(|| replacement.clone());
+            group.id = replacement;
+        }
+        group_ids.insert(group.id.clone())
+    });
+
+    for tab in &mut tabs {
+        if let Some(group_id) = tab.group_id.as_mut()
+            && let Some(replacement) = group_id_replacements.get(group_id)
+        {
+            *group_id = replacement.clone();
+        }
+        if tab
+            .group_id
+            .as_ref()
+            .is_some_and(|group_id| !group_ids.contains(group_id))
+        {
+            tab.group_id = None;
+        }
+    }
+    let used_group_ids = tabs
+        .iter()
+        .filter_map(|tab| tab.group_id.as_ref())
+        .collect::<HashSet<_>>();
+    groups.retain(|group| used_group_ids.contains(&group.id));
+    make_group_members_contiguous(&mut tabs);
+
     let active_tab_id = active_tab_id
         .filter(|id| ids.contains(id))
         .unwrap_or_else(|| tabs[0].id.clone());
     RequestTabs {
         tabs,
         active_tab_id,
+        groups,
+    }
+}
+
+fn make_group_members_contiguous(tabs: &mut Vec<RequestTabRecord>) {
+    enum OrderItem {
+        Ungrouped(Box<RequestTabRecord>),
+        Group(RequestTabGroupId),
+    }
+
+    let mut order = Vec::with_capacity(tabs.len());
+    let mut grouped_tabs = HashMap::<RequestTabGroupId, Vec<RequestTabRecord>>::new();
+    for tab in std::mem::take(tabs) {
+        if let Some(group_id) = tab.group_id.clone() {
+            if !grouped_tabs.contains_key(&group_id) {
+                order.push(OrderItem::Group(group_id.clone()));
+            }
+            grouped_tabs.entry(group_id).or_default().push(tab);
+        } else {
+            order.push(OrderItem::Ungrouped(Box::new(tab)));
+        }
+    }
+
+    for item in order {
+        match item {
+            OrderItem::Ungrouped(tab) => tabs.push(*tab),
+            OrderItem::Group(group_id) => {
+                if let Some(group) = grouped_tabs.remove(&group_id) {
+                    tabs.extend(group);
+                }
+            }
+        }
     }
 }
 
@@ -540,6 +1020,16 @@ fn new_request_tab_id() -> String {
     let sequence = NEXT_REQUEST_TAB_ID.fetch_add(1, Ordering::Relaxed);
     format!(
         "tab-{}-{}-{sequence}",
+        created_at.timestamp_micros(),
+        std::process::id()
+    )
+}
+
+fn new_request_tab_group_id() -> String {
+    let created_at = Utc::now();
+    let sequence = NEXT_REQUEST_TAB_GROUP_ID.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "tab-group-{}-{}-{sequence}",
         created_at.timestamp_micros(),
         std::process::id()
     )
@@ -885,5 +1375,274 @@ mod tests {
             &association(Some("shared-folder-id"), Some("collection-b"), None)
         );
         assert!(!valid.is_detached());
+    }
+
+    #[test]
+    fn close_target_selectors_follow_visual_order_for_every_scope() {
+        let mut tabs = RequestTabs::new();
+        let first = tabs.active_tab_id().clone();
+        let second = tabs.open_new();
+        let third = tabs.open_new();
+        let fourth = tabs.open_new();
+        let fifth = tabs.open_new();
+        let group = tabs
+            .create_group_for_tab(&second, "Auth", RequestTabGroupColor::Blue)
+            .unwrap();
+        assert!(tabs.set_tab_group(&third, Some(&group)));
+
+        assert_eq!(
+            tabs.close_target_ids(&third, RequestTabCloseScope::Current),
+            vec![third.clone()]
+        );
+        assert_eq!(
+            tabs.close_target_ids(&third, RequestTabCloseScope::Others),
+            vec![first.clone(), second.clone(), fourth.clone(), fifth.clone()]
+        );
+        assert_eq!(
+            tabs.close_target_ids(&third, RequestTabCloseScope::ToLeft),
+            vec![first.clone(), second.clone()]
+        );
+        assert_eq!(
+            tabs.close_target_ids(&third, RequestTabCloseScope::ToRight),
+            vec![fourth.clone(), fifth.clone()]
+        );
+        assert_eq!(
+            tabs.close_target_ids(&third, RequestTabCloseScope::All),
+            vec![
+                first.clone(),
+                second.clone(),
+                third.clone(),
+                fourth.clone(),
+                fifth.clone()
+            ]
+        );
+        assert_eq!(
+            tabs.close_target_ids(&third, RequestTabCloseScope::Group),
+            vec![second, third]
+        );
+
+        let missing = RequestTabId("missing".to_owned());
+        for scope in [
+            RequestTabCloseScope::Current,
+            RequestTabCloseScope::Others,
+            RequestTabCloseScope::ToLeft,
+            RequestTabCloseScope::ToRight,
+            RequestTabCloseScope::Group,
+        ] {
+            assert!(tabs.close_target_ids(&missing, scope).is_empty());
+        }
+        assert_eq!(
+            tabs.close_target_ids(&missing, RequestTabCloseScope::All)
+                .len(),
+            5
+        );
+    }
+
+    #[test]
+    fn close_tabs_is_atomic_ordered_and_preserves_or_repairs_active_selection() {
+        let mut tabs = RequestTabs::new();
+        tabs.active_mut().set_title("First");
+        let first = tabs.active_tab_id().clone();
+        let second = tabs.open_new();
+        tabs.active_mut().set_title("Second");
+        let third = tabs.open_new();
+        tabs.active_mut().set_title("Third");
+        let fourth = tabs.open_new();
+        tabs.active_mut().set_title("Fourth");
+        let fifth = tabs.open_new();
+        tabs.active_mut().set_title("Fifth");
+
+        assert!(tabs.activate(&third));
+        let removed = tabs.close_tabs(&[
+            first.clone(),
+            RequestTabId("missing".to_owned()),
+            fifth.clone(),
+            first,
+        ]);
+        assert_eq!(
+            removed
+                .iter()
+                .map(RequestTabRecord::title)
+                .collect::<Vec<_>>(),
+            vec!["First", "Fifth"]
+        );
+        assert_eq!(tabs.active_tab_id(), &third);
+
+        let removed = tabs.close_tabs(&[second, third.clone()]);
+        assert_eq!(
+            removed
+                .iter()
+                .map(RequestTabRecord::title)
+                .collect::<Vec<_>>(),
+            vec!["Second", "Third"]
+        );
+        assert_eq!(tabs.active_tab_id(), &fourth);
+        assert!(
+            tabs.close_tabs(&[RequestTabId("missing".to_owned())])
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn scoped_closes_use_anchor_fallback_and_all_creates_one_scratch() {
+        let mut tabs = RequestTabs::new();
+        let first = tabs.active_tab_id().clone();
+        let second = tabs.open_new();
+        let third = tabs.open_new();
+        let fourth = tabs.open_new();
+
+        assert!(tabs.activate(&second));
+        let removed = tabs.close_scope(&third, RequestTabCloseScope::ToLeft);
+        assert_eq!(
+            removed
+                .iter()
+                .map(|tab| tab.id().clone())
+                .collect::<Vec<_>>(),
+            vec![first, second]
+        );
+        assert_eq!(tabs.active_tab_id(), &third);
+
+        let removed = tabs.close_scope(&third, RequestTabCloseScope::Others);
+        assert_eq!(
+            removed
+                .iter()
+                .map(|tab| tab.id().clone())
+                .collect::<Vec<_>>(),
+            vec![fourth]
+        );
+        assert_eq!(tabs.active_tab_id(), &third);
+        assert_eq!(tabs.len(), 1);
+
+        let old_tab = tabs.active_tab_id().clone();
+        let removed = tabs.close_scope(&old_tab, RequestTabCloseScope::All);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].id(), &old_tab);
+        assert_eq!(tabs.len(), 1);
+        assert_ne!(tabs.active_tab_id(), &old_tab);
+        assert!(!tabs.active().is_dirty());
+        assert!(tabs.active().group_id().is_none());
+        assert!(tabs.groups().is_empty());
+    }
+
+    #[test]
+    fn assigning_and_ungrouping_tabs_keeps_each_group_contiguous() {
+        let mut tabs = RequestTabs::new();
+        let first = tabs.active_tab_id().clone();
+        let second = tabs.open_new();
+        let third = tabs.open_new();
+        let fourth = tabs.open_new();
+        let group = tabs
+            .create_group_for_tab(&second, "Auth", RequestTabGroupColor::Cyan)
+            .unwrap();
+
+        assert!(tabs.set_tab_group(&fourth, Some(&group)));
+        assert_eq!(
+            tabs.tabs()
+                .iter()
+                .map(|tab| tab.id().clone())
+                .collect::<Vec<_>>(),
+            vec![first.clone(), second.clone(), fourth.clone(), third.clone()]
+        );
+        assert_eq!(tabs.tabs_in_group(&group).len(), 2);
+
+        assert!(tabs.set_tab_group(&second, None));
+        assert_eq!(
+            tabs.tabs()
+                .iter()
+                .map(|tab| tab.id().clone())
+                .collect::<Vec<_>>(),
+            vec![first, fourth.clone(), second.clone(), third]
+        );
+        assert!(tabs.get(&second).unwrap().group_id().is_none());
+        assert_eq!(tabs.tabs_in_group(&group).len(), 1);
+
+        let new_in_group = tabs.open_new_in_group(&group).unwrap();
+        let grouped_ids = tabs
+            .tabs_in_group(&group)
+            .into_iter()
+            .map(|tab| tab.id().clone())
+            .collect::<Vec<_>>();
+        assert_eq!(grouped_ids, vec![fourth, new_in_group]);
+    }
+
+    #[test]
+    fn closing_a_group_prunes_its_metadata_and_keeps_other_groups() {
+        let mut tabs = RequestTabs::new();
+        let first = tabs.active_tab_id().clone();
+        let second = tabs.open_new();
+        let third = tabs.open_new();
+        let first_group = tabs
+            .create_group_for_tab(&first, "First group", RequestTabGroupColor::Green)
+            .unwrap();
+        assert!(tabs.set_tab_group(&second, Some(&first_group)));
+        let second_group = tabs
+            .create_group_for_tab(&third, "Second group", RequestTabGroupColor::Orange)
+            .unwrap();
+
+        let target_ids = tabs.close_target_ids(&second, RequestTabCloseScope::Group);
+        let removed = tabs.close_tabs(&target_ids);
+        assert_eq!(removed.len(), 2);
+        assert!(tabs.group(&first_group).is_none());
+        assert!(tabs.group(&second_group).is_some());
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs.active_tab_id(), &third);
+    }
+
+    #[test]
+    fn tab_groups_round_trip_and_unknown_colors_are_preserved() {
+        let mut tabs = RequestTabs::new();
+        let tab_id = tabs.active_tab_id().clone();
+        let group_id = tabs
+            .create_group_for_tab(
+                &tab_id,
+                "Experimental",
+                RequestTabGroupColor::Custom("ultraviolet".to_owned()),
+            )
+            .unwrap();
+        assert!(tabs.set_group_collapsed(&group_id, true));
+
+        let json = serde_json::to_string(&tabs).unwrap();
+        let restored: RequestTabs = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored, tabs);
+        assert_eq!(
+            restored.group(&group_id).unwrap().color(),
+            &RequestTabGroupColor::Custom("ultraviolet".to_owned())
+        );
+        assert!(restored.group(&group_id).unwrap().is_collapsed());
+    }
+
+    #[test]
+    fn legacy_and_malformed_group_state_is_normalized() {
+        let legacy: RequestTabs =
+            serde_json::from_str(r#"{"tabs":[],"active_tab_id":null,"future_field":"ignored"}"#)
+                .unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert!(legacy.groups().is_empty());
+
+        let mut tabs = RequestTabs::new();
+        let first = tabs.active_tab_id().clone();
+        let second = tabs.open_new();
+        let third = tabs.open_new();
+        let group = tabs
+            .create_group_for_tab(&first, "Group", RequestTabGroupColor::Pink)
+            .unwrap();
+        assert!(tabs.set_tab_group(&third, Some(&group)));
+        let mut value = serde_json::to_value(&tabs).unwrap();
+        let serialized_tabs = value["tabs"].as_array_mut().unwrap();
+        serialized_tabs.swap(1, 2);
+        serialized_tabs[1]["group_id"] = serde_json::json!("missing-group");
+
+        let restored: RequestTabs = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            restored
+                .tabs()
+                .iter()
+                .map(|tab| tab.id().clone())
+                .collect::<Vec<_>>(),
+            vec![first.clone(), third, second.clone()]
+        );
+        assert_eq!(restored.get(&first).unwrap().group_id(), Some(&group));
+        assert!(restored.get(&second).unwrap().group_id().is_none());
     }
 }
