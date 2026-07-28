@@ -7,11 +7,12 @@
 use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 
 use anyhow::Result;
-use gpui::{Context, Task, Window};
-use gpui_component::input::{CompletionProvider, InputState, Rope};
+use gpui::{App, Context, Task, Window};
+use gpui_component::input::{CompletionProvider, HoverProvider, InputState, Rope};
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit,
-    Diagnostic, DiagnosticSeverity, Documentation, NumberOrString, Position, Range, TextEdit,
+    Diagnostic, DiagnosticSeverity, Documentation, Hover, HoverContents, MarkupContent, MarkupKind,
+    NumberOrString, Position, Range, TextEdit,
 };
 
 use crate::core::{BodyFieldKind, BodyMode, RawBodyLanguage, STANDARD_HTTP_METHODS};
@@ -142,6 +143,12 @@ impl ScriptCompletionProvider {
     pub fn completion_items_for_source(&self, source: &str, offset: usize) -> Vec<CompletionItem> {
         completion_items(source, offset, self.phase, &self.variables.borrow())
     }
+
+    /// Returns documentation for the runtime symbol or variable name under
+    /// the pointer. Environment and collection values never enter the hover.
+    pub fn hover_for_source(&self, source: &str, offset: usize) -> Option<Hover> {
+        hover_for_source(source, offset, self.phase, &self.variables.borrow())
+    }
 }
 
 impl CompletionProvider for ScriptCompletionProvider {
@@ -191,6 +198,18 @@ impl CompletionProvider for ScriptCompletionProvider {
         }
 
         script_completion_is_active(text, cursor_offset, self.phase, &self.variables.borrow())
+    }
+}
+
+impl HoverProvider for ScriptCompletionProvider {
+    fn hover(
+        &self,
+        text: &Rope,
+        offset: usize,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Task<Result<Option<Hover>>> {
+        Task::ready(Ok(self.hover_for_source(&text.to_string(), offset)))
     }
 }
 
@@ -327,192 +346,327 @@ struct CompletionSpec {
 }
 
 const ROOT_MEMBERS_PRE: &[CompletionSpec] = &[
-    field("request", "Request", "The request being prepared."),
+    field(
+        "request",
+        "Request",
+        "The request being prepared. Changes made here are used for the outgoing request.",
+    ),
     field(
         "environment",
         "EnvironmentVariables",
-        "Variables from the selected environment.",
+        "Read and transactionally update variables from the selected environment.",
     ),
     field(
         "variables",
         "Variables",
-        "Environment variables with collection-variable fallback.",
+        "Read variables from the selected environment with collection-variable fallback.",
     ),
-    field("console", "Console", "Bounded script console."),
+    field("console", "ScriptConsole", "Bounded script console."),
 ];
 
 const ROOT_MEMBERS_POST: &[CompletionSpec] = &[
-    field("request", "Readonly<Request>", "The request that was sent."),
-    field("response", "Response", "The received response."),
+    field(
+        "request",
+        "ReadonlyRequest",
+        "The request that was sent. Request fields and headers are read-only in this phase.",
+    ),
+    field(
+        "response",
+        "Response",
+        "The received response and its script-visible body.",
+    ),
     field(
         "environment",
         "EnvironmentVariables",
-        "Variables from the selected environment.",
+        "Read and transactionally update variables from the selected environment.",
     ),
     field(
         "variables",
         "Variables",
-        "Environment variables with collection-variable fallback.",
+        "Read variables from the selected environment with collection-variable fallback.",
     ),
-    field("console", "Console", "Bounded script console."),
+    field("console", "ScriptConsole", "Bounded script console."),
     method(
         "test",
-        "(name, callback) -> void",
-        "Records a post-response test result.",
+        "(name: unknown, callback: () => unknown): void",
+        "Runs `callback` synchronously and records a passing or failing test named by `name`. Callback errors are recorded instead of aborting the script; async callbacks are unsupported and are recorded as failures.",
     ),
     method(
         "assert",
-        "(condition, message?) -> void",
-        "Throws when a test assertion is false.",
+        "(condition: unknown, message?: unknown): void",
+        "Throws when `condition` is falsy. `message` is converted to text and defaults to `\"assertion failed\"`.",
     ),
 ];
 
-const REQUEST_MEMBERS: &[CompletionSpec] = &[
-    field("method", "string", "HTTP method."),
-    field("url", "string", "Request URL."),
-    field("body", "string", "Raw request body."),
-    field("bodyMode", "string", "Request body mode."),
+const REQUEST_MEMBERS_PRE: &[CompletionSpec] = &[
+    field(
+        "method",
+        "string",
+        "HTTP method. Assignments are converted to text before sending.",
+    ),
+    field(
+        "url",
+        "string",
+        "Request URL. Assignments are converted to text before sending.",
+    ),
+    field(
+        "body",
+        "string",
+        "Raw request body. Assignments are converted to text before sending.",
+    ),
+    field(
+        "bodyMode",
+        "BodyMode",
+        "Request body mode: `none`, `raw`, `form_url_encoded`, or `multipart_form_data`.",
+    ),
     field(
         "rawBodyLanguage",
-        "string",
-        "Syntax language selected for a raw body.",
+        "RawBodyLanguage",
+        "Syntax language selected for a raw body. Use one of the values offered by completion.",
     ),
     field(
         "bodyFields",
         "BodyField[]",
-        "Form or multipart body fields.",
+        "Mutable form or multipart rows. A file row's `value` is its file path.",
     ),
-    field("headers", "Headers", "Request header bag."),
+    field(
+        "headers",
+        "MutableHeaders",
+        "Mutable request header bag. Prefer its methods when editing headers.",
+    ),
+];
+
+const REQUEST_MEMBERS_POST: &[CompletionSpec] = &[
+    field("method", "string", "HTTP method that was sent. Read-only."),
+    field("url", "string", "Request URL that was sent. Read-only."),
+    field(
+        "body",
+        "string",
+        "Raw request body that was sent. Read-only.",
+    ),
+    field(
+        "bodyMode",
+        "BodyMode",
+        "Body mode that was sent. Read-only.",
+    ),
+    field(
+        "rawBodyLanguage",
+        "RawBodyLanguage",
+        "Raw-body syntax language that was selected. Read-only.",
+    ),
+    field(
+        "bodyFields",
+        "readonly Readonly<BodyField>[]",
+        "Read-only form or multipart rows from the sent request. A file row's `value` is its file path.",
+    ),
+    field(
+        "headers",
+        "ReadonlyHeaders",
+        "Read-only header bag from the sent request.",
+    ),
 ];
 
 const RESPONSE_MEMBERS: &[CompletionSpec] = &[
-    field("status", "number", "HTTP response status."),
-    field("statusText", "string", "HTTP response status text."),
+    field("status", "number", "HTTP response status code."),
+    field("statusText", "string", "HTTP response reason phrase."),
     field("httpVersion", "string", "Negotiated HTTP version."),
-    field("url", "string", "Final response URL."),
-    field("headers", "ReadonlyHeaders", "Response header bag."),
-    field("durationMs", "number", "Request duration in milliseconds."),
-    field("sizeBytes", "number", "Received response size."),
+    field("url", "string", "Final response URL after redirects."),
+    field(
+        "headers",
+        "ReadonlyHeaders",
+        "Read-only response header bag.",
+    ),
+    field(
+        "durationMs",
+        "number",
+        "Whole milliseconds elapsed while performing the request.",
+    ),
+    field(
+        "sizeBytes",
+        "number",
+        "Full received response-body size in bytes, even when the script-visible body is truncated.",
+    ),
     field(
         "truncated",
         "boolean",
-        "Whether the response body was truncated.",
+        "Whether the script-visible response body was capped at 5 MiB.",
     ),
     field(
         "bodyBase64",
         "string | null",
-        "Base64 response body when it is not UTF-8 text.",
+        "Base64 of the script-visible body when its bytes were not valid UTF-8; otherwise `null`. The visible body can be truncated to 5 MiB.",
     ),
-    method("text", "() -> string", "Returns the response body as text."),
-    method("json", "() -> unknown", "Parses the response body as JSON."),
+    method(
+        "text",
+        "(): string",
+        "Returns the script-visible response body as text using lossy UTF-8 decoding. The visible body can be truncated to 5 MiB.",
+    ),
+    method(
+        "json",
+        "(): unknown",
+        "Parses `text()` with `JSON.parse`. Invalid or truncated JSON throws.",
+    ),
 ];
 
 const READONLY_HEADER_MEMBERS: &[CompletionSpec] = &[
-    method("has", "(name) -> boolean", "Checks for an enabled header."),
+    method(
+        "has",
+        "(name: unknown): boolean",
+        "Checks for an enabled header. Names are converted to text, trimmed, and compared case-insensitively.",
+    ),
     method(
         "get",
-        "(name) -> string | undefined",
-        "Returns the first enabled header value.",
+        "(name: unknown): string | undefined",
+        "Returns the first enabled matching header value. Names are converted to text, trimmed, and compared case-insensitively.",
     ),
     method(
         "getAll",
-        "(name) -> string[]",
-        "Returns all enabled values for a header.",
+        "(name: unknown): string[]",
+        "Returns all enabled matching header values. Names are converted to text, trimmed, and compared case-insensitively.",
     ),
     method(
         "toArray",
-        "() -> Header[]",
-        "Returns a detached array of headers.",
+        "(): Header[]",
+        "Returns detached header-row copies with `enabled`, `name`, and `value` fields.",
     ),
 ];
 
 const MUTABLE_HEADER_MEMBERS: &[CompletionSpec] = &[
-    method("has", "(name) -> boolean", "Checks for an enabled header."),
+    method(
+        "has",
+        "(name: unknown): boolean",
+        "Checks for an enabled header. Names are converted to text, trimmed, and compared case-insensitively.",
+    ),
     method(
         "get",
-        "(name) -> string | undefined",
-        "Returns the first enabled header value.",
+        "(name: unknown): string | undefined",
+        "Returns the first enabled matching header value. Names are converted to text, trimmed, and compared case-insensitively.",
     ),
     method(
         "getAll",
-        "(name) -> string[]",
-        "Returns all enabled values for a header.",
+        "(name: unknown): string[]",
+        "Returns all enabled matching header values. Names are converted to text, trimmed, and compared case-insensitively.",
     ),
     method(
         "set",
-        "(name, value) -> void",
-        "Sets one request header value.",
+        "(name: unknown, value: unknown): void",
+        "Sets one enabled request-header value, removing later enabled duplicates. The trimmed name cannot be empty; both arguments are converted to text.",
     ),
     method(
         "append",
-        "(name, value) -> void",
-        "Appends a request header.",
+        "(name: unknown, value: unknown): void",
+        "Appends an enabled request header. The trimmed name cannot be empty; both arguments are converted to text.",
     ),
     method(
         "remove",
-        "(name) -> void",
-        "Removes request headers with this name.",
+        "(name: unknown): void",
+        "Removes all request headers with this case-insensitive name.",
     ),
     method(
         "toArray",
-        "() -> Header[]",
-        "Returns a detached array of headers.",
+        "(): Header[]",
+        "Returns detached header-row copies with `enabled`, `name`, and `value` fields.",
     ),
 ];
 
 const ENVIRONMENT_MEMBERS: &[CompletionSpec] = &[
-    method("has", "(key) -> boolean", "Checks the active environment."),
+    method(
+        "has",
+        "(key: unknown): boolean",
+        "Checks the selected environment for an exact, case-sensitive key after converting `key` to text.",
+    ),
     method(
         "get",
-        "(key) -> string | undefined",
-        "Reads an active-environment variable.",
+        "(key: unknown): string | undefined",
+        "Reads an exact, case-sensitive key from the selected environment after converting `key` to text.",
     ),
     method(
         "set",
-        "(key, value) -> void",
-        "Sets an active-environment variable after this script succeeds.",
+        "(key: unknown, value: unknown): void",
+        "Updates the current script's environment view and queues persistence only if the script succeeds. The non-empty key and value are converted to text.",
     ),
     method(
         "unset",
-        "(key) -> void",
-        "Removes an active-environment variable after this script succeeds.",
+        "(key: unknown): void",
+        "Removes the key from the current script's environment view and queues persistence only if the script succeeds.",
     ),
     method(
         "toObject",
-        "() -> Record<string, string>",
-        "Returns a detached object of active-environment variables.",
+        "(): Record<string, string>",
+        "Returns a detached object containing the selected environment's variables.",
     ),
 ];
 
 const VARIABLE_MEMBERS: &[CompletionSpec] = &[
     method(
         "has",
-        "(key) -> boolean",
-        "Checks the environment, then collection variables.",
+        "(key: unknown): boolean",
+        "Checks the selected environment and then collection variables for an exact, case-sensitive key. Environment variables take precedence.",
     ),
     method(
         "get",
-        "(key) -> string | undefined",
-        "Reads the environment, then collection variables.",
+        "(key: unknown): string | undefined",
+        "Reads an exact, case-sensitive key from the selected environment, then falls back to collection variables.",
     ),
     method(
         "toObject",
-        "() -> Record<string, string>",
-        "Returns merged collection and environment variables.",
+        "(): Record<string, string>",
+        "Returns a detached merged object. Selected-environment variables override same-named collection variables.",
     ),
 ];
 
 const CONSOLE_MEMBERS: &[CompletionSpec] = &[
-    method("log", "(...values) -> void", "Writes a bounded log entry."),
-    method("info", "(...values) -> void", "Writes an info log entry."),
-    method("warn", "(...values) -> void", "Writes a warning log entry."),
-    method("error", "(...values) -> void", "Writes an error log entry."),
-    method("debug", "(...values) -> void", "Writes a debug log entry."),
+    method(
+        "log",
+        "(...values: unknown[]): void",
+        "Writes one `log` row. Values are rendered and space-joined; all script logs together are capped at 100 rows and 64 KiB.",
+    ),
+    method(
+        "info",
+        "(...values: unknown[]): void",
+        "Writes one `info` row. Values are rendered and space-joined; all script logs together are capped at 100 rows and 64 KiB.",
+    ),
+    method(
+        "warn",
+        "(...values: unknown[]): void",
+        "Writes one `warn` row. Values are rendered and space-joined; all script logs together are capped at 100 rows and 64 KiB.",
+    ),
+    method(
+        "error",
+        "(...values: unknown[]): void",
+        "Writes one `error` row. Values are rendered and space-joined; all script logs together are capped at 100 rows and 64 KiB.",
+    ),
+    method(
+        "debug",
+        "(...values: unknown[]): void",
+        "Writes one `debug` row. Values are rendered and space-joined; all script logs together are capped at 100 rows and 64 KiB.",
+    ),
 ];
 
-const GLOBALS: &[CompletionSpec] = &[
-    field("api", "ApiTesterRuntime", "Sandboxed API Tester runtime."),
-    field("console", "Console", "Bounded script console."),
+const GLOBALS_PRE: &[CompletionSpec] = &[
+    field(
+        "api",
+        "PreRequestApi",
+        "Sandboxed synchronous API Tester runtime. Network and host globals such as `fetch`, `require`, `process`, `Deno`, `WebSocket`, and `XMLHttpRequest` are unavailable. Each run is limited to 1 second, a 32 MiB heap, and a 256 KiB stack.",
+    ),
+    field(
+        "console",
+        "ScriptConsole",
+        "Global alias of `api.console`, writing bounded rows to the script log.",
+    ),
+];
+
+const GLOBALS_POST: &[CompletionSpec] = &[
+    field(
+        "api",
+        "PostResponseApi",
+        "Sandboxed synchronous API Tester runtime. Network and host globals such as `fetch`, `require`, `process`, `Deno`, `WebSocket`, and `XMLHttpRequest` are unavailable. Each run is limited to 1 second, a 32 MiB heap, and a 256 KiB stack.",
+    ),
+    field(
+        "console",
+        "ScriptConsole",
+        "Global alias of `api.console`, writing bounded rows to the script log.",
+    ),
 ];
 
 const fn field(
@@ -596,6 +750,8 @@ fn completion_items(
                     offset,
                     name,
                     string_context.quote,
+                    string_context.namespace,
+                    variables,
                 )
             })
             .collect();
@@ -619,12 +775,18 @@ fn completion_items(
 
 fn specs_for_path(path: &[String], phase: ScriptEditorPhase) -> &'static [CompletionSpec] {
     match path {
-        [] => GLOBALS,
+        [] => match phase {
+            ScriptEditorPhase::PreRequest => GLOBALS_PRE,
+            ScriptEditorPhase::PostResponse => GLOBALS_POST,
+        },
         [api] if api == "api" => match phase {
             ScriptEditorPhase::PreRequest => ROOT_MEMBERS_PRE,
             ScriptEditorPhase::PostResponse => ROOT_MEMBERS_POST,
         },
-        [api, request] if api == "api" && request == "request" => REQUEST_MEMBERS,
+        [api, request] if api == "api" && request == "request" => match phase {
+            ScriptEditorPhase::PreRequest => REQUEST_MEMBERS_PRE,
+            ScriptEditorPhase::PostResponse => REQUEST_MEMBERS_POST,
+        },
         [api, request, headers] if api == "api" && request == "request" && headers == "headers" => {
             match phase {
                 ScriptEditorPhase::PreRequest => MUTABLE_HEADER_MEMBERS,
@@ -655,6 +817,287 @@ fn specs_for_path(path: &[String], phase: ScriptEditorPhase) -> &'static [Comple
     }
 }
 
+fn hover_for_source(
+    source: &str,
+    requested_offset: usize,
+    phase: ScriptEditorPhase,
+    variables: &ScriptVariableCatalog,
+) -> Option<Hover> {
+    let offset = clipped_char_boundary(source, requested_offset);
+    let tokens = lex(source).tokens;
+    let token_index = hover_token_at_offset(&tokens, offset)?;
+
+    if tokens[token_index].identifier().is_some() {
+        return runtime_symbol_hover(source, &tokens, token_index, phase);
+    }
+    if tokens[token_index].string_literal().is_some() {
+        return variable_name_hover(source, &tokens, token_index, offset, phase, variables);
+    }
+    None
+}
+
+fn hover_token_at_offset(tokens: &[Token], offset: usize) -> Option<usize> {
+    let containing = tokens
+        .iter()
+        .position(|token| token.span.start <= offset && offset < token.span.end);
+    if let Some(index) = containing
+        && (tokens[index].identifier().is_some() || tokens[index].string_literal().is_some())
+    {
+        return Some(index);
+    }
+
+    // GPUI hit-testing returns the closest caret position rather than the
+    // painted glyph itself. On the right half of an identifier's final glyph,
+    // that position is the identifier end (often also the next punctuation
+    // token's start). Resolve that boundary to the identifier on its left and
+    // let the popover retain that trigger offset while keeping its semantic
+    // range scoped to the identifier.
+    tokens
+        .iter()
+        .rposition(|token| token.identifier().is_some() && token.span.end == offset)
+}
+
+fn runtime_symbol_hover(
+    source: &str,
+    tokens: &[Token],
+    token_index: usize,
+    phase: ScriptEditorPhase,
+) -> Option<Hover> {
+    let symbol = tokens.get(token_index)?;
+    let symbol_name = symbol.identifier()?;
+    let path = dotted_identifier_path(tokens.get(..=token_index)?)?;
+    let (resolved_name, parent_path) = path.split_last()?;
+    if resolved_name != symbol_name {
+        return None;
+    }
+    let spec = specs_for_path(parent_path, phase)
+        .iter()
+        .find(|spec| spec.label == symbol_name)?;
+    let full_path = path.join(".");
+
+    Some(markdown_hover(
+        source,
+        symbol.span.start,
+        symbol.span.end,
+        runtime_symbol_markdown(&full_path, *spec, phase),
+    ))
+}
+
+fn variable_name_hover(
+    source: &str,
+    tokens: &[Token],
+    token_index: usize,
+    offset: usize,
+    phase: ScriptEditorPhase,
+    variables: &ScriptVariableCatalog,
+) -> Option<Hover> {
+    let argument = tokens.get(token_index)?.string_literal()?;
+    let name = argument.value.as_deref()?;
+    let call_start = token_index.checked_sub(6)?;
+    let call = api_variable_call(tokens, call_start)?;
+    let accepts_variable_name = match call.namespace {
+        VariableNamespace::Environment => {
+            matches!(call.method, "get" | "has" | "set" | "unset")
+        }
+        VariableNamespace::Variables => matches!(call.method, "get" | "has"),
+    };
+    if !accepts_variable_name {
+        return None;
+    }
+
+    let parent_path = match call.namespace {
+        VariableNamespace::Environment => vec!["api".to_owned(), "environment".to_owned()],
+        VariableNamespace::Variables => vec!["api".to_owned(), "variables".to_owned()],
+    };
+    let method = specs_for_path(&parent_path, phase)
+        .iter()
+        .find(|spec| spec.label == call.method)?;
+    let full_path = format!("{}.{}", parent_path.join("."), call.method);
+    let content_end = if argument.terminated {
+        argument.span.end.saturating_sub(argument.quote.len_utf8())
+    } else {
+        argument.span.end
+    };
+    if argument.content_start >= content_end {
+        return None;
+    }
+    if !(argument.content_start <= offset && offset <= content_end) {
+        return None;
+    }
+    let (environment_names, disabled_environment_names) =
+        script_environment_state_before(tokens, call_start, variables);
+    let variable_state = VariableHoverState {
+        environment_names,
+        disabled_environment_names,
+        collection_names: &variables.collection_names,
+    };
+
+    Some(markdown_hover(
+        source,
+        argument.content_start,
+        content_end,
+        variable_name_markdown(name, call, &variable_state, &full_path, *method, phase),
+    ))
+}
+
+fn runtime_symbol_markdown(
+    full_path: &str,
+    spec: CompletionSpec,
+    phase: ScriptEditorPhase,
+) -> String {
+    format!(
+        "```typescript\n{}\n```\n\n{}\n\n_{}_",
+        runtime_symbol_signature(full_path, spec),
+        spec.documentation,
+        phase_availability(phase),
+    )
+}
+
+struct VariableHoverState<'a> {
+    environment_names: BTreeSet<String>,
+    disabled_environment_names: BTreeSet<String>,
+    collection_names: &'a BTreeSet<String>,
+}
+
+fn variable_name_markdown(
+    name: &str,
+    call: ApiVariableCall<'_>,
+    variable_state: &VariableHoverState<'_>,
+    full_path: &str,
+    method: CompletionSpec,
+    phase: ScriptEditorPhase,
+) -> String {
+    let status = variable_name_status(name, call.namespace, variable_state);
+    format!(
+        "```typescript\n{}\n```\n\n{}\n\n**Variable key:** {}\n\n{}\n\n_Values are intentionally hidden from script editor tooling._\n\n_{}_",
+        runtime_symbol_signature(full_path, method),
+        method.documentation,
+        markdown_inline_code(name),
+        status,
+        phase_availability(phase),
+    )
+}
+
+fn variable_name_status(
+    name: &str,
+    namespace: VariableNamespace,
+    variable_state: &VariableHoverState<'_>,
+) -> &'static str {
+    if variable_state.environment_names.contains(name) {
+        return "Available in the selected environment.";
+    }
+    if namespace == VariableNamespace::Variables && variable_state.collection_names.contains(name) {
+        return "Available as a collection variable. No selected-environment variable shadows it.";
+    }
+    if variable_state.disabled_environment_names.contains(name) {
+        return "This key exists in the selected environment but is disabled.";
+    }
+    match namespace {
+        VariableNamespace::Environment => {
+            "This key does not currently exist in the selected environment."
+        }
+        VariableNamespace::Variables => {
+            "This key does not currently exist in the selected environment or collection."
+        }
+    }
+}
+
+fn script_environment_state_before(
+    tokens: &[Token],
+    end_index: usize,
+    variables: &ScriptVariableCatalog,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut environment_names = variables.environment_names.clone();
+    let mut disabled_environment_names = variables.disabled_environment_names.clone();
+    let mut index = 0;
+
+    while index < end_index {
+        let Some(call) = api_variable_call(tokens, index) else {
+            index += 1;
+            continue;
+        };
+        if call.namespace != VariableNamespace::Environment {
+            index += 1;
+            continue;
+        }
+        let Some(name) = tokens
+            .get(index + 6)
+            .filter(|_| index + 6 < end_index)
+            .and_then(Token::string_literal)
+            .and_then(|argument| argument.value.as_deref())
+        else {
+            index += 1;
+            continue;
+        };
+
+        match call.method {
+            "set" if !name.is_empty() => {
+                environment_names.insert(name.to_owned());
+                disabled_environment_names.remove(name);
+            }
+            "unset" => {
+                environment_names.remove(name);
+                disabled_environment_names.remove(name);
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+
+    (environment_names, disabled_environment_names)
+}
+
+fn runtime_symbol_signature(full_path: &str, spec: CompletionSpec) -> String {
+    if spec.kind == CompletionItemKind::METHOD {
+        format!("{full_path}{}", spec.detail)
+    } else {
+        format!("{full_path}: {}", spec.detail)
+    }
+}
+
+fn phase_availability(phase: ScriptEditorPhase) -> &'static str {
+    match phase {
+        ScriptEditorPhase::PreRequest => "Available in pre-request scripts.",
+        ScriptEditorPhase::PostResponse => "Available in post-response scripts.",
+    }
+}
+
+fn markdown_inline_code(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            character if character.is_control() => {
+                use std::fmt::Write as _;
+                let _ = write!(escaped, "\\u{{{:x}}}", character as u32);
+            }
+            character => escaped.push(character),
+        }
+    }
+    let fence_length = escaped
+        .as_bytes()
+        .split(|byte| *byte != b'`')
+        .map(<[u8]>::len)
+        .max()
+        .unwrap_or_default()
+        .saturating_add(1)
+        .max(1);
+    let fence = "`".repeat(fence_length);
+    format!("{fence} {escaped} {fence}")
+}
+
+fn markdown_hover(source: &str, start: usize, end: usize, value: String) -> Hover {
+    Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value,
+        }),
+        range: Some(source_range(source, start, end)),
+    }
+}
+
 fn spec_completion_item(
     source: &str,
     replace_start: usize,
@@ -680,11 +1123,20 @@ fn variable_completion_item(
     offset: usize,
     name: &str,
     quote: char,
+    namespace: VariableNamespace,
+    variables: &ScriptVariableCatalog,
 ) -> CompletionItem {
+    let detail = match namespace {
+        VariableNamespace::Environment => "selected-environment variable",
+        VariableNamespace::Variables if variables.environment_names.contains(name) => {
+            "selected-environment variable"
+        }
+        VariableNamespace::Variables => "collection variable",
+    };
     CompletionItem {
         label: name.to_owned(),
         kind: Some(CompletionItemKind::VARIABLE),
-        detail: Some("active variable".to_owned()),
+        detail: Some(detail.to_owned()),
         documentation: Some(Documentation::String(
             "Variable name only; its value is never exposed to editor intelligence.".to_owned(),
         )),
@@ -1288,6 +1740,10 @@ fn lex(source: &str) -> Lexed {
 
         if character == '`' {
             let (end, terminated) = skip_template(source, offset);
+            lexed.tokens.push(Token {
+                kind: TokenKind::Other,
+                span: offset..end,
+            });
             offset = end;
             if !terminated {
                 lexed.ended_in_comment_or_template = true;
@@ -1317,6 +1773,10 @@ fn lex(source: &str) -> Lexed {
         if character == '/' && can_start_regex {
             let (end, terminated) = skip_regex(source, offset);
             if end > offset + 1 {
+                lexed.tokens.push(Token {
+                    kind: TokenKind::Other,
+                    span: offset..end,
+                });
                 offset = end;
                 if !terminated {
                     lexed.ended_in_comment_or_template = true;
@@ -1592,6 +2052,20 @@ mod tests {
             Some(CompletionTextEdit::Edit(edit)) => edit,
             other => panic!("expected a plain completion text edit, got {other:?}"),
         }
+    }
+
+    fn hover_markdown(hover: &Hover) -> &str {
+        match &hover.contents {
+            HoverContents::Markup(markup) => &markup.value,
+            other => panic!("expected Markdown hover content, got {other:?}"),
+        }
+    }
+
+    fn hover_at(provider: &ScriptCompletionProvider, source: &str, needle: &str) -> Hover {
+        let offset = source.rfind(needle).expect("hover needle") + 1;
+        provider
+            .hover_for_source(source, offset)
+            .unwrap_or_else(|| panic!("expected hover for {needle:?} in {source:?}"))
     }
 
     fn catalog() -> ScriptVariableCatalog {
@@ -2012,5 +2486,249 @@ api.environment.set("later", "value");
 
         assert_eq!(labels(items), ["şehir"]);
         assert!(diagnostics_for_source(r#"api.environment.get("şehir")"#, &catalog).is_empty());
+    }
+
+    #[test]
+    fn hover_documents_runtime_function_parameters_and_fields() {
+        let pre = provider(ScriptEditorPhase::PreRequest, catalog());
+        let post = provider(ScriptEditorPhase::PostResponse, catalog());
+
+        let header_source = r#"api.request.headers.set("X-Token", "value");"#;
+        let header_hover = hover_at(&pre, header_source, "set");
+        let header_markdown = hover_markdown(&header_hover);
+        assert!(
+            header_markdown
+                .contains("api.request.headers.set(name: unknown, value: unknown): void")
+        );
+        assert!(header_markdown.contains("removing later enabled duplicates"));
+        assert_eq!(
+            header_hover.range,
+            Some(Range::new(Position::new(0, 20), Position::new(0, 23)))
+        );
+
+        let status_hover = hover_at(&post, "api.response.status;", "status");
+        let status_markdown = hover_markdown(&status_hover);
+        assert!(status_markdown.contains("api.response.status: number"));
+        assert!(status_markdown.contains("HTTP response status code"));
+
+        let test_hover = hover_at(
+            &post,
+            r#"api.test("status", () => api.assert(true));"#,
+            "test",
+        );
+        assert!(
+            hover_markdown(&test_hover)
+                .contains("api.test(name: unknown, callback: () => unknown): void")
+        );
+        assert!(hover_markdown(&test_hover).contains("async callbacks are unsupported"));
+
+        let console_hover = hover_at(&pre, "console.log(api.request.url);", "log");
+        assert!(hover_markdown(&console_hover).contains("console.log(...values: unknown[]): void"));
+    }
+
+    #[test]
+    fn hover_respects_script_phase_and_request_mutability() {
+        let pre = provider(ScriptEditorPhase::PreRequest, catalog());
+        let post = provider(ScriptEditorPhase::PostResponse, catalog());
+
+        for source in ["api.response", "api.test", "api.assert"] {
+            let offset = source.rfind('.').expect("member separator") + 2;
+            assert!(
+                pre.hover_for_source(source, offset).is_none(),
+                "pre-request hover should hide {source}"
+            );
+        }
+        assert!(
+            post.hover_for_source("api.request.headers.set", 22)
+                .is_none()
+        );
+
+        let pre_headers = hover_at(&pre, "api.request.headers", "headers");
+        assert!(hover_markdown(&pre_headers).contains("api.request.headers: MutableHeaders"));
+        let post_headers = hover_at(&post, "api.request.headers", "headers");
+        assert!(hover_markdown(&post_headers).contains("api.request.headers: ReadonlyHeaders"));
+
+        let response = hover_at(&post, "api.response.json()", "json");
+        assert!(hover_markdown(&response).contains("api.response.json(): unknown"));
+    }
+
+    #[test]
+    fn hover_rejects_non_runtime_text_and_expression_suffixes() {
+        let post = provider(ScriptEditorPhase::PostResponse, catalog());
+        for (source, needle) in [
+            ("// api.response.json()", "json"),
+            ("/* api.response.json() */", "json"),
+            (r#""api.response.json()""#, "json"),
+            ("`api.response.json()`", "json"),
+            ("const pattern = /api.response.json/;", "json"),
+            ("client.api.response.json()", "json"),
+            ("getApi().response", "response"),
+            (r#"api["response"].json()"#, "json"),
+            ("api`tag`.request", "request"),
+        ] {
+            let offset = source.rfind(needle).expect("hover needle") + 1;
+            assert!(
+                post.hover_for_source(source, offset).is_none(),
+                "unexpected hover for {source:?}"
+            );
+        }
+
+        let source = "api /* runtime object */ . response";
+        let hover = hover_at(&post, source, "response");
+        assert!(hover_markdown(&hover).contains("api.response: Response"));
+    }
+
+    #[test]
+    fn variable_name_hover_reports_scope_without_values() {
+        let catalog = ScriptVariableCatalog::from_names(
+            ["environment_only", "shared"],
+            ["disabled_key"],
+            ["collection_only", "shared"],
+        );
+        let pre = provider(ScriptEditorPhase::PreRequest, catalog);
+
+        let environment = hover_at(
+            &pre,
+            r#"api.environment.get("environment_only")"#,
+            "environment_only",
+        );
+        assert!(hover_markdown(&environment).contains("Available in the selected environment"));
+
+        let collection = hover_at(
+            &pre,
+            r#"api.variables.get("collection_only")"#,
+            "collection_only",
+        );
+        assert!(hover_markdown(&collection).contains("Available as a collection variable"));
+
+        let shared = hover_at(&pre, r#"api.variables.get("shared")"#, "shared");
+        assert!(hover_markdown(&shared).contains("Available in the selected environment"));
+
+        let disabled = hover_at(
+            &pre,
+            r#"api.environment.get("disabled_key")"#,
+            "disabled_key",
+        );
+        assert!(
+            hover_markdown(&disabled)
+                .contains("exists in the selected environment but is disabled")
+        );
+
+        let missing = hover_at(&pre, r#"api.variables.get("missing_key")"#, "missing_key");
+        assert!(
+            hover_markdown(&missing)
+                .contains("does not currently exist in the selected environment or collection")
+        );
+        assert!(!hover_markdown(&missing).contains("super-secret-value"));
+
+        let second_argument = r#"api.environment.set("new_key", "value")"#;
+        let value_offset = second_argument.rfind("value").expect("second argument") + 1;
+        assert!(
+            pre.hover_for_source(second_argument, value_offset)
+                .is_none()
+        );
+
+        let opening_quote = r#"api.environment.get("environment_only")"#;
+        let quote_offset = opening_quote.find('"').expect("opening quote");
+        assert!(pre.hover_for_source(opening_quote, quote_offset).is_none());
+    }
+
+    #[test]
+    fn hover_ranges_use_gpui_unicode_scalar_columns() {
+        let post = provider(ScriptEditorPhase::PostResponse, catalog());
+        let source = "const şehir = 1; api.response.json();";
+        let hover = hover_at(&post, source, "json");
+
+        assert_eq!(
+            hover.range,
+            Some(Range::new(Position::new(0, 30), Position::new(0, 34)))
+        );
+        let inside_multibyte = source.find('ş').expect("unicode identifier") + 1;
+        assert!(
+            post.hover_for_source(source, inside_multibyte).is_none(),
+            "clipping an offset inside a multibyte scalar must not panic or resolve a runtime symbol"
+        );
+    }
+
+    #[test]
+    fn hover_accepts_gpui_caret_offsets_at_symbol_boundaries() {
+        let pre = provider(ScriptEditorPhase::PreRequest, catalog());
+        let source = r#"api.request.headers.set("X-Token", "value");"#;
+        let set_start = source.find(".set").expect("set member") + 1;
+        let set_end = set_start + "set".len();
+        let hover = pre
+            .hover_for_source(source, set_end)
+            .expect("right half of the final glyph resolves to the identifier on its left");
+
+        assert!(
+            hover_markdown(&hover)
+                .contains("api.request.headers.set(name: unknown, value: unknown): void")
+        );
+        assert_eq!(
+            hover.range,
+            Some(Range::new(Position::new(0, 20), Position::new(0, 23)))
+        );
+
+        let api_boundary = pre
+            .hover_for_source("api.request", 3)
+            .expect("identifier remains hoverable at the following dot boundary");
+        assert!(hover_markdown(&api_boundary).contains("api: PreRequestApi"));
+        assert_eq!(
+            api_boundary.range,
+            Some(Range::new(Position::new(0, 0), Position::new(0, 3)))
+        );
+
+        let variable = r#"api.environment.get("base_url")"#;
+        let closing_quote = variable.rfind('"').expect("closing quote");
+        let variable_hover = pre
+            .hover_for_source(variable, closing_quote)
+            .expect("last variable-name glyph resolves at the closing-quote caret");
+        assert!(hover_markdown(&variable_hover).contains("Available in the selected environment"));
+        assert_eq!(
+            variable_hover.range,
+            Some(Range::new(Position::new(0, 21), Position::new(0, 29)))
+        );
+    }
+
+    #[test]
+    fn variable_hover_models_earlier_environment_mutations() {
+        let catalog = ScriptVariableCatalog::from_names(
+            ["environment_only", "shared"],
+            ["disabled_key"],
+            ["shared"],
+        );
+        let pre = provider(ScriptEditorPhase::PreRequest, catalog);
+
+        let created = r#"
+api.environment.set("later", "super-secret-value");
+api.environment.get("later");
+"#;
+        let created_hover = hover_at(&pre, created, "later");
+        assert!(hover_markdown(&created_hover).contains("Available in the selected environment"));
+        assert!(!hover_markdown(&created_hover).contains("super-secret-value"));
+
+        let removed = r#"
+api.environment.unset("environment_only");
+api.environment.get("environment_only");
+"#;
+        let removed_hover = hover_at(&pre, removed, "environment_only");
+        assert!(
+            hover_markdown(&removed_hover)
+                .contains("does not currently exist in the selected environment")
+        );
+
+        let fallback = r#"
+api.environment.unset("shared");
+api.variables.get("shared");
+"#;
+        let fallback_hover = hover_at(&pre, fallback, "shared");
+        assert!(hover_markdown(&fallback_hover).contains("Available as a collection variable"));
+
+        let enabled = r#"
+api.environment.set("disabled_key", "new-value");
+api.environment.get("disabled_key");
+"#;
+        let enabled_hover = hover_at(&pre, enabled, "disabled_key");
+        assert!(hover_markdown(&enabled_hover).contains("Available in the selected environment"));
     }
 }

@@ -340,6 +340,10 @@ impl ApiTester {
         let pre_request_script = cx.new(|cx| {
             let completion_catalog = Rc::clone(&pre_completion_catalog);
             let diagnostic_catalog = Rc::clone(&pre_diagnostic_catalog);
+            let intelligence = Rc::new(ScriptCompletionProvider::new(
+                ScriptEditorPhase::PreRequest,
+                completion_catalog,
+            ));
             CodeEditor::new(
                 CodeEditorConfig::default()
                     .language(CodeLanguage::JavaScript)
@@ -348,10 +352,8 @@ impl ApiTester {
                     )
                     .rows(12)
                     .soft_wrap(false)
-                    .completion_provider(Rc::new(ScriptCompletionProvider::new(
-                        ScriptEditorPhase::PreRequest,
-                        completion_catalog,
-                    )))
+                    .completion_provider(intelligence.clone())
+                    .hover_provider(intelligence)
                     .diagnostic_provider(move |source| {
                         diagnostics_for_source(source, &diagnostic_catalog.borrow())
                             .into_iter()
@@ -367,6 +369,10 @@ impl ApiTester {
         let post_response_script = cx.new(|cx| {
             let completion_catalog = Rc::clone(&post_completion_catalog);
             let diagnostic_catalog = Rc::clone(&post_diagnostic_catalog);
+            let intelligence = Rc::new(ScriptCompletionProvider::new(
+                ScriptEditorPhase::PostResponse,
+                completion_catalog,
+            ));
             CodeEditor::new(
                 CodeEditorConfig::default()
                     .language(CodeLanguage::JavaScript)
@@ -375,10 +381,8 @@ impl ApiTester {
                     )
                     .rows(12)
                     .soft_wrap(false)
-                    .completion_provider(Rc::new(ScriptCompletionProvider::new(
-                        ScriptEditorPhase::PostResponse,
-                        completion_catalog,
-                    )))
+                    .completion_provider(intelligence.clone())
+                    .hover_provider(intelligence)
                     .diagnostic_provider(move |source| {
                         diagnostics_for_source(source, &diagnostic_catalog.borrow())
                             .into_iter()
