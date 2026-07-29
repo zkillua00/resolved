@@ -34,8 +34,28 @@ pub(super) fn build_request_tab_context_menu(
         Some(super::RequestTabContextTarget::Group(group_id)) => {
             build_group_menu(menu, owner, group_id, window, cx)
         }
+        Some(super::RequestTabContextTarget::Tool(tool)) => build_tool_menu(menu, owner, tool),
         None => menu,
     }
+}
+
+fn build_tool_menu(
+    menu: PopupMenu,
+    owner: gpui::WeakEntity<ApiTester>,
+    tool: WorkspaceToolTab,
+) -> PopupMenu {
+    menu.min_w(px(180.)).item(
+        PopupMenuItem::new("Close tab").on_click(move |_, window, cx| {
+            let owner = owner.clone();
+            window.defer(cx, move |window, cx| {
+                if let Some(owner) = owner.upgrade() {
+                    owner.update(cx, |this, cx| {
+                        this.close_workspace_tool_tab(tool, window, cx);
+                    });
+                }
+            });
+        }),
+    )
 }
 
 fn build_tab_menu(

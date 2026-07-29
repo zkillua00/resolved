@@ -6,7 +6,6 @@ impl ApiTester {
             SidebarTab::Collections => self.render_collections(cx),
             SidebarTab::Environments => self.render_environment_browser(cx),
             SidebarTab::History => self.render_history(cx),
-            SidebarTab::Settings => div().into_any_element(),
         }
     }
 }

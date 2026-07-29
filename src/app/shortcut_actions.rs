@@ -7,7 +7,6 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sidebar_tab = SidebarTab::Collections;
         self.open_blank_request_tab(window, cx);
     }
 
@@ -17,9 +16,7 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sidebar_tab = SidebarTab::Collections;
-        let tab_id = self.request_tabs.active_tab_id().clone();
-        self.request_close_request_tab(tab_id, window, cx);
+        self.close_active_workspace_tab(window, cx);
     }
 
     pub(crate) fn on_activate_next_request_tab(
@@ -46,18 +43,12 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let tabs = self.request_tabs.tabs();
-        if tabs.len() < 2 || self.sending {
-            return;
-        }
-        let current = tabs
-            .iter()
-            .position(|tab| tab.id() == self.request_tabs.active_tab_id())
-            .unwrap_or(0);
-        let next = (current as isize + direction).rem_euclid(tabs.len() as isize) as usize;
-        let tab_id = tabs[next].id().clone();
-        self.sidebar_tab = SidebarTab::Collections;
-        self.activate_request_tab(tab_id, window, cx);
+        let tab = self.workspace_tabs.adjacent_tab(
+            &self.request_tabs,
+            self.theme_editor.is_some(),
+            direction,
+        );
+        self.activate_workspace_tab(tab, window, cx);
     }
 
     pub(crate) fn on_send_or_cancel_request(
@@ -69,7 +60,7 @@ impl ApiTester {
         if self.sending {
             self.cancel_request(cx);
         } else {
-            self.sidebar_tab = SidebarTab::Collections;
+            self.activate_request_workspace(SidebarTab::Collections, window, cx);
             self.start_request(window, cx);
         }
     }
@@ -80,7 +71,7 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sidebar_tab = SidebarTab::Collections;
+        self.activate_request_workspace(SidebarTab::Collections, window, cx);
         self.save_current_request(false, window, cx);
     }
 
@@ -90,7 +81,7 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sidebar_tab = SidebarTab::Collections;
+        self.activate_request_workspace(SidebarTab::Collections, window, cx);
         self.save_current_request(true, window, cx);
     }
 
@@ -100,7 +91,7 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sidebar_tab = SidebarTab::Collections;
+        self.activate_request_workspace(SidebarTab::Collections, window, cx);
         self.url.read(cx).focus_handle(cx).focus(window);
         cx.notify();
     }
@@ -111,7 +102,7 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sidebar_tab = SidebarTab::Collections;
+        self.activate_request_workspace(SidebarTab::Collections, window, cx);
         self.request_pane = RequestPane::Body;
         self.format_raw_body(window, cx);
     }
@@ -119,41 +110,37 @@ impl ApiTester {
     pub(crate) fn on_show_collections(
         &mut self,
         _: &shortcuts::ShowCollections,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sidebar_tab = SidebarTab::Collections;
-        cx.notify();
+        self.activate_request_workspace(SidebarTab::Collections, window, cx);
     }
 
     pub(crate) fn on_show_environments(
         &mut self,
         _: &shortcuts::ShowEnvironments,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sidebar_tab = SidebarTab::Environments;
-        cx.notify();
+        self.activate_request_workspace(SidebarTab::Environments, window, cx);
     }
 
     pub(crate) fn on_show_history(
         &mut self,
         _: &shortcuts::ShowHistory,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sidebar_tab = SidebarTab::History;
-        cx.notify();
+        self.activate_request_workspace(SidebarTab::History, window, cx);
     }
 
     pub(crate) fn on_show_settings(
         &mut self,
         _: &shortcuts::ShowSettings,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sidebar_tab = SidebarTab::Settings;
-        cx.notify();
+        self.open_workspace_tool_tab(WorkspaceToolTab::Settings, window, cx);
     }
 
     pub(crate) fn on_toggle_navigation(

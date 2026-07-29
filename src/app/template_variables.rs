@@ -334,10 +334,13 @@ impl ApiTester {
         cx.notify();
     }
 
-    pub(super) fn open_environments_from_template(&mut self, cx: &mut Context<Self>) {
-        self.sidebar_tab = SidebarTab::Environments;
+    pub(super) fn open_environments_from_template(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.template_variable_popover = None;
-        cx.notify();
+        self.activate_request_workspace(SidebarTab::Environments, window, cx);
     }
 }
 

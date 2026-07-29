@@ -513,6 +513,7 @@ impl ApiTester {
             request_tabs_warning,
             request_tabs_writable,
             request_tab_context_target: None,
+            workspace_tabs: WorkspaceTabs::default(),
             settings,
             settings_warning,
             settings_writable,

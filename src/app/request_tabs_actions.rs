@@ -285,8 +285,13 @@ impl ApiTester {
 
         if let Some(response) = self.response.clone() {
             self.update_response_editor(&response, window, cx);
-            if self.response_tab == ResponseTab::Preview {
+            if self.response_tab == ResponseTab::Preview
+                && self.workspace_tabs.active() == ActiveWorkspaceTab::Request
+                && self.sidebar_tab != SidebarTab::Environments
+            {
                 self.show_preview(window, cx);
+            } else {
+                self.hide_preview(cx);
             }
         } else {
             self.response_editor.update(cx, |editor, cx| {
@@ -304,17 +309,30 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.sending {
+        if self.request_tabs.get(&tab_id).is_none() {
+            return;
+        }
+        let leaving_tool = self.workspace_tabs.active() != ActiveWorkspaceTab::Request;
+        let activating_current_request = self.request_tabs.active_tab_id() == &tab_id;
+        if self.sending && !(leaving_tool && activating_current_request) {
             self.request_notice =
                 Some("Finish or cancel the active request before switching tabs.".to_owned());
             cx.notify();
             return;
         }
-        if self.request_tabs.active_tab_id() == &tab_id {
+        if self.workspace_tabs.active() == ActiveWorkspaceTab::Settings {
+            self.cancel_shortcut_recording(cx);
+        }
+        self.workspace_tabs.activate_request();
+        self.sidebar_tab = SidebarTab::Collections;
+        if activating_current_request {
             if self.expand_request_tab_group_for(&tab_id) {
                 self.persist_request_tabs_now(cx);
-                cx.notify();
             }
+            if leaving_tool && self.response_tab == ResponseTab::Preview {
+                self.show_preview(window, cx);
+            }
+            cx.notify();
             return;
         }
         self.snapshot_active_request_tab(cx);
@@ -330,6 +348,11 @@ impl ApiTester {
         if self.sending {
             return;
         }
+        if self.workspace_tabs.active() == ActiveWorkspaceTab::Settings {
+            self.cancel_shortcut_recording(cx);
+        }
+        self.workspace_tabs.activate_request();
+        self.sidebar_tab = SidebarTab::Collections;
         self.snapshot_active_request_tab(cx);
         let tab_id = if self.selected_collection_id.is_none() {
             self.request_tabs.open_new()
@@ -361,6 +384,11 @@ impl ApiTester {
         if self.sending {
             return;
         }
+        if self.workspace_tabs.active() == ActiveWorkspaceTab::Settings {
+            self.cancel_shortcut_recording(cx);
+        }
+        self.workspace_tabs.activate_request();
+        self.sidebar_tab = SidebarTab::Collections;
         let Some((title, definition, folder_id)) = self
             .workspace
             .collection(&collection_id)
@@ -422,6 +450,11 @@ impl ApiTester {
         if self.sending {
             return;
         }
+        if self.workspace_tabs.active() == ActiveWorkspaceTab::Settings {
+            self.cancel_shortcut_recording(cx);
+        }
+        self.workspace_tabs.activate_request();
+        self.sidebar_tab = SidebarTab::Collections;
         self.snapshot_active_request_tab(cx);
         let title = format!("{} {}", request.method, compact_url(&request.url));
         let tab_id = self.request_tabs.open_unsaved(

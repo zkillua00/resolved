@@ -62,8 +62,8 @@ impl ApiTester {
                         .label("Open environments")
                         .small()
                         .outline()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.open_environments_from_template(cx);
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_environments_from_template(window, cx);
                         })),
                 )
             })

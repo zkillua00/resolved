@@ -239,6 +239,11 @@ impl ApiTester {
         if self.request_tabs.group(&group_id).is_none() {
             return;
         }
+        if self.workspace_tabs.active() == ActiveWorkspaceTab::Settings {
+            self.cancel_shortcut_recording(cx);
+        }
+        self.workspace_tabs.activate_request();
+        self.sidebar_tab = SidebarTab::Collections;
         self.snapshot_active_request_tab(cx);
         let _ = self.request_tabs.set_group_collapsed(&group_id, false);
         let tab_id = if self.selected_collection_id.is_none() {

@@ -3,6 +3,11 @@ use super::*;
 impl ApiTester {
     pub(super) fn render_navigation_rail(&self, cx: &mut Context<Self>) -> AnyElement {
         let hud_visible = self.debug_overlay.read(cx).is_visible();
+        let request_workspace_active = self.workspace_tabs.active() == ActiveWorkspaceTab::Request;
+        let settings_workspace_active = matches!(
+            self.workspace_tabs.active(),
+            ActiveWorkspaceTab::Settings | ActiveWorkspaceTab::ThemeCss
+        );
         let compact = self.navigation_compact;
         let rail_width = if compact { px(56.) } else { px(116.) };
         let item_width = if compact { px(44.) } else { px(100.) };
@@ -29,14 +34,16 @@ impl ApiTester {
                     .rounded_lg()
                     .cursor_pointer()
                     .text_color(cx.theme().muted_foreground)
-                    .when(self.sidebar_tab == SidebarTab::Collections, |this| {
-                        this.bg(cx.theme().sidebar_accent)
-                            .text_color(cx.theme().foreground)
-                    })
+                    .when(
+                        request_workspace_active && self.sidebar_tab == SidebarTab::Collections,
+                        |this| {
+                            this.bg(cx.theme().sidebar_accent)
+                                .text_color(cx.theme().foreground)
+                        },
+                    )
                     .hover(|style| style.bg(cx.theme().sidebar_accent))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.sidebar_tab = SidebarTab::Collections;
-                        cx.notify();
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.activate_request_workspace(SidebarTab::Collections, window, cx);
                     }))
                     .when(compact, |this| {
                         this.tooltip(|window, cx| Tooltip::new("Collections").build(window, cx))
@@ -62,14 +69,16 @@ impl ApiTester {
                     .rounded_lg()
                     .cursor_pointer()
                     .text_color(cx.theme().muted_foreground)
-                    .when(self.sidebar_tab == SidebarTab::Environments, |this| {
-                        this.bg(cx.theme().sidebar_accent)
-                            .text_color(cx.theme().foreground)
-                    })
+                    .when(
+                        request_workspace_active && self.sidebar_tab == SidebarTab::Environments,
+                        |this| {
+                            this.bg(cx.theme().sidebar_accent)
+                                .text_color(cx.theme().foreground)
+                        },
+                    )
                     .hover(|style| style.bg(cx.theme().sidebar_accent))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.sidebar_tab = SidebarTab::Environments;
-                        cx.notify();
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.activate_request_workspace(SidebarTab::Environments, window, cx);
                     }))
                     .when(compact, |this| {
                         this.tooltip(|window, cx| Tooltip::new("Environments").build(window, cx))
@@ -95,14 +104,16 @@ impl ApiTester {
                     .rounded_lg()
                     .cursor_pointer()
                     .text_color(cx.theme().muted_foreground)
-                    .when(self.sidebar_tab == SidebarTab::History, |this| {
-                        this.bg(cx.theme().sidebar_accent)
-                            .text_color(cx.theme().foreground)
-                    })
+                    .when(
+                        request_workspace_active && self.sidebar_tab == SidebarTab::History,
+                        |this| {
+                            this.bg(cx.theme().sidebar_accent)
+                                .text_color(cx.theme().foreground)
+                        },
+                    )
                     .hover(|style| style.bg(cx.theme().sidebar_accent))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.sidebar_tab = SidebarTab::History;
-                        cx.notify();
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.activate_request_workspace(SidebarTab::History, window, cx);
                     }))
                     .when(compact, |this| {
                         this.tooltip(|window, cx| Tooltip::new("History").build(window, cx))
@@ -125,14 +136,13 @@ impl ApiTester {
                     .rounded_lg()
                     .cursor_pointer()
                     .text_color(cx.theme().muted_foreground)
-                    .when(self.sidebar_tab == SidebarTab::Settings, |this| {
+                    .when(settings_workspace_active, |this| {
                         this.bg(cx.theme().sidebar_accent)
                             .text_color(cx.theme().foreground)
                     })
                     .hover(|style| style.bg(cx.theme().sidebar_accent))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.sidebar_tab = SidebarTab::Settings;
-                        cx.notify();
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_workspace_tool_tab(WorkspaceToolTab::Settings, window, cx);
                     }))
                     .when(compact, |this| {
                         this.tooltip(|window, cx| Tooltip::new("Settings").build(window, cx))

@@ -359,8 +359,13 @@ impl ApiTester {
             &history_sensitive_values,
         ));
         self.persist_history();
-        if self.response_tab == ResponseTab::Preview {
+        if self.response_tab == ResponseTab::Preview
+            && self.workspace_tabs.active() == ActiveWorkspaceTab::Request
+            && self.sidebar_tab != SidebarTab::Environments
+        {
             self.show_preview(window, cx);
+        } else {
+            self.hide_preview(cx);
         }
         cx.notify();
     }

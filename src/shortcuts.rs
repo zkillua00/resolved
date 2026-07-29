@@ -114,7 +114,7 @@ impl ShortcutCategory {
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::RequestTabs => "Request tabs",
+            Self::RequestTabs => "Tabs",
             Self::ActiveRequest => "Active request",
             Self::Navigation => "Navigation",
             Self::Interface => "Interface",
@@ -124,7 +124,7 @@ impl ShortcutCategory {
 
     pub const fn description(self) -> &'static str {
         match self {
-            Self::RequestTabs => "Create, close, and move between request tabs.",
+            Self::RequestTabs => "Create request tabs, then close and move between open tabs.",
             Self::ActiveRequest => "Send, save, focus, and format the active request.",
             Self::Navigation => "Open the primary API Tester workspaces.",
             Self::Interface => "Show or hide supporting interface surfaces.",
@@ -151,19 +151,19 @@ pub const SHORTCUT_DESCRIPTORS: &[ShortcutDescriptor] = &[
     },
     ShortcutDescriptor {
         id: ShortcutId::CloseRequestTab,
-        label: "Close request tab",
+        label: "Close active tab",
         category: ShortcutCategory::RequestTabs,
         default_binding: "cmd-w",
     },
     ShortcutDescriptor {
         id: ShortcutId::ActivateNextRequestTab,
-        label: "Next request tab",
+        label: "Next tab",
         category: ShortcutCategory::RequestTabs,
         default_binding: "ctrl-tab",
     },
     ShortcutDescriptor {
         id: ShortcutId::ActivatePreviousRequestTab,
-        label: "Previous request tab",
+        label: "Previous tab",
         category: ShortcutCategory::RequestTabs,
         default_binding: "ctrl-shift-tab",
     },
@@ -643,6 +643,28 @@ mod tests {
             );
             assert!(!category.description().trim().is_empty());
         }
+    }
+
+    #[test]
+    fn generalized_tab_labels_keep_persisted_shortcut_ids_compatible() {
+        assert_eq!(ShortcutId::CloseRequestTab.key(), "request.close_tab");
+        assert_eq!(ShortcutId::ActivateNextRequestTab.key(), "request.next_tab");
+        assert_eq!(
+            ShortcutId::ActivatePreviousRequestTab.key(),
+            "request.previous_tab"
+        );
+        assert_eq!(
+            shortcut_descriptor(ShortcutId::CloseRequestTab).label,
+            "Close active tab"
+        );
+        assert_eq!(
+            shortcut_descriptor(ShortcutId::ActivateNextRequestTab).label,
+            "Next tab"
+        );
+        assert_eq!(
+            shortcut_descriptor(ShortcutId::ActivatePreviousRequestTab).label,
+            "Previous tab"
+        );
     }
 
     #[test]

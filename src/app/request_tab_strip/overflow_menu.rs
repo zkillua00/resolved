@@ -31,19 +31,28 @@ pub(super) fn render_open_tabs_menu(app: &ApiTester, cx: &mut Context<ApiTester>
             OpenTabMenuEntry {
                 tab_id: tab.id().clone(),
                 title: tab.display_title().to_owned(),
-                active: tab.id() == app.request_tabs.active_tab_id(),
+                active: app.workspace_tabs.active() == ActiveWorkspaceTab::Request
+                    && tab.id() == app.request_tabs.active_tab_id(),
                 group_label,
             }
         })
         .collect::<Vec<_>>();
+    let settings_open = app.workspace_tabs.settings_open();
+    let settings_active = app
+        .workspace_tabs
+        .tool_is_active(WorkspaceToolTab::Settings);
+    let theme_css_open = app.theme_editor.is_some();
+    let theme_css_active = app
+        .workspace_tabs
+        .tool_is_active(WorkspaceToolTab::ThemeCss);
     let owner = cx.entity().downgrade();
 
-    Button::new("all-request-tabs")
+    Button::new("all-tabs")
         .icon(IconName::ChevronDown)
         .small()
         .ghost()
         .rounded_full()
-        .tooltip("All request tabs")
+        .tooltip("All tabs")
         .dropdown_menu(move |mut menu, _, _| {
             menu = menu.max_h(px(520.)).scrollable(true);
             for entry in &entries {
@@ -60,6 +69,47 @@ pub(super) fn render_open_tabs_menu(app: &ApiTester, cx: &mut Context<ApiTester>
                                 owner.update(cx, |this, cx| {
                                     this.sidebar_tab = SidebarTab::Collections;
                                     this.activate_request_tab(tab_id.clone(), window, cx);
+                                });
+                            }
+                        }),
+                );
+            }
+            if settings_open || theme_css_open {
+                menu = menu.separator().label("Tools");
+            }
+            if settings_open {
+                let owner = owner.clone();
+                menu = menu.item(
+                    PopupMenuItem::new("Settings")
+                        .icon(IconName::Settings2)
+                        .checked(settings_active)
+                        .on_click(move |_, window, cx| {
+                            if let Some(owner) = owner.upgrade() {
+                                owner.update(cx, |this, cx| {
+                                    this.activate_workspace_tab(
+                                        WorkspaceTab::Tool(WorkspaceToolTab::Settings),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                        }),
+                );
+            }
+            if theme_css_open {
+                let owner = owner.clone();
+                menu = menu.item(
+                    PopupMenuItem::new("Theme CSS")
+                        .icon(IconName::Palette)
+                        .checked(theme_css_active)
+                        .on_click(move |_, window, cx| {
+                            if let Some(owner) = owner.upgrade() {
+                                owner.update(cx, |this, cx| {
+                                    this.activate_workspace_tab(
+                                        WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss),
+                                        window,
+                                        cx,
+                                    );
                                 });
                             }
                         }),

@@ -116,6 +116,8 @@ mod theme_css_actions;
 mod theme_css_editor;
 mod title_bar;
 mod ui_utils;
+mod workspace_tab;
+mod workspace_tab_actions;
 
 use environment_variable_grid::EnvironmentVariableRow;
 use execution_stage::*;
@@ -129,6 +131,7 @@ use sidebar_tab::*;
 use template_variable_popover_model::*;
 use template_variables::*;
 use ui_utils::*;
+use workspace_tab::*;
 
 const TEMPLATE_HIGHLIGHT_DEBOUNCE: Duration = Duration::from_millis(90);
 const REQUEST_TABS_PERSIST_DEBOUNCE: Duration = Duration::from_millis(450);
@@ -188,6 +191,7 @@ pub struct ApiTester {
     request_tabs_warning: Option<String>,
     request_tabs_writable: bool,
     request_tab_context_target: Option<request_tab_strip::RequestTabContextTarget>,
+    workspace_tabs: WorkspaceTabs,
     settings: AppSettings,
     settings_warning: Option<String>,
     settings_writable: bool,

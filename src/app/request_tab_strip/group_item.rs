@@ -9,11 +9,12 @@ pub(super) fn render_request_tab_group(
     let toggle_id = group_id.clone();
     let context_id = group_id.clone();
     let color = request_tab_group_color(group.color(), cx);
-    let active = app
-        .request_tabs
-        .active()
-        .group_id()
-        .is_some_and(|active_group_id| active_group_id == group.id());
+    let active = app.workspace_tabs.active() == ActiveWorkspaceTab::Request
+        && app
+            .request_tabs
+            .active()
+            .group_id()
+            .is_some_and(|active_group_id| active_group_id == group.id());
     let count = app.request_tabs.tabs_in_group(group.id()).len();
     let label = compact_label(group.display_title(), 18);
     let tooltip = format!("{} · {count} tabs", group.display_title());

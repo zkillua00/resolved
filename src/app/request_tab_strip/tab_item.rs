@@ -14,7 +14,8 @@ pub(super) fn render_request_tab(
     let row_group: SharedString = format!("open-request-tab-group-{tab_key}").into();
     let title_id: SharedString = format!("open-request-tab-title-{tab_key}").into();
     let close_button_id: SharedString = format!("close-open-request-tab-{tab_key}").into();
-    let active = app.request_tabs.active_tab_id() == &tab_id;
+    let active = app.workspace_tabs.active() == ActiveWorkspaceTab::Request
+        && app.request_tabs.active_tab_id() == &tab_id;
     let dirty = if active {
         app.request_is_dirty()
     } else {

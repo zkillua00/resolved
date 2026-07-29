@@ -45,7 +45,7 @@ fn configure_menus(cx: &mut App) {
             name: "File".into(),
             items: vec![
                 MenuItem::action("New Request Tab", NewRequestTab),
-                MenuItem::action("Close Request Tab", CloseRequestTab),
+                MenuItem::action("Close Active Tab", CloseRequestTab),
                 MenuItem::separator(),
                 MenuItem::action("Save Request", SaveRequest),
                 MenuItem::action("Save Request As…", SaveRequestAs),
@@ -128,6 +128,7 @@ impl AssetSource for AppAssets {
             "icons/gallery-vertical-end.svg" => {
                 include_bytes!("../assets/icons/gallery-vertical-end.svg")
             }
+            "icons/palette.svg" => include_bytes!("../assets/icons/palette.svg"),
             "icons/settings-2.svg" => include_bytes!("../assets/icons/settings-2.svg"),
             "icons/chart-pie.svg" => include_bytes!("../assets/icons/chart-pie.svg"),
             "icons/case-sensitive.svg" => include_bytes!("../assets/icons/case-sensitive.svg"),

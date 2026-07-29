@@ -63,7 +63,7 @@ impl ApiTester {
             );
         }
 
-        let mut appearance_page = SettingPage::new("Appearance")
+        let appearance_page = SettingPage::new("Appearance")
             .description(
                 "Choose a built-in or saved theme, then edit its validated CSS here or in your preferred editor.",
             )
@@ -76,16 +76,6 @@ impl ApiTester {
                     )
                     .item(self.theme_setting_item(cx)),
             );
-        if self.theme_editor.is_some() {
-            appearance_page = appearance_page.group(
-                SettingGroup::new()
-                    .title("CSS editor")
-                    .description(
-                        "Complete and hover --api-* tokens, use CSS highlighting, and fix inline diagnostics before applying.",
-                    )
-                    .item(self.theme_editor_setting_item(cx)),
-            );
-        }
 
         v_flex()
             .size_full()
@@ -434,12 +424,17 @@ impl ApiTester {
                             .child(
                                 Button::new("edit-css-theme-here")
                                     .label(if editor_open {
-                                        "Editing CSS below"
+                                        "Show CSS editor"
                                     } else {
                                         "Edit CSS here"
                                     })
                                     .outline()
-                                    .disabled(!writable || editor_open)
+                                    .disabled(!writable)
+                                    .tooltip(if editor_open {
+                                        "Show the open Theme CSS workspace tab"
+                                    } else {
+                                        "Open a Theme CSS workspace tab with validation and intelligence"
+                                    })
                                     .on_click(move |_, window, cx| {
                                         if let Some(this) = edit_this.upgrade() {
                                             this.update(cx, |this, cx| {
@@ -551,7 +546,7 @@ fn shortcut_display(binding: Option<&str>) -> String {
         .join(" ")
 }
 
-fn settings_message(message: String, color: Hsla) -> AnyElement {
+pub(super) fn settings_message(message: String, color: Hsla) -> AnyElement {
     div()
         .mx_4()
         .mt_3()

@@ -174,7 +174,8 @@ impl ApiTester {
             cx.notify();
             return;
         }
-        if let Some(editor) = self.theme_editor.as_ref() {
+        if let Some(editor) = self.theme_editor.clone() {
+            self.open_workspace_tool_tab(WorkspaceToolTab::ThemeCss, window, cx);
             editor.read(cx).focus_handle(cx).focus(window);
             return;
         }
@@ -233,6 +234,7 @@ impl ApiTester {
         );
         self.theme_editor_subscription = Some(subscription);
         self.theme_editor = Some(editor.clone());
+        self.open_workspace_tool_tab(WorkspaceToolTab::ThemeCss, window, cx);
         self.settings_notice = Some(if recovered {
             "Recovered the unapplied CSS draft. Save or revert it when ready.".into()
         } else {
@@ -734,10 +736,10 @@ impl ApiTester {
         cx.notify();
     }
 
-    pub(super) fn close_theme_editor(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn close_theme_editor(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.persist_theme_editor_draft(cx) {
             cx.notify();
-            return;
+            return false;
         }
         let draft_saved = self.settings.theme.draft_source.is_some();
         self.dismiss_theme_editor();
@@ -748,6 +750,7 @@ impl ApiTester {
             "CSS editor closed.".into()
         });
         cx.notify();
+        true
     }
 
     pub(super) fn has_unapplied_theme_draft(&self) -> bool {
@@ -818,6 +821,8 @@ impl ApiTester {
         self.theme_editor_validation_task = None;
         self.theme_editor_persist_task = None;
         self.theme_editor_subscription = None;
+        self.workspace_tabs
+            .close_tool(WorkspaceToolTab::ThemeCss, false);
     }
 
     fn theme_editor_changed(&mut self, cx: &mut Context<Self>) {

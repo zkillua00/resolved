@@ -4,16 +4,19 @@ mod context_menu;
 mod group_item;
 mod overflow_menu;
 mod tab_item;
+mod tool_tab_item;
 
 use context_menu::build_request_tab_context_menu;
 use group_item::render_request_tab_group;
 use overflow_menu::render_open_tabs_menu;
 use tab_item::render_request_tab;
+use tool_tab_item::render_workspace_tool_tab;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::app) enum RequestTabContextTarget {
     Tab(RequestTabId),
     Group(RequestTabGroupId),
+    Tool(WorkspaceToolTab),
 }
 
 impl ApiTester {
@@ -37,6 +40,20 @@ impl ApiTester {
                 elements.push(render_request_tab(self, tab, cx));
             }
             previous_group_id = tab.group_id().cloned();
+        }
+        if self.workspace_tabs.settings_open() {
+            elements.push(render_workspace_tool_tab(
+                self,
+                WorkspaceToolTab::Settings,
+                cx,
+            ));
+        }
+        if self.theme_editor.is_some() {
+            elements.push(render_workspace_tool_tab(
+                self,
+                WorkspaceToolTab::ThemeCss,
+                cx,
+            ));
         }
 
         let context_owner = cx.entity().downgrade();

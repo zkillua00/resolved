@@ -2,11 +2,13 @@ use super::*;
 
 impl ApiTester {
     pub(super) fn render_title_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        match self.workspace_tabs.active() {
+            ActiveWorkspaceTab::Settings => return self.render_settings_title_bar(cx),
+            ActiveWorkspaceTab::ThemeCss => return self.render_theme_css_title_bar(cx),
+            ActiveWorkspaceTab::Request => {}
+        }
         if self.sidebar_tab == SidebarTab::Environments {
             return self.render_environment_title_bar(cx);
-        }
-        if self.sidebar_tab == SidebarTab::Settings {
-            return self.render_settings_title_bar(cx);
         }
 
         let active_environment_full = self
@@ -202,11 +204,14 @@ impl ApiTester {
                                 let manage_this = this.clone();
                                 menu.separator().item(
                                     PopupMenuItem::new("Manage environments…").on_click(
-                                        move |_, _, cx| {
+                                        move |_, window, cx| {
                                             if let Some(this) = manage_this.upgrade() {
                                                 this.update(cx, |this, cx| {
-                                                    this.sidebar_tab = SidebarTab::Environments;
-                                                    cx.notify();
+                                                    this.activate_request_workspace(
+                                                        SidebarTab::Environments,
+                                                        window,
+                                                        cx,
+                                                    );
                                                 });
                                             }
                                         },
