@@ -8,16 +8,15 @@
 use std::{cell::RefCell, collections::BTreeMap, fmt, ops::Range as ByteRange, rc::Rc};
 
 use anyhow::Result;
-use gpui::{App, Context, HighlightStyle, Hsla, Task, Window};
-use gpui_component::input::{CompletionProvider, HoverProvider, InputState, Rope};
+use gpui::{Context, HighlightStyle, Hsla, Task, Window};
+use gpui_component::input::{CompletionProvider, InputState, Rope};
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit,
-    Documentation, Hover, HoverContents, MarkupContent, MarkupKind, Position, Range, TextEdit,
+    Documentation, Position, Range, TextEdit,
 };
 
 use crate::core::Environment;
 
-const SECRET_MASK: &str = "••••••••";
 const COMPLETION_CONTEXT_PADDING: usize = 32;
 
 /// A value-aware snapshot of one active-environment variable.
@@ -123,10 +122,6 @@ impl TemplateVariableCatalog {
         self.environment_name.as_deref()
     }
 
-    pub fn has_active_environment(&self) -> bool {
-        self.environment_id.is_some()
-    }
-
     /// Returns unique, enabled variables in deterministic name order.
     ///
     /// Duplicate keys are intentionally omitted because request resolution
@@ -162,10 +157,6 @@ impl TemplateVariableCatalog {
             Some(_) => TemplateClassification::Invalid(TemplateInvalidReason::DuplicateName),
             None => TemplateClassification::Missing,
         }
-    }
-
-    fn unique_variable(&self, name: &str) -> Option<&TemplateVariable> {
-        self.variable(name)
     }
 }
 
@@ -312,21 +303,6 @@ pub fn semantic_style_spans(
             )
         })
         .collect()
-}
-
-fn invalid_reason_message(reason: TemplateInvalidReason, name: &str) -> String {
-    match reason {
-        TemplateInvalidReason::EmptyName => "Template variable name cannot be empty.".to_owned(),
-        TemplateInvalidReason::Unclosed => {
-            "Template variable is missing its closing '}}' delimiter.".to_owned()
-        }
-        TemplateInvalidReason::NestedDelimiter => {
-            "Template variable contains a nested delimiter.".to_owned()
-        }
-        TemplateInvalidReason::DuplicateName => {
-            format!("Active environment has more than one variable named '{name}'.")
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -491,140 +467,6 @@ fn completion_context(source: &str, requested_offset: usize) -> Option<TemplateC
     })
 }
 
-#[derive(Clone, Debug)]
-pub struct TemplateHoverProvider {
-    catalog: TemplateVariableCatalogHandle,
-}
-
-impl TemplateHoverProvider {
-    pub fn new(catalog: TemplateVariableCatalogHandle) -> Self {
-        Self { catalog }
-    }
-
-    pub fn hover_for_source(&self, source: &str, requested_offset: usize) -> Option<Hover> {
-        let offset = clipped_char_boundary(source, requested_offset);
-        let span = scan_template_spans(source)
-            .into_iter()
-            .find(|span| span_contains_offset(span, offset))?;
-        let catalog = self.catalog.borrow();
-        let name = span.name(source);
-        let classification = span.classification(source, &catalog);
-        let contents = hover_markdown(name, classification, &catalog);
-
-        Some(Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: contents,
-            }),
-            range: Some(source_range(source, span.range.start, span.range.end)),
-        })
-    }
-}
-
-impl HoverProvider for TemplateHoverProvider {
-    fn hover(
-        &self,
-        text: &Rope,
-        offset: usize,
-        _window: &mut Window,
-        _cx: &mut App,
-    ) -> Task<Result<Option<Hover>>> {
-        Task::ready(Ok(self.hover_for_source(&text.to_string(), offset)))
-    }
-}
-
-fn span_contains_offset(span: &TemplateSpan, offset: usize) -> bool {
-    span.range.start <= offset
-        && (offset < span.range.end || (!span.complete && offset == span.range.end))
-}
-
-fn hover_markdown(
-    name: &str,
-    classification: TemplateClassification,
-    catalog: &TemplateVariableCatalog,
-) -> String {
-    let environment = catalog
-        .environment_name()
-        .map(markdown_inline_code)
-        .unwrap_or_else(|| "no active environment".to_owned());
-    let display_name = if name.is_empty() {
-        "(empty)".to_owned()
-    } else {
-        markdown_inline_code(name)
-    };
-
-    match classification {
-        TemplateClassification::Available | TemplateClassification::Disabled => {
-            let variable = catalog
-                .unique_variable(name)
-                .expect("available and disabled names are unique");
-            let mut markdown = if classification == TemplateClassification::Disabled {
-                format!(
-                    "**Disabled environment variable**\n\nName: {display_name}\n\nEnvironment: {environment}\n\nThis variable exists but is disabled, so requests cannot resolve it. Click the highlighted template to enable it."
-                )
-            } else {
-                format!(
-                    "**Environment variable**\n\nName: {display_name}\n\nEnvironment: {environment}"
-                )
-            };
-
-            if variable.secret {
-                markdown.push_str(&format!(
-                    "\n\nValue: {SECRET_MASK}\n\n_Secret value hidden._"
-                ));
-            } else if variable.value.is_empty() {
-                markdown.push_str("\n\nValue: _(empty string)_");
-            } else {
-                markdown.push_str("\n\nValue:\n\n");
-                markdown.push_str(&markdown_code_block(&variable.value));
-            }
-            markdown
-        }
-        TemplateClassification::Missing => {
-            if catalog.has_active_environment() {
-                format!(
-                    "**Undefined environment variable**\n\n{display_name} does not exist in {environment}.\n\nClick the highlighted template to create it in the active environment."
-                )
-            } else {
-                format!(
-                    "**Undefined environment variable**\n\n{display_name} cannot be resolved because no environment is active.\n\nSelect an environment before creating this variable."
-                )
-            }
-        }
-        TemplateClassification::Invalid(reason) => {
-            format!(
-                "**Invalid template variable**\n\n{}",
-                invalid_reason_message(reason, name)
-            )
-        }
-    }
-}
-
-fn markdown_inline_code(text: &str) -> String {
-    let fence_len = longest_run(text, '`') + 1;
-    let fence = "`".repeat(fence_len.max(1));
-    format!("{fence} {text} {fence}")
-}
-
-fn markdown_code_block(text: &str) -> String {
-    let fence = "`".repeat((longest_run(text, '`') + 1).max(3));
-    format!("{fence}text\n{text}\n{fence}")
-}
-
-fn longest_run(text: &str, needle: char) -> usize {
-    let mut longest = 0;
-    let mut current = 0;
-    for character in text.chars() {
-        if character == needle {
-            current += 1;
-            longest = longest.max(current);
-        } else {
-            current = 0;
-        }
-    }
-    longest
-}
-
 fn source_range(source: &str, start: usize, end: usize) -> Range {
     Range::new(source_position(source, start), source_position(source, end))
 }
@@ -655,7 +497,7 @@ fn clipped_char_boundary(source: &str, requested_offset: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use gpui::{HighlightStyle, hsla};
-    use lsp_types::{CompletionTextEdit, HoverContents, Position, Range};
+    use lsp_types::{CompletionTextEdit, Position, Range};
 
     use super::*;
 
@@ -692,13 +534,6 @@ mod tests {
         match item.text_edit.as_ref().expect("completion has edit") {
             CompletionTextEdit::Edit(edit) => (&edit.range, edit.new_text.as_str()),
             CompletionTextEdit::InsertAndReplace(_) => panic!("expected exact text edit"),
-        }
-    }
-
-    fn hover_text(hover: &Hover) -> &str {
-        match &hover.contents {
-            HoverContents::Markup(markup) => &markup.value,
-            _ => panic!("expected markdown hover"),
         }
     }
 
@@ -866,53 +701,11 @@ mod tests {
     }
 
     #[test]
-    fn hover_shows_plain_values_and_masks_secrets() {
-        let handle = catalog().shared();
-        let provider = TemplateHoverProvider::new(handle);
-
-        let plain = provider
-            .hover_for_source("{{base_url}}", 3)
-            .expect("plain hover");
-        let plain_text = hover_text(&plain);
-        assert!(plain_text.contains("https://example.test"));
-        assert!(plain_text.contains("Development"));
-
-        let secret = provider
-            .hover_for_source("{{token}}", 3)
-            .expect("secret hover");
-        let secret_text = hover_text(&secret);
-        assert!(secret_text.contains(SECRET_MASK));
-        assert!(secret_text.contains("Secret value hidden"));
-        assert!(!secret_text.contains("s3cr3t"));
-    }
-
-    #[test]
     fn debug_output_never_contains_variable_values() {
         let debug = format!("{:?}", catalog());
         assert!(!debug.contains("s3cr3t"));
         assert!(!debug.contains("https://example.test"));
         assert!(debug.contains("[OMITTED]"));
-    }
-
-    #[test]
-    fn hover_explains_disabled_missing_and_no_active_environment() {
-        let provider = TemplateHoverProvider::new(catalog().shared());
-        let disabled = provider
-            .hover_for_source("{{disabled}}", 3)
-            .expect("disabled hover");
-        assert!(hover_text(&disabled).contains("exists but is disabled"));
-        assert!(hover_text(&disabled).contains("not-used"));
-
-        let missing = provider
-            .hover_for_source("{{missing}}", 3)
-            .expect("missing hover");
-        assert!(hover_text(&missing).contains("does not exist"));
-
-        let no_environment =
-            TemplateHoverProvider::new(TemplateVariableCatalog::default().shared())
-                .hover_for_source("{{missing}}", 3)
-                .expect("no-environment hover");
-        assert!(hover_text(&no_environment).contains("no environment is active"));
     }
 
     #[test]
@@ -938,20 +731,5 @@ mod tests {
         );
         assert_eq!(styles[1].1.color, Some(colors.warning));
         assert_eq!(styles[2].1.color, Some(colors.error));
-    }
-
-    #[test]
-    fn markdown_fences_do_not_break_on_backticks_in_values() {
-        let catalog = TemplateVariableCatalog::from_parts(
-            Some("environment-1".to_owned()),
-            Some("Development".to_owned()),
-            [variable("1", "ticks", "```inside```", true, false)],
-        );
-        let hover = TemplateHoverProvider::new(catalog.shared())
-            .hover_for_source("{{ticks}}", 3)
-            .expect("hover");
-        let text = hover_text(&hover);
-        assert!(text.contains("````text"));
-        assert!(text.contains("```inside```"));
     }
 }

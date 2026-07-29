@@ -8,7 +8,7 @@ use super::*;
 impl ApiTester {
     pub(super) fn render_settings_title_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         h_flex()
-            .h(px(64.))
+            .h(px(APP_TITLE_BAR_HEIGHT))
             .flex_shrink_0()
             .pl(px(92.))
             .pr_6()
@@ -76,6 +76,15 @@ impl ApiTester {
                     )
                     .item(self.theme_setting_item(cx)),
             );
+        let developer_page = SettingPage::new("Developer Settings")
+            .description("Enable diagnostics for inspecting API Tester while it is running.")
+            .resettable(false)
+            .group(
+                SettingGroup::new()
+                    .title("Diagnostics")
+                    .description("Developer overlays stay inactive until explicitly enabled.")
+                    .item(self.metrics_setting_item(cx)),
+            );
 
         v_flex()
             .size_full()
@@ -92,7 +101,7 @@ impl ApiTester {
                     SettingsView::new("api-tester-settings")
                         .sidebar_width(px(220.))
                         .with_group_variant(GroupBoxVariant::Outline)
-                        .pages([keyboard_page, appearance_page]),
+                        .pages([keyboard_page, appearance_page, developer_page]),
                 ),
             )
             .into_any_element()
@@ -222,6 +231,34 @@ impl ApiTester {
             }),
         )
         .description("Restore every keyboard command to its default binding.")
+    }
+
+    fn metrics_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        let read_this = this.clone();
+        SettingItem::new(
+            "Metrics",
+            SettingField::<bool>::switch(
+                move |cx| {
+                    read_this.upgrade().is_some_and(|entity| {
+                        entity.read(cx).debug_overlay.read(cx).is_visible()
+                    })
+                },
+                move |visible, cx| {
+                    if let Some(entity) = this.upgrade() {
+                        entity.update(cx, |this, cx| {
+                            this.debug_overlay.update(cx, |overlay, cx| {
+                                overlay.set_visible(visible, cx);
+                            });
+                            cx.notify();
+                        });
+                    }
+                },
+            ),
+        )
+        .description(
+            "Show the performance HUD with UI redraw cadence, process CPU, RSS, and physical footprint.",
+        )
     }
 
     fn theme_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {

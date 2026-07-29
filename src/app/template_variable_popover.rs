@@ -8,13 +8,24 @@ impl ApiTester {
         let popover = self.template_variable_popover.clone()?;
         let blocker = self.template_variable_mutation_blocker(&popover, cx);
         let has_environment = popover.expected_environment_id.is_some();
-        let is_create = matches!(popover.action, TemplateVariableAction::Create);
-        let title = if is_create {
-            "Create environment variable"
-        } else {
-            "Enable environment variable"
+        let (title, action_label) = match &popover.action {
+            TemplateVariableAction::Create => ("Create environment variable", "Create"),
+            TemplateVariableAction::Update {
+                enable_on_save: true,
+                ..
+            } => ("Disabled environment variable", "Save & enable"),
+            TemplateVariableAction::Update {
+                enable_on_save: false,
+                ..
+            } => ("Environment variable", "Save"),
         };
-        let action_label = if is_create { "Create" } else { "Enable" };
+        let enables_variable = matches!(
+            &popover.action,
+            TemplateVariableAction::Update {
+                enable_on_save: true,
+                ..
+            }
+        );
         let template = format!("{{{{{}}}}}", popover.name);
         let environment = popover
             .environment_name
@@ -23,6 +34,7 @@ impl ApiTester {
         let apply_this = cx.entity().downgrade();
         let close_this = apply_this.clone();
         let outside_this = apply_this.clone();
+        let hover_this = apply_this.clone();
 
         let content = v_flex()
             .id("template-variable-popover")
@@ -34,6 +46,14 @@ impl ApiTester {
             .border_color(cx.api_outline_variant())
             .bg(cx.api_surface_container())
             .shadow_lg()
+            .occlude()
+            .on_hover(move |hovered, window, cx| {
+                if let Some(this) = hover_this.upgrade() {
+                    this.update(cx, |this, cx| {
+                        this.set_template_variable_popover_hovered(*hovered, window, cx);
+                    });
+                }
+            })
             .on_mouse_down_out(move |_, _, cx| {
                 if let Some(this) = outside_this.upgrade() {
                     this.update(cx, |this, cx| this.close_template_variable_popover(cx));
@@ -67,16 +87,19 @@ impl ApiTester {
                         })),
                 )
             })
-            .when(has_environment && is_create, |this| {
+            .when(has_environment, |this| {
                 this.child(
                     v_flex()
                         .gap_1()
                         .child(
-                            div()
+                            h_flex()
+                                .w_full()
+                                .justify_between()
                                 .text_xs()
                                 .font_semibold()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("VALUE"),
+                                .child("VALUE")
+                                .when(popover.secret, |this| this.child("SECRET · MASKED")),
                         )
                         .child(
                             div()
@@ -97,24 +120,20 @@ impl ApiTester {
                         ),
                 )
             })
-            .when(has_environment && !is_create, |this| {
-                this.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(
-                            "This variable exists but is disabled. Enable it without changing its value or secret status.",
-                        ),
-                )
-            })
-            .when_some(popover.error.clone().or_else(|| blocker.clone()), |this, message| {
+            .when(has_environment && enables_variable, |this| {
                 this.child(
                     div()
                         .text_xs()
-                        .text_color(cx.theme().red)
-                        .child(message),
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Saving also enables this variable so requests can resolve it."),
                 )
             })
+            .when_some(
+                popover.error.clone().or_else(|| blocker.clone()),
+                |this, message| {
+                    this.child(div().text_xs().text_color(cx.theme().red).child(message))
+                },
+            )
             .when(has_environment, |this| {
                 this.child(
                     h_flex()

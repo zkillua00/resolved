@@ -2,7 +2,6 @@ use super::*;
 
 impl ApiTester {
     pub(super) fn render_navigation_rail(&self, cx: &mut Context<Self>) -> AnyElement {
-        let hud_visible = self.debug_overlay.read(cx).is_visible();
         let request_workspace_active = self.workspace_tabs.active() == ActiveWorkspaceTab::Request;
         let settings_workspace_active = matches!(
             self.workspace_tabs.active(),
@@ -153,35 +152,6 @@ impl ApiTester {
                     }),
             )
             .child(div().flex_1())
-            .child(
-                v_flex()
-                    .id("rail-hud")
-                    .w(item_width)
-                    .h(item_height)
-                    .items_center()
-                    .justify_center()
-                    .gap_1()
-                    .rounded_lg()
-                    .cursor_pointer()
-                    .text_color(cx.theme().muted_foreground)
-                    .when(hud_visible, |this| {
-                        this.bg(cx.theme().sidebar_accent)
-                            .text_color(cx.theme().foreground)
-                    })
-                    .hover(|style| style.bg(cx.theme().sidebar_accent))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.debug_overlay
-                            .update(cx, |overlay, cx| overlay.toggle(cx));
-                        cx.notify();
-                    }))
-                    .when(compact, |this| {
-                        this.tooltip(|window, cx| Tooltip::new("Metrics").build(window, cx))
-                    })
-                    .child(gpui_component::Icon::new(IconName::ChartPie).with_size(px(18.)))
-                    .when(!compact, |this| {
-                        this.child(div().text_size(px(10.5)).font_semibold().child("Metrics"))
-                    }),
-            )
             .child(
                 h_flex()
                     .id("rail-compact-toggle")

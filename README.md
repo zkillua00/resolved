@@ -153,6 +153,9 @@ Reset shortcuts restores all defaults. Invalid or conflicting assignments are
 left unapplied. Valid changes are persisted to SQLite and take effect
 immediately, including while an input or code editor is focused.
 
+The Developer Settings page contains the Metrics switch for the performance
+HUD. `⌘⇧M` remains available as a customizable quick toggle.
+
 Bindings are divided into five sections so related commands remain easy to
 scan:
 
@@ -309,10 +312,11 @@ and an isolated helper-process sandbox are not part of this MVP.
 
 ## Performance HUD
 
-The optional in-app HUD reports UI FPS, average and p95 frame interval, process
-CPU, resident set size (RSS), and macOS Activity Monitor-style physical
-footprint. Resource sampling runs off the UI thread once per second and is
-inactive while the HUD is hidden.
+Enable Settings → Developer Settings → Metrics to show the optional in-app HUD.
+It reports UI FPS, average and p95 frame interval, process CPU, resident set
+size (RSS), and macOS Activity Monitor-style physical footprint. Resource
+sampling runs off the UI thread once per second and is inactive while the HUD
+is hidden.
 
 `UI FPS` is the application's actual GPUI redraw cadence. Idle views report
 `idle`; the HUD does not force a display-rate redraw loop. This is useful for

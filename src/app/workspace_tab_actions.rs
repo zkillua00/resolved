@@ -12,6 +12,7 @@ impl ApiTester {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.dismiss_template_variable_popover();
         if self.workspace_tabs.active() == ActiveWorkspaceTab::Request {
             self.snapshot_active_request_tab(cx);
             self.hide_preview(cx);
@@ -33,6 +34,7 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.dismiss_template_variable_popover();
         let was_tool = self.workspace_tabs.active() != ActiveWorkspaceTab::Request;
         let was_environment = self.sidebar_tab == SidebarTab::Environments;
         if self.workspace_tabs.active() == ActiveWorkspaceTab::Settings {

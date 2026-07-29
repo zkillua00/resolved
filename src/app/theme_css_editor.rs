@@ -3,7 +3,7 @@ use super::*;
 impl ApiTester {
     pub(super) fn render_theme_css_title_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         h_flex()
-            .h(px(64.))
+            .h(px(APP_TITLE_BAR_HEIGHT))
             .flex_shrink_0()
             .pl(px(92.))
             .pr_6()

@@ -22,14 +22,38 @@ impl ApiTester {
                 )
                 .into_any_element(),
             BodyMode::Raw => {
-                let body_template_input = self.body.read(cx).input_state();
+                let body_hover_input = self.body.read(cx).input_state();
+                let body_click_input = body_hover_input.clone();
+                let body_hover_this = cx.entity().downgrade();
+                let body_hover_input_id = body_hover_input.entity_id();
                 div()
+                    .id("raw-body-template-source")
                     .size_full()
+                    .on_hover(move |hovered, window, cx| {
+                        if let Some(this) = body_hover_this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.set_template_variable_source_hovered(
+                                    body_hover_input_id,
+                                    *hovered,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }
+                    })
+                    .on_mouse_move(cx.listener(move |this, event, window, cx| {
+                        this.hover_template_variable_popover(
+                            body_hover_input.clone(),
+                            event,
+                            window,
+                            cx,
+                        );
+                    }))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event, window, cx| {
                             this.open_template_variable_popover(
-                                body_template_input.clone(),
+                                body_click_input.clone(),
                                 event,
                                 window,
                                 cx,

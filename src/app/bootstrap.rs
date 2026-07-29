@@ -25,7 +25,6 @@ impl ApiTester {
             )
         });
         let body_completion_catalog = Rc::clone(&template_variable_catalog);
-        let body_hover_catalog = Rc::clone(&template_variable_catalog);
         let body = cx.new(|cx| {
             CodeEditor::new(
                 CodeEditorConfig::default()
@@ -36,8 +35,7 @@ impl ApiTester {
                     .format_action(true)
                     .completion_provider(Rc::new(TemplateCompletionProvider::new(
                         body_completion_catalog,
-                    )))
-                    .hover_provider(Rc::new(TemplateHoverProvider::new(body_hover_catalog))),
+                    ))),
                 window,
                 cx,
             )
@@ -546,6 +544,9 @@ impl ApiTester {
             script_variable_catalog,
             template_variable_catalog,
             template_highlight_tasks: HashMap::new(),
+            template_variable_hover_task: None,
+            template_variable_source_hovered: None,
+            template_variable_popover_hovered: false,
             template_variable_popover: None,
             focused_template_input: None,
             debug_overlay,

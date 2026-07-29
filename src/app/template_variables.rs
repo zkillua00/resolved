@@ -2,6 +2,7 @@ use super::*;
 
 impl ApiTester {
     pub(super) fn refresh_variable_intelligence(&mut self, cx: &mut Context<Self>) {
+        self.dismiss_template_variable_popover();
         self.template_highlight_tasks.clear();
         update_script_variable_catalog(&self.script_variable_catalog, &self.workspace);
         self.template_variable_catalog
@@ -54,6 +55,14 @@ impl ApiTester {
         input: &Entity<InputState>,
         cx: &mut Context<Self>,
     ) {
+        self.template_variable_hover_task = None;
+        let closes_popover = self
+            .template_variable_popover
+            .as_ref()
+            .is_some_and(|popover| popover.source_input_id == input.entity_id());
+        if closes_popover && self.dismiss_template_variable_popover() {
+            cx.notify();
+        }
         if self.request_dirty.is_hydrating() {
             return;
         }
@@ -111,6 +120,11 @@ impl ApiTester {
         if event.is_held {
             return;
         }
+        if event.keystroke.key == "escape" && self.template_variable_popover.is_some() {
+            self.close_template_variable_popover(cx);
+            cx.stop_propagation();
+            return;
+        }
         let modifiers = event.keystroke.modifiers;
         if modifiers.platform || modifiers.control || modifiers.function {
             return;
@@ -148,11 +162,54 @@ impl ApiTester {
         if event.button != MouseButton::Left {
             return;
         }
+        self.template_variable_source_hovered = Some(input.entity_id());
+        self.template_variable_hover_task = None;
+        self.show_template_variable_popover(input, event.position, true, window, cx);
+    }
+
+    pub(super) fn hover_template_variable_popover(
+        &mut self,
+        input: Entity<InputState>,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.pressed_button.is_some() {
+            return;
+        }
+        let input_id = input.entity_id();
+        self.template_variable_source_hovered = Some(input_id);
+        let position = event.position;
+        let input = input.downgrade();
+        self.template_variable_hover_task = Some(cx.spawn_in(window, async move |this, cx| {
+            Timer::after(TEMPLATE_HOVER_DEBOUNCE).await;
+            let Some(input) = input.upgrade() else {
+                return;
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.template_variable_hover_task = None;
+                if this.template_variable_source_hovered != Some(input_id) {
+                    return;
+                }
+                this.show_template_variable_popover(input, position, false, window, cx);
+            });
+        }));
+    }
+
+    fn show_template_variable_popover(
+        &mut self,
+        input: Entity<InputState>,
+        position: Point<Pixels>,
+        focus_value: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(clicked_utf16) = input.update(cx, |input, cx| {
-            EntityInputHandler::character_index_for_point(input, event.position, window, cx)
+            EntityInputHandler::character_index_for_point(input, position, window, cx)
         }) else {
-            self.template_variable_popover = None;
-            cx.notify();
+            if focus_value || !self.template_variable_popover_should_stay_open(window, cx) {
+                self.close_template_variable_popover(cx);
+            }
             return;
         };
         let source = input.read(cx).text().to_string();
@@ -160,46 +217,74 @@ impl ApiTester {
         let Some(span) = scan_template_spans(&source).into_iter().find(|span| {
             span.complete && span.range.start <= clicked_offset && clicked_offset < span.range.end
         }) else {
-            self.template_variable_popover = None;
-            cx.notify();
+            if focus_value || !self.template_variable_popover_should_stay_open(window, cx) {
+                self.close_template_variable_popover(cx);
+            }
             return;
         };
         let name = span.name(&source).to_owned();
         let catalog = self.template_variable_catalog.borrow();
-        let action = match span.classification(&source, &catalog) {
-            TemplateClassification::Missing => TemplateVariableAction::Create,
-            TemplateClassification::Disabled => {
-                let Some(variable) = catalog.variable(&name) else {
-                    return;
-                };
-                TemplateVariableAction::Enable {
-                    variable_id: variable.id.clone(),
-                }
-            }
-            TemplateClassification::Available | TemplateClassification::Invalid(_) => {
+        let Some(target) = template_variable_popover_target(
+            &name,
+            span.classification(&source, &catalog),
+            &catalog,
+        ) else {
+            if focus_value || !self.template_variable_popover_should_stay_open(window, cx) {
                 drop(catalog);
-                self.template_variable_popover = None;
-                cx.notify();
-                return;
+                self.close_template_variable_popover(cx);
             }
+            return;
         };
         let expected_environment_id = catalog.environment_id().map(ToOwned::to_owned);
         let environment_name = catalog.environment_name().map(ToOwned::to_owned);
         drop(catalog);
 
-        let value = cx.new(|cx| InputState::new(window, cx).placeholder("Variable value"));
-        let should_focus_value =
-            matches!(action, TemplateVariableAction::Create) && expected_environment_id.is_some();
+        let source_input_id = input.entity_id();
+        if let Some(current) = self.template_variable_popover.as_ref() {
+            let same_target = current.source_input_id == source_input_id
+                && current.source_range == span.range
+                && current.name == name
+                && current.expected_environment_id == expected_environment_id
+                && current.action == target.action;
+            if same_target {
+                if focus_value && expected_environment_id.is_some() {
+                    current.value.read(cx).focus_handle(cx).focus(window);
+                }
+                return;
+            }
+            if !focus_value && current.value.read(cx).focus_handle(cx).is_focused(window) {
+                return;
+            }
+        }
+
+        let initial_value = target.initial_value;
+        let secret = target.secret;
+        let value = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Variable value")
+                .default_value(initial_value)
+                .masked(secret)
+        });
         self.template_variable_popover = Some(TemplateVariablePopover {
+            source_input: input,
+            source_input_id,
+            source_range: span.range,
             name,
             expected_environment_id,
             environment_name,
-            action,
+            action: target.action,
+            secret,
             value: value.clone(),
-            position: event.position,
+            position: position + point(px(12.), px(16.)),
             error: None,
         });
-        if should_focus_value {
+        self.template_variable_popover_hovered = false;
+        if focus_value
+            && self
+                .template_variable_popover
+                .as_ref()
+                .is_some_and(|popover| popover.expected_environment_id.is_some())
+        {
             value.read(cx).focus_handle(cx).focus(window);
         }
         cx.notify();
@@ -211,7 +296,7 @@ impl ApiTester {
         cx: &App,
     ) -> Option<String> {
         let Some(expected_environment_id) = popover.expected_environment_id.as_deref() else {
-            return Some("Select an active environment before creating variables.".to_owned());
+            return Some("Select an active environment before editing variables.".to_owned());
         };
         if self.workspace.active_environment_id.as_deref() != Some(expected_environment_id) {
             return Some(
@@ -240,6 +325,16 @@ impl ApiTester {
         let Some(popover) = self.template_variable_popover.clone() else {
             return;
         };
+        let source = popover.source_input.read(cx).text().to_string();
+        if !template_variable_source_matches(&source, &popover.source_range, popover.name.as_str())
+        {
+            if let Some(current) = self.template_variable_popover.as_mut() {
+                current.error =
+                    Some("The template changed. Hover it again before saving.".to_owned());
+            }
+            cx.notify();
+            return;
+        }
         if self
             .template_variable_mutation_blocker(&popover, cx)
             .is_some()
@@ -258,46 +353,13 @@ impl ApiTester {
             .as_deref()
             .expect("mutation blocker requires an active environment");
         let mut candidate = self.workspace.clone();
-        let result = match &popover.action {
-            TemplateVariableAction::Create => candidate
-                .add_environment_variable(
-                    environment_id,
-                    popover.name.clone(),
-                    popover.value.read(cx).value().to_string(),
-                    true,
-                    false,
-                )
-                .map(|_| ()),
-            TemplateVariableAction::Enable { variable_id } => {
-                let variable = candidate
-                    .environment(environment_id)
-                    .and_then(|environment| {
-                        environment
-                            .variables
-                            .iter()
-                            .find(|variable| variable.id == *variable_id)
-                    })
-                    .cloned();
-                variable.map_or_else(
-                    || {
-                        Err(crate::core::WorkspaceMutationError::NotFound {
-                            kind: "variable",
-                            id: variable_id.clone(),
-                        })
-                    },
-                    |variable| {
-                        candidate.update_environment_variable(
-                            environment_id,
-                            variable_id,
-                            variable.key,
-                            variable.value,
-                            true,
-                            variable.secret,
-                        )
-                    },
-                )
-            }
-        };
+        let result = apply_template_variable_mutation(
+            &mut candidate,
+            environment_id,
+            &popover.name,
+            &popover.action,
+            popover.value.read(cx).value().to_string(),
+        );
         if let Err(error) = result {
             if let Some(current) = self.template_variable_popover.as_mut() {
                 current.error = Some(error.to_string());
@@ -317,21 +379,110 @@ impl ApiTester {
             self.reload_environment_editor(window, cx);
         }
         self.refresh_variable_intelligence(cx);
-        self.request_notice = Some(match popover.action {
+        self.request_notice = Some(match &popover.action {
             TemplateVariableAction::Create => {
                 format!("Created environment variable '{}'.", popover.name)
             }
-            TemplateVariableAction::Enable { .. } => {
-                format!("Enabled environment variable '{}'.", popover.name)
+            TemplateVariableAction::Update {
+                enable_on_save: true,
+                ..
+            } => {
+                format!(
+                    "Updated and enabled environment variable '{}'.",
+                    popover.name
+                )
+            }
+            TemplateVariableAction::Update {
+                enable_on_save: false,
+                ..
+            } => {
+                format!("Updated environment variable '{}'.", popover.name)
             }
         });
-        self.template_variable_popover = None;
+        self.dismiss_template_variable_popover();
         cx.notify();
     }
 
+    pub(super) fn dismiss_template_variable_popover(&mut self) -> bool {
+        let changed = self.template_variable_popover.take().is_some();
+        self.template_variable_hover_task = None;
+        self.template_variable_source_hovered = None;
+        self.template_variable_popover_hovered = false;
+        changed
+    }
+
+    fn template_variable_popover_should_stay_open(&self, window: &Window, cx: &App) -> bool {
+        self.template_variable_popover_hovered
+            || self
+                .template_variable_popover
+                .as_ref()
+                .is_some_and(|popover| popover.value.read(cx).focus_handle(cx).is_focused(window))
+    }
+
     pub(super) fn close_template_variable_popover(&mut self, cx: &mut Context<Self>) {
-        self.template_variable_popover = None;
-        cx.notify();
+        if self.dismiss_template_variable_popover() {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_template_variable_popover_hovered(
+        &mut self,
+        hovered: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.template_variable_popover_hovered = hovered;
+        self.template_variable_hover_task = None;
+        if self.template_variable_popover_should_stay_open(window, cx)
+            || self.template_variable_popover.is_none()
+        {
+            return;
+        }
+        self.schedule_template_variable_popover_dismissal(window, cx);
+    }
+
+    pub(super) fn set_template_variable_source_hovered(
+        &mut self,
+        input_id: EntityId,
+        hovered: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if hovered {
+            self.template_variable_source_hovered = Some(input_id);
+            self.template_variable_hover_task = None;
+            return;
+        }
+        if self.template_variable_source_hovered != Some(input_id) {
+            return;
+        }
+        self.template_variable_source_hovered = None;
+        self.template_variable_hover_task = None;
+        let owns_popover = self
+            .template_variable_popover
+            .as_ref()
+            .is_some_and(|popover| popover.source_input_id == input_id);
+        if owns_popover && !self.template_variable_popover_should_stay_open(window, cx) {
+            self.schedule_template_variable_popover_dismissal(window, cx);
+        }
+    }
+
+    fn schedule_template_variable_popover_dismissal(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.template_variable_hover_task = Some(cx.spawn_in(window, async move |this, cx| {
+            Timer::after(TEMPLATE_HOVER_DEBOUNCE).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.template_variable_hover_task = None;
+                if !this.template_variable_popover_should_stay_open(window, cx)
+                    && this.dismiss_template_variable_popover()
+                {
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     pub(super) fn open_environments_from_template(
@@ -339,9 +490,21 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.template_variable_popover = None;
+        self.dismiss_template_variable_popover();
         self.activate_request_workspace(SidebarTab::Environments, window, cx);
     }
+}
+
+fn template_variable_source_matches(
+    source: &str,
+    expected_range: &std::ops::Range<usize>,
+    expected_name: &str,
+) -> bool {
+    scan_template_spans(source).into_iter().any(|span| {
+        span.complete
+            && span.range == *expected_range
+            && span.name(source).trim() == expected_name.trim()
+    })
 }
 
 pub(super) fn update_script_variable_catalog(
@@ -374,11 +537,224 @@ pub(super) fn template_input_state(
     placeholder: impl Into<SharedString>,
     default_value: impl Into<SharedString>,
 ) -> InputState {
-    let hover_catalog = Rc::clone(&catalog);
     let mut state = InputState::new(window, cx)
         .placeholder(placeholder)
         .default_value(default_value);
     state.lsp.completion_provider = Some(Rc::new(TemplateCompletionProvider::new(catalog)));
-    state.lsp.hover_provider = Some(Rc::new(TemplateHoverProvider::new(hover_catalog)));
     state
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TemplateVariablePopoverTarget {
+    action: TemplateVariableAction,
+    initial_value: String,
+    secret: bool,
+}
+
+fn template_variable_popover_target(
+    name: &str,
+    classification: TemplateClassification,
+    catalog: &TemplateVariableCatalog,
+) -> Option<TemplateVariablePopoverTarget> {
+    match classification {
+        TemplateClassification::Missing => Some(TemplateVariablePopoverTarget {
+            action: TemplateVariableAction::Create,
+            initial_value: String::new(),
+            secret: false,
+        }),
+        TemplateClassification::Available | TemplateClassification::Disabled => {
+            let variable = catalog.variable(name)?;
+            Some(TemplateVariablePopoverTarget {
+                action: TemplateVariableAction::Update {
+                    variable_id: variable.id.clone(),
+                    enable_on_save: classification == TemplateClassification::Disabled,
+                },
+                initial_value: variable.value.clone(),
+                secret: variable.secret,
+            })
+        }
+        TemplateClassification::Invalid(_) => None,
+    }
+}
+
+fn apply_template_variable_mutation(
+    workspace: &mut Workspace,
+    environment_id: &str,
+    name: &str,
+    action: &TemplateVariableAction,
+    value: String,
+) -> Result<(), crate::core::WorkspaceMutationError> {
+    match action {
+        TemplateVariableAction::Create => workspace
+            .add_environment_variable(environment_id, name, value, true, false)
+            .map(|_| ()),
+        TemplateVariableAction::Update {
+            variable_id,
+            enable_on_save,
+        } => {
+            let variable = workspace
+                .environment(environment_id)
+                .and_then(|environment| environment.variable(variable_id))
+                .cloned()
+                .ok_or_else(|| crate::core::WorkspaceMutationError::NotFound {
+                    kind: "variable",
+                    id: variable_id.clone(),
+                })?;
+            workspace.update_environment_variable(
+                environment_id,
+                variable_id,
+                variable.key,
+                value,
+                variable.enabled || *enable_on_save,
+                variable.secret,
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::template_intelligence::TemplateVariable;
+
+    fn catalog() -> TemplateVariableCatalog {
+        TemplateVariableCatalog::from_parts(
+            Some("env-1".to_owned()),
+            Some("Development".to_owned()),
+            [
+                TemplateVariable {
+                    id: "enabled-id".to_owned(),
+                    name: "base_url".to_owned(),
+                    value: "https://example.test".to_owned(),
+                    enabled: true,
+                    secret: false,
+                },
+                TemplateVariable {
+                    id: "disabled-id".to_owned(),
+                    name: "token".to_owned(),
+                    value: "top-secret".to_owned(),
+                    enabled: false,
+                    secret: true,
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn popover_targets_preload_existing_values_and_prepare_missing_values() {
+        let catalog = catalog();
+
+        let enabled = template_variable_popover_target(
+            "base_url",
+            TemplateClassification::Available,
+            &catalog,
+        )
+        .unwrap();
+        assert_eq!(enabled.initial_value, "https://example.test");
+        assert!(!enabled.secret);
+        assert_eq!(
+            enabled.action,
+            TemplateVariableAction::Update {
+                variable_id: "enabled-id".to_owned(),
+                enable_on_save: false,
+            }
+        );
+
+        let disabled =
+            template_variable_popover_target("token", TemplateClassification::Disabled, &catalog)
+                .unwrap();
+        assert_eq!(disabled.initial_value, "top-secret");
+        assert!(disabled.secret);
+        assert_eq!(
+            disabled.action,
+            TemplateVariableAction::Update {
+                variable_id: "disabled-id".to_owned(),
+                enable_on_save: true,
+            }
+        );
+
+        let missing = template_variable_popover_target(
+            "new_value",
+            TemplateClassification::Missing,
+            &catalog,
+        )
+        .unwrap();
+        assert_eq!(missing.initial_value, "");
+        assert_eq!(missing.action, TemplateVariableAction::Create);
+    }
+
+    #[test]
+    fn source_revalidation_rejects_an_equal_length_template_rename() {
+        assert!(template_variable_source_matches(
+            "{{foo}}",
+            &(0.."{{foo}}".len()),
+            "foo"
+        ));
+        assert!(!template_variable_source_matches(
+            "{{bar}}",
+            &(0.."{{bar}}".len()),
+            "foo"
+        ));
+    }
+
+    #[test]
+    fn variable_mutations_create_update_and_enable_without_losing_secret_status() {
+        let mut workspace = Workspace::default();
+        let environment_id = workspace.create_environment("Development").unwrap();
+        let enabled_id = workspace
+            .add_environment_variable(&environment_id, "base_url", "https://old.test", true, false)
+            .unwrap();
+        let disabled_id = workspace
+            .add_environment_variable(&environment_id, "token", "old-secret", false, true)
+            .unwrap();
+
+        apply_template_variable_mutation(
+            &mut workspace,
+            &environment_id,
+            "base_url",
+            &TemplateVariableAction::Update {
+                variable_id: enabled_id.clone(),
+                enable_on_save: false,
+            },
+            "https://new.test".to_owned(),
+        )
+        .unwrap();
+        apply_template_variable_mutation(
+            &mut workspace,
+            &environment_id,
+            "token",
+            &TemplateVariableAction::Update {
+                variable_id: disabled_id.clone(),
+                enable_on_save: true,
+            },
+            "new-secret".to_owned(),
+        )
+        .unwrap();
+        apply_template_variable_mutation(
+            &mut workspace,
+            &environment_id,
+            "region",
+            &TemplateVariableAction::Create,
+            "eu-west".to_owned(),
+        )
+        .unwrap();
+
+        let environment = workspace.environment(&environment_id).unwrap();
+        let enabled = environment.variable(&enabled_id).unwrap();
+        assert_eq!(enabled.value, "https://new.test");
+        assert!(enabled.enabled);
+        assert!(!enabled.secret);
+        let disabled = environment.variable(&disabled_id).unwrap();
+        assert_eq!(disabled.value, "new-secret");
+        assert!(disabled.enabled);
+        assert!(disabled.secret);
+        let created = environment
+            .variables
+            .iter()
+            .find(|variable| variable.key == "region")
+            .unwrap();
+        assert_eq!(created.value, "eu-west");
+        assert!(created.enabled);
+        assert!(!created.secret);
+    }
 }

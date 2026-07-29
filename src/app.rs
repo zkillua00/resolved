@@ -11,9 +11,10 @@ use chrono::Local;
 use gpui::{
     AnyElement, App, AppContext as _, Axis, ClickEvent, ClipboardItem, Context, Corner, Entity,
     EntityId, EntityInputHandler, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, ParentElement as _, PathPromptOptions, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Timer, Window,
-    anchored, deferred, div, prelude::FluentBuilder as _, px,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _,
+    PathPromptOptions, Pixels, Point, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, Timer, Window, anchored, deferred, div, point,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Root, RopeExt as _, Selectable as _,
@@ -59,8 +60,8 @@ use crate::{
     shortcuts::{self, ShortcutId},
     template_intelligence::{
         TemplateClassification, TemplateCompletionProvider, TemplateHighlightColors,
-        TemplateHoverProvider, TemplateVariableCatalog, TemplateVariableCatalogHandle,
-        scan_template_spans, semantic_style_spans,
+        TemplateVariableCatalog, TemplateVariableCatalogHandle, scan_template_spans,
+        semantic_style_spans,
     },
     theme::ApiThemeExt as _,
     web_preview::{HtmlPreview, can_preview},
@@ -134,9 +135,11 @@ use ui_utils::*;
 use workspace_tab::*;
 
 const TEMPLATE_HIGHLIGHT_DEBOUNCE: Duration = Duration::from_millis(90);
+const TEMPLATE_HOVER_DEBOUNCE: Duration = Duration::from_millis(120);
 const REQUEST_TABS_PERSIST_DEBOUNCE: Duration = Duration::from_millis(450);
 const THEME_EDITOR_VALIDATION_DEBOUNCE: Duration = Duration::from_millis(100);
 const THEME_EDITOR_PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
+const APP_TITLE_BAR_HEIGHT: f32 = 52.;
 
 pub struct ApiTester {
     method: Entity<InputState>,
@@ -224,6 +227,9 @@ pub struct ApiTester {
     script_variable_catalog: Rc<RefCell<ScriptVariableCatalog>>,
     template_variable_catalog: TemplateVariableCatalogHandle,
     template_highlight_tasks: HashMap<EntityId, Task<()>>,
+    template_variable_hover_task: Option<Task<()>>,
+    template_variable_source_hovered: Option<EntityId>,
+    template_variable_popover_hovered: bool,
     template_variable_popover: Option<TemplateVariablePopover>,
     focused_template_input: Option<Entity<InputState>>,
     debug_overlay: Entity<DebugOverlay>,

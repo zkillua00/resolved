@@ -6,7 +6,10 @@ impl ApiTester {
         let color = method_color(&method, cx);
         let selected_method = method.clone();
         let this = cx.entity().downgrade();
-        let url_template_input = self.url.clone();
+        let url_hover_input = self.url.clone();
+        let url_click_input = self.url.clone();
+        let url_hover_this = cx.entity().downgrade();
+        let url_hover_input_id = self.url.entity_id();
         let action = if self.sending {
             Button::new("cancel-request")
                 .label("Cancel")
@@ -154,13 +157,34 @@ impl ApiTester {
                     )
                     .child(
                         div()
+                            .id("request-url-template-source")
                             .flex_1()
                             .min_w_0()
+                            .on_hover(move |hovered, window, cx| {
+                                if let Some(this) = url_hover_this.upgrade() {
+                                    this.update(cx, |this, cx| {
+                                        this.set_template_variable_source_hovered(
+                                            url_hover_input_id,
+                                            *hovered,
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                }
+                            })
+                            .on_mouse_move(cx.listener(move |this, event, window, cx| {
+                                this.hover_template_variable_popover(
+                                    url_hover_input.clone(),
+                                    event,
+                                    window,
+                                    cx,
+                                );
+                            }))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, event, window, cx| {
                                     this.open_template_variable_popover(
-                                        url_template_input.clone(),
+                                        url_click_input.clone(),
                                         event,
                                         window,
                                         cx,
