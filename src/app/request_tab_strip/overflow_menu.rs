@@ -46,11 +46,21 @@ pub(super) fn render_open_tabs_menu(app: &ApiTester, cx: &mut Context<ApiTester>
     let settings_open = app.workspace_tabs.settings_open();
     let settings_active = app
         .workspace_tabs
-        .tool_is_active(WorkspaceToolTab::Settings);
-    let theme_css_open = app.theme_editor.is_some();
-    let theme_css_active = app
+        .tool_is_active(&WorkspaceToolTab::Settings);
+    let theme_editors = app
         .workspace_tabs
-        .tool_is_active(WorkspaceToolTab::ThemeCss);
+        .theme_editor_ids()
+        .iter()
+        .map(|editor_id| {
+            let tool = WorkspaceToolTab::ThemeCss(editor_id.clone());
+            (
+                editor_id.clone(),
+                app.theme_editor_title(editor_id)
+                    .unwrap_or_else(|| "Theme CSS".to_owned()),
+                app.workspace_tabs.tool_is_active(&tool),
+            )
+        })
+        .collect::<Vec<_>>();
     let owner = cx.entity().downgrade();
 
     Button::new("all-tabs")
@@ -98,7 +108,7 @@ pub(super) fn render_open_tabs_menu(app: &ApiTester, cx: &mut Context<ApiTester>
                         }),
                 );
             }
-            if settings_open || theme_css_open {
+            if settings_open || !theme_editors.is_empty() {
                 menu = menu.separator().label("Tools");
             }
             if settings_open {
@@ -120,17 +130,20 @@ pub(super) fn render_open_tabs_menu(app: &ApiTester, cx: &mut Context<ApiTester>
                         }),
                 );
             }
-            if theme_css_open {
+            for (editor_id, title, active) in &theme_editors {
                 let owner = owner.clone();
+                let editor_id = editor_id.clone();
                 menu = menu.item(
-                    PopupMenuItem::new("Theme CSS")
+                    PopupMenuItem::new(title.clone())
                         .icon(IconName::Palette)
-                        .checked(theme_css_active)
+                        .checked(*active)
                         .on_click(move |_, window, cx| {
                             if let Some(owner) = owner.upgrade() {
                                 owner.update(cx, |this, cx| {
                                     this.activate_workspace_tab(
-                                        WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss),
+                                        WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss(
+                                            editor_id.clone(),
+                                        )),
                                         window,
                                         cx,
                                     );

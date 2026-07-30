@@ -2,8 +2,8 @@ use crate::core::{RequestTabId, RequestTabs};
 
 /// The content surface currently shown below the workspace tab strip.
 ///
-/// Request records stay in [`RequestTabs`]. Settings and theme editing are
-/// runtime-only singleton tools and never enter request persistence.
+/// Request records stay in [`RequestTabs`]. Settings and theme editors are
+/// runtime-only tools and never enter request persistence.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum ActiveWorkspaceTab {
     #[default]
@@ -13,10 +13,10 @@ pub(super) enum ActiveWorkspaceTab {
     ThemeCss,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum WorkspaceToolTab {
     Settings,
-    ThemeCss,
+    ThemeCss(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,10 +26,21 @@ pub(super) enum WorkspaceTab {
     Tool(WorkspaceToolTab),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WorkspaceTabCloseScope {
+    Current,
+    Others,
+    ToLeft,
+    ToRight,
+    All,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct WorkspaceTabs {
     active: ActiveWorkspaceTab,
     settings_open: bool,
+    theme_editor_ids: Vec<String>,
+    active_theme_editor_id: Option<String>,
     welcome_request_tab_id: Option<RequestTabId>,
     welcome_visible: bool,
 }
@@ -49,6 +60,16 @@ impl WorkspaceTabs {
 
     pub fn settings_open(&self) -> bool {
         self.settings_open
+    }
+
+    pub fn theme_editor_ids(&self) -> &[String] {
+        &self.theme_editor_ids
+    }
+
+    pub fn active_theme_editor_id(&self) -> Option<&str> {
+        (self.active == ActiveWorkspaceTab::ThemeCss)
+            .then_some(self.active_theme_editor_id.as_deref())
+            .flatten()
     }
 
     pub fn welcome_request_tab_id(&self) -> Option<&RequestTabId> {
@@ -81,12 +102,14 @@ impl WorkspaceTabs {
         tab_id
     }
 
-    pub fn tool_is_active(&self, tab: WorkspaceToolTab) -> bool {
-        self.active
-            == match tab {
-                WorkspaceToolTab::Settings => ActiveWorkspaceTab::Settings,
-                WorkspaceToolTab::ThemeCss => ActiveWorkspaceTab::ThemeCss,
+    pub fn tool_is_active(&self, tab: &WorkspaceToolTab) -> bool {
+        match tab {
+            WorkspaceToolTab::Settings => self.active == ActiveWorkspaceTab::Settings,
+            WorkspaceToolTab::ThemeCss(editor_id) => {
+                self.active == ActiveWorkspaceTab::ThemeCss
+                    && self.active_theme_editor_id.as_ref() == Some(editor_id)
             }
+        }
     }
 
     pub fn open_tool(&mut self, tab: WorkspaceToolTab) {
@@ -95,7 +118,15 @@ impl WorkspaceTabs {
                 self.settings_open = true;
                 self.active = ActiveWorkspaceTab::Settings;
             }
-            WorkspaceToolTab::ThemeCss => {
+            WorkspaceToolTab::ThemeCss(editor_id) => {
+                if !self
+                    .theme_editor_ids
+                    .iter()
+                    .any(|candidate| candidate == &editor_id)
+                {
+                    self.theme_editor_ids.push(editor_id.clone());
+                }
+                self.active_theme_editor_id = Some(editor_id);
                 self.active = ActiveWorkspaceTab::ThemeCss;
             }
         }
@@ -124,13 +155,9 @@ impl WorkspaceTabs {
         true
     }
 
-    /// Close a singleton tool tab.
-    ///
-    /// Theme CSS openness is owned by the editor entity, so callers pass its
-    /// post-operation state when closing Settings. Closing the active tool
-    /// selects the next tool to its right, then the previous tool, then the
-    /// retained active request.
-    pub fn close_tool(&mut self, tab: WorkspaceToolTab, theme_css_open: bool) -> bool {
+    /// Close a runtime-only tool tab. Closing the active tool selects the next
+    /// tab to its right, then the previous tool, then the retained request.
+    pub fn close_tool(&mut self, tab: &WorkspaceToolTab) -> bool {
         match tab {
             WorkspaceToolTab::Settings => {
                 if !self.settings_open {
@@ -138,7 +165,8 @@ impl WorkspaceTabs {
                 }
                 self.settings_open = false;
                 if self.active == ActiveWorkspaceTab::Settings {
-                    self.active = if theme_css_open {
+                    self.active = if !self.theme_editor_ids.is_empty() {
+                        self.active_theme_editor_id = self.theme_editor_ids.first().cloned();
                         ActiveWorkspaceTab::ThemeCss
                     } else if self.welcome_visible {
                         ActiveWorkspaceTab::Welcome
@@ -147,18 +175,64 @@ impl WorkspaceTabs {
                     };
                 }
             }
-            WorkspaceToolTab::ThemeCss => {
-                if self.active == ActiveWorkspaceTab::ThemeCss {
-                    self.active = if self.settings_open {
+            WorkspaceToolTab::ThemeCss(editor_id) => {
+                let Some(index) = self
+                    .theme_editor_ids
+                    .iter()
+                    .position(|candidate| candidate == editor_id)
+                else {
+                    return false;
+                };
+                let was_active = self.active == ActiveWorkspaceTab::ThemeCss
+                    && self.active_theme_editor_id.as_ref() == Some(editor_id);
+                self.theme_editor_ids.remove(index);
+                if was_active {
+                    self.active = if !self.theme_editor_ids.is_empty() {
+                        self.active_theme_editor_id = self
+                            .theme_editor_ids
+                            .get(index)
+                            .or_else(|| self.theme_editor_ids.last())
+                            .cloned();
+                        ActiveWorkspaceTab::ThemeCss
+                    } else if self.settings_open {
+                        self.active_theme_editor_id = None;
                         ActiveWorkspaceTab::Settings
                     } else if self.welcome_visible {
+                        self.active_theme_editor_id = None;
                         ActiveWorkspaceTab::Welcome
                     } else {
+                        self.active_theme_editor_id = None;
                         ActiveWorkspaceTab::Request
                     };
                 }
             }
         }
+        true
+    }
+
+    pub fn replace_theme_editor_id(&mut self, old_id: &str, new_id: String) -> bool {
+        let Some(mut index) = self
+            .theme_editor_ids
+            .iter()
+            .position(|candidate| candidate == old_id)
+        else {
+            return false;
+        };
+        if let Some(existing) = self
+            .theme_editor_ids
+            .iter()
+            .position(|candidate| candidate == &new_id)
+            && existing != index
+        {
+            self.theme_editor_ids.remove(existing);
+            if existing < index {
+                index -= 1;
+            }
+        }
+        if self.active_theme_editor_id.as_deref() == Some(old_id) {
+            self.active_theme_editor_id = Some(new_id.clone());
+        }
+        self.theme_editor_ids[index] = new_id;
         true
     }
 
@@ -169,15 +243,16 @@ impl WorkspaceTabs {
                 WorkspaceTab::Request(request_tabs.active_tab_id().clone())
             }
             ActiveWorkspaceTab::Settings => WorkspaceTab::Tool(WorkspaceToolTab::Settings),
-            ActiveWorkspaceTab::ThemeCss => WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss),
+            ActiveWorkspaceTab::ThemeCss => WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss(
+                self.active_theme_editor_id
+                    .as_ref()
+                    .expect("active theme editor must have a tab identity")
+                    .clone(),
+            )),
         }
     }
 
-    pub fn visible_tabs(
-        &self,
-        request_tabs: &RequestTabs,
-        theme_css_open: bool,
-    ) -> Vec<WorkspaceTab> {
+    pub fn visible_tabs(&self, request_tabs: &RequestTabs) -> Vec<WorkspaceTab> {
         let mut tabs = Vec::new();
         if self.welcome_visible {
             tabs.push(WorkspaceTab::Welcome);
@@ -194,19 +269,17 @@ impl WorkspaceTabs {
         if self.settings_open {
             tabs.push(WorkspaceTab::Tool(WorkspaceToolTab::Settings));
         }
-        if theme_css_open {
-            tabs.push(WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss));
-        }
+        tabs.extend(
+            self.theme_editor_ids
+                .iter()
+                .cloned()
+                .map(|editor_id| WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss(editor_id))),
+        );
         tabs
     }
 
-    pub fn adjacent_tab(
-        &self,
-        request_tabs: &RequestTabs,
-        theme_css_open: bool,
-        direction: isize,
-    ) -> WorkspaceTab {
-        let tabs = self.visible_tabs(request_tabs, theme_css_open);
+    pub fn adjacent_tab(&self, request_tabs: &RequestTabs, direction: isize) -> WorkspaceTab {
+        let tabs = self.visible_tabs(request_tabs);
         let active = self.active_tab(request_tabs);
         let current = tabs.iter().position(|tab| tab == &active).unwrap_or(0);
         let next = (current as isize + direction).rem_euclid(tabs.len() as isize) as usize;
@@ -226,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn singleton_tools_have_stable_order_and_open_idempotently() {
+    fn tools_have_stable_order_and_open_idempotently() {
         let requests = RequestTabs::default();
         let mut tabs = WorkspaceTabs::default();
 
@@ -234,23 +307,29 @@ mod tests {
         tabs.open_tool(WorkspaceToolTab::Settings);
         assert_eq!(tabs.active(), ActiveWorkspaceTab::Settings);
         assert_eq!(
-            tabs.visible_tabs(&requests, false),
+            tabs.visible_tabs(&requests),
             vec![
                 WorkspaceTab::Request(requests.active_tab_id().clone()),
                 WorkspaceTab::Tool(WorkspaceToolTab::Settings),
             ]
         );
 
-        tabs.open_tool(WorkspaceToolTab::ThemeCss);
+        tabs.open_tool(WorkspaceToolTab::ThemeCss("ocean".to_owned()));
+        tabs.open_tool(WorkspaceToolTab::ThemeCss("forest".to_owned()));
         assert_eq!(tabs.active(), ActiveWorkspaceTab::ThemeCss);
         assert_eq!(
-            tabs.visible_tabs(&requests, true),
+            tabs.visible_tabs(&requests),
             vec![
                 WorkspaceTab::Request(requests.active_tab_id().clone()),
                 WorkspaceTab::Tool(WorkspaceToolTab::Settings),
-                WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss),
+                WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss("ocean".to_owned())),
+                WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss("forest".to_owned())),
             ]
         );
+        assert!(tabs.tool_is_active(&WorkspaceToolTab::ThemeCss("forest".to_owned())));
+        tabs.open_tool(WorkspaceToolTab::ThemeCss("ocean".to_owned()));
+        assert_eq!(tabs.theme_editor_ids(), &["ocean", "forest"]);
+        assert!(tabs.tool_is_active(&WorkspaceToolTab::ThemeCss("ocean".to_owned())));
     }
 
     #[test]
@@ -260,15 +339,12 @@ mod tests {
         let mut tabs = WorkspaceTabs::from_request_tabs(&requests);
 
         assert_eq!(tabs.active(), ActiveWorkspaceTab::Welcome);
-        assert_eq!(
-            tabs.visible_tabs(&requests, false),
-            vec![WorkspaceTab::Welcome]
-        );
+        assert_eq!(tabs.visible_tabs(&requests), vec![WorkspaceTab::Welcome]);
         assert!(tabs.activate_welcome());
         assert_eq!(tabs.take_welcome_request_tab_id(), Some(backing_id.clone()));
         assert_eq!(tabs.active(), ActiveWorkspaceTab::Request);
         assert_eq!(
-            tabs.visible_tabs(&requests, false),
+            tabs.visible_tabs(&requests),
             vec![WorkspaceTab::Request(backing_id)]
         );
     }
@@ -281,7 +357,7 @@ mod tests {
         assert_eq!(tabs.active(), ActiveWorkspaceTab::Request);
         assert!(!tabs.welcome_is_open());
         assert_eq!(
-            tabs.visible_tabs(&requests, false),
+            tabs.visible_tabs(&requests),
             vec![WorkspaceTab::Request(requests.active_tab_id().clone())]
         );
     }
@@ -297,7 +373,7 @@ mod tests {
         assert!(!tabs.welcome_is_open());
         assert_eq!(tabs.welcome_request_tab_id(), Some(&backing_id));
         assert_eq!(
-            tabs.visible_tabs(&requests, false),
+            tabs.visible_tabs(&requests),
             vec![WorkspaceTab::Request(backing_id)]
         );
     }
@@ -306,23 +382,28 @@ mod tests {
     fn closing_active_tools_uses_visual_neighbor_fallbacks() {
         let mut tabs = WorkspaceTabs::default();
         tabs.open_tool(WorkspaceToolTab::Settings);
-        tabs.open_tool(WorkspaceToolTab::ThemeCss);
+        tabs.open_tool(WorkspaceToolTab::ThemeCss("ocean".to_owned()));
+        tabs.open_tool(WorkspaceToolTab::ThemeCss("forest".to_owned()));
+        tabs.open_tool(WorkspaceToolTab::ThemeCss("ocean".to_owned()));
 
-        assert!(tabs.close_tool(WorkspaceToolTab::ThemeCss, false));
+        assert!(tabs.close_tool(&WorkspaceToolTab::ThemeCss("ocean".to_owned())));
+        assert!(tabs.tool_is_active(&WorkspaceToolTab::ThemeCss("forest".to_owned())));
+        assert!(tabs.close_tool(&WorkspaceToolTab::ThemeCss("forest".to_owned())));
         assert_eq!(tabs.active(), ActiveWorkspaceTab::Settings);
-        assert!(tabs.close_tool(WorkspaceToolTab::Settings, false));
+        assert!(tabs.close_tool(&WorkspaceToolTab::Settings));
         assert_eq!(tabs.active(), ActiveWorkspaceTab::Request);
-        assert!(!tabs.close_tool(WorkspaceToolTab::Settings, false));
+        assert!(!tabs.close_tool(&WorkspaceToolTab::Settings));
     }
 
     #[test]
     fn closing_settings_can_fall_forward_to_theme_css() {
         let mut tabs = WorkspaceTabs::default();
-        tabs.open_tool(WorkspaceToolTab::ThemeCss);
+        tabs.open_tool(WorkspaceToolTab::ThemeCss("ocean".to_owned()));
         tabs.open_tool(WorkspaceToolTab::Settings);
 
-        assert!(tabs.close_tool(WorkspaceToolTab::Settings, true));
+        assert!(tabs.close_tool(&WorkspaceToolTab::Settings));
         assert_eq!(tabs.active(), ActiveWorkspaceTab::ThemeCss);
+        assert!(tabs.tool_is_active(&WorkspaceToolTab::ThemeCss("ocean".to_owned())));
     }
 
     #[test]
@@ -334,17 +415,17 @@ mod tests {
         tabs.open_tool(WorkspaceToolTab::Settings);
 
         assert_eq!(
-            tabs.adjacent_tab(&requests, false, -1),
+            tabs.adjacent_tab(&requests, -1),
             WorkspaceTab::Request(second.clone())
         );
         tabs.activate_request();
         assert_eq!(
-            tabs.adjacent_tab(&requests, false, 1),
+            tabs.adjacent_tab(&requests, 1),
             WorkspaceTab::Tool(WorkspaceToolTab::Settings)
         );
         let _ = requests.activate(&first);
         assert_eq!(
-            tabs.adjacent_tab(&requests, false, -1),
+            tabs.adjacent_tab(&requests, -1),
             WorkspaceTab::Tool(WorkspaceToolTab::Settings)
         );
     }
@@ -356,17 +437,14 @@ mod tests {
         tabs.open_tool(WorkspaceToolTab::Settings);
 
         assert_eq!(
-            tabs.visible_tabs(&requests, false),
+            tabs.visible_tabs(&requests),
             vec![
                 WorkspaceTab::Welcome,
                 WorkspaceTab::Tool(WorkspaceToolTab::Settings),
             ]
         );
-        assert_eq!(
-            tabs.adjacent_tab(&requests, false, -1),
-            WorkspaceTab::Welcome
-        );
-        assert!(tabs.close_tool(WorkspaceToolTab::Settings, false));
+        assert_eq!(tabs.adjacent_tab(&requests, -1), WorkspaceTab::Welcome);
+        assert!(tabs.close_tool(&WorkspaceToolTab::Settings));
         assert_eq!(tabs.active(), ActiveWorkspaceTab::Welcome);
     }
 
@@ -379,13 +457,13 @@ mod tests {
 
         assert_eq!(tabs.active(), ActiveWorkspaceTab::Settings);
         assert_eq!(
-            tabs.visible_tabs(&requests, false),
+            tabs.visible_tabs(&requests),
             vec![
                 WorkspaceTab::Welcome,
                 WorkspaceTab::Tool(WorkspaceToolTab::Settings),
             ]
         );
-        assert!(tabs.close_tool(WorkspaceToolTab::Settings, false));
+        assert!(tabs.close_tool(&WorkspaceToolTab::Settings));
         assert_eq!(tabs.active(), ActiveWorkspaceTab::Welcome);
     }
 }

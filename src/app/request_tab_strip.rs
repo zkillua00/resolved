@@ -58,10 +58,10 @@ impl ApiTester {
                 cx,
             ));
         }
-        if self.theme_editor.is_some() {
+        for editor_id in self.workspace_tabs.theme_editor_ids() {
             elements.push(render_workspace_tool_tab(
                 self,
-                WorkspaceToolTab::ThemeCss,
+                WorkspaceToolTab::ThemeCss(editor_id.clone()),
                 cx,
             ));
         }

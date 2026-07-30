@@ -141,6 +141,19 @@ const THEME_EDITOR_VALIDATION_DEBOUNCE: Duration = Duration::from_millis(100);
 const THEME_EDITOR_PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
 const APP_TITLE_BAR_HEIGHT: f32 = 52.;
 
+struct ThemeEditorSession {
+    theme_id: Option<String>,
+    theme_name: String,
+    editor: Entity<CodeEditor>,
+    path: Option<PathBuf>,
+    baseline: String,
+    dirty: bool,
+    disk_source: Option<String>,
+    validation_task: Option<Task<()>>,
+    persist_task: Option<Task<()>>,
+    _subscription: Subscription,
+}
+
 pub struct ApiTester {
     method: Entity<InputState>,
     url: Entity<InputState>,
@@ -201,14 +214,7 @@ pub struct ApiTester {
     base_key_bindings: Vec<gpui::KeyBinding>,
     recording_shortcut_id: Option<ShortcutId>,
     settings_notice: Option<String>,
-    theme_editor: Option<Entity<CodeEditor>>,
-    theme_editor_path: Option<PathBuf>,
-    theme_editor_baseline: String,
-    theme_editor_dirty: bool,
-    theme_editor_disk_source: Option<String>,
-    theme_editor_validation_task: Option<Task<()>>,
-    theme_editor_persist_task: Option<Task<()>>,
-    theme_editor_subscription: Option<Subscription>,
+    theme_editors: HashMap<String, ThemeEditorSession>,
     selected_environment_id: Option<String>,
     collection_search: Entity<InputState>,
     environment_search: Entity<InputState>,

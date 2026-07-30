@@ -43,11 +43,9 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let tab = self.workspace_tabs.adjacent_tab(
-            &self.request_tabs,
-            self.theme_editor.is_some(),
-            direction,
-        );
+        let tab = self
+            .workspace_tabs
+            .adjacent_tab(&self.request_tabs, direction);
         self.activate_workspace_tab(tab, window, cx);
     }
 

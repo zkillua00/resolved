@@ -2,6 +2,11 @@ use super::*;
 
 impl ApiTester {
     pub(super) fn render_theme_css_title_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let title = self
+            .workspace_tabs
+            .active_theme_editor_id()
+            .and_then(|editor_id| self.theme_editor_title(editor_id))
+            .unwrap_or_else(|| "Theme CSS".to_owned());
         h_flex()
             .h(px(APP_TITLE_BAR_HEIGHT))
             .flex_shrink_0()
@@ -33,14 +38,14 @@ impl ApiTester {
                             .text_sm()
                             .font_semibold()
                             .child(Icon::new(IconName::Palette).with_size(px(16.)))
-                            .child("Theme CSS"),
+                            .child(title),
                     ),
             )
             .into_any_element()
     }
 
     pub(super) fn render_theme_css_workspace(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(editor) = self.theme_editor.clone() else {
+        let Some(session) = self.active_theme_editor() else {
             return v_flex()
                 .size_full()
                 .items_center()
@@ -51,20 +56,34 @@ impl ApiTester {
                 .child("The Theme CSS editor is not open.")
                 .into_any_element();
         };
+        let editor = session.editor.clone();
+        let theme_id = session.theme_id.clone();
+        let editor_path = session.path.clone();
 
         let source = editor.read(cx).value(cx).to_string();
-        let dirty = self.theme_editor_dirty;
+        let dirty = session.dirty;
         let writable = self.settings_writable;
-        let path = self
-            .theme_editor_path
+        let saved_source_path = theme_id
+            .as_deref()
+            .and_then(|theme_id| self.settings.theme.saved_theme(theme_id))
+            .and_then(|theme| theme.source_path.as_ref());
+        let path = editor_path
             .as_ref()
-            .or(self.settings.theme.source_path.as_ref())
+            .or(saved_source_path)
+            .or_else(|| {
+                theme_id
+                    .is_none()
+                    .then_some(self.settings.theme.source_path.as_ref())
+                    .flatten()
+            })
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "Saved in API Tester".to_owned());
         let validation = crate::theme::parse_css(&source);
         let valid = validation.is_ok();
-        let detached_theme = self.has_detached_theme_snapshot();
-        let editing_saved_theme = self.settings.theme.active_theme_id.is_some() && !detached_theme;
+        let editing_saved_theme = theme_id
+            .as_deref()
+            .is_some_and(|theme_id| self.settings.theme.saved_theme(theme_id).is_some());
+        let detached_theme = !editing_saved_theme;
         let (status, status_color) = match validation {
             Ok(theme) => (
                 format!(
@@ -210,7 +229,7 @@ impl ApiTester {
                                     .label("Reload file")
                                     .small()
                                     .ghost()
-                                    .disabled(self.theme_editor_path.is_none())
+                                    .disabled(editor_path.is_none())
                                     .tooltip(
                                         "Replace the editor contents with the latest version of the file",
                                     )

@@ -98,6 +98,12 @@ pub struct SavedTheme {
     pub name: String,
     pub css_source: String,
     pub source_path: Option<PathBuf>,
+    /// Unapplied in-app work for this saved theme.
+    pub draft_source: Option<String>,
+    /// File handed to an external editor for this saved theme.
+    pub draft_path: Option<PathBuf>,
+    /// Last contents known to match `draft_path`.
+    pub draft_disk_source: Option<String>,
     /// Preserve metadata written by a newer application version.
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
@@ -114,6 +120,9 @@ impl SavedTheme {
             name: name.into(),
             css_source: css_source.into(),
             source_path,
+            draft_source: None,
+            draft_path: None,
+            draft_disk_source: None,
             extra: BTreeMap::new(),
         }
     }
@@ -359,5 +368,22 @@ mod tests {
             encoded.get("future_theme_property"),
             Some(&serde_json::json!({ "revision": 3 }))
         );
+    }
+
+    #[test]
+    fn saved_theme_round_trip_keeps_its_own_editor_draft() {
+        let mut theme = SavedTheme::new(
+            "Ocean",
+            ":root { --api-theme-name: \"Ocean\"; }",
+            Some(PathBuf::from("/tmp/ocean.css")),
+        );
+        theme.draft_source = Some(":root { --api-theme-name: \"Ocean Draft\"; }".to_owned());
+        theme.draft_path = Some(PathBuf::from("/tmp/ocean-draft.css"));
+        theme.draft_disk_source = theme.draft_source.clone();
+
+        let encoded = serde_json::to_string(&theme).unwrap();
+        let decoded: SavedTheme = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, theme);
     }
 }

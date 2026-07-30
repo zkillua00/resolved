@@ -82,7 +82,7 @@ impl ApiTester {
                     .when(compact, |this| {
                         this.tooltip(|window, cx| Tooltip::new("Environments").build(window, cx))
                     })
-                    .child(gpui_component::Icon::new(IconName::Settings2).with_size(px(18.)))
+                    .child(gpui_component::Icon::new(IconName::Globe).with_size(px(18.)))
                     .when(!compact, |this| {
                         this.child(
                             div()

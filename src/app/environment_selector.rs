@@ -68,7 +68,7 @@ impl ApiTester {
             )
             .child(
                 Button::new("environment-workspace-active")
-                    .icon(IconName::Settings2)
+                    .icon(IconName::Globe)
                     .label(active_environment)
                     .large()
                     .h(px(38.))

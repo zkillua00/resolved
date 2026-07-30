@@ -34,28 +34,101 @@ pub(super) fn build_request_tab_context_menu(
         Some(super::RequestTabContextTarget::Group(group_id)) => {
             build_group_menu(menu, owner, group_id, window, cx)
         }
-        Some(super::RequestTabContextTarget::Tool(tool)) => build_tool_menu(menu, owner, tool),
+        Some(super::RequestTabContextTarget::Tool(tool)) => {
+            build_tool_menu(menu, owner, tool, window, cx)
+        }
         None => menu,
     }
 }
 
 fn build_tool_menu(
-    menu: PopupMenu,
+    mut menu: PopupMenu,
     owner: gpui::WeakEntity<ApiTester>,
     tool: WorkspaceToolTab,
+    _window: &mut Window,
+    cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
-    menu.min_w(px(180.)).item(
-        PopupMenuItem::new("Close tab").on_click(move |_, window, cx| {
+    let Some(entity) = owner.upgrade() else {
+        return menu;
+    };
+    let snapshot = {
+        let app = entity.read(cx);
+        let tabs = app.workspace_tabs.visible_tabs(&app.request_tabs);
+        let anchor = WorkspaceTab::Tool(tool.clone());
+        let Some(index) = tabs.iter().position(|tab| tab == &anchor) else {
+            return menu;
+        };
+        let closable = |tab: &WorkspaceTab| !matches!(tab, WorkspaceTab::Welcome);
+        (
+            tabs.iter()
+                .enumerate()
+                .any(|(candidate, tab)| candidate != index && closable(tab)),
+            tabs[..index].iter().any(closable),
+            tabs[index + 1..].iter().any(closable),
+        )
+    };
+
+    menu = menu
+        .min_w(px(230.))
+        .item(workspace_close_scope_item(
+            "Close tab",
+            false,
+            owner.clone(),
+            tool.clone(),
+            WorkspaceTabCloseScope::Current,
+        ))
+        .item(workspace_close_scope_item(
+            "Close other tabs",
+            !snapshot.0,
+            owner.clone(),
+            tool.clone(),
+            WorkspaceTabCloseScope::Others,
+        ))
+        .separator()
+        .item(workspace_close_scope_item(
+            "Close tabs to the left",
+            !snapshot.1,
+            owner.clone(),
+            tool.clone(),
+            WorkspaceTabCloseScope::ToLeft,
+        ))
+        .item(workspace_close_scope_item(
+            "Close tabs to the right",
+            !snapshot.2,
+            owner.clone(),
+            tool.clone(),
+            WorkspaceTabCloseScope::ToRight,
+        ))
+        .item(workspace_close_scope_item(
+            "Close all tabs",
+            false,
+            owner,
+            tool,
+            WorkspaceTabCloseScope::All,
+        ));
+    menu
+}
+
+fn workspace_close_scope_item(
+    label: &'static str,
+    disabled: bool,
+    owner: gpui::WeakEntity<ApiTester>,
+    tool: WorkspaceToolTab,
+    scope: WorkspaceTabCloseScope,
+) -> PopupMenuItem {
+    PopupMenuItem::new(label)
+        .disabled(disabled)
+        .on_click(move |_, window, cx| {
             let owner = owner.clone();
+            let tool = tool.clone();
             window.defer(cx, move |window, cx| {
                 if let Some(owner) = owner.upgrade() {
                     owner.update(cx, |this, cx| {
-                        this.close_workspace_tool_tab(tool, window, cx);
+                        this.request_close_workspace_tabs(tool.clone(), scope, window, cx);
                     });
                 }
             });
-        }),
-    )
+        })
 }
 
 fn build_tab_menu(

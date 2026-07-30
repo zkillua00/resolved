@@ -320,14 +320,30 @@ impl ApiTester {
                 };
                 let state = entity.read(cx);
                 let detached_theme = state.has_detached_theme_snapshot();
-                let can_reload = state.settings.theme.source_path.is_some()
+                let active_saved_theme = state
+                    .settings
+                    .theme
+                    .active_theme_id
+                    .as_deref()
+                    .and_then(|theme_id| state.settings.theme.saved_theme(theme_id));
+                let can_reload = active_saved_theme
+                    .is_some_and(|theme| theme.source_path.is_some() || theme.draft_path.is_some())
+                    || state.settings.theme.source_path.is_some()
                     || state.settings.theme.draft_path.is_some();
                 let writable = state.settings_writable;
-                let editor_pending = state.has_unapplied_editor_draft();
-                let theme_pending = state.has_unapplied_theme_draft();
-                let external_draft_pending =
-                    state.settings.theme.draft_path.is_some() && !editor_pending;
-                let selection_blocked = theme_pending || detached_theme;
+                let editor_pending = state.has_unscoped_theme_draft();
+                let active_editor_pending = active_saved_theme
+                    .is_some_and(|theme| theme.draft_source.is_some())
+                    || state.theme_editors.values().any(|session| {
+                        session.theme_id.as_deref()
+                            == state.settings.theme.active_theme_id.as_deref()
+                            && session.dirty
+                    })
+                    || editor_pending;
+                let external_draft_pending = active_saved_theme
+                    .is_some_and(|theme| theme.draft_path.is_some())
+                    || state.settings.theme.draft_path.is_some();
+                let selection_blocked = editor_pending || detached_theme;
                 let active_id_ambiguous = state
                     .settings
                     .theme
@@ -408,7 +424,7 @@ impl ApiTester {
                             .disabled(
                                 !writable
                                     || !can_reload
-                                    || editor_pending
+                                    || active_editor_pending
                                     || detached_theme
                                     || active_id_ambiguous,
                             )
@@ -416,7 +432,7 @@ impl ApiTester {
                                 "The active theme has no file to reload"
                             } else if active_id_ambiguous {
                                 "The active theme cannot be reloaded safely"
-                            } else if editor_pending {
+                            } else if active_editor_pending {
                                 "Save or revert your changes before reloading"
                             } else if detached_theme {
                                 "Save this theme before reloading"
@@ -439,15 +455,10 @@ impl ApiTester {
     fn theme_library_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
         let this = cx.entity().downgrade();
         let mut search_text =
-            "themes built in saved active available invalid use edit preferred delete source"
-                .to_owned();
+            "themes built in saved active invalid use edit preferred delete".to_owned();
         for theme in &self.settings.theme.saved_themes {
             search_text.push(' ');
             search_text.push_str(&theme.name);
-            if let Some(path) = &theme.source_path {
-                search_text.push(' ');
-                search_text.push_str(&path.display().to_string());
-            }
         }
 
         SettingItem::render_searchable(search_text, move |_, _, cx| {
@@ -461,27 +472,27 @@ impl ApiTester {
                 && active_theme_id.is_none()
                 && state.settings.theme.css_source.is_none();
             let writable = state.settings_writable;
-            let editor_open = state.theme_editor.is_some();
-            let editor_pending = state.has_unapplied_editor_draft();
-            let theme_pending = state.has_unapplied_theme_draft();
+            let detached_editor_open = state
+                .theme_editors
+                .values()
+                .any(|session| session.theme_id.is_none());
+            let editor_pending = state.has_unscoped_theme_draft();
             let external_draft_pending =
                 state.settings.theme.draft_path.is_some() && !editor_pending;
-            let selection_blocked = theme_pending || detached_theme;
+            let selection_blocked = editor_pending || detached_theme;
             let mut rows = Vec::with_capacity(
                 1 + usize::from(detached_theme) + state.settings.theme.saved_themes.len(),
             );
 
             let switch_built_in_this = this.clone();
             let discard_built_in_this = this.clone();
-            let built_in_status = if built_in_active {
-                active_theme_badge(cx)
-            } else {
-                available_theme_badge(cx)
-            };
             let built_in_actions = h_flex()
                 .w_full()
                 .justify_end()
                 .gap_1()
+                .when(built_in_active, |actions| {
+                    actions.child(active_theme_badge(cx))
+                })
                 .when(!built_in_active, |actions| {
                     actions.child(
                         Button::new("use-built-in-css-theme")
@@ -525,8 +536,6 @@ impl ApiTester {
             rows.push(theme_table_row(
                 "built-in",
                 "API Tester Material Dark".to_owned(),
-                "Built in · read-only".to_owned(),
-                built_in_status,
                 built_in_actions,
                 cx,
             ));
@@ -540,14 +549,6 @@ impl ApiTester {
                     .and_then(|source| crate::theme::parse_css(source).ok())
                     .map(|theme| theme.name.to_string())
                     .unwrap_or_else(|| "Unsaved theme".to_owned());
-                let detached_source = state
-                    .settings
-                    .theme
-                    .draft_path
-                    .as_ref()
-                    .or(state.settings.theme.source_path.as_ref())
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "API Tester".to_owned());
                 let edit_this = this.clone();
                 let external_this = this.clone();
                 let discard_this = this.clone();
@@ -555,9 +556,10 @@ impl ApiTester {
                     .w_full()
                     .justify_end()
                     .gap_1()
+                    .child(active_theme_badge(cx))
                     .child(
                         Button::new("edit-detached-css-theme-here")
-                            .label(if editor_open {
+                            .label(if detached_editor_open {
                                 "Show editor"
                             } else {
                                 "Edit here"
@@ -582,7 +584,7 @@ impl ApiTester {
                             .on_click(move |_, _, cx| {
                                 if let Some(this) = external_this.upgrade() {
                                     this.update(cx, |this, cx| {
-                                        this.open_css_in_preferred_editor(cx);
+                                        this.edit_detached_theme_externally(cx);
                                     });
                                 }
                             }),
@@ -608,8 +610,6 @@ impl ApiTester {
                 rows.push(theme_table_row(
                     "unsaved",
                     detached_name,
-                    detached_source,
-                    active_theme_badge(cx),
                     detached_actions,
                     cx,
                 ));
@@ -633,17 +633,14 @@ impl ApiTester {
                     && state.settings.theme.source_path == theme.source_path;
                 let valid = crate::theme::parse_css(&theme.css_source).is_ok();
                 let active = projected && valid && !ambiguous_id;
-                let source = projected
-                    .then_some(state.settings.theme.draft_path.as_ref())
-                    .flatten()
-                    .map(|path| path.display().to_string())
-                    .or_else(|| {
-                        theme
-                            .source_path
-                            .as_ref()
-                            .map(|path| path.display().to_string())
-                    })
-                    .unwrap_or_else(|| "API Tester".to_owned());
+                let editor_open = state.theme_editor_is_open_for(&theme_id);
+                let theme_pending = theme.draft_source.is_some()
+                    || theme.draft_path.is_some()
+                    || state.theme_editors.values().any(|session| {
+                        session.theme_id.as_deref() == Some(&theme_id) && session.dirty
+                    });
+                let theme_external_draft_pending =
+                    theme.draft_path.is_some() && theme.draft_source.is_none();
                 let row_key = if ambiguous_id {
                     format!("ambiguous-{index}-{theme_id}")
                 } else {
@@ -661,8 +658,8 @@ impl ApiTester {
                 let identity_tooltip = "This theme’s saved information is invalid";
                 let invalid_tooltip =
                     "This theme contains invalid CSS. Re-import a corrected file or delete it";
-                let edit_blocked = ambiguous_id || (!projected && (!valid || selection_blocked));
-                let edit_label = if projected && editor_open {
+                let edit_blocked = ambiguous_id || !valid;
+                let edit_label = if editor_open {
                     "Show editor"
                 } else {
                     "Edit here"
@@ -671,33 +668,17 @@ impl ApiTester {
                     identity_tooltip
                 } else if !valid && !projected {
                     invalid_tooltip
-                } else if projected {
-                    if editor_open {
-                        "Show the open Theme CSS tab"
-                    } else {
-                        "Edit this theme in API Tester"
-                    }
+                } else if editor_open {
+                    "Show this theme’s editor tab"
                 } else {
-                    theme_selection_tooltip(
-                        detached_theme,
-                        editor_pending,
-                        external_draft_pending,
-                        "Use and edit this theme in API Tester",
-                    )
+                    "Open this theme in a new editor tab"
                 };
                 let external_tooltip = if ambiguous_id {
                     identity_tooltip
-                } else if !valid && !projected {
+                } else if !valid {
                     invalid_tooltip
-                } else if projected {
-                    "Open this theme in your preferred CSS app"
                 } else {
-                    theme_selection_tooltip(
-                        detached_theme,
-                        editor_pending,
-                        external_draft_pending,
-                        "Use this theme and open it in your preferred CSS app",
-                    )
+                    "Open this theme in your preferred CSS app"
                 };
                 let delete_tooltip = if ambiguous_id {
                     identity_tooltip
@@ -709,22 +690,6 @@ impl ApiTester {
                         "Delete this saved theme after confirmation",
                     )
                 };
-                let status = if ambiguous_id {
-                    theme_problem_badge("Unavailable", cx)
-                } else if !valid {
-                    theme_problem_badge(
-                        if projected {
-                            "Selected · invalid"
-                        } else {
-                            "Invalid CSS"
-                        },
-                        cx,
-                    )
-                } else if active {
-                    active_theme_badge(cx)
-                } else {
-                    available_theme_badge(cx)
-                };
                 let use_this = this.clone();
                 let edit_this = this.clone();
                 let external_this = this.clone();
@@ -733,11 +698,13 @@ impl ApiTester {
                 let use_theme_id = theme_id.clone();
                 let edit_theme_id = theme_id.clone();
                 let external_theme_id = theme_id.clone();
+                let discard_theme_id = theme_id.clone();
                 let delete_theme_id = theme_id;
                 let actions = h_flex()
                     .w_full()
                     .justify_end()
                     .gap_1()
+                    .when(active, |actions| actions.child(active_theme_badge(cx)))
                     .when(!active && valid && !ambiguous_id, |actions| {
                         actions.child(
                             Button::new(use_element_id)
@@ -797,7 +764,7 @@ impl ApiTester {
                                 }
                             }),
                     )
-                    .when(projected && external_draft_pending, |actions| {
+                    .when(theme_external_draft_pending, |actions| {
                         actions.child(
                             Button::new(discard_external_element_id)
                                 .label("Ignore file changes")
@@ -808,7 +775,10 @@ impl ApiTester {
                                 .on_click(move |_, _, cx| {
                                     if let Some(this) = discard_external_this.upgrade() {
                                         this.update(cx, |this, cx| {
-                                            this.discard_external_theme_draft(cx);
+                                            this.discard_saved_theme_external_draft(
+                                                discard_theme_id.clone(),
+                                                cx,
+                                            );
                                         });
                                     }
                                 }),
@@ -820,7 +790,7 @@ impl ApiTester {
                             .small()
                             .ghost()
                             .text_color(cx.theme().danger)
-                            .disabled(!writable || selection_blocked || ambiguous_id)
+                            .disabled(!writable || theme_pending || ambiguous_id)
                             .tooltip(delete_tooltip)
                             .on_click(move |_, window, cx| {
                                 if let Some(this) = delete_this.upgrade() {
@@ -835,14 +805,7 @@ impl ApiTester {
                             }),
                     )
                     .into_any_element();
-                rows.push(theme_table_row(
-                    row_key,
-                    theme.name.clone(),
-                    source,
-                    status,
-                    actions,
-                    cx,
-                ));
+                rows.push(theme_table_row(row_key, theme.name.clone(), actions, cx));
             }
 
             div()
@@ -866,10 +829,9 @@ impl ApiTester {
     }
 }
 
-const THEME_TABLE_MIN_WIDTH: f32 = 1_420.;
-const THEME_TABLE_NAME_WIDTH: f32 = 280.;
-const THEME_TABLE_STATUS_WIDTH: f32 = 160.;
-const THEME_TABLE_ACTIONS_WIDTH: f32 = 720.;
+const THEME_TABLE_MIN_WIDTH: f32 = 1_020.;
+const THEME_TABLE_NAME_WIDTH: f32 = 320.;
+const THEME_TABLE_ACTIONS_MIN_WIDTH: f32 = 700.;
 
 fn theme_table_header(cx: &App) -> AnyElement {
     h_flex()
@@ -895,32 +857,8 @@ fn theme_table_header(cx: &App) -> AnyElement {
         .child(
             div()
                 .flex_1()
-                .min_w(px(260.))
+                .min_w(px(THEME_TABLE_ACTIONS_MIN_WIDTH))
                 .h_full()
-                .px_3()
-                .flex()
-                .items_center()
-                .border_r_1()
-                .border_color(cx.api_outline_variant())
-                .child("SOURCE"),
-        )
-        .child(
-            div()
-                .w(px(THEME_TABLE_STATUS_WIDTH))
-                .h_full()
-                .flex_shrink_0()
-                .px_3()
-                .flex()
-                .items_center()
-                .border_r_1()
-                .border_color(cx.api_outline_variant())
-                .child("STATUS"),
-        )
-        .child(
-            div()
-                .w(px(THEME_TABLE_ACTIONS_WIDTH))
-                .h_full()
-                .flex_shrink_0()
                 .px_3()
                 .flex()
                 .items_center()
@@ -933,15 +871,12 @@ fn theme_table_header(cx: &App) -> AnyElement {
 fn theme_table_row(
     row_key: impl Into<SharedString>,
     name: String,
-    source: String,
-    status: AnyElement,
     actions: AnyElement,
     cx: &App,
 ) -> AnyElement {
     let row_key = row_key.into();
     let row_id: SharedString = format!("theme-table-row-{row_key}").into();
     let name_id: SharedString = format!("theme-table-name-{row_key}").into();
-    let source_id: SharedString = format!("theme-table-source-{row_key}").into();
 
     h_flex()
         .id(row_id)
@@ -977,42 +912,9 @@ fn theme_table_row(
         )
         .child(
             div()
-                .id(source_id)
                 .flex_1()
-                .min_w(px(260.))
+                .min_w(px(THEME_TABLE_ACTIONS_MIN_WIDTH))
                 .h_full()
-                .px_3()
-                .flex()
-                .items_center()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .border_r_1()
-                .border_color(cx.api_outline_variant())
-                .tooltip({
-                    let source = source.clone();
-                    move |window, cx| Tooltip::new(source.clone()).build(window, cx)
-                })
-                .child(source),
-        )
-        .child(
-            div()
-                .w(px(THEME_TABLE_STATUS_WIDTH))
-                .h_full()
-                .flex_shrink_0()
-                .px_3()
-                .flex()
-                .items_center()
-                .border_r_1()
-                .border_color(cx.api_outline_variant())
-                .child(status),
-        )
-        .child(
-            div()
-                .w(px(THEME_TABLE_ACTIONS_WIDTH))
-                .h_full()
-                .flex_shrink_0()
                 .px_3()
                 .flex()
                 .items_center()
@@ -1033,32 +935,6 @@ fn active_theme_badge(cx: &App) -> AnyElement {
         .text_color(cx.api_primary_bright())
         .child(Icon::new(IconName::Check).xsmall())
         .child("Active")
-        .into_any_element()
-}
-
-fn available_theme_badge(cx: &App) -> AnyElement {
-    div()
-        .px_2()
-        .py_1()
-        .rounded_full()
-        .bg(cx.api_surface_high())
-        .text_xs()
-        .font_medium()
-        .text_color(cx.theme().muted_foreground)
-        .child("Available")
-        .into_any_element()
-}
-
-fn theme_problem_badge(label: &'static str, cx: &App) -> AnyElement {
-    div()
-        .px_2()
-        .py_1()
-        .rounded_full()
-        .bg(cx.theme().danger.opacity(0.12))
-        .text_xs()
-        .font_semibold()
-        .text_color(cx.theme().danger)
-        .child(label)
         .into_any_element()
 }
 

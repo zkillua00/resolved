@@ -16,7 +16,7 @@ impl ApiTester {
                 .text_center()
                 .bg(cx.api_surface())
                 .child(
-                    gpui_component::Icon::new(IconName::Settings2)
+                    gpui_component::Icon::new(IconName::Globe)
                         .with_size(px(28.))
                         .text_color(cx.theme().muted_foreground),
                 )

@@ -202,11 +202,13 @@ The Appearance page offers two complementary editing workflows:
 Import CSS… also accepts an existing UTF-8 `.css` file. The in-app editor can
 Revert to the active snapshot or load the fully commented Default template,
 whose sections explain where each token affects the interface. Loading the
-template changes only the draft. **Save changes** updates the selected saved
-theme, while **Save as new theme…** asks for a library name, stores a separate
-SQLite snapshot, and selects it. Closing the editor releases it without losing
-its recoverable draft; replacing a dirty buffer from disk requires
-confirmation.
+template changes only the draft. **Save changes** updates the theme linked to
+that editor tab, while **Save as new theme…** asks for a library name, stores a separate
+SQLite snapshot, and selects it. Each saved theme can have its own
+`Edit <ThemeName>.css` tab; opening an editor does not select or apply that
+theme. Saving an inactive theme updates only its library entry, while saving the
+active theme also refreshes the interface. Closing an editor keeps its draft,
+and replacing a dirty buffer from disk requires confirmation.
 
 Appearance separates library-wide actions from theme-specific actions. Import
 CSS…, Create from template…, and Reload active sit beside the Themes heading.
@@ -215,11 +217,11 @@ table with an explicit active state; saved-theme rows provide Use theme, Edit
 here, Edit in preferred editor, and Delete… actions for that exact entry.
 Deleting the active entry returns to Material Dark. When a real source file
 still exists it is left on disk; SQLite-only themes warn that removal deletes
-their only saved copy. Switching, importing, creating, and deletion stay
-disabled while a recoverable draft or preferred-editor copy is pending, so none
-of those actions can silently discard editor work. Reload accepts the external
-copy; Discard external copy stops tracking it while leaving the file on disk.
-The catalog and active selection live in the existing SQLite settings record.
+their only saved copy. Drafts and preferred-editor copies belong to their
+specific saved theme, so other themes can still be opened, edited, or selected.
+Reload accepts the external copy; Ignore file changes stops tracking it while
+leaving the file on disk. The catalog and active selection live in the existing
+SQLite settings record.
 
 Theme CSS is deliberately a color-configuration format rather than arbitrary
 web styling: it must contain exactly one `:root` rule, a quoted

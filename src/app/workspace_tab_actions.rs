@@ -17,7 +17,7 @@ impl ApiTester {
             self.snapshot_active_request_tab(cx);
             self.hide_preview(cx);
         } else if self.workspace_tabs.active() == ActiveWorkspaceTab::Settings
-            && tab != WorkspaceToolTab::Settings
+            && !matches!(tab, WorkspaceToolTab::Settings)
         {
             self.cancel_shortcut_recording(cx);
         }
@@ -76,19 +76,25 @@ impl ApiTester {
                 }
             }
             WorkspaceTab::Request(tab_id) => self.activate_request_tab(tab_id, window, cx),
-            WorkspaceTab::Tool(WorkspaceToolTab::Settings) => {
-                self.open_workspace_tool_tab(WorkspaceToolTab::Settings, window, cx);
-            }
-            WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss) => {
-                if self.theme_editor.is_some() {
-                    self.open_workspace_tool_tab(WorkspaceToolTab::ThemeCss, window, cx);
-                    if let Some(editor) = self.theme_editor.as_ref() {
+            WorkspaceTab::Tool(tool) => match tool {
+                WorkspaceToolTab::Settings => {
+                    self.open_workspace_tool_tab(WorkspaceToolTab::Settings, window, cx);
+                }
+                WorkspaceToolTab::ThemeCss(editor_id) => {
+                    if let Some(editor) = self
+                        .theme_editors
+                        .get(&editor_id)
+                        .map(|session| session.editor.clone())
+                    {
+                        self.open_workspace_tool_tab(
+                            WorkspaceToolTab::ThemeCss(editor_id),
+                            window,
+                            cx,
+                        );
                         editor.read(cx).focus_handle(cx).focus(window);
                     }
-                } else {
-                    self.open_theme_editor(window, cx);
                 }
-            }
+            },
         }
     }
 
@@ -98,13 +104,12 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let closed = match tab {
+        let closed = match &tab {
             WorkspaceToolTab::Settings => {
                 self.cancel_shortcut_recording(cx);
-                self.workspace_tabs
-                    .close_tool(tab, self.theme_editor.is_some())
+                self.workspace_tabs.close_tool(&tab)
             }
-            WorkspaceToolTab::ThemeCss => self.close_theme_editor(cx),
+            WorkspaceToolTab::ThemeCss(editor_id) => self.close_theme_editor(editor_id, cx),
         };
         if !closed {
             return;
@@ -112,6 +117,164 @@ impl ApiTester {
 
         self.restore_visible_workspace_after_tool_close(window, cx);
         cx.notify();
+    }
+
+    pub(super) fn request_close_workspace_tabs(
+        &mut self,
+        anchor: WorkspaceToolTab,
+        scope: WorkspaceTabCloseScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let visible_tabs = self.workspace_tabs.visible_tabs(&self.request_tabs);
+        let anchor = WorkspaceTab::Tool(anchor);
+        let Some(anchor_index) = visible_tabs.iter().position(|tab| tab == &anchor) else {
+            return;
+        };
+        let targets = visible_tabs
+            .into_iter()
+            .enumerate()
+            .filter(|(index, tab)| {
+                !matches!(tab, WorkspaceTab::Welcome)
+                    && match scope {
+                        WorkspaceTabCloseScope::Current => *index == anchor_index,
+                        WorkspaceTabCloseScope::Others => *index != anchor_index,
+                        WorkspaceTabCloseScope::ToLeft => *index < anchor_index,
+                        WorkspaceTabCloseScope::ToRight => *index > anchor_index,
+                        WorkspaceTabCloseScope::All => true,
+                    }
+            })
+            .map(|(_, tab)| tab)
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            return;
+        }
+
+        let request_ids = targets
+            .iter()
+            .filter_map(|tab| match tab {
+                WorkspaceTab::Request(tab_id) => Some(tab_id.clone()),
+                WorkspaceTab::Welcome | WorkspaceTab::Tool(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let tools = targets
+            .iter()
+            .filter_map(|tab| match tab {
+                WorkspaceTab::Tool(tool) => Some(tool.clone()),
+                WorkspaceTab::Welcome | WorkspaceTab::Request(_) => None,
+            })
+            .collect::<Vec<_>>();
+
+        if self.sending && !request_ids.is_empty() {
+            self.request_notice =
+                Some("Finish or cancel the active request before closing tabs.".to_owned());
+            cx.notify();
+            return;
+        }
+        if !request_ids.is_empty() {
+            self.snapshot_active_request_tab(cx);
+        }
+        let dirty_titles = request_ids
+            .iter()
+            .filter_map(|id| self.request_tabs.get(id))
+            .filter(|tab| tab.is_dirty())
+            .map(|tab| tab.display_title().to_owned())
+            .collect::<Vec<_>>();
+        if dirty_titles.is_empty() {
+            self.close_workspace_tabs_now(request_ids, tools, window, cx);
+            return;
+        }
+
+        let close_count = targets.len();
+        let dirty_count = dirty_titles.len();
+        let dialog_title = if close_count == 1 {
+            "Discard request changes?".to_owned()
+        } else {
+            format!("Close {close_count} tabs?")
+        };
+        let detail =
+            super::request_tabs_actions::close_tabs_confirmation_detail(&dirty_titles, close_count);
+        let this = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let close_this = this.clone();
+            let request_ids = request_ids.clone();
+            let tools = tools.clone();
+            dialog
+                .title(dialog_title.clone())
+                .w(px(440.))
+                .confirm()
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(if close_count == 1 {
+                            "Discard".to_owned()
+                        } else {
+                            format!("Close {close_count} tabs")
+                        })
+                        .ok_variant(ButtonVariant::Danger),
+                )
+                .on_ok(move |_, window, cx| {
+                    if let Some(this) = close_this.upgrade() {
+                        this.update(cx, |this, cx| {
+                            this.close_workspace_tabs_now(
+                                request_ids.clone(),
+                                tools.clone(),
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                    true
+                })
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(detail.clone()),
+                        )
+                        .when(dirty_count > 1, |this| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!(
+                                        "{dirty_count} tabs contain unsaved request changes."
+                                    )),
+                            )
+                        }),
+                )
+        });
+    }
+
+    fn close_workspace_tabs_now(
+        &mut self,
+        request_ids: Vec<RequestTabId>,
+        tools: Vec<WorkspaceToolTab>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for tool in tools.into_iter().rev() {
+            let closed = match &tool {
+                WorkspaceToolTab::Settings => {
+                    self.cancel_shortcut_recording(cx);
+                    self.workspace_tabs.close_tool(&tool)
+                }
+                WorkspaceToolTab::ThemeCss(editor_id) => self.close_theme_editor(editor_id, cx),
+            };
+            if !closed {
+                return;
+            }
+        }
+
+        if request_ids.is_empty() {
+            self.restore_visible_workspace_after_tool_close(window, cx);
+            cx.notify();
+            return;
+        }
+        let anchor_id = self.request_tabs.active_tab_id().clone();
+        self.close_request_tabs_now(request_ids, anchor_id, window, cx);
     }
 
     pub(super) fn close_active_workspace_tab(
@@ -129,7 +292,17 @@ impl ApiTester {
                 self.close_workspace_tool_tab(WorkspaceToolTab::Settings, window, cx);
             }
             ActiveWorkspaceTab::ThemeCss => {
-                self.close_workspace_tool_tab(WorkspaceToolTab::ThemeCss, window, cx);
+                if let Some(editor_id) = self
+                    .workspace_tabs
+                    .active_theme_editor_id()
+                    .map(ToOwned::to_owned)
+                {
+                    self.close_workspace_tool_tab(
+                        WorkspaceToolTab::ThemeCss(editor_id),
+                        window,
+                        cx,
+                    );
+                }
             }
         }
     }

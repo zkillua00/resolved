@@ -128,6 +128,7 @@ impl AssetSource for AppAssets {
             "icons/gallery-vertical-end.svg" => {
                 include_bytes!("../assets/icons/gallery-vertical-end.svg")
             }
+            "icons/globe.svg" => include_bytes!("../assets/icons/globe.svg"),
             "icons/palette.svg" => include_bytes!("../assets/icons/palette.svg"),
             "icons/settings-2.svg" => include_bytes!("../assets/icons/settings-2.svg"),
             "icons/chart-pie.svg" => include_bytes!("../assets/icons/chart-pie.svg"),

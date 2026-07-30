@@ -711,7 +711,10 @@ impl ApiTester {
     }
 }
 
-fn close_tabs_confirmation_detail(dirty_titles: &[String], close_count: usize) -> String {
+pub(super) fn close_tabs_confirmation_detail(
+    dirty_titles: &[String],
+    close_count: usize,
+) -> String {
     if dirty_titles.len() == 1 {
         return if close_count == 1 {
             format!(
