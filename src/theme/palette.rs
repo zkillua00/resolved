@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use gpui::{Hsla, SharedString};
+use gpui::{Edges, Hsla, Pixels, SharedString, px};
 use gpui_component::{
-    ThemeColor, ThemeMode,
+    ButtonClassStyle, ThemeColor, ThemeMode,
     highlighter::{HighlightTheme, HighlightThemeStyle},
 };
 
@@ -12,6 +12,52 @@ pub struct ApiTheme {
     pub name: SharedString,
     pub mode: ThemeMode,
     pub palette: ApiPalette,
+    pub classes: ApiThemeClasses,
+}
+
+#[derive(Clone, Debug)]
+pub struct ApiThemeClasses {
+    pub app: AppClassStyle,
+    pub button: ButtonClassStyle,
+    pub editor: EditorClassStyle,
+}
+
+#[derive(Clone, Debug)]
+pub struct AppClassStyle {
+    pub font_family: SharedString,
+    pub font_size: Pixels,
+    pub margin: Edges<Pixels>,
+    pub padding: Edges<Pixels>,
+}
+
+#[derive(Clone, Debug)]
+pub struct EditorClassStyle {
+    pub font_family: SharedString,
+    pub font_size: Pixels,
+    pub border_radius: Option<Pixels>,
+    pub margin: Edges<Pixels>,
+    pub padding: Edges<Pixels>,
+}
+
+impl Default for ApiThemeClasses {
+    fn default() -> Self {
+        Self {
+            app: AppClassStyle {
+                font_family: ".SystemUIFont".into(),
+                font_size: px(16.),
+                margin: Edges::all(Pixels::ZERO),
+                padding: Edges::all(Pixels::ZERO),
+            },
+            button: ButtonClassStyle::default(),
+            editor: EditorClassStyle {
+                font_family: ".SystemUIFont".into(),
+                font_size: px(14.),
+                border_radius: None,
+                margin: Edges::all(Pixels::ZERO),
+                padding: Edges::all(Pixels::ZERO),
+            },
+        }
+    }
 }
 
 /// Application-specific colors plus their gpui-component projections.
@@ -46,6 +92,7 @@ impl ApiTheme {
         name: String,
         mode: ThemeMode,
         tokens: BTreeMap<String, Hsla>,
+        classes: ApiThemeClasses,
     ) -> Self {
         let surface = required(&tokens, "--api-surface");
         let surface_lowest = required(&tokens, "--api-surface-lowest");
@@ -210,6 +257,7 @@ impl ApiTheme {
         Self {
             name: name.into(),
             mode,
+            classes,
             palette: ApiPalette {
                 surface,
                 surface_lowest,

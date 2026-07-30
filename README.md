@@ -188,10 +188,11 @@ The Appearance page offers two complementary editing workflows:
 
 - **Edit CSS here** opens a native, lazily created CSS editor inside API Tester.
   It provides syntax highlighting, automatic delimiter closing, completion for
-  the required `:root` selector, supported `--api-*` properties, declared
-  custom-property references inside `var()`, and metadata values. Hovering a
-  supported property shows whether it is required, its category, default value,
-  and the UI surfaces it affects. Parser diagnostics update while editing.
+  the required `:root`, `.app`, `.button`, and `.editor` rules, supported
+  properties, declared custom-property references inside `var()`, and metadata
+  values. Hovering a supported token or class property shows its type, default
+  value, and the UI surfaces it affects. Parser diagnostics update while
+  editing.
 - **Open in preferred editor** materializes the current source as a `.css` file
   and asks macOS to open it with the system's preferred application for CSS
   files. **Reload from disk** brings external edits back into the in-app
@@ -223,15 +224,24 @@ Reload accepts the external copy; Ignore file changes stops tracking it while
 leaving the file on disk. The catalog and active selection live in the existing
 SQLite settings record.
 
-Theme CSS is deliberately a color-configuration format rather than arbitrary
-web styling: it must contain exactly one `:root` rule, a quoted
-`--api-theme-name`, a `dark` or `light` `--api-appearance`, and the supported
-semantic `--api-*` color properties. Values may reference another declared
-token with `var()`. The bundled
+Theme CSS is a constrained native stylesheet, not browser CSS. It contains one
+`:root` token rule plus `.app`, `.button`, and `.editor` class rules. `:root`
+provides the quoted `--api-theme-name`, the `dark` or `light`
+`--api-appearance`, and semantic `--api-*` colors; those values may reference
+another declared token with `var()`. `.app` controls the font, interface zoom,
+margin, and padding. Zoom scales class lengths and rem-based native controls;
+native pixel dimensions outside these classes remain fixed. `.button` controls
+shape, width, height, margin, padding, icon/label gap, and typography. `.editor`
+controls code typography, radius, margin, and padding. Lengths accept `px`,
+`rem`, or unitless zero, and spacing uses normal one-to-four-value CSS
+shorthand. The pre-1.0 stylesheet contract is allowed to change without
+migrations. The bundled
 [assets/themes/api-tester-dark.css](assets/themes/api-tester-dark.css) is the
-canonical, fully documented token contract and a starting template for custom
-themes. Saving validates and commits the SQLite snapshot before updating GPUI
-Component colors and editor syntax highlighting; it never overwrites a file an
+canonical, fully documented stylesheet and reproduces the current interface.
+See the [Theme CSS reference](docs/theme-css.md) for the complete selector,
+property, value, and color-token contract.
+Saving validates and commits the SQLite snapshot before updating native colors,
+layout, typography, and syntax highlighting; it never overwrites a file an
 external editor might change concurrently. A CSS file is created only for the
 preferred-editor workflow. Every library entry contains a durable snapshot, so
 switching and restart do not depend on the original file. Unapplied editor work
@@ -376,7 +386,8 @@ GPUI's `runtime_shaders` feature is enabled, so the normal build works with Appl
 Command Line Tools and does not require the full Xcode Metal command-line
 compiler. The wrapper obtains the verified crates.io GPUI 0.2.2 and GPUI
 Component 0.5.1 archives from Cargo's local cache when available (or crates.io
-otherwise), applies the small renderer and input-integration patches, and then
+otherwise), applies the small renderer, native-theme, and input-integration
+patches, and then
 forwards its arguments to Cargo. The generated `vendor/gpui-0.2.2/` and
 `vendor/gpui-component-0.5.1/` directories are ignored by Git.
 

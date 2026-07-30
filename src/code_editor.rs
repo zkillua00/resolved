@@ -504,6 +504,8 @@ impl Focusable for CodeEditor {
 
 impl Render for CodeEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let editor_style = cx.api_theme().classes.editor.clone();
+        let editor_line_height = editor_style.font_size * (10. / 7.);
         let context_menu = self.context_menu.clone().map(|menu| {
             deferred(
                 anchored()
@@ -513,6 +515,7 @@ impl Render for CodeEditor {
                     .child(
                         div()
                             .font_family(cx.theme().font_family.clone())
+                            .text_size(cx.theme().font_size)
                             .cursor_default()
                             .child(menu),
                     ),
@@ -533,13 +536,27 @@ impl Render for CodeEditor {
                     .border_1()
                     .border_color(cx.api_outline_variant())
             })
+            .when_some(editor_style.border_radius, |this, radius| {
+                this.rounded(radius)
+            })
+            .mt(editor_style.margin.top)
+            .mr(editor_style.margin.right)
+            .mb(editor_style.margin.bottom)
+            .ml(editor_style.margin.left)
+            .pt(editor_style.padding.top)
+            .pr(editor_style.padding.right)
+            .pb(editor_style.padding.bottom)
+            .pl(editor_style.padding.left)
             .bg(cx.api_surface_lowest())
             .overflow_hidden()
             .child(
                 Input::new(&self.input)
                     .appearance(false)
                     .disabled(self.read_only)
-                    .size_full(),
+                    .size_full()
+                    .font_family(editor_style.font_family)
+                    .text_size(editor_style.font_size)
+                    .line_height(editor_line_height),
             )
             .children(context_menu)
             .capture_any_mouse_down(cx.listener(Self::capture_mouse_down))

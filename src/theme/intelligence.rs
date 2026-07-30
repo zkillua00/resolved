@@ -17,7 +17,11 @@ use lsp_types::{
 
 use super::{
     ThemeError, parse_css,
-    schema::{THEME_PROPERTIES, ThemePropertyKind, ThemePropertySpec, theme_property},
+    schema::{
+        THEME_CLASS_PROPERTIES, THEME_CLASSES, THEME_PROPERTIES, ThemeClassPropertyKind,
+        ThemeClassPropertySpec, ThemePropertyKind, ThemePropertySpec, theme_class_property,
+        theme_property,
+    },
 };
 
 const DIAGNOSTIC_SOURCE: &str = "API Tester theme";
@@ -99,12 +103,14 @@ impl HoverProvider for ThemeCssIntelligence {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ThemeCompletionKind {
-    RootSelector,
+    Selector,
     Property,
+    ClassProperty { selector: String },
     Variable,
     Appearance,
     ThemeName,
     Color { property: String },
+    ClassValue { selector: String, property: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -273,21 +279,22 @@ fn completion_context(source: &str, requested_offset: usize) -> Option<ThemeComp
 
     let last_open = lexical.rfind_byte(source, b'{');
     let last_close = lexical.rfind_byte(source, b'}');
-    let inside_root = last_open.is_some() && last_open > last_close;
-    if !inside_root {
+    let inside_rule = last_open.is_some() && last_open > last_close;
+    if !inside_rule {
         let start = last_close.map_or(0, |position| position.saturating_add(1));
         let replace_start = lexical
             .first_significant_code(source, start..offset)
             .unwrap_or(offset);
         let prefix = source[replace_start..offset].trim().to_owned();
-        return (prefix.is_empty() || ":root".starts_with(&prefix)).then_some(
+        return (prefix.is_empty() || prefix.starts_with([':', '.'])).then_some(
             ThemeCompletionContext {
                 replace_range: replace_start..offset,
                 prefix,
-                kind: ThemeCompletionKind::RootSelector,
+                kind: ThemeCompletionKind::Selector,
             },
         );
     }
+    let selector = selector_before_open(source, &lexical, last_open?)?;
 
     if let Some(var_start) = lexical
         .rfind_pattern(source, "var(")
@@ -333,13 +340,24 @@ fn completion_context(source: &str, requested_offset: usize) -> Option<ThemeComp
     let content = &source[content_start..offset];
 
     let Some(colon) = lexical.find_byte_in(source, content_start..offset, b':') else {
-        if content.is_empty()
-            || (content.starts_with('-') && content.chars().all(is_custom_property_character))
-        {
+        let valid_property_prefix = if selector == ":root" {
+            content.is_empty()
+                || (content.starts_with('-') && content.chars().all(is_custom_property_character))
+        } else {
+            content.is_empty()
+                || content
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        };
+        if valid_property_prefix {
             return Some(ThemeCompletionContext {
                 replace_range: content_start..offset,
                 prefix: content.to_owned(),
-                kind: ThemeCompletionKind::Property,
+                kind: if selector == ":root" {
+                    ThemeCompletionKind::Property
+                } else {
+                    ThemeCompletionKind::ClassProperty { selector }
+                },
             });
         }
         return None;
@@ -350,12 +368,20 @@ fn completion_context(source: &str, requested_offset: usize) -> Option<ThemeComp
         .first_significant_code(source, colon + 1..offset)
         .unwrap_or(offset);
     let prefix = source[value_start..offset].to_owned();
-    let kind = match theme_property(property)?.kind {
-        ThemePropertyKind::Name => ThemeCompletionKind::ThemeName,
-        ThemePropertyKind::Appearance => ThemeCompletionKind::Appearance,
-        ThemePropertyKind::Color => ThemeCompletionKind::Color {
+    let kind = if selector == ":root" {
+        match theme_property(property)?.kind {
+            ThemePropertyKind::Name => ThemeCompletionKind::ThemeName,
+            ThemePropertyKind::Appearance => ThemeCompletionKind::Appearance,
+            ThemePropertyKind::Color => ThemeCompletionKind::Color {
+                property: property.to_owned(),
+            },
+        }
+    } else {
+        theme_class_property(&selector, property)?;
+        ThemeCompletionKind::ClassValue {
+            selector,
             property: property.to_owned(),
-        },
+        }
     };
     Some(ThemeCompletionContext {
         replace_range: value_start..offset,
@@ -364,22 +390,56 @@ fn completion_context(source: &str, requested_offset: usize) -> Option<ThemeComp
     })
 }
 
+fn selector_before_open(source: &str, lexical: &CssLexicalMap, open: usize) -> Option<String> {
+    std::iter::once(":root")
+        .chain(THEME_CLASSES.iter().map(|class| class.selector))
+        .filter_map(|selector| {
+            source[..open]
+                .match_indices(selector)
+                .filter(|(start, _)| {
+                    lexical.is_code_range(*start..*start + selector.len())
+                        && !token_continues_before(source, *start)
+                        && !token_continues_after(source, *start + selector.len())
+                })
+                .last()
+                .map(|(start, _)| (start, selector))
+        })
+        .max_by_key(|(start, _)| *start)
+        .map(|(_, selector)| selector.to_owned())
+}
+
 fn completion_items(source: &str, context: ThemeCompletionContext) -> Vec<CompletionItem> {
     match context.kind {
-        ThemeCompletionKind::RootSelector => completion_matches(&context.prefix, ":root")
-            .then(|| {
+        ThemeCompletionKind::Selector => {
+            let declared = declared_selectors(source);
+            std::iter::once((
+                ":root",
+                "Color tokens",
+                "Theme metadata and semantic color custom properties.",
+            ))
+            .chain(
+                THEME_CLASSES
+                    .iter()
+                    .map(|class| (class.selector, "Native style class", class.documentation)),
+            )
+            .filter(|(selector, _, _)| {
+                completion_matches(&context.prefix, selector)
+                    && (!declared.contains(*selector) || context.prefix == *selector)
+            })
+            .map(|(selector, detail, documentation)| {
+                let replacement = selector_rule_template(selector);
                 completion_item(
                     source,
-                    context.replace_range,
-                    ":root",
-                    ":root {\n    \n}",
+                    context.replace_range.clone(),
+                    selector,
+                    &replacement,
                     CompletionItemKind::CLASS,
-                    "Required theme selector",
-                    "API Tester themes contain exactly one `:root` declaration block.",
+                    detail,
+                    documentation,
                 )
             })
-            .into_iter()
-            .collect(),
+            .collect()
+        }
         ThemeCompletionKind::Property => {
             let declared = declared_custom_properties(source);
             THEME_PROPERTIES
@@ -404,6 +464,28 @@ fn completion_items(source: &str, context: ThemeCompletionContext) -> Vec<Comple
                             },
                             property.category.label()
                         ),
+                        property.documentation,
+                    )
+                })
+                .collect()
+        }
+        ThemeCompletionKind::ClassProperty { selector } => {
+            let declared = declared_rule_properties(source, &selector);
+            THEME_CLASS_PROPERTIES
+                .iter()
+                .filter(|property| {
+                    property.selector == selector
+                        && completion_matches(&context.prefix, property.name)
+                        && (!declared.contains(property.name) || context.prefix == property.name)
+                })
+                .map(|property| {
+                    completion_item(
+                        source,
+                        context.replace_range.clone(),
+                        property.name,
+                        &format!("{}: ", property.name),
+                        CompletionItemKind::PROPERTY,
+                        selector.trim_start_matches('.'),
                         property.documentation,
                     )
                 })
@@ -523,7 +605,68 @@ fn completion_items(source: &str, context: ThemeCompletionContext) -> Vec<Comple
                 })
                 .collect()
         }
+        ThemeCompletionKind::ClassValue { selector, property } => {
+            let Some(spec) = theme_class_property(&selector, &property) else {
+                return Vec::new();
+            };
+            class_value_candidates(spec)
+                .into_iter()
+                .filter(|value| completion_matches(&context.prefix, value))
+                .map(|value| {
+                    completion_item(
+                        source,
+                        context.replace_range.clone(),
+                        value,
+                        value,
+                        CompletionItemKind::VALUE,
+                        &format!("{selector} {property}"),
+                        spec.documentation,
+                    )
+                })
+                .collect()
+        }
     }
+}
+
+fn selector_rule_template(selector: &str) -> String {
+    let declarations = if selector == ":root" {
+        THEME_PROPERTIES
+            .iter()
+            .map(|property| format!("    {}: {};", property.name, property.default_value))
+            .collect::<Vec<_>>()
+    } else {
+        THEME_CLASS_PROPERTIES
+            .iter()
+            .filter(|property| property.selector == selector)
+            .map(|property| format!("    {}: {};", property.name, property.default_value))
+            .collect::<Vec<_>>()
+    };
+    format!("{selector} {{\n{}\n}}", declarations.join("\n"))
+}
+
+fn class_value_candidates(spec: &ThemeClassPropertySpec) -> Vec<&'static str> {
+    let mut values = vec![spec.default_value];
+    match spec.kind {
+        ThemeClassPropertyKind::Zoom => values.extend(["100%", "1", "125%"]),
+        ThemeClassPropertyKind::FontFamily => {
+            if spec.selector != ".app" {
+                values.push("inherit");
+            }
+            values.extend(["\".SystemUIFont\"", "\"Menlo\""]);
+        }
+        ThemeClassPropertyKind::Length if spec.name == "font-size" => {
+            if spec.selector == ".app" {
+                values.extend(["8px", "16px", "24px", "48px"]);
+            } else {
+                values.extend(["inherit", "0", "13px", "0.875rem"]);
+            }
+        }
+        ThemeClassPropertyKind::Length => values.extend(["auto", "0", "8px", "0.5rem"]),
+        ThemeClassPropertyKind::Box => values.extend(["0", "4px 8px", "0.25rem 0.5rem"]),
+    }
+    values.sort_unstable();
+    values.dedup();
+    values
 }
 
 fn completion_item(
@@ -582,6 +725,38 @@ fn hover_for_source(source: &str, requested_offset: usize) -> Option<Hover> {
         return Some(markdown_hover(source, range, markdown));
     }
 
+    for class in THEME_CLASSES {
+        if let Some((start, _)) = source.match_indices(class.selector).find(|(start, _)| {
+            let range = *start..*start + class.selector.len();
+            lexical.is_code_range(range.clone()) && range.start <= offset && offset <= range.end
+        }) {
+            let range = start..start + class.selector.len();
+            return Some(markdown_hover(
+                source,
+                range,
+                format!("`{}`\n\n{}", class.selector, class.documentation),
+            ));
+        }
+    }
+
+    if let Some(range) = token_range_at(source, offset, |character| {
+        character.is_ascii_alphanumeric() || character == '-'
+    })
+    .filter(|range| lexical.is_code_range(range.clone()))
+    {
+        let through_offset = CssLexicalMap::through(source, offset);
+        if let Some(open) = through_offset.rfind_byte(source, b'{')
+            && let Some(selector) = selector_before_open(source, &through_offset, open)
+            && let Some(property) = theme_class_property(&selector, &source[range.clone()])
+        {
+            return Some(markdown_hover(
+                source,
+                range,
+                class_property_hover_markdown(property),
+            ));
+        }
+    }
+
     let root_range = token_range_at(source, offset, |character| {
         character == ':' || character.is_ascii_alphabetic()
     })
@@ -591,10 +766,32 @@ fn hover_for_source(source: &str, requested_offset: usize) -> Option<Hover> {
         return Some(markdown_hover(
             source,
             root_range,
-            "`:root`\n\nThe only selector accepted by API Tester theme files. Component classes are intentionally not part of the native theme contract.".to_owned(),
+            "`:root`\n\nTheme metadata and semantic color custom properties.".to_owned(),
         ));
     }
     None
+}
+
+fn class_property_hover_markdown(property: &ThemeClassPropertySpec) -> String {
+    let value_type = match (property.selector, property.name) {
+        (".app", "zoom") => "0.5–2 or 50%–200%",
+        (".app", "font-family") => "one font family name",
+        (".app", "font-size") => "8px–48px",
+        (_, "font-family") => "inherit or one font family name",
+        (_, "margin") => "one to four px/rem/0 lengths; negatives allowed",
+        (".button", "padding") => "auto or one to four non-negative px/rem/0 lengths",
+        (_, "padding") => "one to four non-negative px/rem/0 lengths",
+        (_, "font-size") => "inherit or a non-negative px/rem/0 length",
+        _ => "auto or a non-negative px/rem/0 length",
+    };
+    format!(
+        "`{} {}`\n\n**Native style class · {}**\n\n{}\n\nDefault: `{}`",
+        property.selector,
+        property.name,
+        value_type,
+        property.documentation,
+        property.default_value,
+    )
 }
 
 fn property_hover_markdown(property: &ThemePropertySpec) -> String {
@@ -653,7 +850,19 @@ fn diagnostic_byte_range(source: &str, error: &ThemeError) -> ByteRange<usize> {
     let range = match error {
         ThemeError::UnknownProperty(property) => property_occurrence(source, property, false),
         ThemeError::DuplicateProperty(property) => property_occurrence(source, property, true),
-        ThemeError::MissingProperty(_) => source.find(":root").map(|start| start..start + 5),
+        ThemeError::UnknownSelector(selector) => property_occurrence(source, selector, false),
+        ThemeError::DuplicateSelector(selector) => property_occurrence(source, selector, true),
+        ThemeError::MissingSelector(_) => property_occurrence(source, ":root", false),
+        ThemeError::UnknownClassProperty { property, .. } => {
+            property_occurrence(source, property, false)
+        }
+        ThemeError::DuplicateClassProperty { property, .. } => {
+            property_occurrence(source, property, true)
+        }
+        ThemeError::MissingClassProperty { selector, .. } => {
+            property_occurrence(source, selector, false)
+        }
+        ThemeError::MissingProperty(_) => property_occurrence(source, ":root", false),
         ThemeError::InvalidValue {
             property,
             line,
@@ -671,7 +880,8 @@ fn diagnostic_byte_range(source: &str, error: &ThemeError) -> ByteRange<usize> {
             line,
             column,
             ..
-        } => property_occurrence(source, property, false)
+        } => property_occurrence_on_line(source, property, *line)
+            .or_else(|| property_occurrence(source, property, false))
             .or_else(|| range_at_display_location(source, *line, *column)),
         ThemeError::VariableCycle {
             chain,
@@ -686,7 +896,15 @@ fn diagnostic_byte_range(source: &str, error: &ThemeError) -> ByteRange<usize> {
             range_at_display_location(source, *line, *column)
         }
         ThemeError::ExpectedSingleRoot => {
-            let roots = source.match_indices(":root").collect::<Vec<_>>();
+            let lexical = CssLexicalMap::through(source, source.len());
+            let roots = source
+                .match_indices(":root")
+                .filter(|(start, _)| {
+                    lexical.is_code_range(*start..*start + 5)
+                        && !token_continues_before(source, *start)
+                        && !token_continues_after(source, *start + 5)
+                })
+                .collect::<Vec<_>>();
             roots
                 .get(1)
                 .or_else(|| roots.first())
@@ -697,11 +915,49 @@ fn diagnostic_byte_range(source: &str, error: &ThemeError) -> ByteRange<usize> {
     visible_range(source, range.unwrap_or(0..0))
 }
 
-fn property_occurrence(source: &str, property: &str, last: bool) -> Option<ByteRange<usize>> {
-    let start = if last {
-        source.rfind(property)
+fn property_occurrence_on_line(
+    source: &str,
+    property: &str,
+    line: u32,
+) -> Option<ByteRange<usize>> {
+    let line_index = line.saturating_sub(1) as usize;
+    let line_start = if line_index == 0 {
+        0
     } else {
-        source.find(property)
+        source
+            .match_indices('\n')
+            .nth(line_index.saturating_sub(1))
+            .map(|(index, _)| index + 1)?
+    };
+    let line_end = source[line_start..]
+        .find('\n')
+        .map_or(source.len(), |relative| line_start + relative);
+    let lexical = CssLexicalMap::through(source, line_end);
+    source[line_start..line_end]
+        .match_indices(property)
+        .map(|(relative, _)| line_start + relative)
+        .find(|start| {
+            lexical.is_code_range(*start..*start + property.len())
+                && !token_continues_before(source, *start)
+                && !token_continues_after(source, *start + property.len())
+        })
+        .map(|start| start..start + property.len())
+}
+
+fn property_occurrence(source: &str, property: &str, last: bool) -> Option<ByteRange<usize>> {
+    let lexical = CssLexicalMap::through(source, source.len());
+    let mut occurrences = source
+        .match_indices(property)
+        .map(|(start, _)| start)
+        .filter(|start| {
+            lexical.is_code_range(*start..*start + property.len())
+                && !token_continues_before(source, *start)
+                && !token_continues_after(source, *start + property.len())
+        });
+    let start = if last {
+        occurrences.last()
+    } else {
+        occurrences.next()
     }?;
     Some(start..start + property.len())
 }
@@ -776,6 +1032,63 @@ fn declared_custom_properties(source: &str) -> BTreeSet<String> {
             .len_utf8();
     }
     declarations
+}
+
+fn declared_selectors(source: &str) -> BTreeSet<String> {
+    let lexical = CssLexicalMap::through(source, source.len());
+    std::iter::once(":root")
+        .chain(THEME_CLASSES.iter().map(|class| class.selector))
+        .filter(|selector| {
+            source.match_indices(selector).any(|(start, _)| {
+                let end = start + selector.len();
+                lexical.is_code_range(start..end)
+                    && !token_continues_before(source, start)
+                    && !token_continues_after(source, end)
+                    && lexical
+                        .first_significant_code(source, end..source.len())
+                        .is_some_and(|next| source.as_bytes()[next] == b'{')
+            })
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+fn declared_rule_properties(source: &str, selector: &str) -> BTreeSet<String> {
+    let lexical = CssLexicalMap::through(source, source.len());
+    let Some(selector_start) = source.match_indices(selector).find_map(|(start, _)| {
+        lexical
+            .is_code_range(start..start + selector.len())
+            .then_some(start)
+    }) else {
+        return BTreeSet::new();
+    };
+    let Some(open) =
+        lexical.find_byte_in(source, selector_start + selector.len()..source.len(), b'{')
+    else {
+        return BTreeSet::new();
+    };
+    let close = lexical
+        .find_byte_in(source, open + 1..source.len(), b'}')
+        .unwrap_or(source.len());
+    THEME_CLASS_PROPERTIES
+        .iter()
+        .filter(|property| property.selector == selector)
+        .filter(|property| {
+            source[open + 1..close]
+                .match_indices(property.name)
+                .any(|(relative, _)| {
+                    let start = open + 1 + relative;
+                    let end = start + property.name.len();
+                    lexical.is_code_range(start..end)
+                        && !token_continues_before(source, start)
+                        && !token_continues_after(source, end)
+                        && lexical
+                            .first_significant_code(source, end..close)
+                            .is_some_and(|next| source.as_bytes()[next] == b':')
+                })
+        })
+        .map(|property| property.name.to_owned())
+        .collect()
 }
 
 fn declaration_value<'a>(source: &'a str, name: &str, lexical: &CssLexicalMap) -> Option<&'a str> {
@@ -942,6 +1255,30 @@ mod tests {
                 property.name
             );
         }
+        let mut selectors = BTreeSet::new();
+        for class in THEME_CLASSES {
+            assert!(
+                selectors.insert(class.selector),
+                "duplicate {}",
+                class.selector
+            );
+            assert!(!class.documentation.trim().is_empty());
+            assert!(
+                super::super::bundled_css().contains(class.selector),
+                "template is missing {}",
+                class.selector
+            );
+        }
+        let mut class_properties = BTreeSet::new();
+        for property in THEME_CLASS_PROPERTIES {
+            assert!(
+                class_properties.insert((property.selector, property.name)),
+                "duplicate {} {}",
+                property.selector,
+                property.name
+            );
+            assert!(!property.documentation.trim().is_empty());
+        }
         assert!(parse_css(super::super::bundled_css()).is_ok());
     }
 
@@ -971,10 +1308,114 @@ mod tests {
     }
 
     #[test]
-    fn suppresses_completion_in_comments_strings_and_class_selectors() {
+    fn suppresses_completion_in_comments_and_strings() {
         assert!(labels("/* --api-pri").is_empty());
         assert!(labels(":root { --api-theme-name: \"--api-pri").is_empty());
-        assert!(labels(".button").is_empty());
+    }
+
+    #[test]
+    fn completes_class_selectors_properties_and_values() {
+        let selector_items = ThemeCssIntelligence.completion_items_for_source(".bu", ".bu".len());
+        let button_selector = selector_items
+            .iter()
+            .find(|item| item.label == ".button")
+            .expect("button selector completion");
+        let CompletionTextEdit::Edit(button_edit) = button_selector
+            .text_edit
+            .as_ref()
+            .expect("selector text edit")
+        else {
+            panic!("expected a text edit")
+        };
+        for property in THEME_CLASS_PROPERTIES
+            .iter()
+            .filter(|property| property.selector == ".button")
+        {
+            assert!(
+                button_edit
+                    .new_text
+                    .contains(&format!("{}: {};", property.name, property.default_value)),
+                "selector scaffold is missing {}",
+                property.name
+            );
+        }
+
+        let properties = labels(".button {\n    bor");
+        assert!(properties.contains(&"border-radius".to_owned()));
+        assert!(!properties.contains(&"zoom".to_owned()));
+
+        let values = labels(".app {\n    zoom: 1");
+        assert!(values.contains(&"1".to_owned()));
+        assert!(values.contains(&"100%".to_owned()));
+
+        let font_values = labels(".button {\n    font-family: in");
+        assert!(font_values.contains(&"inherit".to_owned()));
+
+        let app_font_sizes = labels(".app {\n    font-size: ");
+        assert!(app_font_sizes.contains(&"16px".to_owned()));
+        assert!(!app_font_sizes.contains(&"auto".to_owned()));
+        assert!(!app_font_sizes.contains(&"inherit".to_owned()));
+        assert!(!app_font_sizes.contains(&"0.5rem".to_owned()));
+
+        let button_widths = labels(".button {\n    width: ");
+        assert!(button_widths.contains(&"auto".to_owned()));
+        assert!(!button_widths.contains(&"inherit".to_owned()));
+
+        let editor_font_sizes = labels(".editor {\n    font-size: ");
+        assert!(editor_font_sizes.contains(&"inherit".to_owned()));
+        assert!(!editor_font_sizes.contains(&"auto".to_owned()));
+    }
+
+    #[test]
+    fn hover_documents_native_classes_and_properties() {
+        let source = "/* 😀 */ .button { padding: 0; }";
+        let selector_start = source.find(".button").unwrap();
+        let selector_hover = ThemeCssIntelligence
+            .hover_for_source(source, selector_start + 2)
+            .unwrap();
+        let HoverContents::Markup(selector_markup) = selector_hover.contents else {
+            panic!("expected markdown hover")
+        };
+        assert!(selector_markup.value.contains("native buttons"));
+
+        let property_start = source.find("padding").unwrap();
+        let property_hover = ThemeCssIntelligence
+            .hover_for_source(source, property_start + 2)
+            .unwrap();
+        let property_range = property_hover.range.unwrap();
+        assert_eq!(property_range.start.character, 18);
+        assert_eq!(property_range.end.character, 25);
+        let HoverContents::Markup(property_markup) = property_hover.contents else {
+            panic!("expected markdown hover")
+        };
+        assert!(
+            property_markup
+                .value
+                .contains("Spacing inside every button")
+        );
+    }
+
+    #[test]
+    fn class_diagnostics_point_to_the_correct_repeated_property_name() {
+        let source = super::super::bundled_css().replace("font-size: inherit;", "font-size: 12vh;");
+        let diagnostics = theme_css_diagnostics(&source);
+        assert_eq!(diagnostics.len(), 1);
+        let line = diagnostics[0].range.start.line as usize;
+        assert!(
+            source
+                .lines()
+                .nth(line)
+                .is_some_and(|line| line.contains("font-size: 12vh"))
+        );
+    }
+
+    #[test]
+    fn missing_class_property_diagnostic_ignores_selectors_in_comments() {
+        let source = super::super::bundled_css().replace("    gap: auto;\n", "");
+        let diagnostics = theme_css_diagnostics(&source);
+        assert_eq!(diagnostics.len(), 1);
+        let line = diagnostics[0].range.start.line as usize;
+        assert_eq!(source.lines().nth(line).map(str::trim), Some(".button {"));
     }
 
     #[test]

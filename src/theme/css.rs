@@ -4,13 +4,16 @@ use cssparser::{
     BasicParseError, Delimiter, ParseError, ParseErrorKind, Parser, ParserInput, SourceLocation,
     ToCss, Token,
 };
-use gpui::{Hsla, Rgba};
-use gpui_component::ThemeMode;
+use gpui::{Edges, Hsla, Pixels, Rgba, px};
+use gpui_component::{ButtonClassStyle, ThemeMode};
 use thiserror::Error;
 
 use super::{
-    palette::ApiTheme,
-    schema::{THEME_PROPERTIES, ThemePropertyKind, theme_property},
+    palette::{ApiTheme, ApiThemeClasses},
+    schema::{
+        THEME_CLASS_PROPERTIES, THEME_CLASSES, THEME_PROPERTIES, ThemePropertyKind, theme_class,
+        theme_class_property, theme_property,
+    },
 };
 
 pub const BUILTIN_THEME_CSS: &str = include_str!("../../assets/themes/api-tester-dark.css");
@@ -27,6 +30,18 @@ pub enum ThemeCssError {
     TooLarge { limit: usize },
     #[error("theme CSS must contain exactly one :root rule")]
     ExpectedSingleRoot,
+    #[error("unsupported theme selector `{0}`")]
+    UnknownSelector(String),
+    #[error("theme selector `{0}` is declared more than once")]
+    DuplicateSelector(String),
+    #[error("missing required theme selector `{0}`")]
+    MissingSelector(String),
+    #[error("unsupported property `{property}` in `{selector}`")]
+    UnknownClassProperty { selector: String, property: String },
+    #[error("property `{property}` is declared more than once in `{selector}`")]
+    DuplicateClassProperty { selector: String, property: String },
+    #[error("missing required property `{property}` in `{selector}`")]
+    MissingClassProperty { selector: String, property: String },
     #[error("CSS syntax error at {line}:{column}: {message}")]
     Syntax {
         line: u32,
@@ -80,7 +95,13 @@ struct RawDeclaration {
 
 type RawDeclarations = BTreeMap<String, RawDeclaration>;
 
-/// Parse a complete API Tester theme from one CSS `:root` rule.
+#[derive(Clone, Debug)]
+struct RawStylesheet {
+    root: RawDeclarations,
+    classes: BTreeMap<String, RawDeclarations>,
+}
+
+/// Parse a complete API Tester theme stylesheet.
 pub fn parse_theme_css(source: &str) -> Result<ApiTheme, ThemeCssError> {
     if source.len() > MAX_THEME_BYTES {
         return Err(ThemeCssError::TooLarge {
@@ -88,7 +109,10 @@ pub fn parse_theme_css(source: &str) -> Result<ApiTheme, ThemeCssError> {
         });
     }
 
-    let declarations = parse_root(source)?;
+    let RawStylesheet {
+        root: declarations,
+        classes,
+    } = parse_stylesheet(source)?;
     for required in THEME_PROPERTIES.iter().filter(|property| property.required) {
         if !declarations.contains_key(required.name) {
             return Err(ThemeCssError::MissingProperty(required.name.to_owned()));
@@ -145,39 +169,86 @@ pub fn parse_theme_css(source: &str) -> Result<ApiTheme, ThemeCssError> {
         );
     }
 
-    Ok(ApiTheme::from_resolved(name, mode, colors))
+    let class_styles = parse_class_styles(&classes)?;
+    Ok(ApiTheme::from_resolved(name, mode, colors, class_styles))
 }
 
-fn parse_root(source: &str) -> Result<RawDeclarations, ThemeCssError> {
+fn parse_stylesheet(source: &str) -> Result<RawStylesheet, ThemeCssError> {
     let mut input = ParserInput::new(source);
     let mut parser = Parser::new(&mut input);
-    if parser.is_exhausted() {
-        return Err(ThemeCssError::ExpectedSingleRoot);
+    let mut root = None;
+    let mut classes = BTreeMap::new();
+
+    while !parser.is_exhausted() {
+        let selector = match parser
+            .next()
+            .map_err(|error| basic_error(error, "expected a theme selector"))?
+            .clone()
+        {
+            Token::Colon => {
+                let name = parser
+                    .expect_ident_cloned()
+                    .map_err(|error| basic_error(error, "expected `root` after `:`"))?;
+                format!(":{name}")
+            }
+            Token::Delim('.') => {
+                let name = parser
+                    .expect_ident_cloned()
+                    .map_err(|error| basic_error(error, "expected a class name after `.`"))?;
+                format!(".{name}")
+            }
+            token => {
+                let mut selector = String::new();
+                token
+                    .to_css(&mut selector)
+                    .expect("writing CSS to a String cannot fail");
+                return Err(ThemeCssError::UnknownSelector(selector));
+            }
+        };
+
+        if selector != ":root" && theme_class(&selector).is_none() {
+            return Err(ThemeCssError::UnknownSelector(selector));
+        }
+        parser
+            .expect_curly_bracket_block()
+            .map_err(|error| basic_error(error, "expected a declaration block"))?;
+        let declarations = if selector == ":root" {
+            parser
+                .parse_nested_block(parse_root_declarations)
+                .map_err(|error| parse_error(error, "invalid :root declaration block"))?
+        } else {
+            parser
+                .parse_nested_block(|input| parse_class_declarations(input, &selector))
+                .map_err(|error| parse_error(error, "invalid theme class declaration block"))?
+        };
+
+        if selector == ":root" {
+            if root.replace(declarations).is_some() {
+                return Err(ThemeCssError::ExpectedSingleRoot);
+            }
+        } else if classes.insert(selector.clone(), declarations).is_some() {
+            return Err(ThemeCssError::DuplicateSelector(selector));
+        }
     }
 
-    parser
-        .expect_colon()
-        .map_err(|error| basic_error(error, "expected `:root`"))?;
-    let selector = parser
-        .expect_ident_cloned()
-        .map_err(|error| basic_error(error, "expected `root`"))?;
-    if !selector.eq_ignore_ascii_case("root") {
-        return Err(ThemeCssError::ExpectedSingleRoot);
+    let root = root.ok_or(ThemeCssError::ExpectedSingleRoot)?;
+    for class in THEME_CLASSES {
+        if !classes.contains_key(class.selector) {
+            return Err(ThemeCssError::MissingSelector(class.selector.to_owned()));
+        }
     }
-    parser
-        .expect_curly_bracket_block()
-        .map_err(|error| basic_error(error, "expected the :root declaration block"))?;
-    let declarations = parser
-        .parse_nested_block(parse_declarations)
-        .map_err(|error| parse_error(error, "invalid :root declaration block"))?;
-
-    if !parser.is_exhausted() {
-        return Err(ThemeCssError::ExpectedSingleRoot);
+    for property in THEME_CLASS_PROPERTIES {
+        if !classes[property.selector].contains_key(property.name) {
+            return Err(ThemeCssError::MissingClassProperty {
+                selector: property.selector.to_owned(),
+                property: property.name.to_owned(),
+            });
+        }
     }
-    Ok(declarations)
+    Ok(RawStylesheet { root, classes })
 }
 
-fn parse_declarations<'i, 't>(
+fn parse_root_declarations<'i, 't>(
     input: &mut Parser<'i, 't>,
 ) -> Result<RawDeclarations, ParseError<'i, ThemeCssError>> {
     let mut declarations = BTreeMap::new();
@@ -227,6 +298,444 @@ fn parse_declarations<'i, 't>(
         }
     }
     Ok(declarations)
+}
+
+fn parse_class_declarations<'i, 't>(
+    input: &mut Parser<'i, 't>,
+    selector: &str,
+) -> Result<RawDeclarations, ParseError<'i, ThemeCssError>> {
+    let mut declarations = BTreeMap::new();
+    loop {
+        while input.try_parse(|input| input.expect_semicolon()).is_ok() {}
+        if input.is_exhausted() {
+            break;
+        }
+
+        let property = input.expect_ident_cloned()?.to_string();
+        if theme_class_property(selector, &property).is_none() {
+            return Err(input.new_custom_error(ThemeCssError::UnknownClassProperty {
+                selector: selector.to_owned(),
+                property,
+            }));
+        }
+        input.expect_colon()?;
+        let location = input.current_source_location();
+        let value = input.parse_until_before(
+            Delimiter::Semicolon,
+            |value| -> Result<String, ParseError<'i, ThemeCssError>> {
+                let start = value.position();
+                while value.next_including_whitespace_and_comments().is_ok() {}
+                let raw = value.slice_from(start).trim().to_owned();
+                if raw.is_empty() {
+                    let (line, column) = display_location(location);
+                    return Err(value.new_custom_error(ThemeCssError::InvalidValue {
+                        property: property.clone(),
+                        value: raw,
+                        message: "value cannot be empty".to_owned(),
+                        line,
+                        column,
+                    }));
+                }
+                Ok(raw)
+            },
+        )?;
+
+        if declarations
+            .insert(property.clone(), RawDeclaration { value, location })
+            .is_some()
+        {
+            return Err(
+                input.new_custom_error(ThemeCssError::DuplicateClassProperty {
+                    selector: selector.to_owned(),
+                    property,
+                }),
+            );
+        }
+        if !input.is_exhausted() {
+            input.expect_semicolon()?;
+        }
+    }
+    Ok(declarations)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CssLength {
+    Pixels(f32),
+    Rems(f32),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CssLengthValue {
+    Length(CssLength),
+    Auto,
+    Inherit,
+}
+
+fn parse_class_styles(
+    classes: &BTreeMap<String, RawDeclarations>,
+) -> Result<ApiThemeClasses, ThemeCssError> {
+    let app = &classes[".app"];
+    let button = &classes[".button"];
+    let editor = &classes[".editor"];
+
+    let zoom = parse_class_value(app, ".app", "zoom", parse_zoom)?;
+    let app_font_family = parse_class_value(app, ".app", "font-family", |value| {
+        parse_font_family(value, false)
+    })?
+    .expect("the .app font cannot inherit");
+    let app_font_size = parse_class_value(app, ".app", "font-size", |value| {
+        let value = parse_length_value(value)?;
+        let CssLengthValue::Length(CssLength::Pixels(size)) = value else {
+            return Err("font-size must use px".to_owned());
+        };
+        if !(8. ..=48.).contains(&size) {
+            return Err("font-size must be between 8px and 48px".to_owned());
+        }
+        Ok(size)
+    })?;
+    let app_margin = parse_class_box(app, ".app", "margin", true, app_font_size, zoom)?;
+    let app_padding = parse_class_box(app, ".app", "padding", false, app_font_size, zoom)?;
+    let scaled_app_font_size = px(app_font_size * zoom);
+
+    let editor_font_family = parse_class_value(editor, ".editor", "font-family", |value| {
+        parse_font_family(value, true)
+    })?
+    .unwrap_or_else(|| app_font_family.clone());
+    let editor_font_size =
+        match parse_class_value(editor, ".editor", "font-size", parse_length_value)? {
+            CssLengthValue::Length(length) => {
+                scale_non_negative_length(length, app_font_size, zoom, "font-size")
+                    .map_err(|message| invalid_class_value(editor, "font-size", &message))?
+            }
+            CssLengthValue::Inherit => scaled_app_font_size,
+            CssLengthValue::Auto => {
+                return Err(invalid_class_value(
+                    editor,
+                    "font-size",
+                    "auto is not valid here",
+                ));
+            }
+        };
+    let editor_border_radius = parse_optional_length(
+        editor,
+        ".editor",
+        "border-radius",
+        app_font_size,
+        zoom,
+        false,
+    )?;
+    let editor_margin = parse_class_box(editor, ".editor", "margin", true, app_font_size, zoom)?;
+    let editor_padding = parse_class_box(editor, ".editor", "padding", false, app_font_size, zoom)?;
+
+    let button_border_radius = parse_optional_length(
+        button,
+        ".button",
+        "border-radius",
+        app_font_size,
+        zoom,
+        false,
+    )?;
+    let button_width =
+        parse_optional_length(button, ".button", "width", app_font_size, zoom, false)?;
+    let button_min_width =
+        parse_optional_length(button, ".button", "min-width", app_font_size, zoom, false)?;
+    let button_height =
+        parse_optional_length(button, ".button", "height", app_font_size, zoom, false)?;
+    let button_margin = parse_class_box(button, ".button", "margin", true, app_font_size, zoom)?;
+    let button_padding =
+        parse_optional_box(button, ".button", "padding", false, app_font_size, zoom)?;
+    let button_gap = parse_optional_length(button, ".button", "gap", app_font_size, zoom, false)?;
+    let button_font_family = parse_class_value(button, ".button", "font-family", |value| {
+        parse_font_family(value, true)
+    })?;
+    let button_font_size =
+        match parse_class_value(button, ".button", "font-size", parse_length_value)? {
+            CssLengthValue::Length(length) => Some(
+                scale_non_negative_length(length, app_font_size, zoom, "font-size")
+                    .map_err(|message| invalid_class_value(button, "font-size", &message))?,
+            ),
+            CssLengthValue::Inherit => None,
+            CssLengthValue::Auto => {
+                return Err(invalid_class_value(
+                    button,
+                    "font-size",
+                    "use inherit to keep the native button size",
+                ));
+            }
+        };
+
+    Ok(ApiThemeClasses {
+        app: super::palette::AppClassStyle {
+            font_family: app_font_family.into(),
+            font_size: scaled_app_font_size,
+            margin: app_margin,
+            padding: app_padding,
+        },
+        button: ButtonClassStyle {
+            border_radius: button_border_radius,
+            width: button_width,
+            min_width: button_min_width,
+            height: button_height,
+            margin: Some(button_margin),
+            padding: button_padding,
+            gap: button_gap,
+            font_family: button_font_family.map(Into::into),
+            font_size: button_font_size,
+        },
+        editor: super::palette::EditorClassStyle {
+            font_family: editor_font_family.into(),
+            font_size: editor_font_size,
+            border_radius: editor_border_radius,
+            margin: editor_margin,
+            padding: editor_padding,
+        },
+    })
+}
+
+fn parse_class_value<T>(
+    declarations: &RawDeclarations,
+    _selector: &str,
+    property: &str,
+    parser: impl FnOnce(&str) -> Result<T, String>,
+) -> Result<T, ThemeCssError> {
+    let declaration = &declarations[property];
+    parser(&declaration.value).map_err(|message| {
+        let (line, column) = display_location(declaration.location);
+        ThemeCssError::InvalidValue {
+            property: property.to_owned(),
+            value: declaration.value.clone(),
+            message,
+            line,
+            column,
+        }
+    })
+}
+
+fn invalid_class_value(
+    declarations: &RawDeclarations,
+    property: &str,
+    message: &str,
+) -> ThemeCssError {
+    let declaration = &declarations[property];
+    let (line, column) = display_location(declaration.location);
+    ThemeCssError::InvalidValue {
+        property: property.to_owned(),
+        value: declaration.value.clone(),
+        message: message.to_owned(),
+        line,
+        column,
+    }
+}
+
+fn parse_zoom(value: &str) -> Result<f32, String> {
+    let mut input = ParserInput::new(value);
+    let mut parser = Parser::new(&mut input);
+    let zoom = match parser.next().map_err(|error| format!("{error:?}"))? {
+        Token::Number { value, .. } => *value,
+        Token::Percentage { unit_value, .. } => *unit_value,
+        _ => return Err("zoom must be a number or percentage".to_owned()),
+    };
+    parser
+        .expect_exhausted()
+        .map_err(|error| format!("{error:?}"))?;
+    if !zoom.is_finite() || !(0.5..=2.).contains(&zoom) {
+        return Err("zoom must be between 50% and 200%".to_owned());
+    }
+    Ok(zoom)
+}
+
+fn parse_font_family(value: &str, allow_inherit: bool) -> Result<Option<String>, String> {
+    let mut input = ParserInput::new(value);
+    let mut parser = Parser::new(&mut input);
+    let first = parser.next().map_err(|error| format!("{error:?}"))?.clone();
+    let family = match first {
+        Token::QuotedString(family) => {
+            parser
+                .expect_exhausted()
+                .map_err(|error| format!("{error:?}"))?;
+            family.to_string()
+        }
+        Token::Ident(ident) => {
+            let mut family = ident.to_string();
+            while !parser.is_exhausted() {
+                let ident = parser
+                    .expect_ident_cloned()
+                    .map_err(|_| "font-family must be one quoted name or identifier sequence")?;
+                family.push(' ');
+                family.push_str(&ident);
+            }
+            family
+        }
+        _ => return Err("font-family must be a quoted name or identifier sequence".to_owned()),
+    };
+    if family.eq_ignore_ascii_case("inherit") {
+        return if allow_inherit {
+            Ok(None)
+        } else {
+            Err("inherit is not valid here".to_owned())
+        };
+    }
+    if family.eq_ignore_ascii_case("auto") {
+        return Err("auto is not a font family".to_owned());
+    }
+    if family.trim().is_empty() {
+        return Err("font-family cannot be empty".to_owned());
+    }
+    Ok(Some(family))
+}
+
+fn parse_length_value(value: &str) -> Result<CssLengthValue, String> {
+    let mut input = ParserInput::new(value);
+    let mut parser = Parser::new(&mut input);
+    let token = parser.next().map_err(|error| format!("{error:?}"))?.clone();
+    let length = match token {
+        Token::Ident(keyword) if keyword.eq_ignore_ascii_case("auto") => CssLengthValue::Auto,
+        Token::Ident(keyword) if keyword.eq_ignore_ascii_case("inherit") => CssLengthValue::Inherit,
+        Token::Dimension { value, unit, .. } if unit.eq_ignore_ascii_case("px") => {
+            CssLengthValue::Length(CssLength::Pixels(value))
+        }
+        Token::Dimension { value, unit, .. } if unit.eq_ignore_ascii_case("rem") => {
+            CssLengthValue::Length(CssLength::Rems(value))
+        }
+        Token::Number { value: 0., .. } => CssLengthValue::Length(CssLength::Pixels(0.)),
+        _ => return Err("expected px, rem, unitless 0, auto, or inherit".to_owned()),
+    };
+    parser
+        .expect_exhausted()
+        .map_err(|error| format!("{error:?}"))?;
+    Ok(length)
+}
+
+fn parse_optional_length(
+    declarations: &RawDeclarations,
+    selector: &str,
+    property: &str,
+    base_font_size: f32,
+    zoom: f32,
+    allow_inherit: bool,
+) -> Result<Option<Pixels>, ThemeCssError> {
+    match parse_class_value(declarations, selector, property, parse_length_value)? {
+        CssLengthValue::Auto => Ok(None),
+        CssLengthValue::Inherit if allow_inherit => Ok(None),
+        CssLengthValue::Inherit => Err(invalid_class_value(
+            declarations,
+            property,
+            "inherit is not valid here",
+        )),
+        CssLengthValue::Length(length) => {
+            scale_non_negative_length(length, base_font_size, zoom, property)
+                .map(Some)
+                .map_err(|message| invalid_class_value(declarations, property, &message))
+        }
+    }
+}
+
+fn parse_class_box(
+    declarations: &RawDeclarations,
+    selector: &str,
+    property: &str,
+    allow_negative: bool,
+    base_font_size: f32,
+    zoom: f32,
+) -> Result<Edges<Pixels>, ThemeCssError> {
+    parse_class_value(declarations, selector, property, |value| {
+        parse_box(value, allow_negative, base_font_size, zoom)
+    })
+}
+
+fn parse_optional_box(
+    declarations: &RawDeclarations,
+    selector: &str,
+    property: &str,
+    allow_negative: bool,
+    base_font_size: f32,
+    zoom: f32,
+) -> Result<Option<Edges<Pixels>>, ThemeCssError> {
+    if declarations[property].value.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
+    parse_class_box(
+        declarations,
+        selector,
+        property,
+        allow_negative,
+        base_font_size,
+        zoom,
+    )
+    .map(Some)
+}
+
+fn parse_box(
+    value: &str,
+    allow_negative: bool,
+    base_font_size: f32,
+    zoom: f32,
+) -> Result<Edges<Pixels>, String> {
+    let mut input = ParserInput::new(value);
+    let mut parser = Parser::new(&mut input);
+    let mut values = Vec::with_capacity(4);
+    while !parser.is_exhausted() {
+        let start = parser.position();
+        parser.next().map_err(|error| format!("{error:?}"))?;
+        let raw = parser.slice_from(start);
+        let length = match parse_length_value(raw)? {
+            CssLengthValue::Length(length) => {
+                scale_length(length, base_font_size, zoom, "spacing")?
+            }
+            CssLengthValue::Auto | CssLengthValue::Inherit => {
+                return Err("spacing values must use px, rem, or unitless 0".to_owned());
+            }
+        };
+        if !allow_negative && length < Pixels::ZERO {
+            return Err("padding cannot be negative".to_owned());
+        }
+        values.push(length);
+        if values.len() > 4 {
+            return Err("spacing accepts one to four values".to_owned());
+        }
+    }
+    let [top, right, bottom, left] = match values.as_slice() {
+        [all] => [*all, *all, *all, *all],
+        [vertical, horizontal] => [*vertical, *horizontal, *vertical, *horizontal],
+        [top, horizontal, bottom] => [*top, *horizontal, *bottom, *horizontal],
+        [top, right, bottom, left] => [*top, *right, *bottom, *left],
+        _ => return Err("spacing accepts one to four values".to_owned()),
+    };
+    Ok(Edges {
+        top,
+        right,
+        bottom,
+        left,
+    })
+}
+
+fn scale_length(
+    length: CssLength,
+    base_font_size: f32,
+    zoom: f32,
+    property: &str,
+) -> Result<Pixels, String> {
+    let value = match length {
+        CssLength::Pixels(value) => value * zoom,
+        CssLength::Rems(value) => value * base_font_size * zoom,
+    };
+    if !value.is_finite() || !(-512. ..=4096.).contains(&value) {
+        return Err(format!("{property} is outside the supported size range"));
+    }
+    Ok(px(value))
+}
+
+fn scale_non_negative_length(
+    length: CssLength,
+    base_font_size: f32,
+    zoom: f32,
+    property: &str,
+) -> Result<Pixels, String> {
+    let value = scale_length(length, base_font_size, zoom, property)?;
+    if value < Pixels::ZERO {
+        return Err(format!("{property} cannot be negative"));
+    }
+    Ok(value)
 }
 
 fn is_known_api_property(property: &str) -> bool {
@@ -604,6 +1113,7 @@ fn display_location(location: SourceLocation) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_component::PixelsExt as _;
 
     #[test]
     fn parses_built_in_theme_and_resolves_aliases() {
@@ -613,6 +1123,20 @@ mod tests {
         assert_eq!(
             theme.palette.token("--api-yellow"),
             theme.palette.token("--api-warning")
+        );
+        assert_eq!(theme.classes.app.font_size.as_f32(), 16.);
+        assert_eq!(theme.classes.editor.font_size.as_f32(), 14.);
+        assert!(theme.classes.button.border_radius.is_none());
+        assert!(theme.classes.button.padding.is_none());
+        assert_eq!(
+            theme
+                .classes
+                .button
+                .margin
+                .expect("the default button margin is explicit")
+                .top
+                .as_f32(),
+            0.
         );
     }
 
@@ -637,6 +1161,149 @@ mod tests {
             parse_theme_css(&css).unwrap_err(),
             ThemeCssError::ExpectedSingleRoot
         );
+    }
+
+    #[test]
+    fn requires_the_native_style_classes() {
+        let classless = BUILTIN_THEME_CSS
+            .split("\n.app {")
+            .next()
+            .expect("the bundled stylesheet contains .app");
+        assert!(matches!(
+            parse_theme_css(classless),
+            Err(ThemeCssError::MissingSelector(selector)) if selector == ".app"
+        ));
+
+        let missing_property = BUILTIN_THEME_CSS.replace("    gap: auto;\n", "");
+        assert!(matches!(
+            parse_theme_css(&missing_property),
+            Err(ThemeCssError::MissingClassProperty { selector, property })
+                if selector == ".button" && property == "gap"
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_and_duplicate_class_rules_and_properties() {
+        let unknown_selector = format!("{BUILTIN_THEME_CSS}\n.card {{ padding: 0; }}");
+        assert!(matches!(
+            parse_theme_css(&unknown_selector),
+            Err(ThemeCssError::UnknownSelector(selector)) if selector == ".card"
+        ));
+
+        let duplicate_selector = BUILTIN_THEME_CSS.replace(".button {", ".button {}\n.button {");
+        assert!(matches!(
+            parse_theme_css(&duplicate_selector),
+            Err(ThemeCssError::DuplicateSelector(selector)) if selector == ".button"
+        ));
+
+        let unknown_property = BUILTIN_THEME_CSS.replace(".button {", ".button {\n    color: red;");
+        assert!(matches!(
+            parse_theme_css(&unknown_property),
+            Err(ThemeCssError::UnknownClassProperty { selector, property })
+                if selector == ".button" && property == "color"
+        ));
+
+        let duplicate_property =
+            BUILTIN_THEME_CSS.replace(".button {", ".button {\n    margin: 0;");
+        assert!(matches!(
+            parse_theme_css(&duplicate_property),
+            Err(ThemeCssError::DuplicateClassProperty { selector, property })
+                if selector == ".button" && property == "margin"
+        ));
+    }
+
+    #[test]
+    fn parses_zoom_lengths_and_css_box_shorthand() {
+        let css = BUILTIN_THEME_CSS
+            .replace("zoom: 100%;", "zoom: 125%;")
+            .replace("font-size: 16px;", "font-size: 18px;")
+            .replace("border-radius: auto;", "border-radius: 0.5rem;")
+            .replace("margin: 0;", "margin: 1px 2px 3px 4px;")
+            .replace("padding: auto;", "padding: 2px 4px 6px 8px;")
+            .replace("font-size: inherit;", "font-size: 0.875rem;");
+        let theme = parse_theme_css(&css).unwrap();
+
+        assert_eq!(theme.classes.app.font_size.as_f32(), 22.5);
+        assert_eq!(
+            theme
+                .classes
+                .button
+                .border_radius
+                .expect("radius override")
+                .as_f32(),
+            11.25
+        );
+        let margin = theme.classes.button.margin.expect("button margin");
+        assert_eq!(
+            [
+                margin.top.as_f32(),
+                margin.right.as_f32(),
+                margin.bottom.as_f32(),
+                margin.left.as_f32(),
+            ],
+            [1.25, 2.5, 3.75, 5.]
+        );
+        let padding = theme.classes.button.padding.expect("button padding");
+        assert_eq!(
+            [
+                padding.top.as_f32(),
+                padding.right.as_f32(),
+                padding.bottom.as_f32(),
+                padding.left.as_f32(),
+            ],
+            [2.5, 5., 7.5, 10.]
+        );
+        assert_eq!(
+            theme
+                .classes
+                .button
+                .font_size
+                .expect("button font override")
+                .as_f32(),
+            19.6875
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_or_unsupported_layout_values() {
+        let excessive_zoom = BUILTIN_THEME_CSS.replace("zoom: 100%;", "zoom: 250%;");
+        assert!(matches!(
+            parse_theme_css(&excessive_zoom),
+            Err(ThemeCssError::InvalidValue { property, .. }) if property == "zoom"
+        ));
+
+        let negative_padding = BUILTIN_THEME_CSS.replace("padding: auto;", "padding: -1px;");
+        assert!(matches!(
+            parse_theme_css(&negative_padding),
+            Err(ThemeCssError::InvalidValue { property, .. }) if property == "padding"
+        ));
+
+        let unsupported_unit = BUILTIN_THEME_CSS.replace("height: auto;", "height: 2vh;");
+        assert!(matches!(
+            parse_theme_css(&unsupported_unit),
+            Err(ThemeCssError::InvalidValue { property, .. }) if property == "height"
+        ));
+
+        let negative_radius =
+            BUILTIN_THEME_CSS.replace("border-radius: auto;", "border-radius: -4px;");
+        assert!(matches!(
+            parse_theme_css(&negative_radius),
+            Err(ThemeCssError::InvalidValue { property, .. }) if property == "border-radius"
+        ));
+
+        let negative_font_size =
+            BUILTIN_THEME_CSS.replace("font-size: inherit;", "font-size: -1rem;");
+        assert!(matches!(
+            parse_theme_css(&negative_font_size),
+            Err(ThemeCssError::InvalidValue { property, .. }) if property == "font-size"
+        ));
+
+        let inherited_app_font =
+            BUILTIN_THEME_CSS.replace("font-family: \".SystemUIFont\";", "font-family: inherit;");
+        assert!(matches!(
+            parse_theme_css(&inherited_app_font),
+            Err(ThemeCssError::InvalidValue { property, .. }) if property == "font-family"
+        ));
     }
 
     #[test]
@@ -773,7 +1440,7 @@ mod tests {
     #[test]
     fn reports_syntax_lines_as_one_based() {
         assert!(matches!(
-            parse_theme_css("not-a-root"),
+            parse_theme_css(":root !"),
             Err(ThemeCssError::Syntax { line: 1, .. })
         ));
     }

@@ -3,6 +3,7 @@ use super::*;
 impl Render for ApiTester {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.debug_overlay.read(cx).record_ui_frame();
+        let app_style = cx.api_theme().classes.app.clone();
 
         let workspace = match self.workspace_tabs.active() {
             ActiveWorkspaceTab::Welcome => v_flex()
@@ -76,6 +77,14 @@ impl Render for ApiTester {
             .size_full()
             .relative()
             .overflow_hidden()
+            .mt(app_style.margin.top)
+            .mr(app_style.margin.right)
+            .mb(app_style.margin.bottom)
+            .ml(app_style.margin.left)
+            .pt(app_style.padding.top)
+            .pr(app_style.padding.right)
+            .pb(app_style.padding.bottom)
+            .pl(app_style.padding.left)
             .bg(cx.api_surface())
             .text_color(cx.theme().foreground)
             .key_context(shortcuts::APP_KEY_CONTEXT)

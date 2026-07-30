@@ -200,6 +200,9 @@ pub fn apply(theme: ApiTheme, cx: &mut App) {
     component_theme.mode = theme.mode;
     component_theme.colors = theme.palette.component_colors;
     component_theme.highlight_theme = Arc::clone(&theme.palette.highlight_theme);
+    component_theme.font_family = theme.classes.app.font_family.clone();
+    component_theme.font_size = theme.classes.app.font_size;
+    component_theme.button_style = theme.classes.button.clone();
     cx.refresh_windows();
 }
 

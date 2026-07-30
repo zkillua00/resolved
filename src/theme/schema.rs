@@ -21,6 +21,29 @@ pub(crate) enum ThemePropertyCategory {
     Syntax,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThemeClassPropertyKind {
+    Zoom,
+    FontFamily,
+    Length,
+    Box,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ThemeClassSpec {
+    pub(crate) selector: &'static str,
+    pub(crate) documentation: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ThemeClassPropertySpec {
+    pub(crate) selector: &'static str,
+    pub(crate) name: &'static str,
+    pub(crate) kind: ThemeClassPropertyKind,
+    pub(crate) default_value: &'static str,
+    pub(crate) documentation: &'static str,
+}
+
 impl ThemePropertyCategory {
     pub(crate) const fn label(self) -> &'static str {
         match self {
@@ -310,7 +333,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyCategory::Status,
         true,
         "#385f8e",
-        "Informational notices, links, and neutral status feedback.",
+        "Informational controls, script output, and 3xx status feedback.",
     ),
     property(
         "--api-info-hover",
@@ -558,4 +581,170 @@ pub(crate) fn theme_property(name: &str) -> Option<&'static ThemePropertySpec> {
     THEME_PROPERTIES
         .iter()
         .find(|property| property.name == name)
+}
+
+pub(crate) const THEME_CLASSES: &[ThemeClassSpec] = &[
+    ThemeClassSpec {
+        selector: ".app",
+        documentation: "Global typography, rem-based interface scale, and outer spacing.",
+    },
+    ThemeClassSpec {
+        selector: ".button",
+        documentation: "Shared geometry, spacing, and typography for native buttons.",
+    },
+    ThemeClassSpec {
+        selector: ".editor",
+        documentation: "Typography, shape, and inner and outer spacing for code editor surfaces.",
+    },
+];
+
+pub(crate) const THEME_CLASS_PROPERTIES: &[ThemeClassPropertySpec] = &[
+    ThemeClassPropertySpec {
+        selector: ".app",
+        name: "zoom",
+        kind: ThemeClassPropertyKind::Zoom,
+        default_value: "100%",
+        documentation: "Scales class lengths, rem-based interface dimensions, and typography from 50% to 200%.",
+    },
+    ThemeClassPropertySpec {
+        selector: ".app",
+        name: "font-family",
+        kind: ThemeClassPropertyKind::FontFamily,
+        default_value: "\".SystemUIFont\"",
+        documentation: "Application font family. Use one quoted or unquoted family name.",
+    },
+    ThemeClassPropertySpec {
+        selector: ".app",
+        name: "font-size",
+        kind: ThemeClassPropertyKind::Length,
+        default_value: "16px",
+        documentation: "Unscaled base font size and the base unit used by interface zoom.",
+    },
+    ThemeClassPropertySpec {
+        selector: ".app",
+        name: "margin",
+        kind: ThemeClassPropertyKind::Box,
+        default_value: "0",
+        documentation: "Outer spacing around the application canvas using CSS box shorthand.",
+    },
+    ThemeClassPropertySpec {
+        selector: ".app",
+        name: "padding",
+        kind: ThemeClassPropertyKind::Box,
+        default_value: "0",
+        documentation: "Inner spacing around the application canvas using CSS box shorthand.",
+    },
+    ThemeClassPropertySpec {
+        selector: ".button",
+        name: "border-radius",
+        kind: ThemeClassPropertyKind::Length,
+        default_value: "auto",
+        documentation: "Overrides every button corner radius; auto preserves each native button shape.",
+    },
+    ThemeClassPropertySpec {
+        selector: ".button",
+        name: "width",
+        kind: ThemeClassPropertyKind::Length,
+        default_value: "auto",
+        documentation: "Fixed button width; auto keeps content and icon button sizing.",
+    },
+    ThemeClassPropertySpec {
+        selector: ".button",
+        name: "min-width",
+        kind: ThemeClassPropertyKind::Length,
+        default_value: "auto",
+        documentation: "Minimum button width; auto keeps the component default.",
+    },
+    ThemeClassPropertySpec {
+        selector: ".button",
+        name: "height",
+        kind: ThemeClassPropertyKind::Length,
+        default_value: "auto",
+        documentation: "Fixed button height; auto preserves small, medium, large, and custom sizes.",
+    },
+    ThemeClassPropertySpec {
+        selector: ".button",
+        name: "margin",
+        kind: ThemeClassPropertyKind::Box,
+        default_value: "0",
+        documentation: "Spacing outside every button using CSS box shorthand.",
+    },
+    ThemeClassPropertySpec {
+        selector: ".button",
+        name: "padding",
+        kind: ThemeClassPropertyKind::Box,
+        default_value: "auto",
+        documentation: "Spacing inside every button; auto preserves native size and compact variants.",
+    },
+    ThemeClassPropertySpec {
+        selector: ".button",
+        name: "gap",
+        kind: ThemeClassPropertyKind::Length,
+        default_value: "auto",
+        documentation: "Space between a button icon, label, and dropdown caret.",
+    },
+    ThemeClassPropertySpec {
+        selector: ".button",
+        name: "font-family",
+        kind: ThemeClassPropertyKind::FontFamily,
+        default_value: "inherit",
+        documentation: "Button font family; inherit uses the application font.",
+    },
+    ThemeClassPropertySpec {
+        selector: ".button",
+        name: "font-size",
+        kind: ThemeClassPropertyKind::Length,
+        default_value: "inherit",
+        documentation: "Button font size; inherit preserves native size variants.",
+    },
+    ThemeClassPropertySpec {
+        selector: ".editor",
+        name: "font-family",
+        kind: ThemeClassPropertyKind::FontFamily,
+        default_value: "inherit",
+        documentation: "Font family used for request, response, script, and theme code editors.",
+    },
+    ThemeClassPropertySpec {
+        selector: ".editor",
+        name: "font-size",
+        kind: ThemeClassPropertyKind::Length,
+        default_value: "0.875rem",
+        documentation: "Code editor font size before interface zoom is applied.",
+    },
+    ThemeClassPropertySpec {
+        selector: ".editor",
+        name: "border-radius",
+        kind: ThemeClassPropertyKind::Length,
+        default_value: "auto",
+        documentation: "Code editor corner radius; auto preserves framed and unframed editor shapes.",
+    },
+    ThemeClassPropertySpec {
+        selector: ".editor",
+        name: "margin",
+        kind: ThemeClassPropertyKind::Box,
+        default_value: "0",
+        documentation: "Spacing outside code editor surfaces using CSS box shorthand.",
+    },
+    ThemeClassPropertySpec {
+        selector: ".editor",
+        name: "padding",
+        kind: ThemeClassPropertyKind::Box,
+        default_value: "0",
+        documentation: "Spacing inside code editor surfaces using CSS box shorthand.",
+    },
+];
+
+pub(crate) fn theme_class(selector: &str) -> Option<&'static ThemeClassSpec> {
+    THEME_CLASSES
+        .iter()
+        .find(|class| class.selector == selector)
+}
+
+pub(crate) fn theme_class_property(
+    selector: &str,
+    name: &str,
+) -> Option<&'static ThemeClassPropertySpec> {
+    THEME_CLASS_PROPERTIES
+        .iter()
+        .find(|property| property.selector == selector && property.name == name)
 }

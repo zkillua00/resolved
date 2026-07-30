@@ -1,7 +1,8 @@
 /*
  * API Tester theme files intentionally use a small, deterministic subset of
- * CSS: one :root rule containing the custom properties documented here.
- * Values may refer to other custom properties with var().
+ * CSS: one :root color-token rule plus the .app, .button, and .editor
+ * classes documented below. Root values may refer to other custom properties
+ * with var().
  *
  * Required tokens must remain present. Optional tokens may be removed to use
  * the fallback described in their section. Hover a token in API Tester's
@@ -121,4 +122,48 @@
     --api-syntax-variable: var(--api-foreground);
     --api-syntax-type: #ccc2dc;
     --api-syntax-function: var(--api-primary);
+}
+
+/*
+ * Application canvas
+ * zoom scales class lengths, rem-based controls, and typography. Font size is
+ * the unscaled base. Margin and padding use normal one-to-four-value CSS box
+ * shorthand.
+ */
+.app {
+    zoom: 100%;
+    font-family: ".SystemUIFont";
+    font-size: 16px;
+    margin: 0;
+    padding: 0;
+}
+
+/*
+ * Native buttons
+ * auto retains native geometry; inherit retains native typography. Replace
+ * them with px or rem values to make every button share the same values.
+ */
+.button {
+    border-radius: auto;
+    width: auto;
+    min-width: auto;
+    height: auto;
+    margin: 0;
+    padding: auto;
+    gap: auto;
+    font-family: inherit;
+    font-size: inherit;
+}
+
+/*
+ * Code editors
+ * These values reproduce the current editor typography and spacing. An auto
+ * radius retains the framed or unframed shape selected by each editor.
+ */
+.editor {
+    font-family: inherit;
+    font-size: 0.875rem;
+    border-radius: auto;
+    margin: 0;
+    padding: 0;
 }

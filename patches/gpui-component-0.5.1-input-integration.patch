@@ -595,3 +595,85 @@ diff --git a/src/setting/item.rs b/src/setting/item.rs
 @@ -205 +226 @@
 -                SettingItem::Element { render } => {
 +                SettingItem::Element { render, .. } => {
+diff --git a/src/theme/mod.rs b/src/theme/mod.rs
+--- a/src/theme/mod.rs
++++ b/src/theme/mod.rs
+@@ -2 +2 @@
+-use gpui::{px, App, Global, Hsla, Pixels, SharedString, Window, WindowAppearance};
++use gpui::{App, Edges, Global, Hsla, Pixels, SharedString, Window, WindowAppearance, px};
+@@ -38,0 +39,16 @@
++/// Optional application CSS overrides for every button.
++///
++/// `None` preserves the component's native size- and variant-specific value.
++#[derive(Debug, Clone, Default)]
++pub struct ButtonClassStyle {
++    pub border_radius: Option<Pixels>,
++    pub width: Option<Pixels>,
++    pub min_width: Option<Pixels>,
++    pub height: Option<Pixels>,
++    pub margin: Option<Edges<Pixels>>,
++    pub padding: Option<Edges<Pixels>>,
++    pub gap: Option<Pixels>,
++    pub font_family: Option<SharedString>,
++    pub font_size: Option<Pixels>,
++}
++
+@@ -75,0 +92,4 @@
++    /// Application CSS overrides for buttons.
++    #[serde(skip)]
++    #[schemars(skip)]
++    pub button_style: ButtonClassStyle,
+@@ -204,0 +225 @@
++            button_style: ButtonClassStyle::default(),
+diff --git a/src/button/button.rs b/src/button/button.rs
+--- a/src/button/button.rs
++++ b/src/button/button.rs
+@@ -430,0 +431,2 @@
++        let class_style = cx.theme().button_style.clone();
++        let has_class_rounding = class_style.border_radius.is_some();
+@@ -442 +444 @@
+-        let rounding = match self.rounded {
++        let rounding = class_style.border_radius.unwrap_or_else(|| match self.rounded {
+@@ -448 +450 @@
+-        };
++        });
+@@ -534,0 +537,31 @@
++            .when_some(class_style.width, |this, width| this.w(width))
++            .when_some(class_style.min_width, |this, min_width| {
++                this.min_w(min_width)
++            })
++            .when_some(class_style.height, |this, height| this.h(height))
++            .when_some(class_style.margin, |this, margin| {
++                this.mt(margin.top)
++                    .mr(margin.right)
++                    .mb(margin.bottom)
++                    .ml(margin.left)
++            })
++            .when_some(class_style.padding, |this, padding| {
++                this.pt(padding.top)
++                    .pr(padding.right)
++                    .pb(padding.bottom)
++                    .pl(padding.left)
++            })
++            .when(has_class_rounding && self.border_corners.top_left, |this| {
++                this.rounded_tl(rounding)
++            })
++            .when(has_class_rounding && self.border_corners.top_right, |this| {
++                this.rounded_tr(rounding)
++            })
++            .when(
++                has_class_rounding && self.border_corners.bottom_left,
++                |this| this.rounded_bl(rounding),
++            )
++            .when(
++                has_class_rounding && self.border_corners.bottom_right,
++                |this| this.rounded_br(rounding),
++            )
+@@ -573,0 +607,7 @@
++                    .when_some(class_style.gap, |this, gap| this.gap(gap))
++                    .when_some(class_style.font_family.clone(), |this, font_family| {
++                        this.font_family(font_family)
++                    })
++                    .when_some(class_style.font_size, |this, font_size| {
++                        this.text_size(font_size)
++                    })
