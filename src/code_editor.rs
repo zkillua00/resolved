@@ -4,7 +4,7 @@ use gpui::{
     App, AppContext as _, Context, Corner, DismissEvent, Entity, EntityInputHandler, EventEmitter,
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, ParentElement as _, Pixels, Point, Render, SharedString, Styled as _,
-    Subscription, Task, Timer, Window, anchored, deferred, div, px,
+    Subscription, Task, Timer, Window, anchored, deferred, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, RopeExt as _,
@@ -101,6 +101,7 @@ pub struct CodeEditorConfig {
     line_numbers: bool,
     read_only: bool,
     auto_close: bool,
+    framed: bool,
     format_action: bool,
     completion_provider: Option<Rc<dyn CompletionProvider>>,
     hover_provider: Option<Rc<dyn HoverProvider>>,
@@ -118,6 +119,7 @@ impl Default for CodeEditorConfig {
             line_numbers: true,
             read_only: false,
             auto_close: true,
+            framed: true,
             format_action: false,
             completion_provider: None,
             hover_provider: None,
@@ -168,6 +170,11 @@ impl CodeEditorConfig {
         self
     }
 
+    pub fn framed(mut self, framed: bool) -> Self {
+        self.framed = framed;
+        self
+    }
+
     pub fn format_action(mut self, format_action: bool) -> Self {
         self.format_action = format_action;
         self
@@ -209,6 +216,7 @@ pub struct CodeEditor {
     rows: usize,
     read_only: bool,
     auto_close: bool,
+    framed: bool,
     completion_enabled: bool,
     format_action: bool,
     context_menu: Option<Entity<PopupMenu>>,
@@ -231,6 +239,7 @@ impl CodeEditor {
             line_numbers,
             read_only,
             auto_close,
+            framed,
             format_action,
             completion_provider,
             hover_provider,
@@ -276,6 +285,7 @@ impl CodeEditor {
             rows,
             read_only,
             auto_close,
+            framed,
             completion_enabled,
             format_action,
             context_menu: None,
@@ -518,9 +528,11 @@ impl Render for CodeEditor {
             // behind it keeps an enclosing list or page from handling the
             // same wheel event before InputState consumes it.
             .occlude()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.api_outline_variant())
+            .when(self.framed, |this| {
+                this.rounded_lg()
+                    .border_1()
+                    .border_color(cx.api_outline_variant())
+            })
             .bg(cx.api_surface_lowest())
             .overflow_hidden()
             .child(

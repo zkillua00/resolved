@@ -24,7 +24,8 @@ WKWebView through `gpui-wry` only when the Preview tab is selected.
 - Persistent request tabs with independent drafts, named/color-coded collapsible
   groups, dirty-close protection, and restoration across launches
 - Browser-style tab menus for closing the current, other, left, right, all, or
-  grouped tabs with one aggregate unsaved-changes confirmation
+  grouped tabs with one aggregate unsaved-changes confirmation and a Welcome
+  tab when the final request closes
 - Nested collection folders with search-preserved ancestry, request moves, and
   safe folder reparenting
 - Persistent collections, saved requests, environments, and secret variables
@@ -142,7 +143,9 @@ shows at most one discard confirmation and performs one persistence write. Use
 Move to group to create or reuse a group. Group chips can be collapsed with a
 click and expose rename, color, new-tab, ungroup, and close-group actions from
 their own context menu. The chevron beside the new-tab button lists every open
-tab, including tabs inside collapsed groups.
+tab, including tabs inside collapsed groups. Closing the final request opens a
+lightweight Welcome tab instead of immediately manufacturing another editable
+request. New Request reuses that clean backing tab, so the tab strip stays tidy.
 
 ## Settings, shortcuts, and themes
 
@@ -153,8 +156,8 @@ Reset shortcuts restores all defaults. Invalid or conflicting assignments are
 left unapplied. Valid changes are persisted to SQLite and take effect
 immediately, including while an input or code editor is focused.
 
-The Developer Settings page contains the Metrics switch for the performance
-HUD. `⌘⇧M` remains available as a customizable quick toggle.
+The Developer Settings page contains the Metrics switch and HUD location
+selector. `⌘⇧M` remains available as a customizable quick toggle.
 
 Bindings are divided into five sections so related commands remain easy to
 scan:
@@ -205,15 +208,18 @@ SQLite snapshot, and selects it. Closing the editor releases it without losing
 its recoverable draft; replacing a dirty buffer from disk requires
 confirmation.
 
-The Current theme picker keeps Material Dark pinned above every saved theme.
-Imported CSS joins the same library, saved themes can be switched immediately,
-and deleting the selected entry returns to Material Dark. When a real source
-file still exists it is left on disk; SQLite-only themes warn that removal
-deletes their only saved copy. Switching, importing, and deletion stay disabled
-while a recoverable draft or preferred-editor copy is pending, so none of those
-actions can silently discard editor work. Reload accepts the external copy;
-Discard external copy stops tracking it while leaving the file on disk. The
-catalog and active selection live in the existing SQLite settings record.
+Appearance separates library-wide actions from theme-specific actions. Import
+CSS…, Create from template…, and Reload active sit beside the Themes heading.
+Material Dark and every saved theme have their own row in the compact theme
+table with an explicit active state; saved-theme rows provide Use theme, Edit
+here, Edit in preferred editor, and Delete… actions for that exact entry.
+Deleting the active entry returns to Material Dark. When a real source file
+still exists it is left on disk; SQLite-only themes warn that removal deletes
+their only saved copy. Switching, importing, creating, and deletion stay
+disabled while a recoverable draft or preferred-editor copy is pending, so none
+of those actions can silently discard editor work. Reload accepts the external
+copy; Discard external copy stops tracking it while leaving the file on disk.
+The catalog and active selection live in the existing SQLite settings record.
 
 Theme CSS is deliberately a color-configuration format rather than arbitrary
 web styling: it must contain exactly one `:root` rule, a quoted
@@ -316,7 +322,8 @@ Enable Settings → Developer Settings → Metrics to show the optional in-app H
 It reports UI FPS, average and p95 frame interval, process CPU, resident set
 size (RSS), and macOS Activity Monitor-style physical footprint. Resource
 sampling runs off the UI thread once per second and is inactive while the HUD
-is hidden.
+is hidden. Its corner defaults to Bottom Right for backward compatibility and
+the selected location is restored on restart.
 
 `UI FPS` is the application's actual GPUI redraw cadence. Idle views report
 `idle`; the HUD does not force a display-rate redraw loop. This is useful for

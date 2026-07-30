@@ -9,12 +9,11 @@ use std::{
 
 use chrono::Local;
 use gpui::{
-    AnyElement, App, AppContext as _, Axis, ClickEvent, ClipboardItem, Context, Corner, Entity,
-    EntityId, EntityInputHandler, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _,
-    PathPromptOptions, Pixels, Point, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, Timer, Window, anchored, deferred, div, point,
-    prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Corner, Entity, EntityId,
+    EntityInputHandler, Focusable as _, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, PathPromptOptions, Pixels,
+    Point, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
+    Timer, Window, anchored, deferred, div, point, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Root, RopeExt as _, Selectable as _,
@@ -117,6 +116,7 @@ mod theme_css_actions;
 mod theme_css_editor;
 mod title_bar;
 mod ui_utils;
+mod welcome_page;
 mod workspace_tab;
 mod workspace_tab_actions;
 

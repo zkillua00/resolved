@@ -2012,7 +2012,7 @@ fn required_when_response<T>(value: Option<T>, field: &'static str) -> Result<T,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{SavedTheme, ShortcutOverride, ThemeSettings};
+    use crate::core::{MetricsPosition, SavedTheme, ShortcutOverride, ThemeSettings};
 
     fn database() -> (tempfile::TempDir, DatabaseStore) {
         let directory = tempfile::tempdir().unwrap();
@@ -3312,6 +3312,7 @@ mod tests {
                 ..Default::default()
             },
             navigation_compact: true,
+            metrics_position: MetricsPosition::TopLeft,
             ..Default::default()
         };
 

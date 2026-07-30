@@ -540,3 +540,58 @@ diff --git a/src/input/popovers/hover_popover.rs b/src/input/popovers/hover_popo
  pub(crate) struct Popover {
      id: ElementId,
      style: StyleRefinement,
+diff --git a/src/setting/group.rs b/src/setting/group.rs
+--- a/src/setting/group.rs
++++ b/src/setting/group.rs
+@@ -8 +8 @@ use crate::{
+-    group_box::{GroupBox, GroupBoxVariants},
++    group_box::{GroupBox, GroupBoxVariant, GroupBoxVariants},
+@@ -17,0 +18 @@ pub struct SettingGroup {
++    variant: Option<GroupBoxVariant>,
+@@ -34,0 +36 @@ impl SettingGroup {
++            variant: None,
+@@ -39,0 +42,6 @@ impl SettingGroup {
++
++    /// Override the default group-box variant for this group.
++    pub fn with_variant(mut self, variant: GroupBoxVariant) -> Self {
++        self.variant = Some(variant);
++        self
++    }
+@@ -86 +94 @@ impl SettingGroup {
+-            .with_variant(options.group_variant)
++            .with_variant(self.variant.unwrap_or(options.group_variant))
+diff --git a/src/setting/item.rs b/src/setting/item.rs
+--- a/src/setting/item.rs
++++ b/src/setting/item.rs
+@@ -29,0 +30 @@
++        search_text: Option<SharedString>,
+@@ -54,0 +56 @@
++            search_text: None,
+@@ -60,0 +63,14 @@
++    /// Create a searchable custom element setting item with a render closure.
++    pub fn render_searchable<R, E>(search_text: impl Into<SharedString>, render: R) -> Self
++    where
++        E: IntoElement,
++        R: Fn(&RenderOptions, &mut Window, &mut App) -> E + 'static,
++    {
++        SettingItem::Element {
++            search_text: Some(search_text.into()),
++            render: Rc::new(move |options, window, cx| {
++                render(options, window, cx).into_any_element()
++            }),
++        }
++    }
++
+@@ -97,2 +113,7 @@
+-            // We need to show all custom elements when not searching.
+-            SettingItem::Element { .. } => query.is_empty(),
++            // Show unindexed custom elements only when not searching.
++            SettingItem::Element { search_text, .. } => {
++                query.is_empty()
++                    || search_text
++                        .as_ref()
++                        .is_some_and(|text| text.to_lowercase().contains(&query.to_lowercase()))
++            }
+@@ -205 +226 @@
+-                SettingItem::Element { render } => {
++                SettingItem::Element { render, .. } => {

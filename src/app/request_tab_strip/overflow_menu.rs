@@ -14,6 +14,10 @@ pub(super) fn render_open_tabs_menu(app: &ApiTester, cx: &mut Context<ApiTester>
         .request_tabs
         .tabs()
         .iter()
+        .filter(|tab| {
+            !app.workspace_tabs.welcome_is_open()
+                || app.workspace_tabs.welcome_request_tab_id() != Some(tab.id())
+        })
         .map(|tab| {
             let group_label = tab.group_id().and_then(|group_id| {
                 let starts_group = previous_group_id.as_ref() != Some(group_id);
@@ -37,6 +41,8 @@ pub(super) fn render_open_tabs_menu(app: &ApiTester, cx: &mut Context<ApiTester>
             }
         })
         .collect::<Vec<_>>();
+    let welcome_open = app.workspace_tabs.welcome_is_open();
+    let welcome_active = app.workspace_tabs.active() == ActiveWorkspaceTab::Welcome;
     let settings_open = app.workspace_tabs.settings_open();
     let settings_active = app
         .workspace_tabs
@@ -55,6 +61,24 @@ pub(super) fn render_open_tabs_menu(app: &ApiTester, cx: &mut Context<ApiTester>
         .tooltip("All tabs")
         .dropdown_menu(move |mut menu, _, _| {
             menu = menu.max_h(px(520.)).scrollable(true);
+            if welcome_open {
+                let welcome_owner = owner.clone();
+                menu = menu.item(
+                    PopupMenuItem::new("Welcome")
+                        .icon(IconName::GalleryVerticalEnd)
+                        .checked(welcome_active)
+                        .on_click(move |_, window, cx| {
+                            if let Some(owner) = welcome_owner.upgrade() {
+                                owner.update(cx, |this, cx| {
+                                    this.activate_workspace_tab(WorkspaceTab::Welcome, window, cx);
+                                });
+                            }
+                        }),
+                );
+                if !entries.is_empty() {
+                    menu = menu.separator().label("Requests");
+                }
+            }
             for entry in &entries {
                 if let Some(group_label) = &entry.group_label {
                     menu = menu.label(group_label.clone());

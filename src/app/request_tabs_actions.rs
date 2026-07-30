@@ -57,6 +57,16 @@ impl ApiTester {
     }
 
     pub(super) fn snapshot_active_request_tab(&mut self, cx: &App) {
+        if self.workspace_tabs.welcome_request_tab_id() == Some(self.request_tabs.active_tab_id()) {
+            if self.workspace_tabs.welcome_is_open()
+                || self.workspace_tabs.active() != ActiveWorkspaceTab::Request
+                || !self.request_is_dirty()
+            {
+                return;
+            }
+            self.workspace_tabs.take_welcome_request_tab_id();
+            self.request_tabs.dismiss_welcome();
+        }
         let tab_id = self.request_tabs.active_tab_id().as_str().to_owned();
         let template = self.request_template(cx);
         let input_title = self.saved_request_name.read(cx).value().to_string();
@@ -312,6 +322,10 @@ impl ApiTester {
         if self.request_tabs.get(&tab_id).is_none() {
             return;
         }
+        let dismissing_welcome_backing =
+            self.workspace_tabs.welcome_request_tab_id() == Some(&tab_id);
+        let leaving_visible_welcome =
+            dismissing_welcome_backing && self.workspace_tabs.welcome_is_open();
         let leaving_tool = self.workspace_tabs.active() != ActiveWorkspaceTab::Request;
         let activating_current_request = self.request_tabs.active_tab_id() == &tab_id;
         if self.sending && !(leaving_tool && activating_current_request) {
@@ -324,8 +338,25 @@ impl ApiTester {
             self.cancel_shortcut_recording(cx);
         }
         self.workspace_tabs.activate_request();
+        if dismissing_welcome_backing {
+            self.request_tabs.dismiss_welcome();
+        }
         self.sidebar_tab = SidebarTab::Collections;
         if activating_current_request {
+            if leaving_visible_welcome {
+                self.request_tab_runtime
+                    .entry(tab_id.as_str().to_owned())
+                    .or_default();
+                self.hide_preview(cx);
+                self.restore_active_request_tab(window, cx);
+                self.persist_request_tabs_now(cx);
+                return;
+            }
+            if dismissing_welcome_backing {
+                self.snapshot_active_request_tab(cx);
+                self.persist_request_tabs_now(cx);
+                return;
+            }
             if self.expand_request_tab_group_for(&tab_id) {
                 self.persist_request_tabs_now(cx);
             }
@@ -350,6 +381,29 @@ impl ApiTester {
         }
         if self.workspace_tabs.active() == ActiveWorkspaceTab::Settings {
             self.cancel_shortcut_recording(cx);
+        }
+        let welcome_backing = self.workspace_tabs.take_welcome_request_tab_id();
+        let reuse_welcome_backing = welcome_backing.is_some() && !self.request_is_dirty();
+        if welcome_backing.is_some() {
+            self.request_tabs.dismiss_welcome();
+        }
+        if let Some(tab_id) = welcome_backing.filter(|_| reuse_welcome_backing) {
+            self.workspace_tabs.activate_request();
+            self.sidebar_tab = SidebarTab::Collections;
+            let association = RequestTabAssociation::new(
+                self.selected_folder_id.clone(),
+                self.selected_collection_id.clone(),
+                None,
+            );
+            let _ = self
+                .request_tabs
+                .repair_association(&tab_id, association, false);
+            self.request_tab_runtime
+                .insert(tab_id.as_str().to_owned(), RequestTabRuntime::default());
+            self.hide_preview(cx);
+            self.restore_active_request_tab(window, cx);
+            self.persist_request_tabs_now(cx);
+            return;
         }
         self.workspace_tabs.activate_request();
         self.sidebar_tab = SidebarTab::Collections;
@@ -387,8 +441,6 @@ impl ApiTester {
         if self.workspace_tabs.active() == ActiveWorkspaceTab::Settings {
             self.cancel_shortcut_recording(cx);
         }
-        self.workspace_tabs.activate_request();
-        self.sidebar_tab = SidebarTab::Collections;
         let Some((title, definition, folder_id)) = self
             .workspace
             .collection(&collection_id)
@@ -409,7 +461,16 @@ impl ApiTester {
             return;
         };
 
-        self.snapshot_active_request_tab(cx);
+        let welcome_backing = self.workspace_tabs.take_welcome_request_tab_id();
+        let discard_welcome_backing = welcome_backing.clone().filter(|_| !self.request_is_dirty());
+        if welcome_backing.is_some() {
+            self.request_tabs.dismiss_welcome();
+        }
+        self.workspace_tabs.activate_request();
+        self.sidebar_tab = SidebarTab::Collections;
+        if discard_welcome_backing.is_none() {
+            self.snapshot_active_request_tab(cx);
+        }
         let selected_folder_id = folder_id.clone();
         let opened = self.request_tabs.open_saved(
             title,
@@ -421,6 +482,11 @@ impl ApiTester {
                 opened.tab_id.as_str().to_owned(),
                 RequestTabRuntime::default(),
             );
+        }
+        if let Some(backing_id) = discard_welcome_backing {
+            self.request_tabs
+                .close_tabs(std::slice::from_ref(&backing_id));
+            self.request_tab_runtime.remove(backing_id.as_str());
         }
         self.expand_request_tab_group_for(&opened.tab_id);
         self.selected_collection_id = Some(collection_id.clone());
@@ -453,9 +519,16 @@ impl ApiTester {
         if self.workspace_tabs.active() == ActiveWorkspaceTab::Settings {
             self.cancel_shortcut_recording(cx);
         }
+        let welcome_backing = self.workspace_tabs.take_welcome_request_tab_id();
+        let discard_welcome_backing = welcome_backing.clone().filter(|_| !self.request_is_dirty());
+        if welcome_backing.is_some() {
+            self.request_tabs.dismiss_welcome();
+        }
         self.workspace_tabs.activate_request();
         self.sidebar_tab = SidebarTab::Collections;
-        self.snapshot_active_request_tab(cx);
+        if discard_welcome_backing.is_none() {
+            self.snapshot_active_request_tab(cx);
+        }
         let title = format!("{} {}", request.method, compact_url(&request.url));
         let tab_id = self.request_tabs.open_unsaved(
             title,
@@ -468,6 +541,11 @@ impl ApiTester {
         );
         self.request_tab_runtime
             .insert(tab_id.as_str().to_owned(), RequestTabRuntime::default());
+        if let Some(backing_id) = discard_welcome_backing {
+            self.request_tabs
+                .close_tabs(std::slice::from_ref(&backing_id));
+            self.request_tab_runtime.remove(backing_id.as_str());
+        }
         self.request_notice = Some(format!("Opened history entry {history_id}."));
         self.hide_preview(cx);
         self.restore_active_request_tab(window, cx);
@@ -582,6 +660,13 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) {
         let active_before = self.request_tabs.active_tab_id().clone();
+        let request_surface_was_active =
+            self.workspace_tabs.active() == ActiveWorkspaceTab::Request;
+        let closes_every_request = self
+            .request_tabs
+            .tabs()
+            .iter()
+            .all(|tab| close_ids.contains(tab.id()));
         let anchor_survives =
             !close_ids.contains(&anchor_id) && self.request_tabs.get(&anchor_id).is_some();
         let removed = self.request_tabs.close_tabs(&close_ids);
@@ -590,6 +675,15 @@ impl ApiTester {
         }
         for tab in &removed {
             self.request_tab_runtime.remove(tab.id().as_str());
+        }
+        if closes_every_request {
+            let welcome_id = self.request_tabs.active_tab_id().clone();
+            self.workspace_tabs
+                .open_welcome(welcome_id, request_surface_was_active);
+            self.hide_preview(cx);
+            self.persist_request_tabs_now(cx);
+            cx.notify();
+            return;
         }
         if self.request_tabs.get(&active_before).is_none() && anchor_survives {
             let _ = self.request_tabs.activate(&anchor_id);

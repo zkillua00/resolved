@@ -5,12 +5,14 @@ mod group_item;
 mod overflow_menu;
 mod tab_item;
 mod tool_tab_item;
+mod welcome_item;
 
 use context_menu::build_request_tab_context_menu;
 use group_item::render_request_tab_group;
 use overflow_menu::render_open_tabs_menu;
 use tab_item::render_request_tab;
 use tool_tab_item::render_workspace_tool_tab;
+use welcome_item::render_welcome_tab;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::app) enum RequestTabContextTarget {
@@ -24,7 +26,15 @@ impl ApiTester {
         let mut elements = Vec::new();
         let mut previous_group_id: Option<RequestTabGroupId> = None;
 
+        if self.workspace_tabs.welcome_is_open() {
+            elements.push(render_welcome_tab(self, cx));
+        }
         for tab in self.request_tabs.tabs() {
+            if self.workspace_tabs.welcome_is_open()
+                && self.workspace_tabs.welcome_request_tab_id() == Some(tab.id())
+            {
+                continue;
+            }
             let group = tab
                 .group_id()
                 .and_then(|group_id| self.request_tabs.group(group_id));

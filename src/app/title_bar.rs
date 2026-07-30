@@ -3,6 +3,7 @@ use super::*;
 impl ApiTester {
     pub(super) fn render_title_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         match self.workspace_tabs.active() {
+            ActiveWorkspaceTab::Welcome => return self.render_welcome_title_bar(cx),
             ActiveWorkspaceTab::Settings => return self.render_settings_title_bar(cx),
             ActiveWorkspaceTab::ThemeCss => return self.render_theme_css_title_bar(cx),
             ActiveWorkspaceTab::Request => {}

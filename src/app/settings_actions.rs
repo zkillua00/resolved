@@ -129,6 +129,25 @@ impl ApiTester {
         }
     }
 
+    pub(super) fn set_metrics_position(
+        &mut self,
+        position: crate::core::MetricsPosition,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.metrics_position == position {
+            return;
+        }
+        let mut candidate = self.settings.clone();
+        candidate.metrics_position = position;
+        match self.commit_settings(candidate, false, cx) {
+            Ok(()) => {
+                self.settings_notice = Some(format!("Metrics HUD moved to {}.", position.label()));
+            }
+            Err(error) => self.settings_notice = Some(error),
+        }
+        cx.notify();
+    }
+
     pub(super) fn commit_settings(
         &mut self,
         candidate: AppSettings,
@@ -151,6 +170,9 @@ impl ApiTester {
                 .map_err(|error| format!("Shortcut keymap could not be applied: {error}"))?;
             crate::configure_menus(cx);
         }
+        self.debug_overlay.update(cx, |overlay, cx| {
+            overlay.set_position(candidate.metrics_position, cx);
+        });
         self.navigation_compact = candidate.navigation_compact;
         self.settings = candidate;
         self.settings_warning = semantic_settings_warning(&self.settings);

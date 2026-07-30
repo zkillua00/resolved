@@ -19,6 +19,7 @@ pub struct AppSettings {
     pub shortcuts: BTreeMap<String, ShortcutOverride>,
     pub theme: ThemeSettings,
     pub navigation_compact: bool,
+    pub metrics_position: MetricsPosition,
     /// Preserve fields written by a newer application version when an older
     /// build changes a setting it understands.
     #[serde(flatten)]
@@ -31,6 +32,58 @@ pub struct AppSettings {
 pub enum ShortcutOverride {
     Custom(String),
     Disabled,
+}
+
+/// Persisted corner used by the in-app performance HUD.
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricsPosition {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    #[default]
+    BottomRight,
+}
+
+impl MetricsPosition {
+    pub const ALL: [Self; 4] = [
+        Self::TopLeft,
+        Self::TopRight,
+        Self::BottomLeft,
+        Self::BottomRight,
+    ];
+
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::TopLeft => "top_left",
+            Self::TopRight => "top_right",
+            Self::BottomLeft => "bottom_left",
+            Self::BottomRight => "bottom_right",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::TopLeft => "Top Left",
+            Self::TopRight => "Top Right",
+            Self::BottomLeft => "Bottom Left",
+            Self::BottomRight => "Bottom Right",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|position| position.key() == key)
+    }
+}
+
+impl<'de> Deserialize<'de> for MetricsPosition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let key = String::deserialize(deserializer)?;
+        Ok(Self::from_key(&key).unwrap_or_default())
+    }
 }
 
 /// One validated CSS theme retained in the user's theme catalog.
@@ -123,6 +176,7 @@ mod tests {
         assert!(settings.shortcuts.is_empty());
         assert_eq!(settings.theme, ThemeSettings::default());
         assert!(!settings.navigation_compact);
+        assert_eq!(settings.metrics_position, MetricsPosition::BottomRight);
     }
 
     #[test]
@@ -191,6 +245,7 @@ mod tests {
             Some(&serde_json::json!(["ocean", 2]))
         );
         assert!(!settings.navigation_compact);
+        assert_eq!(settings.metrics_position, MetricsPosition::BottomRight);
 
         let encoded = serde_json::to_string(&settings).unwrap();
         let decoded: serde_json::Value = serde_json::from_str(&encoded).unwrap();
@@ -231,6 +286,33 @@ mod tests {
             settings.draft_source.as_deref(),
             Some(":root { --api-theme-name: \"Draft\"; }")
         );
+    }
+
+    #[test]
+    fn metrics_positions_round_trip_with_a_backward_compatible_default() {
+        for position in MetricsPosition::ALL {
+            let settings = AppSettings {
+                metrics_position: position,
+                ..Default::default()
+            };
+            let encoded = serde_json::to_value(&settings).unwrap();
+            assert_eq!(
+                encoded.get("metrics_position"),
+                Some(&serde_json::json!(position.key()))
+            );
+            assert_eq!(
+                serde_json::from_value::<AppSettings>(encoded)
+                    .unwrap()
+                    .metrics_position,
+                position
+            );
+            assert_eq!(MetricsPosition::from_key(position.key()), Some(position));
+        }
+        assert_eq!(MetricsPosition::from_key("center"), None);
+
+        let unknown: AppSettings =
+            serde_json::from_str(r#"{"metrics_position":"future_corner"}"#).unwrap();
+        assert_eq!(unknown.metrics_position, MetricsPosition::BottomRight);
     }
 
     #[test]

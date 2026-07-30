@@ -18,6 +18,8 @@ use gpui::{
 use gpui_component::{ActiveTheme as _, StyledExt as _, h_flex, v_flex};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, get_current_pid};
 
+use crate::core::MetricsPosition;
+
 const FRAME_HISTORY_CAPACITY: usize = 120;
 const FRAME_BURST_GAP: Duration = Duration::from_millis(250);
 const FRAME_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -139,6 +141,7 @@ impl FrameHistory {
 /// never blocks the UI thread.
 pub struct DebugOverlay {
     visible: bool,
+    position: MetricsPosition,
     frame_history: RefCell<FrameHistory>,
     resource_sample: Option<ResourceSample>,
     sampler_enabled: Arc<AtomicBool>,
@@ -174,6 +177,7 @@ impl DebugOverlay {
 
         Self {
             visible: false,
+            position: MetricsPosition::default(),
             frame_history: RefCell::new(FrameHistory::new(FRAME_HISTORY_CAPACITY)),
             resource_sample: None,
             sampler_enabled,
@@ -200,6 +204,14 @@ impl DebugOverlay {
         if visible {
             self.resource_sample = None;
         }
+        cx.notify();
+    }
+
+    pub fn set_position(&mut self, position: MetricsPosition, cx: &mut Context<Self>) {
+        if self.position == position {
+            return;
+        }
+        self.position = position;
         cx.notify();
     }
 
@@ -254,10 +266,15 @@ impl Render for DebugOverlay {
                 .child(div().font_semibold().child(value))
         };
 
-        v_flex()
-            .absolute()
-            .bottom(px(12.0))
-            .right(px(12.0))
+        let overlay = v_flex().absolute();
+        let overlay = match self.position {
+            MetricsPosition::TopLeft => overlay.top(px(12.0)).left(px(12.0)),
+            MetricsPosition::TopRight => overlay.top(px(12.0)).right(px(12.0)),
+            MetricsPosition::BottomLeft => overlay.bottom(px(12.0)).left(px(12.0)),
+            MetricsPosition::BottomRight => overlay.bottom(px(12.0)).right(px(12.0)),
+        };
+
+        overlay
             .w(px(228.0))
             .gap_1()
             .p_3()

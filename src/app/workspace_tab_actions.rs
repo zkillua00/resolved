@@ -41,11 +41,18 @@ impl ApiTester {
             self.cancel_shortcut_recording(cx);
         }
 
-        self.workspace_tabs.activate_request();
+        let was_welcome = self.workspace_tabs.browse_requests();
         self.sidebar_tab = sidebar_tab;
+        if was_welcome {
+            self.hide_preview(cx);
+            self.restore_active_request_tab(window, cx);
+        }
         if self.sidebar_tab == SidebarTab::Environments {
             self.hide_preview(cx);
-        } else if (was_tool || was_environment) && self.response_tab == ResponseTab::Preview {
+        } else if !was_welcome
+            && (was_tool || was_environment)
+            && self.response_tab == ResponseTab::Preview
+        {
             self.show_preview(window, cx);
         }
         cx.notify();
@@ -58,6 +65,16 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) {
         match tab {
+            WorkspaceTab::Welcome => {
+                let was_settings = self.workspace_tabs.active() == ActiveWorkspaceTab::Settings;
+                if self.workspace_tabs.activate_welcome() {
+                    if was_settings {
+                        self.cancel_shortcut_recording(cx);
+                    }
+                    self.hide_preview(cx);
+                    cx.notify();
+                }
+            }
             WorkspaceTab::Request(tab_id) => self.activate_request_tab(tab_id, window, cx),
             WorkspaceTab::Tool(WorkspaceToolTab::Settings) => {
                 self.open_workspace_tool_tab(WorkspaceToolTab::Settings, window, cx);
@@ -103,6 +120,7 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) {
         match self.workspace_tabs.active() {
+            ActiveWorkspaceTab::Welcome => {}
             ActiveWorkspaceTab::Request => {
                 let tab_id = self.request_tabs.active_tab_id().clone();
                 self.request_close_request_tab(tab_id, window, cx);
@@ -122,6 +140,9 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) {
         match self.workspace_tabs.active() {
+            ActiveWorkspaceTab::Welcome => {
+                self.hide_preview(cx);
+            }
             ActiveWorkspaceTab::Request => {
                 if self.sidebar_tab == SidebarTab::Environments {
                     self.hide_preview(cx);

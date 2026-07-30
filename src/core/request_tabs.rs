@@ -340,6 +340,18 @@ impl RequestTabRecord {
             || self.template != self.baseline_template
     }
 
+    /// Whether this is the canonical empty request created to preserve the
+    /// non-empty tab invariant.
+    pub fn is_pristine_scratch(&self) -> bool {
+        self.group_id.is_none()
+            && self.title == DEFAULT_REQUEST_TAB_TITLE
+            && self.association == RequestTabAssociation::default()
+            && self.template == canonical_request_template(RequestTemplate::default())
+            && self.baseline_title == DEFAULT_REQUEST_TAB_TITLE
+            && self.baseline_template == self.template
+            && !self.detached
+    }
+
     /// Establish the current title and request template as the clean baseline.
     pub fn mark_saved(&mut self, title: impl Into<String>, association: RequestTabAssociation) {
         self.title = title.into();
@@ -422,6 +434,8 @@ pub struct RequestTabs {
     active_tab_id: RequestTabId,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     groups: Vec<RequestTabGroup>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    welcome: bool,
 }
 
 impl RequestTabs {
@@ -432,11 +446,26 @@ impl RequestTabs {
             tabs: vec![tab],
             active_tab_id,
             groups: Vec::new(),
+            welcome: false,
         }
     }
 
     pub fn tabs(&self) -> &[RequestTabRecord] {
         &self.tabs
+    }
+
+    /// True when the model contains only the clean scratch record used as the
+    /// backing state for the Welcome surface.
+    pub fn is_canonical_scratch_only(&self) -> bool {
+        self.tabs.len() == 1 && self.groups.is_empty() && self.tabs[0].is_pristine_scratch()
+    }
+
+    pub fn welcome_is_open(&self) -> bool {
+        self.welcome
+    }
+
+    pub fn dismiss_welcome(&mut self) {
+        self.welcome = false;
     }
 
     #[cfg(test)]
@@ -664,6 +693,7 @@ impl RequestTabs {
         template: RequestTemplate,
         association: RequestTabAssociation,
     ) -> RequestTabId {
+        self.welcome = false;
         let tab = RequestTabRecord::unsaved(title, template, association);
         let id = tab.id.clone();
         self.tabs.push(tab);
@@ -679,6 +709,7 @@ impl RequestTabs {
         template: RequestTemplate,
         association: RequestTabAssociation,
     ) -> OpenRequestTabResult {
+        self.welcome = false;
         if let Some(saved_request_id) = association.saved_request_id.as_deref()
             && let Some(tab) = self
                 .tabs
@@ -796,9 +827,13 @@ impl RequestTabs {
             self.active_tab_id = replacement.id.clone();
             retained.push(replacement);
             self.groups.clear();
+            self.welcome = true;
         } else if !active_survives {
             self.active_tab_id =
                 fallback_id.expect("a surviving tab must provide an active fallback");
+            self.welcome = false;
+        } else {
+            self.welcome = false;
         }
         self.tabs = retained;
         self.prune_empty_groups();
@@ -882,6 +917,8 @@ struct PersistedRequestTabs {
     active_tab_id: Option<RequestTabId>,
     #[serde(default)]
     groups: Vec<RequestTabGroup>,
+    #[serde(default)]
+    welcome: bool,
 }
 
 impl<'de> Deserialize<'de> for RequestTabs {
@@ -894,6 +931,7 @@ impl<'de> Deserialize<'de> for RequestTabs {
             persisted.tabs,
             persisted.active_tab_id,
             persisted.groups,
+            persisted.welcome,
         ))
     }
 }
@@ -902,6 +940,7 @@ fn normalize_tabs(
     mut tabs: Vec<RequestTabRecord>,
     active_tab_id: Option<RequestTabId>,
     mut groups: Vec<RequestTabGroup>,
+    welcome: bool,
 ) -> RequestTabs {
     if tabs.is_empty() {
         return RequestTabs::new();
@@ -965,11 +1004,18 @@ fn normalize_tabs(
     let active_tab_id = active_tab_id
         .filter(|id| ids.contains(id))
         .unwrap_or_else(|| tabs[0].id.clone());
-    RequestTabs {
+    let mut request_tabs = RequestTabs {
         tabs,
         active_tab_id,
         groups,
-    }
+        welcome: false,
+    };
+    request_tabs.welcome = welcome && request_tabs.is_canonical_scratch_only();
+    request_tabs
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn make_group_members_contiguous(tabs: &mut Vec<RequestTabRecord>) {
@@ -1481,6 +1527,62 @@ mod tests {
             tabs.close_tabs(&[RequestTabId("missing".to_owned())])
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn canonical_scratch_detection_is_strict() {
+        let mut tabs = RequestTabs::new();
+        assert!(tabs.is_canonical_scratch_only());
+        assert!(!tabs.welcome_is_open());
+
+        tabs.active_mut().set_title("Named");
+        assert!(!tabs.is_canonical_scratch_only());
+
+        let mut tabs = RequestTabs::new();
+        tabs.active_mut()
+            .set_template(RequestTemplate::new(super::super::RequestDraft {
+                url: "https://example.test".to_owned(),
+                ..Default::default()
+            }));
+        assert!(!tabs.is_canonical_scratch_only());
+
+        let mut tabs = RequestTabs::new();
+        tabs.open_new();
+        assert!(!tabs.is_canonical_scratch_only());
+    }
+
+    #[test]
+    fn welcome_marker_is_explicit_persisted_and_cleared_by_new_work() {
+        let mut tabs = RequestTabs::new();
+        let initial = tabs.active_tab_id().clone();
+        tabs.close(&initial).unwrap();
+        assert!(tabs.welcome_is_open());
+        assert!(tabs.is_canonical_scratch_only());
+
+        let encoded = serde_json::to_string(&tabs).unwrap();
+        let mut restored: RequestTabs = serde_json::from_str(&encoded).unwrap();
+        assert!(restored.welcome_is_open());
+
+        restored.dismiss_welcome();
+        assert!(!restored.welcome_is_open());
+        restored.open_new();
+        assert!(!restored.welcome_is_open());
+
+        let legacy: RequestTabs = serde_json::from_str(
+            r#"{
+                "tabs": [{
+                    "id": "legacy",
+                    "title": "Untitled Request",
+                    "association": {},
+                    "template": {},
+                    "baseline_title": "Untitled Request",
+                    "baseline_template": {}
+                }],
+                "active_tab_id": "legacy"
+            }"#,
+        )
+        .unwrap();
+        assert!(!legacy.welcome_is_open());
     }
 
     #[test]

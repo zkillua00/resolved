@@ -238,6 +238,9 @@ impl ApiTester {
             }
         }
         let navigation_compact = settings.navigation_compact;
+        debug_overlay.update(cx, |overlay, cx| {
+            overlay.set_position(settings.metrics_position, cx);
+        });
         if let Err(error) = shortcuts::apply_key_bindings(cx, &base_key_bindings, &settings) {
             let warning = format!(
                 "Stored shortcuts are invalid; defaults are active and the stored settings were left untouched: {error}"
@@ -278,6 +281,7 @@ impl ApiTester {
                 }
             }
         }
+        let workspace_tabs = WorkspaceTabs::from_request_tabs(&request_tabs);
 
         let selected_collection_id = request_tabs
             .active()
@@ -511,7 +515,7 @@ impl ApiTester {
             request_tabs_warning,
             request_tabs_writable,
             request_tab_context_target: None,
-            workspace_tabs: WorkspaceTabs::default(),
+            workspace_tabs,
             settings,
             settings_warning,
             settings_writable,

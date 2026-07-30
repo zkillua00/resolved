@@ -11,15 +11,13 @@ use super::*;
 impl ApiTester {
     pub(super) fn choose_css_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.has_detached_theme_snapshot() {
-            self.settings_notice = Some(
-                "Save the current unsaved CSS snapshot as a theme before importing another.".into(),
-            );
+            self.settings_notice = Some("Save this theme before importing another.".into());
             cx.notify();
             return;
         }
         if self.has_unapplied_theme_draft() {
             self.settings_notice =
-                Some("Save or revert the in-app CSS draft before importing another theme.".into());
+                Some("Save or revert your changes before importing another theme.".into());
             cx.notify();
             return;
         }
@@ -53,16 +51,14 @@ impl ApiTester {
 
     pub(super) fn reload_css_theme(&mut self, cx: &mut Context<Self>) {
         if self.has_detached_theme_snapshot() {
-            self.settings_notice = Some(
-                "Save the unreconciled CSS snapshot as a new theme before reloading from a file."
-                    .into(),
-            );
+            self.settings_notice =
+                Some("Save this as a new theme before reloading from a file.".into());
             cx.notify();
             return;
         }
         if self.has_unapplied_editor_draft() {
             self.settings_notice = Some(
-                "Open the recovered CSS draft, then save or revert it before reloading.".into(),
+                "Open your restored changes, then save or revert them before reloading.".into(),
             );
             cx.notify();
             return;
@@ -74,7 +70,7 @@ impl ApiTester {
             .clone()
             .or_else(|| self.settings.theme.source_path.clone())
         else {
-            self.settings_notice = Some("This theme has no source file to reload.".to_owned());
+            self.settings_notice = Some("This theme has no file to reload.".to_owned());
             cx.notify();
             return;
         };
@@ -93,16 +89,13 @@ impl ApiTester {
 
     pub(super) fn switch_css_theme(&mut self, theme_id: Option<String>, cx: &mut Context<Self>) {
         if self.has_detached_theme_snapshot() {
-            self.settings_notice = Some(
-                "Save the current unsaved CSS snapshot as a theme before switching away from it."
-                    .into(),
-            );
+            self.settings_notice = Some("Save this theme before switching to another.".into());
             cx.notify();
             return;
         }
         if self.has_unapplied_theme_draft() {
             self.settings_notice =
-                Some("Save or revert the CSS draft before switching themes.".into());
+                Some("Save or revert your changes before switching themes.".into());
             cx.notify();
             return;
         }
@@ -207,6 +200,7 @@ impl ApiTester {
                     .placeholder("Define one :root theme")
                     .rows(28)
                     .soft_wrap(false)
+                    .framed(false)
                     .completion_provider(intelligence.clone())
                     .hover_provider(intelligence)
                     .diagnostic_provider(crate::theme::theme_css_diagnostics),
@@ -235,13 +229,37 @@ impl ApiTester {
         self.theme_editor_subscription = Some(subscription);
         self.theme_editor = Some(editor.clone());
         self.open_workspace_tool_tab(WorkspaceToolTab::ThemeCss, window, cx);
-        self.settings_notice = Some(if recovered {
-            "Recovered the unapplied CSS draft. Save or revert it when ready.".into()
-        } else {
-            "CSS intelligence is active. Saving validates before changing the theme.".into()
-        });
+        self.settings_notice = recovered
+            .then(|| "Your unsaved changes were restored. Save or revert them when ready.".into());
         editor.read(cx).focus_handle(cx).focus(window);
         cx.notify();
+    }
+
+    pub(super) fn edit_saved_theme_here(
+        &mut self,
+        theme_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.activate_saved_theme_for_editing(&theme_id, cx) {
+            self.open_theme_editor(window, cx);
+        }
+    }
+
+    pub(super) fn edit_saved_theme_externally(&mut self, theme_id: String, cx: &mut Context<Self>) {
+        if self.activate_saved_theme_for_editing(&theme_id, cx) {
+            self.open_css_in_preferred_editor(cx);
+        }
+    }
+
+    fn activate_saved_theme_for_editing(&mut self, theme_id: &str, cx: &mut Context<Self>) -> bool {
+        if self.settings.theme.active_theme_id.as_deref() != Some(theme_id)
+            || self.has_detached_theme_snapshot()
+        {
+            self.switch_css_theme(Some(theme_id.to_owned()), cx);
+        }
+        self.settings.theme.active_theme_id.as_deref() == Some(theme_id)
+            && !self.has_detached_theme_snapshot()
     }
 
     pub(super) fn apply_theme_editor(&mut self, cx: &mut Context<Self>) {
@@ -250,8 +268,7 @@ impl ApiTester {
         };
         if self.has_detached_theme_snapshot() {
             self.settings_notice = Some(
-                "The active CSS snapshot is not safely linked to that library entry. Use Save as new theme instead."
-                    .into(),
+                "This theme can’t be updated directly. Save it as a new theme instead.".into(),
             );
             cx.notify();
             return;
@@ -367,7 +384,91 @@ impl ApiTester {
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(
-                                    "Save this valid CSS snapshot in the theme library. Names may be up to 80 characters.",
+                                    "Choose a name for this theme. Names may be up to 80 characters.",
+                                ),
+                        )
+                        .child(Input::new(&input_for_dialog)),
+                )
+        });
+        name_input.read(cx).focus_handle(cx).focus(window);
+    }
+
+    pub(super) fn open_create_theme_from_template_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.settings_writable {
+            self.settings_notice =
+                Some("The theme library is read-only because settings could not be loaded.".into());
+            cx.notify();
+            return;
+        }
+        if self.has_detached_theme_snapshot() {
+            self.settings_notice = Some("Save this theme before creating another.".into());
+            cx.notify();
+            return;
+        }
+        if self.has_unapplied_theme_draft() {
+            self.settings_notice =
+                Some("Save or revert your changes before creating another theme.".into());
+            cx.notify();
+            return;
+        }
+
+        let source = crate::theme::bundled_css().to_owned();
+        let parsed_name = crate::theme::parse_css(&source)
+            .expect("the bundled CSS theme is validated by the theme test suite")
+            .name
+            .to_string();
+        let default_name =
+            next_available_theme_name(&self.settings.theme.saved_themes, &parsed_name);
+        let name_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Theme name")
+                .default_value(default_name)
+        });
+        let this = cx.entity().downgrade();
+        let input_for_dialog = name_input.clone();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let create_this = this.clone();
+            let input_for_create = input_for_dialog.clone();
+            let source_for_create = source.clone();
+            dialog
+                .title("Create theme from template")
+                .w(px(460.))
+                .confirm()
+                .button_props(DialogButtonProps::default().ok_text("Create theme"))
+                .on_ok(move |_, _, cx| {
+                    let name = input_for_create.read(cx).value().trim().to_owned();
+                    if name.is_empty() || name.chars().count() > 80 {
+                        return false;
+                    }
+                    let Some(this) = create_this.upgrade() else {
+                        return true;
+                    };
+                    this.update(cx, |this, cx| {
+                        if let Some(name) =
+                            this.save_new_theme_source(name, source_for_create.clone(), cx)
+                        {
+                            this.dismiss_theme_editor();
+                            this.settings_notice = Some(format!(
+                                "Created and selected “{name}” from the default template."
+                            ));
+                        }
+                        cx.notify();
+                    });
+                    true
+                })
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(
+                                    "Create a separate saved theme from the documented default CSS. You can edit it from its library row.",
                                 ),
                         )
                         .child(Input::new(&input_for_dialog)),
@@ -377,22 +478,37 @@ impl ApiTester {
     }
 
     fn save_theme_editor_as_new(&mut self, requested_name: String, cx: &mut Context<Self>) {
-        if !self.settings_writable {
-            self.settings_notice =
-                Some("The theme library is read-only because settings could not be loaded.".into());
-            cx.notify();
-            return;
-        }
         let Some(editor) = self.theme_editor.as_ref() else {
             return;
         };
         let source = editor.read(cx).value(cx).to_string();
+        if let Some(name) = self.save_new_theme_source(requested_name, source.clone(), cx) {
+            self.theme_editor_path = None;
+            self.theme_editor_baseline = source;
+            self.theme_editor_dirty = false;
+            self.theme_editor_disk_source = None;
+            self.theme_editor_persist_task = None;
+            self.settings_notice = Some(format!("Saved and selected “{name}”."));
+        }
+        cx.notify();
+    }
+
+    fn save_new_theme_source(
+        &mut self,
+        requested_name: String,
+        source: String,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        if !self.settings_writable {
+            self.settings_notice =
+                Some("The theme library is read-only because settings could not be loaded.".into());
+            return None;
+        }
         let parsed = match crate::theme::parse_css(&source) {
             Ok(parsed) => parsed,
             Err(error) => {
                 self.settings_notice = Some(format!("Theme was not saved: {error}"));
-                cx.notify();
-                return;
+                return None;
             }
         };
         let name = next_available_theme_name(&self.settings.theme.saved_themes, &requested_name);
@@ -402,7 +518,7 @@ impl ApiTester {
         candidate.theme.saved_themes.push(saved);
         candidate.theme.active_theme_id = Some(saved_id);
         candidate.theme.source_path = None;
-        candidate.theme.css_source = Some(source.clone());
+        candidate.theme.css_source = Some(source);
         candidate.theme.draft_source = None;
         candidate.theme.draft_path = None;
         candidate.theme.draft_disk_source = None;
@@ -411,41 +527,36 @@ impl ApiTester {
             Ok(()) => {
                 crate::theme::apply(parsed, cx);
                 self.refresh_variable_intelligence(cx);
-                self.theme_editor_path = None;
-                self.theme_editor_baseline = source.clone();
-                self.theme_editor_dirty = false;
-                self.theme_editor_disk_source = None;
-                self.theme_editor_persist_task = None;
-                self.settings_notice = Some(format!("Saved and selected “{name}”."));
+                Some(name)
             }
-            Err(error) => self.settings_notice = Some(error),
+            Err(error) => {
+                self.settings_notice = Some(error);
+                None
+            }
         }
-        cx.notify();
     }
 
-    pub(super) fn delete_active_saved_theme(
+    pub(super) fn delete_saved_theme(
         &mut self,
+        theme_id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.has_detached_theme_snapshot() {
-            self.settings_notice = Some(
-                "Save the unreconciled CSS snapshot as a new theme before deleting the selected library entry."
-                    .into(),
-            );
+            self.settings_notice =
+                Some("Save this as a new theme before deleting another theme.".into());
             cx.notify();
             return;
         }
         if self.has_unapplied_theme_draft() {
             self.settings_notice =
-                Some("Save or revert the CSS draft before deleting a theme.".into());
+                Some("Save or revert your changes before deleting a theme.".into());
             cx.notify();
             return;
         }
-        let Some(active_id) = self.settings.theme.active_theme_id.clone() else {
-            return;
-        };
-        let Some(theme) = self.settings.theme.saved_theme(&active_id) else {
+        let Some(theme) = self.settings.theme.saved_theme(&theme_id) else {
+            self.settings_notice = Some("That saved theme no longer exists.".into());
+            cx.notify();
             return;
         };
         let name = theme.name.clone();
@@ -453,7 +564,7 @@ impl ApiTester {
         let this = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, cx| {
             let delete_this = this.clone();
-            let theme_id = active_id.clone();
+            let theme_id = theme_id.clone();
             let theme_name = name.clone();
             dialog
                 .title("Remove saved theme?")
@@ -539,9 +650,11 @@ impl ApiTester {
         candidate.theme.draft_path = None;
         candidate.theme.draft_disk_source = None;
         self.settings_notice = Some(match self.commit_settings(candidate, false, cx) {
-            Ok(()) => "Reverted the CSS draft to the active theme.".into(),
+            Ok(()) => "Reverted your changes.".into(),
             Err(error) => {
-                format!("The editor was reverted, but draft recovery could not be cleared: {error}")
+                format!(
+                    "The editor was reverted, but the saved recovery copy could not be cleared: {error}"
+                )
             }
         });
         cx.notify();
@@ -576,12 +689,12 @@ impl ApiTester {
             window.open_dialog(cx, move |dialog, _, cx| {
                 let reload_this = this.clone();
                 dialog
-                    .title("Replace the in-app CSS draft?")
+                    .title("Replace your unsaved changes?")
                     .w(px(460.))
                     .confirm()
                     .button_props(
                         DialogButtonProps::default()
-                            .ok_text("Reload from disk")
+                            .ok_text("Reload file")
                             .ok_variant(ButtonVariant::Danger),
                     )
                     .on_ok(move |_, window, cx| {
@@ -597,7 +710,7 @@ impl ApiTester {
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child(
-                                "The file on disk will replace the current editor buffer and its recoverable draft. This cannot be undone.",
+                                "The latest version of the file will replace your unsaved changes. This cannot be undone.",
                             ),
                     )
             });
@@ -608,7 +721,7 @@ impl ApiTester {
 
     fn reload_theme_editor_from_disk_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.theme_editor_path.clone() else {
-            self.settings_notice = Some("This draft has no file to reload.".into());
+            self.settings_notice = Some("This theme has no file to reload.".into());
             cx.notify();
             return;
         };
@@ -640,8 +753,7 @@ impl ApiTester {
     pub(super) fn open_css_in_preferred_editor(&mut self, cx: &mut Context<Self>) {
         if !self.settings_writable {
             self.settings_notice = Some(
-                "The preferred-editor source cannot be prepared while settings are read-only."
-                    .into(),
+                "This theme can’t be opened in another app while settings are read-only.".into(),
             );
             cx.notify();
             return;
@@ -730,7 +842,7 @@ impl ApiTester {
         }
         cx.open_with_system(&path);
         self.settings_notice = Some(format!(
-            "Opened {} with the macOS preferred CSS editor. Use Reload from disk before saving if both editors are open.",
+            "Opened {} in your preferred CSS app. Reload the file here before saving changes made there.",
             path.display()
         ));
         cx.notify();
@@ -744,8 +856,7 @@ impl ApiTester {
         let draft_saved = self.settings.theme.draft_source.is_some();
         self.dismiss_theme_editor();
         self.settings_notice = Some(if draft_saved {
-            "CSS editor closed. The unapplied draft is saved and will reopen where you left it."
-                .into()
+            "CSS editor closed. Your unsaved changes will be restored when you reopen it.".into()
         } else {
             "CSS editor closed.".into()
         });
@@ -764,7 +875,7 @@ impl ApiTester {
     pub(super) fn discard_external_theme_draft(&mut self, cx: &mut Context<Self>) {
         if self.has_unapplied_editor_draft() {
             self.settings_notice =
-                Some("Save or revert the in-app CSS draft before discarding its file link.".into());
+                Some("Save or revert your changes before ignoring the file changes.".into());
             cx.notify();
             return;
         }
@@ -782,7 +893,7 @@ impl ApiTester {
                     .as_deref()
                     .and_then(|source_path| read_css_theme(source_path).ok());
                 self.settings_notice = Some(format!(
-                    "Stopped tracking {}. The file was left on disk.",
+                    "API Tester will no longer watch {} for changes. The file was kept.",
                     path.display()
                 ));
             }
@@ -799,7 +910,7 @@ impl ApiTester {
         let tabs_saved = self.flush_request_tabs(cx);
         let theme_saved = self.persist_theme_editor_draft(cx);
         if !theme_saved {
-            self.settings_notice = Some("The CSS draft could not be saved.".into());
+            self.settings_notice = Some("Your theme changes could not be saved.".into());
             cx.notify();
         }
         tabs_saved && theme_saved
@@ -879,7 +990,7 @@ impl ApiTester {
             Ok(()) => true,
             Err(error) => {
                 self.settings_notice =
-                    Some(format!("CSS draft recovery could not be saved: {error}"));
+                    Some(format!("Your theme changes could not be saved: {error}"));
                 false
             }
         }
@@ -963,12 +1074,12 @@ fn theme_snapshot_is_detached(theme: &ThemeSettings) -> bool {
 fn saved_theme_removal_message(theme: &SavedTheme) -> String {
     match theme.source_path.as_ref().filter(|path| path.is_file()) {
         Some(path) => format!(
-            "“{}” will be removed from the theme library. Its source file at {} will be left on disk.",
+            "“{}” will be removed. Its file at {} will be kept.",
             theme.name,
             path.display()
         ),
         None => format!(
-            "“{}” is stored only in API Tester’s SQLite theme library. Removing it deletes the only saved copy known to API Tester and cannot be undone.",
+            "“{}” is saved only in API Tester. Removing it deletes the only saved copy and cannot be undone.",
             theme.name
         ),
     }
@@ -1085,7 +1196,7 @@ fn materialize_theme_source(path: &Path, source: &[u8]) -> Result<(), String> {
             }
             Err(error) => {
                 return Err(format!(
-                    "Theme draft could not create a temporary file beside {}: {error}",
+                    "Could not prepare the theme file next to {}: {error}",
                     path.display()
                 ));
             }
@@ -1100,7 +1211,7 @@ fn materialize_theme_source(path: &Path, source: &[u8]) -> Result<(), String> {
             tracing::warn!(
                 path = %temporary_path.display(),
                 %error,
-                "published theme snapshot but could not remove its temporary hard link"
+                "saved theme file but could not remove its temporary hard link"
             );
         }
         Ok(())
@@ -1109,12 +1220,12 @@ fn materialize_theme_source(path: &Path, source: &[u8]) -> Result<(), String> {
         let _ = fs::remove_file(&temporary_path);
         if error.kind() == std::io::ErrorKind::AlreadyExists {
             return Err(format!(
-                "Theme draft already exists at {}; it was left untouched.",
+                "A theme file already exists at {}; it was left unchanged.",
                 path.display()
             ));
         }
         return Err(format!(
-            "Theme draft could not be published safely to {}: {error}",
+            "Could not save the theme file to {}: {error}",
             path.display()
         ));
     }
@@ -1140,7 +1251,7 @@ fn inspect_external_theme_source(
         }
         Err(error) => {
             return Err(format!(
-                "Theme source could not be checked for external changes at {}: {error}",
+                "Could not check the theme file at {}: {error}",
                 path.display()
             ));
         }
@@ -1152,7 +1263,7 @@ fn inspect_external_theme_source(
         return Ok(ThemeSourceState::NeedsFreshPath);
     }
     Err(format!(
-        "{} changed outside API Tester. Reload from disk before opening the in-app draft externally; the external edits were left untouched.",
+        "{} changed in another app. Reload the file in API Tester before opening it again. The changes in the other app were kept.",
         path.display()
     ))
 }
@@ -1209,7 +1320,7 @@ mod tests {
 
         let error = inspect_external_theme_source(&path, Some("previous"), "in-app").unwrap_err();
 
-        assert!(error.contains("changed outside API Tester"));
+        assert!(error.contains("changed in another app"));
         assert_eq!(fs::read_to_string(path).unwrap(), "external");
     }
 
@@ -1356,7 +1467,7 @@ mod tests {
 
         let backed = SavedTheme::new("Backed", "source", Some(existing_path.clone()));
         let message = saved_theme_removal_message(&backed);
-        assert!(message.contains("will be left on disk"));
+        assert!(message.contains("will be kept"));
         assert!(message.contains(&existing_path.display().to_string()));
     }
 }

@@ -30,7 +30,7 @@ pub use script::{
 #[cfg(test)]
 pub use script::{ScriptLog, ScriptTestResult};
 #[allow(unused_imports)]
-pub use settings::{AppSettings, SavedTheme, ShortcutOverride, ThemeSettings};
+pub use settings::{AppSettings, MetricsPosition, SavedTheme, ShortcutOverride, ThemeSettings};
 pub use template::{RequestTemplate, ResolvedRequest, resolve_request};
 pub use workspace::{
     Collection, Environment, RequestScripts, SavedRequest, Workspace, WorkspaceMutationError,

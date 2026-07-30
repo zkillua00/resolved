@@ -60,9 +60,7 @@ impl ApiTester {
             .as_ref()
             .or(self.settings.theme.source_path.as_ref())
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|| {
-                "SQLite snapshot · Open in preferred editor creates a tracked CSS copy.".to_owned()
-            });
+            .unwrap_or_else(|| "Saved in API Tester".to_owned());
         let validation = crate::theme::parse_css(&source);
         let valid = validation.is_ok();
         let detached_theme = self.has_detached_theme_snapshot();
@@ -70,7 +68,7 @@ impl ApiTester {
         let (status, status_color) = match validation {
             Ok(theme) => (
                 format!(
-                    "Valid theme: {}{}",
+                    "{}{}",
                     theme.name,
                     if dirty { " · unapplied changes" } else { "" }
                 ),
@@ -80,7 +78,7 @@ impl ApiTester {
                     cx.theme().success
                 },
             ),
-            Err(error) => (format!("Not ready to save: {error}"), cx.theme().danger),
+            Err(error) => (format!("Invalid CSS: {error}"), cx.theme().danger),
         };
         let using_default_template = source == crate::theme::bundled_css();
         let this = cx.entity().downgrade();
@@ -112,64 +110,30 @@ impl ApiTester {
                 v_flex()
                     .flex_1()
                     .min_h_0()
-                    .gap_3()
-                    .p_4()
                     .child(
                         h_flex()
+                            .id("theme-css-editor-toolbar")
                             .w_full()
                             .flex_shrink_0()
-                            .justify_between()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .id("theme-css-editor-source-path")
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .tooltip({
-                                        let path = path.clone();
-                                        move |window, cx| {
-                                            Tooltip::new(path.clone()).build(window, cx)
-                                        }
-                                    })
-                                    .child(path),
-                            )
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_xs()
-                                    .font_medium()
-                                    .text_color(status_color)
-                                    .child(status),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .flex_1()
-                            .min_h_0()
-                            .rounded_lg()
-                            .child(editor),
-                    )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .flex_shrink_0()
-                            .flex_wrap()
+                            .overflow_x_scroll()
                             .gap_2()
+                            .px_3()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(cx.api_outline_variant())
+                            .bg(cx.api_surface_low())
                             .child(
                                 Button::new("apply-css-editor-theme")
                                     .label("Save changes")
+                                    .small()
                                     .primary()
                                     .disabled(
                                         !writable || !editing_saved_theme || !dirty || !valid,
                                     )
                                     .tooltip(if editing_saved_theme {
-                                        "Validate and update the selected SQLite theme snapshot"
+                                        "Save your changes to this theme"
                                     } else if detached_theme {
-                                        "This CSS is not safely linked to the selected library entry; save it as a new theme"
+                                        "Save this as a new theme before applying it"
                                     } else {
                                         "The built-in theme is read-only; save this CSS as a new theme"
                                     })
@@ -184,9 +148,10 @@ impl ApiTester {
                             .child(
                                 Button::new("save-css-editor-theme-as")
                                     .label("Save as new theme…")
+                                    .small()
                                     .outline()
                                     .disabled(!writable || !valid)
-                                    .tooltip("Save this CSS as a separate theme and switch to it")
+                                    .tooltip("Save a copy as a new theme and use it")
                                     .on_click(move |_, window, cx| {
                                         if let Some(this) = save_as_this.upgrade() {
                                             this.update(cx, |this, cx| {
@@ -198,9 +163,10 @@ impl ApiTester {
                             .child(
                                 Button::new("revert-css-editor-theme")
                                     .label("Revert")
+                                    .small()
                                     .outline()
                                     .disabled(!dirty)
-                                    .tooltip("Restore the last applied CSS snapshot")
+                                    .tooltip("Undo changes since the last save")
                                     .on_click(move |_, window, cx| {
                                         if let Some(this) = revert_this.upgrade() {
                                             this.update(cx, |this, cx| {
@@ -212,9 +178,10 @@ impl ApiTester {
                             .child(
                                 Button::new("default-css-editor-template")
                                     .label("Default template")
+                                    .small()
                                     .ghost()
                                     .disabled(using_default_template)
-                                    .tooltip("Load the fully documented built-in CSS template")
+                                    .tooltip("Replace the editor contents with the default theme")
                                     .on_click(move |_, window, cx| {
                                         if let Some(this) = default_this.upgrade() {
                                             this.update(cx, |this, cx| {
@@ -226,9 +193,10 @@ impl ApiTester {
                             .child(
                                 Button::new("open-css-editor-externally")
                                     .label("Open in preferred editor")
+                                    .small()
                                     .ghost()
                                     .disabled(!writable)
-                                    .tooltip("Use the macOS default application for CSS files")
+                                    .tooltip("Open this theme in your preferred CSS app")
                                     .on_click(move |_, _, cx| {
                                         if let Some(this) = external_this.upgrade() {
                                             this.update(cx, |this, cx| {
@@ -239,11 +207,12 @@ impl ApiTester {
                             )
                             .child(
                                 Button::new("reload-css-editor-from-disk")
-                                    .label("Reload from disk")
+                                    .label("Reload file")
+                                    .small()
                                     .ghost()
                                     .disabled(self.theme_editor_path.is_none())
                                     .tooltip(
-                                        "Replace this editor buffer with the latest contents of its CSS file",
+                                        "Replace the editor contents with the latest version of the file",
                                     )
                                     .on_click(move |_, window, cx| {
                                         if let Some(this) = reload_this.upgrade() {
@@ -252,7 +221,44 @@ impl ApiTester {
                                             });
                                         }
                                     }),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .id("theme-css-editor-source-path")
+                                    .max_w(px(280.))
+                                    .flex_shrink_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .tooltip({
+                                        let path = path.clone();
+                                        move |window, cx| {
+                                            Tooltip::new(path.clone()).build(window, cx)
+                                        }
+                                    })
+                                    .child(path),
+                            )
+                            .child(
+                                div()
+                                    .max_w(px(320.))
+                                    .flex_shrink_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_xs()
+                                    .font_medium()
+                                    .text_color(status_color)
+                                    .child(status),
                             ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .flex_1()
+                            .min_h_0()
+                            .bg(cx.api_surface_lowest())
+                            .child(editor),
                     ),
             )
             .into_any_element()

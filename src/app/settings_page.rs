@@ -63,19 +63,14 @@ impl ApiTester {
             );
         }
 
-        let appearance_page = SettingPage::new("Appearance")
-            .description(
-                "Choose a built-in or saved theme, then edit its validated CSS here or in your preferred editor.",
-            )
-            .resettable(false)
-            .group(
-                SettingGroup::new()
-                    .title("Themes")
-                    .description(
-                        "Saved themes remain available when you switch. Invalid drafts never replace the active theme.",
-                    )
-                    .item(self.theme_setting_item(cx)),
-            );
+        let appearance_page = SettingPage::new("Appearance").resettable(false).group(
+            SettingGroup::new()
+                .with_variant(GroupBoxVariant::Normal)
+                .items([
+                    self.theme_global_actions_setting_item(cx),
+                    self.theme_library_setting_item(cx),
+                ]),
+        );
         let developer_page = SettingPage::new("Developer Settings")
             .description("Enable diagnostics for inspecting API Tester while it is running.")
             .resettable(false)
@@ -83,7 +78,10 @@ impl ApiTester {
                 SettingGroup::new()
                     .title("Diagnostics")
                     .description("Developer overlays stay inactive until explicitly enabled.")
-                    .item(self.metrics_setting_item(cx)),
+                    .items([
+                        self.metrics_setting_item(cx),
+                        self.metrics_position_setting_item(cx),
+                    ]),
             );
 
         v_flex()
@@ -261,300 +259,823 @@ impl ApiTester {
         )
     }
 
-    fn theme_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+    fn metrics_position_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
         let this = cx.entity().downgrade();
         SettingItem::new(
-            "Current theme",
+            "Metrics location",
             SettingField::<SharedString>::render(move |_, _, cx| {
                 let Some(entity) = this.upgrade() else {
                     return div().into_any_element();
                 };
                 let state = entity.read(cx);
-                let active_theme_id = state.settings.theme.active_theme_id.clone();
-                let detached_theme = state.has_detached_theme_snapshot();
-                let detached_theme_name = detached_theme.then(|| {
-                    state
-                        .settings
-                        .theme
-                        .css_source
-                        .as_deref()
-                        .and_then(|source| crate::theme::parse_css(source).ok())
-                        .map(|theme| theme.name.to_string())
-                        .unwrap_or_else(|| "Unsaved CSS theme".to_owned())
-                });
-                let active_saved_theme = active_theme_id.as_ref().and_then(|active_id| {
-                    state
-                        .settings
-                        .theme
-                        .saved_themes
-                        .iter()
-                        .find(|theme| theme.id == *active_id)
-                });
-                let active_theme_name =
-                    match (active_theme_id.as_ref(), active_saved_theme, detached_theme_name) {
-                    (_, _, Some(name)) => format!("{name} · unsaved"),
-                    (Some(_), _, None) if detached_theme => {
-                        "Unreconciled theme snapshot".to_owned()
-                    }
-                    (None, _, None) => "API Tester Material Dark".to_owned(),
-                    (Some(_), Some(theme), _) => theme.name.clone(),
-                    (Some(_), None, _) => "Unavailable saved theme".to_owned(),
-                };
-                let built_in_active =
-                    active_theme_id.is_none() && state.settings.theme.css_source.is_none();
-                let path = state
-                    .settings
-                    .theme
-                    .draft_path
-                    .as_ref()
-                    .or_else(|| {
-                        (!detached_theme)
-                            .then(|| active_saved_theme.and_then(|theme| theme.source_path.as_ref()))
-                            .flatten()
+                let selected = state.settings.metrics_position;
+                let writable = state.settings_writable;
+                let menu_this = this.clone();
+
+                Button::new("metrics-position-picker")
+                    .label(selected.label())
+                    .dropdown_caret(true)
+                    .outline()
+                    .w(px(220.))
+                    .disabled(!writable)
+                    .tooltip(if writable {
+                        "Choose which workspace corner contains the Metrics HUD"
+                    } else {
+                        "Settings are read-only because they could not be loaded safely"
                     })
-                    .or(state.settings.theme.source_path.as_ref())
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| {
-                        if detached_theme {
-                            "Unreconciled CSS snapshot · no source file".to_owned()
-                        } else if active_saved_theme.is_some() {
-                            "Saved SQLite snapshot · source file created on demand".to_owned()
-                        } else {
-                            "Built-in theme · no source file".to_owned()
+                    .dropdown_menu(move |mut menu, _, _| {
+                        menu = menu.min_w(px(220.));
+                        for position in crate::core::MetricsPosition::ALL {
+                            let item_this = menu_this.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(position.label())
+                                    .checked(position == selected)
+                                    .on_click(move |_, _, cx| {
+                                        if position == selected {
+                                            return;
+                                        }
+                                        if let Some(this) = item_this.upgrade() {
+                                            this.update(cx, |this, cx| {
+                                                this.set_metrics_position(position, cx);
+                                            });
+                                        }
+                                    }),
+                            );
                         }
-                    });
+                        menu
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description("Choose the HUD corner. The location is restored when API Tester restarts.")
+    }
+
+    fn theme_global_actions_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Themes",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let detached_theme = state.has_detached_theme_snapshot();
                 let can_reload = state.settings.theme.source_path.is_some()
                     || state.settings.theme.draft_path.is_some();
                 let writable = state.settings_writable;
-                let editor_open = state.theme_editor.is_some();
                 let editor_pending = state.has_unapplied_editor_draft();
                 let theme_pending = state.has_unapplied_theme_draft();
                 let external_draft_pending =
                     state.settings.theme.draft_path.is_some() && !editor_pending;
                 let selection_blocked = theme_pending || detached_theme;
-                let danger = cx.theme().danger;
-
-                let switch_this = this.clone();
-                let choose_this = this.clone();
-                let edit_this = this.clone();
-                let external_this = this.clone();
-                let reload_this = this.clone();
-                let discard_external_this = this.clone();
-                let delete_this = this.clone();
-                let menu_themes = state
+                let active_id_ambiguous = state
                     .settings
                     .theme
-                    .saved_themes
-                    .iter()
-                    .map(|theme| (theme.id.clone(), theme.name.clone()))
-                    .collect::<Vec<_>>();
-                let menu_active_theme_id = active_theme_id.clone();
-                let menu_built_in_active = built_in_active;
-                v_flex()
+                    .active_theme_id
+                    .as_deref()
+                    .is_some_and(|active_id| {
+                        active_id.trim().is_empty()
+                            || state
+                                .settings
+                                .theme
+                                .saved_themes
+                                .iter()
+                                .filter(|theme| theme.id == active_id)
+                                .count()
+                                != 1
+                    });
+
+                let choose_this = this.clone();
+                let create_this = this.clone();
+                let reload_this = this.clone();
+                h_flex()
                     .w_full()
-                    .gap_3()
+                    .flex_wrap()
+                    .justify_end()
+                    .gap_2()
                     .child(
-                        Button::new("css-theme-picker")
-                            .label(active_theme_name)
-                            .icon(IconName::Palette)
-                            .dropdown_caret(true)
+                        Button::new("choose-css-theme")
+                            .label("Import CSS…")
+                            .small()
                             .outline()
-                            .w(px(400.))
                             .disabled(!writable || selection_blocked)
                             .tooltip(if detached_theme {
-                                "Save this unsaved CSS snapshot as a new theme before switching"
+                                "Save this theme before importing another"
                             } else if external_draft_pending {
-                                "Reload or discard the preferred-editor copy before switching themes"
+                                "Reload or ignore the file changes before importing"
                             } else if editor_pending {
-                                "Save or revert the CSS draft before switching themes"
+                                "Save or revert your changes before importing"
                             } else {
-                                "Switch between the built-in theme and saved CSS themes"
+                                "Import a theme from a CSS file"
                             })
-                            .dropdown_menu_with_anchor(Corner::TopRight, move |menu, _, _| {
-                                let built_in_this = switch_this.clone();
-                                let mut menu = menu
-                                    .min_w(px(400.))
-                                    .max_h(px(360.))
-                                    .scrollable(menu_themes.len() > 8)
-                                    .label("Built-in")
-                                    .item(
-                                        PopupMenuItem::new("API Tester Material Dark")
-                                            .icon(IconName::Palette)
-                                            .checked(menu_built_in_active)
-                                            .on_click(move |_, _, cx| {
-                                                if menu_built_in_active {
-                                                    return;
-                                                }
-                                                if let Some(this) = built_in_this.upgrade() {
-                                                    this.update(cx, |this, cx| {
-                                                        this.switch_css_theme(None, cx);
-                                                    });
-                                                }
-                                            }),
-                                    )
-                                    .separator()
-                                    .label("Saved themes");
-                                if menu_themes.is_empty() {
-                                    menu = menu.item(
-                                        PopupMenuItem::new("No saved themes yet").disabled(true),
-                                    );
-                                } else {
-                                    for (theme_id, theme_name) in &menu_themes {
-                                        let theme_id = theme_id.clone();
-                                        let item_this = switch_this.clone();
-                                        let selected =
-                                            menu_active_theme_id.as_ref() == Some(&theme_id);
-                                        menu = menu.item(
-                                            PopupMenuItem::new(theme_name.clone())
-                                                .checked(selected)
-                                                .on_click(move |_, _, cx| {
-                                                    if selected {
-                                                        return;
-                                                    }
-                                                    if let Some(this) = item_this.upgrade() {
-                                                        this.update(cx, |this, cx| {
-                                                            this.switch_css_theme(
-                                                                Some(theme_id.clone()),
-                                                                cx,
-                                                            );
-                                                        });
-                                                    }
-                                                }),
-                                        );
-                                    }
+                            .on_click(move |_, window, cx| {
+                                if let Some(this) = choose_this.upgrade() {
+                                    this.update(cx, |this, cx| {
+                                        this.choose_css_theme(window, cx);
+                                    });
                                 }
-                                menu
                             }),
                     )
                     .child(
-                        div()
-                            .id("css-theme-source-path")
-                            .max_w(px(520.))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .tooltip({
-                                let path = path.clone();
-                                move |window, cx| Tooltip::new(path.clone()).build(window, cx)
+                        Button::new("create-css-theme-from-template")
+                            .label("Create from template…")
+                            .icon(IconName::Plus)
+                            .small()
+                            .outline()
+                            .disabled(!writable || selection_blocked)
+                            .tooltip(if detached_theme {
+                                "Save this theme before creating another"
+                            } else if external_draft_pending {
+                                "Reload or ignore the file changes before creating a theme"
+                            } else if editor_pending {
+                                "Save or revert your changes before creating a theme"
+                            } else {
+                                "Create a new theme from the default template"
                             })
-                            .child(path),
+                            .on_click(move |_, window, cx| {
+                                if let Some(this) = create_this.upgrade() {
+                                    this.update(cx, |this, cx| {
+                                        this.open_create_theme_from_template_dialog(window, cx);
+                                    });
+                                }
+                            }),
                     )
                     .child(
-                        h_flex()
-                            .flex_wrap()
-                            .gap_2()
-                            .child(
-                                Button::new("choose-css-theme")
-                                    .label("Import CSS…")
-                                    .outline()
-                                    .disabled(!writable || selection_blocked)
-                                    .tooltip("Import and apply a CSS theme file")
-                                    .on_click(move |_, window, cx| {
-                                        if let Some(this) = choose_this.upgrade() {
-                                            this.update(cx, |this, cx| {
-                                                this.choose_css_theme(window, cx);
-                                            });
-                                        }
-                                    }),
+                        Button::new("reload-css-theme")
+                            .label("Reload active")
+                            .small()
+                            .ghost()
+                            .disabled(
+                                !writable
+                                    || !can_reload
+                                    || editor_pending
+                                    || detached_theme
+                                    || active_id_ambiguous,
                             )
-                            .child(
-                                Button::new("edit-css-theme-here")
-                                    .label(if editor_open {
-                                        "Show CSS editor"
-                                    } else {
-                                        "Edit CSS here"
-                                    })
-                                    .outline()
-                                    .disabled(!writable)
-                                    .tooltip(if editor_open {
-                                        "Show the open Theme CSS workspace tab"
-                                    } else {
-                                        "Open a Theme CSS workspace tab with validation and intelligence"
-                                    })
-                                    .on_click(move |_, window, cx| {
-                                        if let Some(this) = edit_this.upgrade() {
-                                            this.update(cx, |this, cx| {
-                                                this.open_theme_editor(window, cx);
-                                            });
-                                        }
-                                    }),
-                            )
-                            .child(
-                                Button::new("open-css-theme-preferred-editor")
-                                    .label("Open in preferred editor")
-                                    .ghost()
-                                    .disabled(!writable)
-                                    .tooltip("Use the macOS default application for CSS files")
-                                    .on_click(move |_, _, cx| {
-                                        if let Some(this) = external_this.upgrade() {
-                                            this.update(cx, |this, cx| {
-                                                this.open_css_in_preferred_editor(cx);
-                                            });
-                                        }
-                                    }),
-                            )
-                            .child(
-                                Button::new("reload-css-theme")
-                                    .label("Reload")
-                                    .ghost()
-                                    .disabled(
-                                        !writable
-                                            || !can_reload
-                                            || editor_pending
-                                            || detached_theme,
-                                    )
-                                    .on_click(move |_, _, cx| {
-                                        if let Some(this) = reload_this.upgrade() {
-                                            this.update(cx, |this, cx| {
-                                                this.reload_css_theme(cx);
-                                            });
-                                        }
-                                    }),
-                            )
-                            .when(external_draft_pending, |row| {
-                                row.child(
-                                    Button::new("discard-external-css-draft")
-                                        .label("Discard external copy")
-                                        .ghost()
-                                        .disabled(!writable)
-                                        .tooltip(
-                                            "Stop tracking the preferred-editor copy without deleting its file",
-                                        )
-                                        .on_click(move |_, _, cx| {
-                                            if let Some(this) = discard_external_this.upgrade() {
-                                                this.update(cx, |this, cx| {
-                                                    this.discard_external_theme_draft(cx);
-                                                });
-                                            }
-                                        }),
-                                )
+                            .tooltip(if !can_reload {
+                                "The active theme has no file to reload"
+                            } else if active_id_ambiguous {
+                                "The active theme cannot be reloaded safely"
+                            } else if editor_pending {
+                                "Save or revert your changes before reloading"
+                            } else if detached_theme {
+                                "Save this theme before reloading"
+                            } else {
+                                "Reload the active theme from its file"
                             })
-                            .when(active_theme_id.is_some(), |row| {
-                                row.child(
-                                    Button::new("delete-selected-css-theme")
-                                        .label("Delete selected theme…")
-                                        .ghost()
-                                        .text_color(danger)
-                                        .disabled(!writable || selection_blocked)
-                                        .tooltip("Delete this saved theme after confirmation")
-                                        .on_click(move |_, window, cx| {
-                                            if let Some(this) = delete_this.upgrade() {
-                                                this.update(cx, |this, cx| {
-                                                    this.delete_active_saved_theme(window, cx);
-                                                });
-                                            }
-                                        }),
-                                )
+                            .on_click(move |_, _, cx| {
+                                if let Some(this) = reload_this.upgrade() {
+                                    this.update(cx, |this, cx| {
+                                        this.reload_css_theme(cx);
+                                    });
+                                }
                             }),
                     )
                     .into_any_element()
             }),
         )
-        .description(
-            "The built-in theme is read-only. Import a CSS file or use the editor to save another theme, then switch here without losing it.",
+    }
+
+    fn theme_library_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        let mut search_text =
+            "themes built in saved active available invalid use edit preferred delete source"
+                .to_owned();
+        for theme in &self.settings.theme.saved_themes {
+            search_text.push(' ');
+            search_text.push_str(&theme.name);
+            if let Some(path) = &theme.source_path {
+                search_text.push(' ');
+                search_text.push_str(&path.display().to_string());
+            }
+        }
+
+        SettingItem::render_searchable(search_text, move |_, _, cx| {
+            let Some(entity) = this.upgrade() else {
+                return div().into_any_element();
+            };
+            let state = entity.read(cx);
+            let active_theme_id = state.settings.theme.active_theme_id.clone();
+            let detached_theme = state.has_detached_theme_snapshot();
+            let built_in_active = !detached_theme
+                && active_theme_id.is_none()
+                && state.settings.theme.css_source.is_none();
+            let writable = state.settings_writable;
+            let editor_open = state.theme_editor.is_some();
+            let editor_pending = state.has_unapplied_editor_draft();
+            let theme_pending = state.has_unapplied_theme_draft();
+            let external_draft_pending =
+                state.settings.theme.draft_path.is_some() && !editor_pending;
+            let selection_blocked = theme_pending || detached_theme;
+            let mut rows = Vec::with_capacity(
+                1 + usize::from(detached_theme) + state.settings.theme.saved_themes.len(),
+            );
+
+            let switch_built_in_this = this.clone();
+            let discard_built_in_this = this.clone();
+            let built_in_status = if built_in_active {
+                active_theme_badge(cx)
+            } else {
+                available_theme_badge(cx)
+            };
+            let built_in_actions = h_flex()
+                .w_full()
+                .justify_end()
+                .gap_1()
+                .when(!built_in_active, |actions| {
+                    actions.child(
+                        Button::new("use-built-in-css-theme")
+                            .label("Use theme")
+                            .small()
+                            .outline()
+                            .disabled(!writable || selection_blocked)
+                            .tooltip(theme_selection_tooltip(
+                                detached_theme,
+                                editor_pending,
+                                external_draft_pending,
+                                "Switch to the built-in theme",
+                            ))
+                            .on_click(move |_, _, cx| {
+                                if let Some(this) = switch_built_in_this.upgrade() {
+                                    this.update(cx, |this, cx| {
+                                        this.switch_css_theme(None, cx);
+                                    });
+                                }
+                            }),
+                    )
+                })
+                .when(built_in_active && external_draft_pending, |actions| {
+                    actions.child(
+                        Button::new("discard-built-in-external-css-draft")
+                            .label("Ignore file changes")
+                            .small()
+                            .ghost()
+                            .disabled(!writable)
+                            .tooltip("Keep the file, but stop watching it for changes")
+                            .on_click(move |_, _, cx| {
+                                if let Some(this) = discard_built_in_this.upgrade() {
+                                    this.update(cx, |this, cx| {
+                                        this.discard_external_theme_draft(cx);
+                                    });
+                                }
+                            }),
+                    )
+                })
+                .into_any_element();
+            rows.push(theme_table_row(
+                "built-in",
+                "API Tester Material Dark".to_owned(),
+                "Built in · read-only".to_owned(),
+                built_in_status,
+                built_in_actions,
+                cx,
+            ));
+
+            if detached_theme {
+                let detached_name = state
+                    .settings
+                    .theme
+                    .css_source
+                    .as_deref()
+                    .and_then(|source| crate::theme::parse_css(source).ok())
+                    .map(|theme| theme.name.to_string())
+                    .unwrap_or_else(|| "Unsaved theme".to_owned());
+                let detached_source = state
+                    .settings
+                    .theme
+                    .draft_path
+                    .as_ref()
+                    .or(state.settings.theme.source_path.as_ref())
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "API Tester".to_owned());
+                let edit_this = this.clone();
+                let external_this = this.clone();
+                let discard_this = this.clone();
+                let detached_actions = h_flex()
+                    .w_full()
+                    .justify_end()
+                    .gap_1()
+                    .child(
+                        Button::new("edit-detached-css-theme-here")
+                            .label(if editor_open {
+                                "Show editor"
+                            } else {
+                                "Edit here"
+                            })
+                            .small()
+                            .outline()
+                            .disabled(!writable)
+                            .on_click(move |_, window, cx| {
+                                if let Some(this) = edit_this.upgrade() {
+                                    this.update(cx, |this, cx| {
+                                        this.open_theme_editor(window, cx);
+                                    });
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new("edit-detached-css-theme-externally")
+                            .label("Edit in preferred editor")
+                            .small()
+                            .ghost()
+                            .disabled(!writable)
+                            .on_click(move |_, _, cx| {
+                                if let Some(this) = external_this.upgrade() {
+                                    this.update(cx, |this, cx| {
+                                        this.open_css_in_preferred_editor(cx);
+                                    });
+                                }
+                            }),
+                    )
+                    .when(external_draft_pending, |actions| {
+                        actions.child(
+                            Button::new("discard-detached-external-css-draft")
+                                .label("Ignore file changes")
+                                .small()
+                                .ghost()
+                                .disabled(!writable)
+                                .tooltip("Keep the file, but stop watching it for changes")
+                                .on_click(move |_, _, cx| {
+                                    if let Some(this) = discard_this.upgrade() {
+                                        this.update(cx, |this, cx| {
+                                            this.discard_external_theme_draft(cx);
+                                        });
+                                    }
+                                }),
+                        )
+                    })
+                    .into_any_element();
+                rows.push(theme_table_row(
+                    "unsaved",
+                    detached_name,
+                    detached_source,
+                    active_theme_badge(cx),
+                    detached_actions,
+                    cx,
+                ));
+            }
+
+            for (index, theme) in state.settings.theme.saved_themes.iter().enumerate() {
+                let theme_id = theme.id.clone();
+                let ambiguous_id = theme_id.trim().is_empty()
+                    || state
+                        .settings
+                        .theme
+                        .saved_themes
+                        .iter()
+                        .filter(|candidate| candidate.id == theme_id)
+                        .count()
+                        != 1;
+                let projected = !detached_theme
+                    && active_theme_id.as_ref() == Some(&theme_id)
+                    && state.settings.theme.css_source.as_deref()
+                        == Some(theme.css_source.as_str())
+                    && state.settings.theme.source_path == theme.source_path;
+                let valid = crate::theme::parse_css(&theme.css_source).is_ok();
+                let active = projected && valid && !ambiguous_id;
+                let source = projected
+                    .then_some(state.settings.theme.draft_path.as_ref())
+                    .flatten()
+                    .map(|path| path.display().to_string())
+                    .or_else(|| {
+                        theme
+                            .source_path
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                    })
+                    .unwrap_or_else(|| "API Tester".to_owned());
+                let row_key = if ambiguous_id {
+                    format!("ambiguous-{index}-{theme_id}")
+                } else {
+                    format!("saved-{theme_id}")
+                };
+                let use_element_id: SharedString = format!("use-saved-css-theme-{row_key}").into();
+                let edit_element_id: SharedString =
+                    format!("edit-saved-css-theme-here-{row_key}").into();
+                let external_element_id: SharedString =
+                    format!("edit-saved-css-theme-externally-{row_key}").into();
+                let discard_external_element_id: SharedString =
+                    format!("discard-saved-css-theme-external-draft-{row_key}").into();
+                let delete_element_id: SharedString =
+                    format!("delete-saved-css-theme-{row_key}").into();
+                let identity_tooltip = "This theme’s saved information is invalid";
+                let invalid_tooltip =
+                    "This theme contains invalid CSS. Re-import a corrected file or delete it";
+                let edit_blocked = ambiguous_id || (!projected && (!valid || selection_blocked));
+                let edit_label = if projected && editor_open {
+                    "Show editor"
+                } else {
+                    "Edit here"
+                };
+                let edit_tooltip = if ambiguous_id {
+                    identity_tooltip
+                } else if !valid && !projected {
+                    invalid_tooltip
+                } else if projected {
+                    if editor_open {
+                        "Show the open Theme CSS tab"
+                    } else {
+                        "Edit this theme in API Tester"
+                    }
+                } else {
+                    theme_selection_tooltip(
+                        detached_theme,
+                        editor_pending,
+                        external_draft_pending,
+                        "Use and edit this theme in API Tester",
+                    )
+                };
+                let external_tooltip = if ambiguous_id {
+                    identity_tooltip
+                } else if !valid && !projected {
+                    invalid_tooltip
+                } else if projected {
+                    "Open this theme in your preferred CSS app"
+                } else {
+                    theme_selection_tooltip(
+                        detached_theme,
+                        editor_pending,
+                        external_draft_pending,
+                        "Use this theme and open it in your preferred CSS app",
+                    )
+                };
+                let delete_tooltip = if ambiguous_id {
+                    identity_tooltip
+                } else {
+                    theme_selection_tooltip(
+                        detached_theme,
+                        editor_pending,
+                        external_draft_pending,
+                        "Delete this saved theme after confirmation",
+                    )
+                };
+                let status = if ambiguous_id {
+                    theme_problem_badge("Unavailable", cx)
+                } else if !valid {
+                    theme_problem_badge(
+                        if projected {
+                            "Selected · invalid"
+                        } else {
+                            "Invalid CSS"
+                        },
+                        cx,
+                    )
+                } else if active {
+                    active_theme_badge(cx)
+                } else {
+                    available_theme_badge(cx)
+                };
+                let use_this = this.clone();
+                let edit_this = this.clone();
+                let external_this = this.clone();
+                let discard_external_this = this.clone();
+                let delete_this = this.clone();
+                let use_theme_id = theme_id.clone();
+                let edit_theme_id = theme_id.clone();
+                let external_theme_id = theme_id.clone();
+                let delete_theme_id = theme_id;
+                let actions = h_flex()
+                    .w_full()
+                    .justify_end()
+                    .gap_1()
+                    .when(!active && valid && !ambiguous_id, |actions| {
+                        actions.child(
+                            Button::new(use_element_id)
+                                .label("Use theme")
+                                .small()
+                                .outline()
+                                .disabled(!writable || selection_blocked)
+                                .tooltip(theme_selection_tooltip(
+                                    detached_theme,
+                                    editor_pending,
+                                    external_draft_pending,
+                                    "Switch to this saved theme",
+                                ))
+                                .on_click(move |_, _, cx| {
+                                    if let Some(this) = use_this.upgrade() {
+                                        this.update(cx, |this, cx| {
+                                            this.switch_css_theme(Some(use_theme_id.clone()), cx);
+                                        });
+                                    }
+                                }),
+                        )
+                    })
+                    .child(
+                        Button::new(edit_element_id)
+                            .label(edit_label)
+                            .small()
+                            .outline()
+                            .disabled(!writable || edit_blocked)
+                            .tooltip(edit_tooltip)
+                            .on_click(move |_, window, cx| {
+                                if let Some(this) = edit_this.upgrade() {
+                                    this.update(cx, |this, cx| {
+                                        this.edit_saved_theme_here(
+                                            edit_theme_id.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new(external_element_id)
+                            .label("Edit in preferred editor")
+                            .small()
+                            .ghost()
+                            .disabled(!writable || edit_blocked)
+                            .tooltip(external_tooltip)
+                            .on_click(move |_, _, cx| {
+                                if let Some(this) = external_this.upgrade() {
+                                    this.update(cx, |this, cx| {
+                                        this.edit_saved_theme_externally(
+                                            external_theme_id.clone(),
+                                            cx,
+                                        );
+                                    });
+                                }
+                            }),
+                    )
+                    .when(projected && external_draft_pending, |actions| {
+                        actions.child(
+                            Button::new(discard_external_element_id)
+                                .label("Ignore file changes")
+                                .small()
+                                .ghost()
+                                .disabled(!writable)
+                                .tooltip("Keep the file, but stop watching it for changes")
+                                .on_click(move |_, _, cx| {
+                                    if let Some(this) = discard_external_this.upgrade() {
+                                        this.update(cx, |this, cx| {
+                                            this.discard_external_theme_draft(cx);
+                                        });
+                                    }
+                                }),
+                        )
+                    })
+                    .child(
+                        Button::new(delete_element_id)
+                            .label("Delete…")
+                            .small()
+                            .ghost()
+                            .text_color(cx.theme().danger)
+                            .disabled(!writable || selection_blocked || ambiguous_id)
+                            .tooltip(delete_tooltip)
+                            .on_click(move |_, window, cx| {
+                                if let Some(this) = delete_this.upgrade() {
+                                    this.update(cx, |this, cx| {
+                                        this.delete_saved_theme(
+                                            delete_theme_id.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                }
+                            }),
+                    )
+                    .into_any_element();
+                rows.push(theme_table_row(
+                    row_key,
+                    theme.name.clone(),
+                    source,
+                    status,
+                    actions,
+                    cx,
+                ));
+            }
+
+            div()
+                .id("theme-table-scroll")
+                .w_full()
+                .overflow_x_scroll()
+                .child(
+                    v_flex()
+                        .w_full()
+                        .min_w(px(THEME_TABLE_MIN_WIDTH))
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(cx.api_outline_variant())
+                        .overflow_hidden()
+                        .bg(cx.api_surface())
+                        .child(theme_table_header(cx))
+                        .children(rows),
+                )
+                .into_any_element()
+        })
+    }
+}
+
+const THEME_TABLE_MIN_WIDTH: f32 = 1_420.;
+const THEME_TABLE_NAME_WIDTH: f32 = 280.;
+const THEME_TABLE_STATUS_WIDTH: f32 = 160.;
+const THEME_TABLE_ACTIONS_WIDTH: f32 = 720.;
+
+fn theme_table_header(cx: &App) -> AnyElement {
+    h_flex()
+        .h(px(36.))
+        .w_full()
+        .flex_shrink_0()
+        .bg(cx.api_surface_low())
+        .text_xs()
+        .font_semibold()
+        .text_color(cx.theme().muted_foreground)
+        .child(
+            div()
+                .w(px(THEME_TABLE_NAME_WIDTH))
+                .h_full()
+                .flex_shrink_0()
+                .px_3()
+                .flex()
+                .items_center()
+                .border_r_1()
+                .border_color(cx.api_outline_variant())
+                .child("THEME"),
         )
-        .layout(Axis::Vertical)
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(260.))
+                .h_full()
+                .px_3()
+                .flex()
+                .items_center()
+                .border_r_1()
+                .border_color(cx.api_outline_variant())
+                .child("SOURCE"),
+        )
+        .child(
+            div()
+                .w(px(THEME_TABLE_STATUS_WIDTH))
+                .h_full()
+                .flex_shrink_0()
+                .px_3()
+                .flex()
+                .items_center()
+                .border_r_1()
+                .border_color(cx.api_outline_variant())
+                .child("STATUS"),
+        )
+        .child(
+            div()
+                .w(px(THEME_TABLE_ACTIONS_WIDTH))
+                .h_full()
+                .flex_shrink_0()
+                .px_3()
+                .flex()
+                .items_center()
+                .justify_end()
+                .child("ACTIONS"),
+        )
+        .into_any_element()
+}
+
+fn theme_table_row(
+    row_key: impl Into<SharedString>,
+    name: String,
+    source: String,
+    status: AnyElement,
+    actions: AnyElement,
+    cx: &App,
+) -> AnyElement {
+    let row_key = row_key.into();
+    let row_id: SharedString = format!("theme-table-row-{row_key}").into();
+    let name_id: SharedString = format!("theme-table-name-{row_key}").into();
+    let source_id: SharedString = format!("theme-table-source-{row_key}").into();
+
+    h_flex()
+        .id(row_id)
+        .w_full()
+        .min_w(px(THEME_TABLE_MIN_WIDTH))
+        .h(px(54.))
+        .flex_shrink_0()
+        .border_t_1()
+        .border_color(cx.api_outline_variant())
+        .bg(cx.api_surface())
+        .hover(|style| style.bg(cx.api_surface_low()))
+        .child(
+            div()
+                .id(name_id)
+                .w(px(THEME_TABLE_NAME_WIDTH))
+                .h_full()
+                .flex_shrink_0()
+                .min_w_0()
+                .px_3()
+                .flex()
+                .items_center()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_sm()
+                .font_medium()
+                .border_r_1()
+                .border_color(cx.api_outline_variant())
+                .tooltip({
+                    let name = name.clone();
+                    move |window, cx| Tooltip::new(name.clone()).build(window, cx)
+                })
+                .child(name),
+        )
+        .child(
+            div()
+                .id(source_id)
+                .flex_1()
+                .min_w(px(260.))
+                .h_full()
+                .px_3()
+                .flex()
+                .items_center()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .border_r_1()
+                .border_color(cx.api_outline_variant())
+                .tooltip({
+                    let source = source.clone();
+                    move |window, cx| Tooltip::new(source.clone()).build(window, cx)
+                })
+                .child(source),
+        )
+        .child(
+            div()
+                .w(px(THEME_TABLE_STATUS_WIDTH))
+                .h_full()
+                .flex_shrink_0()
+                .px_3()
+                .flex()
+                .items_center()
+                .border_r_1()
+                .border_color(cx.api_outline_variant())
+                .child(status),
+        )
+        .child(
+            div()
+                .w(px(THEME_TABLE_ACTIONS_WIDTH))
+                .h_full()
+                .flex_shrink_0()
+                .px_3()
+                .flex()
+                .items_center()
+                .child(actions),
+        )
+        .into_any_element()
+}
+
+fn active_theme_badge(cx: &App) -> AnyElement {
+    h_flex()
+        .gap_1()
+        .px_2()
+        .py_1()
+        .rounded_full()
+        .bg(cx.theme().primary.opacity(0.14))
+        .text_xs()
+        .font_semibold()
+        .text_color(cx.api_primary_bright())
+        .child(Icon::new(IconName::Check).xsmall())
+        .child("Active")
+        .into_any_element()
+}
+
+fn available_theme_badge(cx: &App) -> AnyElement {
+    div()
+        .px_2()
+        .py_1()
+        .rounded_full()
+        .bg(cx.api_surface_high())
+        .text_xs()
+        .font_medium()
+        .text_color(cx.theme().muted_foreground)
+        .child("Available")
+        .into_any_element()
+}
+
+fn theme_problem_badge(label: &'static str, cx: &App) -> AnyElement {
+    div()
+        .px_2()
+        .py_1()
+        .rounded_full()
+        .bg(cx.theme().danger.opacity(0.12))
+        .text_xs()
+        .font_semibold()
+        .text_color(cx.theme().danger)
+        .child(label)
+        .into_any_element()
+}
+
+fn theme_selection_tooltip(
+    detached_theme: bool,
+    editor_pending: bool,
+    external_draft_pending: bool,
+    available: &'static str,
+) -> &'static str {
+    if detached_theme {
+        "Save this theme before switching"
+    } else if external_draft_pending {
+        "Reload or ignore the file changes before switching themes"
+    } else if editor_pending {
+        "Save or revert your changes before switching themes"
+    } else {
+        available
     }
 }
 

@@ -5,6 +5,12 @@ impl Render for ApiTester {
         self.debug_overlay.read(cx).record_ui_frame();
 
         let workspace = match self.workspace_tabs.active() {
+            ActiveWorkspaceTab::Welcome => v_flex()
+                .size_full()
+                .min_h_0()
+                .child(self.render_request_tab_strip(cx))
+                .child(div().flex_1().min_h_0().child(self.render_welcome_page(cx)))
+                .into_any_element(),
             ActiveWorkspaceTab::Settings => v_flex()
                 .size_full()
                 .min_h_0()
@@ -81,9 +87,17 @@ impl Render for ApiTester {
                     .flex_1()
                     .min_h_0()
                     .child(self.render_navigation_rail(cx))
-                    .child(div().h_full().flex_1().min_w_0().child(workspace)),
+                    .child(
+                        div()
+                            .relative()
+                            .h_full()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(workspace)
+                            .child(self.debug_overlay.clone()),
+                    ),
             )
-            .child(self.debug_overlay.clone())
             .children(self.render_template_variable_popover(cx))
             .children(Root::render_dialog_layer(window, cx))
     }
