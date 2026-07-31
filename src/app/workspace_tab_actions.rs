@@ -121,34 +121,23 @@ impl ApiTester {
 
     pub(super) fn request_close_workspace_tabs(
         &mut self,
-        anchor: WorkspaceToolTab,
+        anchor: WorkspaceTab,
         scope: WorkspaceTabCloseScope,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let visible_tabs = self.workspace_tabs.visible_tabs(&self.request_tabs);
-        let anchor = WorkspaceTab::Tool(anchor);
-        let Some(anchor_index) = visible_tabs.iter().position(|tab| tab == &anchor) else {
-            return;
-        };
-        let targets = visible_tabs
-            .into_iter()
-            .enumerate()
-            .filter(|(index, tab)| {
-                !matches!(tab, WorkspaceTab::Welcome)
-                    && match scope {
-                        WorkspaceTabCloseScope::Current => *index == anchor_index,
-                        WorkspaceTabCloseScope::Others => *index != anchor_index,
-                        WorkspaceTabCloseScope::ToLeft => *index < anchor_index,
-                        WorkspaceTabCloseScope::ToRight => *index > anchor_index,
-                        WorkspaceTabCloseScope::All => true,
-                    }
-            })
-            .map(|(_, tab)| tab)
-            .collect::<Vec<_>>();
+        let targets = self
+            .workspace_tabs
+            .close_targets(&self.request_tabs, &anchor, scope);
         if targets.is_empty() {
             return;
         }
+        let request_anchor_id = match anchor {
+            WorkspaceTab::Request(tab_id) => tab_id,
+            WorkspaceTab::Welcome | WorkspaceTab::Tool(_) => {
+                self.request_tabs.active_tab_id().clone()
+            }
+        };
 
         let request_ids = targets
             .iter()
@@ -181,7 +170,7 @@ impl ApiTester {
             .map(|tab| tab.display_title().to_owned())
             .collect::<Vec<_>>();
         if dirty_titles.is_empty() {
-            self.close_workspace_tabs_now(request_ids, tools, window, cx);
+            self.close_workspace_tabs_now(request_ids, tools, request_anchor_id, window, cx);
             return;
         }
 
@@ -199,6 +188,7 @@ impl ApiTester {
             let close_this = this.clone();
             let request_ids = request_ids.clone();
             let tools = tools.clone();
+            let request_anchor_id = request_anchor_id.clone();
             dialog
                 .title(dialog_title.clone())
                 .w(px(440.))
@@ -218,6 +208,7 @@ impl ApiTester {
                             this.close_workspace_tabs_now(
                                 request_ids.clone(),
                                 tools.clone(),
+                                request_anchor_id.clone(),
                                 window,
                                 cx,
                             );
@@ -252,6 +243,7 @@ impl ApiTester {
         &mut self,
         request_ids: Vec<RequestTabId>,
         tools: Vec<WorkspaceToolTab>,
+        request_anchor_id: RequestTabId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -273,8 +265,7 @@ impl ApiTester {
             cx.notify();
             return;
         }
-        let anchor_id = self.request_tabs.active_tab_id().clone();
-        self.close_request_tabs_now(request_ids, anchor_id, window, cx);
+        self.close_request_tabs_now(request_ids, request_anchor_id, window, cx);
     }
 
     pub(super) fn close_active_workspace_tab(

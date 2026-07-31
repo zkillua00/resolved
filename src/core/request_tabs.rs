@@ -175,10 +175,6 @@ impl RequestTabGroup {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestTabCloseScope {
     Current,
-    Others,
-    ToLeft,
-    ToRight,
-    All,
     Group,
 }
 
@@ -753,9 +749,6 @@ impl RequestTabs {
         anchor: &RequestTabId,
         scope: RequestTabCloseScope,
     ) -> Vec<RequestTabId> {
-        if scope == RequestTabCloseScope::All {
-            return self.tabs.iter().map(|tab| tab.id.clone()).collect();
-        }
         let Some(anchor_index) = self.tabs.iter().position(|tab| tab.id == *anchor) else {
             return Vec::new();
         };
@@ -766,10 +759,6 @@ impl RequestTabs {
             .enumerate()
             .filter(|(index, tab)| match scope {
                 RequestTabCloseScope::Current => *index == anchor_index,
-                RequestTabCloseScope::Others => *index != anchor_index,
-                RequestTabCloseScope::ToLeft => *index < anchor_index,
-                RequestTabCloseScope::ToRight => *index > anchor_index,
-                RequestTabCloseScope::All => true,
                 RequestTabCloseScope::Group => {
                     anchor_group_id.is_some() && tab.group_id.as_ref() == anchor_group_id
                 }
@@ -838,16 +827,6 @@ impl RequestTabs {
         self.tabs = retained;
         self.prune_empty_groups();
         removed
-    }
-
-    #[cfg(test)]
-    pub fn close_scope(
-        &mut self,
-        anchor: &RequestTabId,
-        scope: RequestTabCloseScope,
-    ) -> Vec<RequestTabRecord> {
-        let ids = self.close_target_ids(anchor, scope);
-        self.close_tabs(&ids)
     }
 
     fn prune_empty_groups(&mut self) {
@@ -1424,13 +1403,10 @@ mod tests {
     }
 
     #[test]
-    fn close_target_selectors_follow_visual_order_for_every_scope() {
+    fn close_target_selectors_cover_current_tab_and_request_group() {
         let mut tabs = RequestTabs::new();
-        let first = tabs.active_tab_id().clone();
         let second = tabs.open_new();
         let third = tabs.open_new();
-        let fourth = tabs.open_new();
-        let fifth = tabs.open_new();
         let group = tabs
             .create_group_for_tab(&second, "Auth", RequestTabGroupColor::Blue)
             .unwrap();
@@ -1441,47 +1417,14 @@ mod tests {
             vec![third.clone()]
         );
         assert_eq!(
-            tabs.close_target_ids(&third, RequestTabCloseScope::Others),
-            vec![first.clone(), second.clone(), fourth.clone(), fifth.clone()]
-        );
-        assert_eq!(
-            tabs.close_target_ids(&third, RequestTabCloseScope::ToLeft),
-            vec![first.clone(), second.clone()]
-        );
-        assert_eq!(
-            tabs.close_target_ids(&third, RequestTabCloseScope::ToRight),
-            vec![fourth.clone(), fifth.clone()]
-        );
-        assert_eq!(
-            tabs.close_target_ids(&third, RequestTabCloseScope::All),
-            vec![
-                first.clone(),
-                second.clone(),
-                third.clone(),
-                fourth.clone(),
-                fifth.clone()
-            ]
-        );
-        assert_eq!(
             tabs.close_target_ids(&third, RequestTabCloseScope::Group),
             vec![second, third]
         );
 
         let missing = RequestTabId("missing".to_owned());
-        for scope in [
-            RequestTabCloseScope::Current,
-            RequestTabCloseScope::Others,
-            RequestTabCloseScope::ToLeft,
-            RequestTabCloseScope::ToRight,
-            RequestTabCloseScope::Group,
-        ] {
+        for scope in [RequestTabCloseScope::Current, RequestTabCloseScope::Group] {
             assert!(tabs.close_target_ids(&missing, scope).is_empty());
         }
-        assert_eq!(
-            tabs.close_target_ids(&missing, RequestTabCloseScope::All)
-                .len(),
-            5
-        );
     }
 
     #[test]
@@ -1583,47 +1526,6 @@ mod tests {
         )
         .unwrap();
         assert!(!legacy.welcome_is_open());
-    }
-
-    #[test]
-    fn scoped_closes_use_anchor_fallback_and_all_creates_one_scratch() {
-        let mut tabs = RequestTabs::new();
-        let first = tabs.active_tab_id().clone();
-        let second = tabs.open_new();
-        let third = tabs.open_new();
-        let fourth = tabs.open_new();
-
-        assert!(tabs.activate(&second));
-        let removed = tabs.close_scope(&third, RequestTabCloseScope::ToLeft);
-        assert_eq!(
-            removed
-                .iter()
-                .map(|tab| tab.id().clone())
-                .collect::<Vec<_>>(),
-            vec![first, second]
-        );
-        assert_eq!(tabs.active_tab_id(), &third);
-
-        let removed = tabs.close_scope(&third, RequestTabCloseScope::Others);
-        assert_eq!(
-            removed
-                .iter()
-                .map(|tab| tab.id().clone())
-                .collect::<Vec<_>>(),
-            vec![fourth]
-        );
-        assert_eq!(tabs.active_tab_id(), &third);
-        assert_eq!(tabs.len(), 1);
-
-        let old_tab = tabs.active_tab_id().clone();
-        let removed = tabs.close_scope(&old_tab, RequestTabCloseScope::All);
-        assert_eq!(removed.len(), 1);
-        assert_eq!(removed[0].id(), &old_tab);
-        assert_eq!(tabs.len(), 1);
-        assert_ne!(tabs.active_tab_id(), &old_tab);
-        assert!(!tabs.active().is_dirty());
-        assert!(tabs.active().group_id().is_none());
-        assert!(tabs.groups().is_empty());
     }
 
     #[test]

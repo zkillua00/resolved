@@ -53,20 +53,20 @@ fn build_tool_menu(
     };
     let snapshot = {
         let app = entity.read(cx);
-        let tabs = app.workspace_tabs.visible_tabs(&app.request_tabs);
         let anchor = WorkspaceTab::Tool(tool.clone());
-        let Some(index) = tabs.iter().position(|tab| tab == &anchor) else {
-            return menu;
-        };
-        let closable = |tab: &WorkspaceTab| !matches!(tab, WorkspaceTab::Welcome);
         (
-            tabs.iter()
-                .enumerate()
-                .any(|(candidate, tab)| candidate != index && closable(tab)),
-            tabs[..index].iter().any(closable),
-            tabs[index + 1..].iter().any(closable),
+            app.workspace_tabs
+                .close_targets(&app.request_tabs, &anchor, WorkspaceTabCloseScope::Others)
+                .is_empty(),
+            app.workspace_tabs
+                .close_targets(&app.request_tabs, &anchor, WorkspaceTabCloseScope::ToLeft)
+                .is_empty(),
+            app.workspace_tabs
+                .close_targets(&app.request_tabs, &anchor, WorkspaceTabCloseScope::ToRight)
+                .is_empty(),
         )
     };
+    let anchor = WorkspaceTab::Tool(tool);
 
     menu = menu
         .min_w(px(230.))
@@ -74,36 +74,36 @@ fn build_tool_menu(
             "Close tab",
             false,
             owner.clone(),
-            tool.clone(),
+            anchor.clone(),
             WorkspaceTabCloseScope::Current,
         ))
         .item(workspace_close_scope_item(
             "Close other tabs",
-            !snapshot.0,
+            snapshot.0,
             owner.clone(),
-            tool.clone(),
+            anchor.clone(),
             WorkspaceTabCloseScope::Others,
         ))
         .separator()
         .item(workspace_close_scope_item(
             "Close tabs to the left",
-            !snapshot.1,
+            snapshot.1,
             owner.clone(),
-            tool.clone(),
+            anchor.clone(),
             WorkspaceTabCloseScope::ToLeft,
         ))
         .item(workspace_close_scope_item(
             "Close tabs to the right",
-            !snapshot.2,
+            snapshot.2,
             owner.clone(),
-            tool.clone(),
+            anchor.clone(),
             WorkspaceTabCloseScope::ToRight,
         ))
         .item(workspace_close_scope_item(
             "Close all tabs",
             false,
             owner,
-            tool,
+            anchor,
             WorkspaceTabCloseScope::All,
         ));
     menu
@@ -113,18 +113,18 @@ fn workspace_close_scope_item(
     label: &'static str,
     disabled: bool,
     owner: gpui::WeakEntity<ApiTester>,
-    tool: WorkspaceToolTab,
+    anchor: WorkspaceTab,
     scope: WorkspaceTabCloseScope,
 ) -> PopupMenuItem {
     PopupMenuItem::new(label)
         .disabled(disabled)
         .on_click(move |_, window, cx| {
             let owner = owner.clone();
-            let tool = tool.clone();
+            let anchor = anchor.clone();
             window.defer(cx, move |window, cx| {
                 if let Some(owner) = owner.upgrade() {
                     owner.update(cx, |this, cx| {
-                        this.request_close_workspace_tabs(tool.clone(), scope, window, cx);
+                        this.request_close_workspace_tabs(anchor.clone(), scope, window, cx);
                     });
                 }
             });
@@ -143,61 +143,66 @@ fn build_tab_menu(
     };
     let snapshot = {
         let app = entity.read(cx);
-        let Some(index) = app
-            .request_tabs
-            .tabs()
-            .iter()
-            .position(|tab| tab.id() == &tab_id)
-        else {
+        let Some(tab) = app.request_tabs.get(&tab_id) else {
             return menu;
         };
-        let tab = &app.request_tabs.tabs()[index];
+        let anchor = WorkspaceTab::Request(tab_id.clone());
         TabMenuSnapshot {
             group_id: tab.group_id().cloned(),
             groups: app.request_tabs.groups().to_vec(),
-            close_others_disabled: app.request_tabs.tabs().len() < 2,
-            close_left_disabled: index == 0,
-            close_right_disabled: index + 1 >= app.request_tabs.tabs().len(),
+            close_others_disabled: app
+                .workspace_tabs
+                .close_targets(&app.request_tabs, &anchor, WorkspaceTabCloseScope::Others)
+                .is_empty(),
+            close_left_disabled: app
+                .workspace_tabs
+                .close_targets(&app.request_tabs, &anchor, WorkspaceTabCloseScope::ToLeft)
+                .is_empty(),
+            close_right_disabled: app
+                .workspace_tabs
+                .close_targets(&app.request_tabs, &anchor, WorkspaceTabCloseScope::ToRight)
+                .is_empty(),
         }
     };
+    let anchor = WorkspaceTab::Request(tab_id.clone());
 
     menu = menu
         .min_w(px(230.))
-        .item(close_scope_item(
+        .item(workspace_close_scope_item(
             "Close tab",
             false,
             owner.clone(),
-            tab_id.clone(),
-            RequestTabCloseScope::Current,
+            anchor.clone(),
+            WorkspaceTabCloseScope::Current,
         ))
-        .item(close_scope_item(
+        .item(workspace_close_scope_item(
             "Close other tabs",
             snapshot.close_others_disabled,
             owner.clone(),
-            tab_id.clone(),
-            RequestTabCloseScope::Others,
+            anchor.clone(),
+            WorkspaceTabCloseScope::Others,
         ))
         .separator()
-        .item(close_scope_item(
+        .item(workspace_close_scope_item(
             "Close tabs to the left",
             snapshot.close_left_disabled,
             owner.clone(),
-            tab_id.clone(),
-            RequestTabCloseScope::ToLeft,
+            anchor.clone(),
+            WorkspaceTabCloseScope::ToLeft,
         ))
-        .item(close_scope_item(
+        .item(workspace_close_scope_item(
             "Close tabs to the right",
             snapshot.close_right_disabled,
             owner.clone(),
-            tab_id.clone(),
-            RequestTabCloseScope::ToRight,
+            anchor.clone(),
+            WorkspaceTabCloseScope::ToRight,
         ))
-        .item(close_scope_item(
+        .item(workspace_close_scope_item(
             "Close all tabs",
             false,
             owner.clone(),
-            tab_id.clone(),
-            RequestTabCloseScope::All,
+            anchor,
+            WorkspaceTabCloseScope::All,
         ))
         .separator();
 
@@ -407,7 +412,7 @@ fn build_group_menu(
             }),
         );
 
-    menu.item(close_scope_item(
+    menu.item(request_close_scope_item(
         "Close group",
         false,
         owner,
@@ -416,7 +421,7 @@ fn build_group_menu(
     ))
 }
 
-fn close_scope_item(
+fn request_close_scope_item(
     label: &'static str,
     disabled: bool,
     owner: gpui::WeakEntity<ApiTester>,

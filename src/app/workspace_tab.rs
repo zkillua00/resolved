@@ -278,6 +278,36 @@ impl WorkspaceTabs {
         tabs
     }
 
+    /// Resolve a workspace close scope in visible tab order without mutating state.
+    /// Welcome is a presentation surface and is never a close target.
+    pub fn close_targets(
+        &self,
+        request_tabs: &RequestTabs,
+        anchor: &WorkspaceTab,
+        scope: WorkspaceTabCloseScope,
+    ) -> Vec<WorkspaceTab> {
+        let visible_tabs = self.visible_tabs(request_tabs);
+        let Some(anchor_index) = visible_tabs.iter().position(|tab| tab == anchor) else {
+            return Vec::new();
+        };
+
+        visible_tabs
+            .into_iter()
+            .enumerate()
+            .filter(|(index, tab)| {
+                !matches!(tab, WorkspaceTab::Welcome)
+                    && match scope {
+                        WorkspaceTabCloseScope::Current => *index == anchor_index,
+                        WorkspaceTabCloseScope::Others => *index != anchor_index,
+                        WorkspaceTabCloseScope::ToLeft => *index < anchor_index,
+                        WorkspaceTabCloseScope::ToRight => *index > anchor_index,
+                        WorkspaceTabCloseScope::All => true,
+                    }
+            })
+            .map(|(_, tab)| tab)
+            .collect()
+    }
+
     pub fn adjacent_tab(&self, request_tabs: &RequestTabs, direction: isize) -> WorkspaceTab {
         let tabs = self.visible_tabs(request_tabs);
         let active = self.active_tab(request_tabs);
@@ -427,6 +457,136 @@ mod tests {
         assert_eq!(
             tabs.adjacent_tab(&requests, -1),
             WorkspaceTab::Tool(WorkspaceToolTab::Settings)
+        );
+    }
+
+    #[test]
+    fn mixed_close_targets_follow_visual_order_from_a_request_anchor() {
+        let mut requests = RequestTabs::default();
+        let first = requests.active_tab_id().clone();
+        let second = requests.open_new();
+        let third = requests.open_new();
+        let mut tabs = WorkspaceTabs::default();
+        tabs.open_tool(WorkspaceToolTab::Settings);
+        tabs.open_tool(WorkspaceToolTab::ThemeCss("ocean".to_owned()));
+        tabs.open_tool(WorkspaceToolTab::ThemeCss("forest".to_owned()));
+        let anchor = WorkspaceTab::Request(second.clone());
+        let settings = WorkspaceTab::Tool(WorkspaceToolTab::Settings);
+        let ocean = WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss("ocean".to_owned()));
+        let forest = WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss("forest".to_owned()));
+
+        assert_eq!(
+            tabs.close_targets(&requests, &anchor, WorkspaceTabCloseScope::Current),
+            vec![anchor.clone()]
+        );
+        assert_eq!(
+            tabs.close_targets(&requests, &anchor, WorkspaceTabCloseScope::Others),
+            vec![
+                WorkspaceTab::Request(first.clone()),
+                WorkspaceTab::Request(third.clone()),
+                settings.clone(),
+                ocean.clone(),
+                forest.clone(),
+            ]
+        );
+        assert_eq!(
+            tabs.close_targets(&requests, &anchor, WorkspaceTabCloseScope::ToLeft),
+            vec![WorkspaceTab::Request(first.clone())]
+        );
+        assert_eq!(
+            tabs.close_targets(&requests, &anchor, WorkspaceTabCloseScope::ToRight),
+            vec![
+                WorkspaceTab::Request(third.clone()),
+                settings.clone(),
+                ocean.clone(),
+                forest.clone(),
+            ]
+        );
+        assert_eq!(
+            tabs.close_targets(&requests, &anchor, WorkspaceTabCloseScope::All),
+            vec![
+                WorkspaceTab::Request(first),
+                anchor,
+                WorkspaceTab::Request(third),
+                settings,
+                ocean,
+                forest,
+            ]
+        );
+    }
+
+    #[test]
+    fn mixed_close_targets_follow_visual_order_from_a_tool_anchor() {
+        let mut requests = RequestTabs::default();
+        let first = requests.active_tab_id().clone();
+        let second = requests.open_new();
+        let third = requests.open_new();
+        let mut tabs = WorkspaceTabs::default();
+        tabs.open_tool(WorkspaceToolTab::Settings);
+        tabs.open_tool(WorkspaceToolTab::ThemeCss("ocean".to_owned()));
+        tabs.open_tool(WorkspaceToolTab::ThemeCss("forest".to_owned()));
+        let settings = WorkspaceTab::Tool(WorkspaceToolTab::Settings);
+        let anchor = WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss("ocean".to_owned()));
+        let forest = WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss("forest".to_owned()));
+
+        assert_eq!(
+            tabs.close_targets(&requests, &anchor, WorkspaceTabCloseScope::Current),
+            vec![anchor.clone()]
+        );
+        assert_eq!(
+            tabs.close_targets(&requests, &anchor, WorkspaceTabCloseScope::Others),
+            vec![
+                WorkspaceTab::Request(first.clone()),
+                WorkspaceTab::Request(second.clone()),
+                WorkspaceTab::Request(third.clone()),
+                settings.clone(),
+                forest.clone(),
+            ]
+        );
+        assert_eq!(
+            tabs.close_targets(&requests, &anchor, WorkspaceTabCloseScope::ToLeft),
+            vec![
+                WorkspaceTab::Request(first.clone()),
+                WorkspaceTab::Request(second.clone()),
+                WorkspaceTab::Request(third.clone()),
+                settings.clone(),
+            ]
+        );
+        assert_eq!(
+            tabs.close_targets(&requests, &anchor, WorkspaceTabCloseScope::ToRight),
+            vec![forest.clone()]
+        );
+        assert_eq!(
+            tabs.close_targets(&requests, &anchor, WorkspaceTabCloseScope::All),
+            vec![
+                WorkspaceTab::Request(first),
+                WorkspaceTab::Request(second),
+                WorkspaceTab::Request(third),
+                settings,
+                anchor,
+                forest,
+            ]
+        );
+    }
+
+    #[test]
+    fn close_targets_never_include_welcome() {
+        let mut requests = RequestTabs::default();
+        let welcome_backing = requests.active_tab_id().clone();
+        let request = requests.open_new();
+        let mut tabs = WorkspaceTabs::default();
+        tabs.open_welcome(welcome_backing, false);
+        tabs.open_tool(WorkspaceToolTab::Settings);
+        tabs.open_tool(WorkspaceToolTab::ThemeCss("ocean".to_owned()));
+        let anchor = WorkspaceTab::Tool(WorkspaceToolTab::Settings);
+
+        assert_eq!(
+            tabs.close_targets(&requests, &anchor, WorkspaceTabCloseScope::All),
+            vec![
+                WorkspaceTab::Request(request),
+                anchor,
+                WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss("ocean".to_owned())),
+            ]
         );
     }
 

@@ -398,6 +398,11 @@ scripts/bundle-macos.sh release
 open "target/release/API Tester.app"
 ```
 
+The package follows a commit-driven pre-1.0 SemVer policy. Cargo owns the
+release version, while the bundle script copies it into the generated app and
+uses the Git commit count as its build number. See
+[Versioning and releases](docs/versioning.md) for bump rules and release steps.
+
 The bundle is ad-hoc signed by the Rust linker and is intended for local
 development. Distribution outside the local machine will require a Developer ID
 signature and notarization.
