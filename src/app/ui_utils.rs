@@ -1,5 +1,20 @@
 use super::*;
 
+pub(super) fn resolved_brand_lockup(cx: &App) -> AnyElement {
+    h_flex()
+        .items_center()
+        .gap_2()
+        .child(img(ICON_ASSET_PATH).size(px(24.)))
+        .child(
+            div()
+                .text_xl()
+                .font_semibold()
+                .text_color(cx.theme().foreground)
+                .child(PRODUCT_NAME),
+        )
+        .into_any_element()
+}
+
 pub(super) fn input_text_equals(input: &Entity<InputState>, expected: &str, cx: &App) -> bool {
     let input = input.read(cx);
     let text = input.text();

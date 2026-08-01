@@ -1,7 +1,7 @@
 //! Application-level keyboard shortcuts.
 //!
 //! GPUI Component owns the normal text-editing keymap. This module only
-//! describes API Tester's actions and installs their effective bindings on top
+//! describes Resolved's actions and installs their effective bindings on top
 //! of a caller-provided snapshot of that base keymap.
 
 use std::{collections::BTreeMap, error::Error, fmt};
@@ -126,7 +126,7 @@ impl ShortcutCategory {
         match self {
             Self::RequestTabs => "Create request tabs, then close and move between open tabs.",
             Self::ActiveRequest => "Send, save, focus, and format the active request.",
-            Self::Navigation => "Open the primary API Tester workspaces.",
+            Self::Navigation => "Open the primary Resolved workspaces.",
             Self::Interface => "Show or hide supporting interface surfaces.",
             Self::Application => "Application-wide commands.",
         }
@@ -235,7 +235,7 @@ pub const SHORTCUT_DESCRIPTORS: &[ShortcutDescriptor] = &[
     },
     ShortcutDescriptor {
         id: ShortcutId::QuitApp,
-        label: "Quit API Tester",
+        label: "Quit Resolved",
         category: ShortcutCategory::Application,
         default_binding: "cmd-q",
     },
@@ -529,18 +529,18 @@ pub fn build_app_key_bindings(
     })
 }
 
-/// Capture GPUI Component's initialized bindings before API Tester installs
+/// Capture GPUI Component's initialized bindings before Resolved installs
 /// its own layer. Keep this snapshot unchanged and pass it to
 /// [`apply_key_bindings`] for every live settings update.
 pub fn capture_base_key_bindings(cx: &App) -> Vec<KeyBinding> {
     cx.key_bindings().borrow().bindings().cloned().collect()
 }
 
-/// Replace only API Tester's keymap layer while preserving GPUI Component's
+/// Replace only Resolved's keymap layer while preserving GPUI Component's
 /// text editing, menu, dialog, and popover bindings.
 ///
 /// `base_bindings` must be captured once, after component initialization and
-/// before any API Tester bindings are installed. The candidate app keymap is
+/// before any Resolved bindings are installed. The candidate app keymap is
 /// fully validated and built before the active keymap is changed.
 pub fn apply_key_bindings(
     cx: &mut App,

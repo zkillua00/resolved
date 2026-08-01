@@ -1,6 +1,8 @@
-# API Tester
+# Resolved
 
-A native macOS API client built with [GPUI 0.2.2](https://docs.rs/gpui/0.2.2/gpui/) and
+**Know exactly what you sent.**
+
+A native macOS API workbench built with [GPUI 0.2.2](https://docs.rs/gpui/0.2.2/gpui/) and
 [GPUI Component 0.5.1](https://docs.rs/gpui-component/0.5.1/gpui_component/).
 The request workspace, code editors, collections, environments, response views,
 and performance HUD are rendered by GPUI. Captured HTML responses use macOS
@@ -186,7 +188,7 @@ scan:
 
 The Appearance page offers two complementary editing workflows:
 
-- **Edit CSS here** opens a native, lazily created CSS editor inside API Tester.
+- **Edit CSS here** opens a native, lazily created CSS editor inside Resolved.
   It provides syntax highlighting, automatic delimiter closing, completion for
   the required `:root`, `.app`, `.button`, and `.editor` rules, supported
   properties, declared custom-property references inside `var()`, and metadata
@@ -345,8 +347,10 @@ can exceed 100% when the process uses more than one core.
 
 ## Local storage
 
-State is stored in the macOS local application-data directory under
-`API Tester/`:
+State is stored in the macOS local application-data directory under the legacy
+`API Tester/` path. Resolved deliberately retains this internal directory name
+so existing history, workspaces, request tabs, settings, and themes continue to
+load after the product rename:
 
 - `api-tester.sqlite3`: the versioned SQLite database for history, collections,
   saved requests and scripts, environments, variables, request tabs, shortcut
@@ -395,7 +399,7 @@ To build a launchable application bundle:
 
 ```sh
 scripts/bundle-macos.sh release
-open "target/release/API Tester.app"
+open "target/release/Resolved.app"
 ```
 
 The package follows a commit-driven pre-1.0 SemVer policy. Cargo owns the

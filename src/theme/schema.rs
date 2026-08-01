@@ -1,4 +1,4 @@
-//! The single source of truth for API Tester's CSS theme contract.
+//! The single source of truth for Resolved's CSS theme contract.
 //!
 //! Parsing, editor intelligence, and documentation all consume these specs so
 //! a property cannot be accepted by one surface and omitted from another.
@@ -92,7 +92,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Name,
         ThemePropertyCategory::Metadata,
         true,
-        "\"API Tester Material Dark\"",
+        "\"Resolved Material Dark\"",
         "Theme metadata used as the default library name when importing or saving CSS.",
     ),
     property(

@@ -1,11 +1,11 @@
 /*
- * API Tester theme files intentionally use a small, deterministic subset of
+ * Resolved theme files intentionally use a small, deterministic subset of
  * CSS: one :root color-token rule plus the .app, .button, and .editor
  * classes documented below. Root values may refer to other custom properties
  * with var().
  *
  * Required tokens must remain present. Optional tokens may be removed to use
- * the fallback described in their section. Hover a token in API Tester's
+ * the fallback described in their section. Hover a token in Resolved's
  * Appearance editor for its exact type, requirement, default, and UI impact.
  */
 :root {
@@ -14,7 +14,7 @@
      * name: default library name when this CSS is imported or saved.
      * appearance: chooses the dark/light GPUI component baseline.
      */
-    --api-theme-name: "API Tester Material Dark";
+    --api-theme-name: "Resolved Material Dark";
     --api-appearance: dark;
 
     /*

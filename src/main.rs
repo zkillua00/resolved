@@ -7,6 +7,7 @@ use gpui::{
 use gpui_component::{Root, WindowExt as _};
 
 mod app;
+mod brand;
 mod code_editor;
 mod core;
 mod debug_overlay;
@@ -19,6 +20,7 @@ mod theme;
 mod web_preview;
 
 use app::ApiTester;
+use brand::{ICON_ASSET_PATH, PRODUCT_NAME};
 use core::DatabaseStore;
 use instance_guard::InstanceGuard;
 use shortcuts::{
@@ -32,13 +34,13 @@ struct AppAssets;
 fn configure_menus(cx: &mut App) {
     cx.set_menus(vec![
         Menu {
-            name: "API Tester".into(),
+            name: PRODUCT_NAME.into(),
             items: vec![
                 MenuItem::action("Settings…", ShowSettings),
                 MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
-                MenuItem::action("Quit API Tester", QuitApp),
+                MenuItem::action(format!("Quit {PRODUCT_NAME}"), QuitApp),
             ],
         },
         Menu {
@@ -91,11 +93,11 @@ fn register_app_action_handlers(view: &Entity<ApiTester>, cx: &mut App) {
                     match result {
                         Ok(Ok(())) => {}
                         Ok(Err(error)) => tracing::error!(
-                            "could not dispatch {} to API Tester: {error}",
+                            "could not dispatch {} to {PRODUCT_NAME}: {error}",
                             stringify!($action)
                         ),
                         Err(error) => tracing::error!(
-                            "could not update API Tester window for {}: {error}",
+                            "could not update {PRODUCT_NAME} window for {}: {error}",
                             stringify!($action)
                         ),
                     }
@@ -124,6 +126,7 @@ fn register_app_action_handlers(view: &Entity<ApiTester>, cx: &mut App) {
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
         let bytes: &'static [u8] = match path {
+            ICON_ASSET_PATH => include_bytes!("../assets/brand/resolved-icon.png"),
             "icons/folder-open.svg" => include_bytes!("../assets/icons/folder-open.svg"),
             "icons/gallery-vertical-end.svg" => {
                 include_bytes!("../assets/icons/gallery-vertical-end.svg")
@@ -171,11 +174,11 @@ fn main() {
     let _instance_guard = match InstanceGuard::acquire(&lock_path) {
         Ok(guard) => guard,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            eprintln!("API Tester is already running.");
+            eprintln!("{PRODUCT_NAME} is already running.");
             return;
         }
         Err(error) => panic!(
-            "failed to lock API Tester workspace at {}: {error}",
+            "failed to lock {PRODUCT_NAME} workspace at {}: {error}",
             lock_path.display()
         ),
     };
@@ -200,7 +203,7 @@ fn main() {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(1100.0), px(720.0))),
                     titlebar: Some(gpui::TitlebarOptions {
-                        title: Some("API Tester".into()),
+                        title: Some(PRODUCT_NAME.into()),
                         appears_transparent: true,
                         traffic_light_position: Some(gpui::point(px(16.0), px(16.0))),
                     }),

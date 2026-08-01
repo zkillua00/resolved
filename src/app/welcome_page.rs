@@ -15,13 +15,7 @@ impl ApiTester {
                 h_flex()
                     .min_w_0()
                     .gap_6()
-                    .child(
-                        div()
-                            .text_xl()
-                            .font_semibold()
-                            .text_color(cx.api_primary_bright())
-                            .child("API Tester"),
-                    )
+                    .child(resolved_brand_lockup(cx))
                     .child(
                         h_flex()
                             .h_full()
@@ -70,31 +64,20 @@ impl ApiTester {
                     .max_w(px(620.))
                     .items_center()
                     .gap_5()
-                    .child(
-                        div()
-                            .size(px(56.))
-                            .rounded_xl()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .bg(cx.theme().primary.opacity(0.14))
-                            .text_color(cx.api_primary_bright())
-                            .child(Icon::new(IconName::GalleryVerticalEnd).with_size(px(26.))),
-                    )
+                    .child(img(ICON_ASSET_PATH).size(px(72.)))
                     .child(
                         v_flex()
                             .items_center()
                             .gap_2()
-                            .child(div().text_2xl().font_semibold().child("Welcome"))
+                            .child(div().text_2xl().font_semibold().child(PRODUCT_NAME))
+                            .child(div().text_base().font_semibold().child(BRAND_HEADLINE))
                             .child(
                                 div()
                                     .max_w(px(500.))
                                     .text_center()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(
-                                        "Start a request, or browse your collections to reopen saved work.",
-                                    ),
+                                    .child(BRAND_EXPLANATION),
                             ),
                     )
                     .child(

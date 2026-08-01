@@ -1,10 +1,10 @@
 # Theme CSS reference
 
-API Tester themes use a small native stylesheet contract. The files look like
+Resolved themes use a small native stylesheet contract. The files look like
 CSS, but they are not browser stylesheets: only the selectors, properties, and
 values documented here are accepted.
 
-The contract is intentionally strict before API Tester 1.0. A stylesheet written
+The contract is intentionally strict before Resolved 1.0. A stylesheet written
 for an older pre-1.0 build is not migrated or given compatibility defaults when
 the contract changes.
 
@@ -115,7 +115,7 @@ font-family: Helvetica Neue;
 ```
 
 Font fallback lists are not supported. `.button` and `.editor` accept
-`inherit`; `.app` does not. `auto` is not a font family. API Tester validates
+`inherit`; `.app` does not. `auto` is not a font family. Resolved validates
 the family syntax, not whether that font is installed.
 
 ## `.app`
@@ -135,7 +135,7 @@ The effective rem size is `font-size × zoom`.
 
 ## `.button`
 
-`.button` applies to native API Tester buttons. An explicit geometry value
+`.button` applies to native Resolved buttons. An explicit geometry value
 overrides button-specific size variants. `auto` preserves the native value for
 that property. The rule affects GPUI Component buttons, not every raw clickable
 element or other control type.
@@ -202,7 +202,7 @@ Example monospace editors:
 
 `--api-theme-name` must be a non-empty quoted string.
 `--api-appearance` must be `dark` or `light`. Color properties accept CSS color
-values understood by API Tester's color parser, including hex, named, RGB, HSL,
+values understood by Resolved's color parser, including hex, named, RGB, HSL,
 and alpha colors.
 
 “Required” means the token must be declared. “Template default” is the value in
@@ -213,7 +213,7 @@ semantic runtime fallback.
 
 | Token | Required | Template default | Effect |
 | --- | --- | --- | --- |
-| `--api-theme-name` | Yes | `"API Tester Material Dark"` | Default library name when importing or saving. |
+| `--api-theme-name` | Yes | `"Resolved Material Dark"` | Default library name when importing or saving. |
 | `--api-appearance` | Yes | `dark` | Selects the dark or light component baseline. |
 
 ### Surfaces and text

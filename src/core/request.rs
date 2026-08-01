@@ -11,7 +11,7 @@ use tokio::task::{AbortHandle, JoinHandle};
 use url::Url;
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-const DEFAULT_USER_AGENT: &str = concat!("api-tester/", env!("CARGO_PKG_VERSION"));
+const DEFAULT_USER_AGENT: &str = concat!("resolved/", env!("CARGO_PKG_VERSION"));
 const MAX_BUFFERED_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// Common HTTP methods offered by editable method controls and script
@@ -1293,6 +1293,11 @@ mod tests {
         server.join().unwrap();
         let received = String::from_utf8_lossy(&request_rx.recv().unwrap()).to_ascii_lowercase();
         assert!(received.starts_with("post /echo http/1.1\r\n"));
+        assert!(received.contains(concat!(
+            "user-agent: resolved/",
+            env!("CARGO_PKG_VERSION"),
+            "\r\n"
+        )));
         assert!(received.contains("x-test-request: yes\r\n"));
         assert!(received.ends_with("hello from the client"));
         assert_eq!(response.status, 201);

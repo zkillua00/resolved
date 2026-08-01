@@ -23,9 +23,10 @@ esac
 
 cargo build --manifest-path "$project_dir/Cargo.toml" --profile "$cargo_profile"
 
-bundle_dir="$project_dir/target/$binary_dir/API Tester.app"
+bundle_dir="$project_dir/target/$binary_dir/Resolved.app"
 contents_dir="$bundle_dir/Contents"
 executable_dir="$contents_dir/MacOS"
+resources_dir="$contents_dir/Resources"
 package_version="$("$project_dir/scripts/version.sh" current)"
 build_number="${API_TESTER_BUILD_NUMBER:-}"
 
@@ -46,8 +47,9 @@ if [ "$build_number" -lt 1 ]; then
     exit 2
 fi
 
-install -d "$executable_dir"
+install -d "$executable_dir" "$resources_dir"
 install -m 755 "$project_dir/target/$binary_dir/api-tester" "$executable_dir/api-tester"
+install -m 644 "$project_dir/macos/Resolved.icns" "$resources_dir/Resolved.icns"
 install -m 644 "$project_dir/macos/Info.plist" "$contents_dir/Info.plist"
 /usr/libexec/PlistBuddy \
     -c "Add :CFBundleShortVersionString string $package_version" \

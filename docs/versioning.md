@@ -1,6 +1,6 @@
 # Versioning and releases
 
-API Tester uses [Semantic Versioning](https://semver.org/) and Conventional
+Resolved uses [Semantic Versioning](https://semver.org/) and Conventional
 Commit subjects. `Cargo.toml` is the single source of the release version.
 
 The project is still before 1.0. During this phase:
@@ -34,7 +34,7 @@ scripts/version.sh bump
 
 `next` and `bump` inspect commit subjects and bodies after the newest reachable
 `vMAJOR.MINOR.PATCH` tag. In a new untagged repository they inspect the complete
-history. `bump` updates the API Tester entries in both `Cargo.toml` and
+history. `bump` updates the project package entries in both `Cargo.toml` and
 `Cargo.lock`. It is safe to repeat `bump`: when Cargo already contains the
 calculated version, the command leaves both files unchanged.
 
@@ -46,7 +46,7 @@ scripts/version.sh bump
 scripts/cargo.sh test --all-targets --all-features
 git add Cargo.toml Cargo.lock
 git commit -m "chore(release): v0.2.0"
-git tag -a v0.2.0 -m "API Tester 0.2.0"
+git tag -a v0.2.0 -m "Resolved 0.2.0"
 ```
 
 Release tags must point at their matching release commit. Tags are the boundary

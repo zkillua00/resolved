@@ -13,7 +13,7 @@ use gpui::{
     EntityInputHandler, Focusable as _, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, PathPromptOptions, Pixels,
     Point, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    Timer, Window, anchored, deferred, div, point, prelude::FluentBuilder as _, px,
+    Timer, Window, anchored, deferred, div, img, point, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Root, RopeExt as _, Selectable as _,
@@ -36,6 +36,7 @@ use reqwest::Client;
 use tokio::{runtime::Runtime, task::AbortHandle};
 
 use crate::{
+    brand::{BRAND_EXPLANATION, BRAND_HEADLINE, ICON_ASSET_PATH, PRODUCT_NAME},
     code_editor::{
         CodeEditor, CodeEditorConfig, CodeEditorEvent, CodeLanguage, apply_template_pair_edit,
     },

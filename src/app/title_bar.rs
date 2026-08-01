@@ -91,13 +91,7 @@ impl ApiTester {
                     .min_w_0()
                     .flex_1()
                     .gap_6()
-                    .child(
-                        div()
-                            .text_xl()
-                            .font_semibold()
-                            .text_color(cx.api_primary_bright())
-                            .child("API Tester"),
-                    )
+                    .child(resolved_brand_lockup(cx))
                     .child(
                         h_flex()
                             .h_full()

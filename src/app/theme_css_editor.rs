@@ -20,13 +20,7 @@ impl ApiTester {
                     .h_full()
                     .gap_6()
                     .items_center()
-                    .child(
-                        div()
-                            .text_xl()
-                            .font_semibold()
-                            .text_color(cx.api_primary_bright())
-                            .child("API Tester"),
-                    )
+                    .child(resolved_brand_lockup(cx))
                     .child(
                         h_flex()
                             .h_full()
@@ -77,7 +71,7 @@ impl ApiTester {
                     .flatten()
             })
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "Saved in API Tester".to_owned());
+            .unwrap_or_else(|| "Saved in Resolved".to_owned());
         let validation = crate::theme::parse_css(&source);
         let valid = validation.is_ok();
         let editing_saved_theme = theme_id

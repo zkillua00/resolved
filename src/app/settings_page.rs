@@ -17,26 +17,17 @@ impl ApiTester {
             .bg(cx.theme().title_bar)
             .justify_between()
             .child(
-                h_flex()
-                    .gap_6()
-                    .child(
-                        div()
-                            .text_xl()
-                            .font_semibold()
-                            .text_color(cx.api_primary_bright())
-                            .child("API Tester"),
-                    )
-                    .child(
-                        h_flex()
-                            .h_full()
-                            .items_center()
-                            .border_b_2()
-                            .border_color(cx.theme().primary)
-                            .px_1()
-                            .text_sm()
-                            .font_semibold()
-                            .child("Settings"),
-                    ),
+                h_flex().gap_6().child(resolved_brand_lockup(cx)).child(
+                    h_flex()
+                        .h_full()
+                        .items_center()
+                        .border_b_2()
+                        .border_color(cx.theme().primary)
+                        .px_1()
+                        .text_sm()
+                        .font_semibold()
+                        .child("Settings"),
+                ),
             )
             .into_any_element()
     }
@@ -72,7 +63,7 @@ impl ApiTester {
                 ]),
         );
         let developer_page = SettingPage::new("Developer Settings")
-            .description("Enable diagnostics for inspecting API Tester while it is running.")
+            .description("Enable diagnostics for inspecting Resolved while it is running.")
             .resettable(false)
             .group(
                 SettingGroup::new()
@@ -307,7 +298,7 @@ impl ApiTester {
                     .into_any_element()
             }),
         )
-        .description("Choose the HUD corner. The location is restored when API Tester restarts.")
+        .description("Choose the HUD corner. The location is restored when Resolved restarts.")
     }
 
     fn theme_global_actions_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
@@ -535,7 +526,7 @@ impl ApiTester {
                 .into_any_element();
             rows.push(theme_table_row(
                 "built-in",
-                "API Tester Material Dark".to_owned(),
+                "Resolved Material Dark".to_owned(),
                 built_in_actions,
                 cx,
             ));

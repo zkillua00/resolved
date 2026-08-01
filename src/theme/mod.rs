@@ -20,7 +20,7 @@ pub(crate) use intelligence::{ThemeCssIntelligence, theme_css_diagnostics};
 #[allow(unused_imports)]
 pub use palette::{ApiPalette, ApiTheme};
 
-/// The active parsed API Tester theme stored in GPUI global state.
+/// The active parsed Resolved theme stored in GPUI global state.
 #[derive(Clone, Debug)]
 pub struct GlobalApiTheme(Arc<ApiTheme>);
 
@@ -89,7 +89,7 @@ pub fn bundled_css() -> &'static str {
     css::BUILTIN_THEME_CSS
 }
 
-/// Parse and validate an API Tester CSS theme without changing application state.
+/// Parse and validate a Resolved CSS theme without changing application state.
 pub fn parse_css(source: &str) -> Result<ApiTheme, ThemeError> {
     css::parse_theme_css(source)
 }
@@ -218,7 +218,7 @@ pub fn configure(cx: &mut App) {
         theme.radius_lg = px(12.);
         theme.shadow = false;
     }
-    let theme = parse_css(bundled_css()).expect("bundled API Tester theme must be valid");
+    let theme = parse_css(bundled_css()).expect("bundled Resolved theme must be valid");
     apply(theme, cx);
 }
 

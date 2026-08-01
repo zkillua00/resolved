@@ -6,7 +6,7 @@ use gpui_component::{
     highlighter::{HighlightTheme, HighlightThemeStyle},
 };
 
-/// A parsed, immutable API Tester theme.
+/// A parsed, immutable Resolved theme.
 #[derive(Clone, Debug)]
 pub struct ApiTheme {
     pub name: SharedString,

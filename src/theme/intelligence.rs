@@ -1,4 +1,4 @@
-//! Completion, hover, and diagnostics for API Tester's constrained CSS theme
+//! Completion, hover, and diagnostics for Resolved's constrained CSS theme
 //! format.
 
 use std::{collections::BTreeSet, ops::Range as ByteRange};
@@ -24,7 +24,7 @@ use super::{
     },
 };
 
-const DIAGNOSTIC_SOURCE: &str = "API Tester theme";
+const DIAGNOSTIC_SOURCE: &str = "Resolved theme";
 const DIAGNOSTIC_CODE: &str = "api-theme-css";
 
 #[derive(Clone, Debug, Default)]
@@ -534,7 +534,7 @@ fn completion_items(source: &str, context: ThemeCompletionContext) -> Vec<Comple
             })
             .collect(),
         ThemeCompletionKind::ThemeName => {
-            let value = "\"My API Tester Theme\"";
+            let value = "\"My Resolved Theme\"";
             completion_matches(&context.prefix, value)
                 .then(|| {
                     completion_item(

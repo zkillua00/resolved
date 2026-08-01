@@ -23,7 +23,7 @@ const MAX_VAR_SUBSTITUTIONS: usize = 4_096;
 const MAX_RESOLVED_VALUE_BYTES: usize = 64 * 1024;
 const MAX_TOTAL_RESOLUTION_WORK: usize = 4 * 1024 * 1024;
 
-/// A deterministic error produced while parsing the API Tester CSS contract.
+/// A deterministic error produced while parsing the Resolved CSS contract.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ThemeCssError {
     #[error("theme CSS exceeds the {limit}-byte limit")]
@@ -101,7 +101,7 @@ struct RawStylesheet {
     classes: BTreeMap<String, RawDeclarations>,
 }
 
-/// Parse a complete API Tester theme stylesheet.
+/// Parse a complete Resolved theme stylesheet.
 pub fn parse_theme_css(source: &str) -> Result<ApiTheme, ThemeCssError> {
     if source.len() > MAX_THEME_BYTES {
         return Err(ThemeCssError::TooLarge {
@@ -1118,7 +1118,7 @@ mod tests {
     #[test]
     fn parses_built_in_theme_and_resolves_aliases() {
         let theme = parse_theme_css(BUILTIN_THEME_CSS).unwrap();
-        assert_eq!(theme.name.as_ref(), "API Tester Material Dark");
+        assert_eq!(theme.name.as_ref(), "Resolved Material Dark");
         assert_eq!(theme.mode, ThemeMode::Dark);
         assert_eq!(
             theme.palette.token("--api-yellow"),

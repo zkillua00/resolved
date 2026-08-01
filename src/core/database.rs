@@ -1,4 +1,4 @@
-//! SQLite persistence for the complete local API Tester workspace.
+//! SQLite persistence for the complete local Resolved workspace.
 //!
 //! The database is intentionally an aggregate store: callers load or save the
 //! domain-level [`Workspace`] and [`RequestHistory`] values, while this module
@@ -360,7 +360,7 @@ pub enum DatabaseError {
     #[error("SQLite quick_check failed: {details}")]
     IntegrityCheckFailed { details: String },
 
-    #[error("database has application_id {found:#010x}; expected API Tester's {expected:#010x}")]
+    #[error("database has application_id {found:#010x}; expected Resolved's {expected:#010x}")]
     UnexpectedApplicationId { found: i64, expected: i32 },
 
     #[error("could not restrict database storage permissions for {path}")]

@@ -38,7 +38,7 @@ impl InstanceGuard {
             return if error.kind() == io::ErrorKind::WouldBlock {
                 Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
-                    "API Tester is already running",
+                    "Resolved is already running",
                 ))
             } else {
                 Err(error)

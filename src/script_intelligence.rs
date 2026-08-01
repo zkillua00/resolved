@@ -1,4 +1,4 @@
-//! Lightweight editor intelligence for the API Tester script runtime.
+//! Lightweight editor intelligence for the Resolved script runtime.
 //!
 //! This module intentionally models variable *names* only. Environment and
 //! collection values (including secrets) must never enter completion items,
@@ -17,7 +17,7 @@ use lsp_types::{
 
 use crate::core::{BodyFieldKind, BodyMode, RawBodyLanguage, STANDARD_HTTP_METHODS};
 
-const DIAGNOSTIC_SOURCE: &str = "api-tester";
+const DIAGNOSTIC_SOURCE: &str = "Resolved";
 const MISSING_VARIABLE_CODE: &str = "missing-script-variable";
 const DISABLED_VARIABLE_CODE: &str = "disabled-script-variable";
 const COMPLETION_CONTEXT_LIMIT: usize = 512;
@@ -647,7 +647,7 @@ const GLOBALS_PRE: &[CompletionSpec] = &[
     field(
         "api",
         "PreRequestApi",
-        "Sandboxed synchronous API Tester runtime. Network and host globals such as `fetch`, `require`, `process`, `Deno`, `WebSocket`, and `XMLHttpRequest` are unavailable. Each run is limited to 1 second, a 32 MiB heap, and a 256 KiB stack.",
+        "Sandboxed synchronous Resolved runtime. Network and host globals such as `fetch`, `require`, `process`, `Deno`, `WebSocket`, and `XMLHttpRequest` are unavailable. Each run is limited to 1 second, a 32 MiB heap, and a 256 KiB stack.",
     ),
     field(
         "console",
@@ -660,7 +660,7 @@ const GLOBALS_POST: &[CompletionSpec] = &[
     field(
         "api",
         "PostResponseApi",
-        "Sandboxed synchronous API Tester runtime. Network and host globals such as `fetch`, `require`, `process`, `Deno`, `WebSocket`, and `XMLHttpRequest` are unavailable. Each run is limited to 1 second, a 32 MiB heap, and a 256 KiB stack.",
+        "Sandboxed synchronous Resolved runtime. Network and host globals such as `fetch`, `require`, `process`, `Deno`, `WebSocket`, and `XMLHttpRequest` are unavailable. Each run is limited to 1 second, a 32 MiB heap, and a 256 KiB stack.",
     ),
     field(
         "console",

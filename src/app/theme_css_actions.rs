@@ -188,7 +188,7 @@ impl ApiTester {
                     None => {
                         crate::theme::configure(cx);
                         self.settings_notice =
-                            Some("Using built-in API Tester Material Dark.".to_owned());
+                            Some("Using built-in Resolved Material Dark.".to_owned());
                     }
                 }
                 self.refresh_variable_intelligence(cx);
@@ -1290,7 +1290,7 @@ impl ApiTester {
                         .and_then(|source_path| read_css_theme(source_path).ok());
                 }
                 self.settings_notice = Some(format!(
-                    "API Tester will no longer watch {} for changes. The file was kept.",
+                    "Resolved will no longer watch {} for changes. The file was kept.",
                     path.display()
                 ));
             }
@@ -1348,7 +1348,7 @@ impl ApiTester {
                         .and_then(|source_path| read_css_theme(source_path).ok());
                 }
                 self.settings_notice = Some(format!(
-                    "API Tester will no longer watch {} for changes. The file was kept.",
+                    "Resolved will no longer watch {} for changes. The file was kept.",
                     path.display()
                 ));
             }
@@ -1586,7 +1586,7 @@ fn saved_theme_removal_message(theme: &SavedTheme) -> String {
             path.display()
         ),
         None => format!(
-            "“{}” is saved only in API Tester. Removing it deletes the only saved copy and cannot be undone.",
+            "“{}” is saved only in Resolved. Removing it deletes the only saved copy and cannot be undone.",
             theme.name
         ),
     }
@@ -1655,15 +1655,15 @@ fn managed_theme_path() -> PathBuf {
             || PathBuf::from("themes"),
             |directory| directory.join("themes"),
         )
-        .join("api-tester-theme.css")
+        .join("resolved-theme.css")
 }
 
 fn next_available_managed_theme_path(draft: bool) -> PathBuf {
     let base = managed_theme_path();
     let stem = if draft {
-        "api-tester-theme-draft"
+        "resolved-theme-draft"
     } else {
-        "api-tester-theme"
+        "resolved-theme"
     };
     next_available_theme_path(&base, stem)
 }
@@ -1684,7 +1684,7 @@ fn materialize_theme_source(path: &Path, source: &[u8]) -> Result<(), String> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("api-tester-theme.css");
+        .unwrap_or("resolved-theme.css");
     let mut attempt = 0u32;
     let (temporary_path, mut temporary_file) = loop {
         let candidate = path.with_file_name(format!(
@@ -1770,7 +1770,7 @@ fn inspect_external_theme_source(
         return Ok(ThemeSourceState::NeedsFreshPath);
     }
     Err(format!(
-        "{} changed in another app. Reload the file in API Tester before opening it again. The changes in the other app were kept.",
+        "{} changed in another app. Reload the file in Resolved before opening it again. The changes in the other app were kept.",
         path.display()
     ))
 }
@@ -1847,13 +1847,13 @@ mod tests {
     #[test]
     fn managed_theme_allocation_skips_existing_sources() {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().join("api-tester-theme.css");
+        let base = directory.path().join("resolved-theme.css");
         fs::write(&base, "first").unwrap();
-        fs::write(directory.path().join("api-tester-theme-2.css"), "second").unwrap();
+        fs::write(directory.path().join("resolved-theme-2.css"), "second").unwrap();
 
         assert_eq!(
-            next_available_theme_path(&base, "api-tester-theme"),
-            directory.path().join("api-tester-theme-3.css")
+            next_available_theme_path(&base, "resolved-theme"),
+            directory.path().join("resolved-theme-3.css")
         );
         assert_eq!(fs::read_to_string(base).unwrap(), "first");
     }

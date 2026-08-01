@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1520 400" role="img" aria-labelledby="title desc">
+  <title id="title">Resolved wordmark</title>
+  <desc id="desc">Resolved set in a restrained editorial serif.</desc>
+
+  <text
+    x="24"
+    y="305"
+    fill="#17171B"
+    font-family="STIX Two Text, Charter, Georgia, serif"
+    font-size="310"
+    font-weight="600"
+    letter-spacing="-7"
+  >Resolved</text>
+</svg>

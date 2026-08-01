@@ -5,15 +5,17 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>API Tester</string>
+    <string>Resolved</string>
     <key>CFBundleExecutable</key>
     <string>api-tester</string>
+    <key>CFBundleIconFile</key>
+    <string>Resolved.icns</string>
     <key>CFBundleIdentifier</key>
     <string>dev.apitester.desktop</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>API Tester</string>
+    <string>Resolved</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
