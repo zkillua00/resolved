@@ -8,19 +8,26 @@
 
 #![allow(dead_code)]
 
-use std::borrow::Cow;
+use std::{
+    borrow::Cow,
+    cell::RefCell,
+    rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use anyhow::Result;
-use gpui::{App, Context, Task, Window};
+use gpui::{App, AppContext as _, Context, Task, Window};
 use gpui_component::input::{CompletionProvider, HoverProvider, InputState, Rope};
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit,
-    Documentation, Hover, HoverContents, MarkupContent, MarkupKind, Position, Range, TextEdit,
+    Diagnostic, Documentation, Hover, HoverContents, MarkupContent, MarkupKind, Position, Range,
+    TextEdit,
 };
 
 use crate::{
     core::{GENERATOR_WRAPPER_PREFIX, GENERATOR_WRAPPER_SUFFIX},
     script_intelligence::ScriptEditorPhase,
+    typescript_service::{TypeScriptDocumentKind, TypeScriptScriptPhase, TypeScriptServiceHandle},
 };
 
 /// Script phase into which a generated or literal snippet will be inserted.
@@ -63,7 +70,7 @@ impl SnippetEditorContext {
         matches!(self, Self::ExecutableGenerator(_))
     }
 
-    /// Ambient declarations to add to the future TypeScript-service document.
+    /// Ambient declarations installed in this editor's TypeScript project.
     ///
     /// Plain source sees the execution API of its target editor. Executable
     /// source instead sees the phase-appropriate read-only generator snapshot
@@ -122,7 +129,7 @@ impl SnippetEditorContext {
     }
 }
 
-/// Source and offset mapping for one future TypeScript-service document.
+/// Source and offset mapping for one executable TypeScript-service document.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SnippetVirtualDocument<'a> {
     source: Cow<'a, str>,
@@ -175,28 +182,19 @@ impl SnippetAmbientDeclarations {
     }
 }
 
-pub const PRE_REQUEST_SNIPPET_GLOBALS: &str = r#"
-declare const api: Resolved.PreRequestApi;
-declare const console: Resolved.ScriptConsole;
-"#;
+pub const PRE_REQUEST_SNIPPET_GLOBALS: &str = include_str!("typescript_service/pre-request.d.ts");
 
-pub const POST_RESPONSE_SNIPPET_GLOBALS: &str = r#"
-declare const api: Resolved.PostResponseApi;
-declare const console: Resolved.ScriptConsole;
-"#;
+pub const POST_RESPONSE_SNIPPET_GLOBALS: &str =
+    include_str!("typescript_service/post-response.d.ts");
 
-pub const EXECUTABLE_PRE_REQUEST_SNIPPET_GLOBALS: &str = r#"
-declare const api: ResolvedSnippet.PreRequestGeneratorApi;
-declare const console: Resolved.ScriptConsole;
-"#;
+pub const EXECUTABLE_PRE_REQUEST_SNIPPET_GLOBALS: &str =
+    include_str!("typescript_service/executable-snippet-pre-request.d.ts");
 
 /// Executable generators may be invoked from the post-response snippet
 /// workspace before any HTTP response exists. This differs from an inserted
 /// post-response script, where `api.response` is always present at execution.
-pub const EXECUTABLE_POST_RESPONSE_SNIPPET_GLOBALS: &str = r#"
-declare const api: ResolvedSnippet.PostResponseGeneratorApi;
-declare const console: Resolved.ScriptConsole;
-"#;
+pub const EXECUTABLE_POST_RESPONSE_SNIPPET_GLOBALS: &str =
+    include_str!("typescript_service/executable-snippet-post-response.d.ts");
 
 /// TypeScript declarations for the JavaScript API preloaded into executable
 /// snippet generators.
@@ -206,127 +204,50 @@ declare const console: Resolved.ScriptConsole;
 /// the same surface. `write` is retained as a compatibility alias for the
 /// original executable-snippet sketch; new snippets should prefer
 /// `snippet.write`.
-pub const SNIPPET_GENERATOR_DECLARATIONS: &str = r#"
-declare namespace ResolvedSnippet {
-  type Category = "pre-request" | "post-response";
-  type SelectionSource = "pre-request" | "post-response" | "request" | "response";
-  type SelectionArea = "script" | "url" | "headers" | "body";
+pub const SNIPPET_GENERATOR_DECLARATIONS: &str =
+    include_str!("typescript_service/snippet-generator.d.ts");
 
-  interface Request {
-    readonly method: Resolved.HttpMethod;
-    readonly url: string;
-    readonly body: string;
-    readonly bodyMode: Resolved.BodyMode;
-    readonly rawBodyLanguage: Resolved.RawBodyLanguage;
-    readonly bodyFields: readonly Resolved.ReadonlyBodyField[];
-    readonly headers: Resolved.ReadonlyHeaders;
-    readonly bodyTruncated: boolean;
-  }
-
-  interface Response {
-    readonly status: number;
-    readonly statusText: string;
-    readonly httpVersion: string;
-    readonly url: string;
-    readonly contentType: string | null;
-    readonly headers: Resolved.ReadonlyHeaders;
-    readonly durationMs: number;
-    readonly sizeBytes: number;
-    readonly bodyTruncated: boolean;
-    text(): string;
-    json(): any;
-  }
-
-  interface PreRequestGeneratorApi {
-    readonly request: Request;
-  }
-
-  /** Generator-time response is nullable until an HTTP response exists. */
-  interface PostResponseGeneratorApi extends PreRequestGeneratorApi {
-    readonly response: Response | null;
-  }
-
-  interface TextRange {
-    /** UTF-16 code-unit offset, matching JavaScript string indexing. */
-    readonly start: number;
-    /** Exclusive UTF-16 code-unit offset. */
-    readonly end: number;
-  }
-
-  interface ExpressionOptions {
-    /**
-     * JavaScript root expression. Request body selections infer a root when
-     * omitted. Response body selections do so only in post-response generators.
-     */
-    readonly root?: string;
-  }
-
-  interface Selection {
-    readonly source: SelectionSource;
-    readonly area: SelectionArea;
-    readonly text: string;
-    /** UTF-16 code-unit offset in the displayed source. */
-    readonly start: number;
-    /** Exclusive UTF-16 code-unit offset in the displayed source. */
-    readonly end: number;
-    readonly range: TextRange;
-    readonly contentType: string | null;
-    is(source: SelectionSource): boolean;
-    /** Dot/bracket JSON path. Throws when no JSON node is mapped. */
-    jsonPath(): string;
-    /** RFC 6901 JSON Pointer. Throws when no JSON node is mapped. */
-    jsonPointer(): string;
-    /** JavaScript expression addressing the selected JSON node. */
-    expression(options?: ExpressionOptions): string;
-  }
-
-  interface ResultOptions {
-    /** UTF-16 code-unit offset for the preferred caret. */
-    readonly cursor?: number | null;
-  }
-
-  interface Result {
-    readonly text: string;
-    readonly cursor: number | null;
-  }
-
-  interface Generator {
-    readonly apiVersion: number;
-    readonly category: Category;
-    readonly outputLanguage: string;
-    readonly selection: Selection | null;
-    /** Appends text to this generator's bounded output buffer. */
-    write(value: unknown): void;
-    /** Builds an explicit generated result. A returned string is also valid. */
-    result(text: unknown, options?: ResultOptions): Result;
-  }
-}
-
-declare const snippet: ResolvedSnippet.Generator;
-
-/** @deprecated Prefer `snippet.write(value)`. */
-declare function write(value: unknown): void;
-"#;
-
-/// Lightweight discovery provider for executable snippet generators.
+/// TypeScript-backed intelligence for executable snippet generators.
 ///
 /// Plain snippets must use [`crate::script_intelligence::ScriptCompletionProvider`]
 /// directly. This provider deliberately exposes only the generator runtime's
 /// frozen snapshot API; environment mutation, request mutation, tests, and
-/// assertions are not generator capabilities. Ordinary JavaScript semantics
-/// still belong to the future TypeScript service.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// assertions are not generator capabilities. The lightweight tables are kept
+/// only as a startup/error fallback for the official TypeScript service.
+#[derive(Clone)]
 pub struct SnippetIntelligenceProvider {
     context: SnippetEditorContext,
+    typescript: Option<TypeScriptServiceHandle>,
+    document: Rc<RefCell<SnippetDocumentVersion>>,
 }
 
+#[derive(Default)]
+struct SnippetDocumentVersion {
+    source: Option<String>,
+    version: u64,
+}
+
+static NEXT_SNIPPET_DOCUMENT_VERSION: AtomicU64 = AtomicU64::new(1);
+
 impl SnippetIntelligenceProvider {
-    pub const fn new(context: SnippetEditorContext) -> Self {
-        Self { context }
+    pub fn new(context: SnippetEditorContext) -> Self {
+        Self {
+            context,
+            typescript: None,
+            document: Rc::new(RefCell::new(SnippetDocumentVersion::default())),
+        }
     }
 
     pub const fn context(&self) -> SnippetEditorContext {
         self.context
+    }
+
+    /// Adds Microsoft's embedded TypeScript LanguageService. The lightweight
+    /// generator tables remain available if the service cannot start or a
+    /// request fails, but successful TypeScript results are authoritative.
+    pub fn with_typescript_service(mut self, typescript: TypeScriptServiceHandle) -> Self {
+        self.typescript = Some(typescript);
+        self
     }
 
     /// Synchronous entrypoint used by the GPUI provider and focused tests.
@@ -342,6 +263,48 @@ impl SnippetIntelligenceProvider {
     pub fn hover_for_source(&self, source: &str, requested_offset: usize) -> Option<Hover> {
         generator_hover(self.context, source, requested_offset)
     }
+
+    /// Produces semantic diagnostics for the executable generator function
+    /// body. The TypeScript service owns wrapper projection, so every returned
+    /// range is relative to the visible editor source.
+    pub fn diagnostics_task(&self, source: String, cx: &mut App) -> Task<Vec<Diagnostic>> {
+        let Some(typescript) = self.typescript.clone() else {
+            return Task::ready(Vec::new());
+        };
+        let document = self.typescript_document();
+        let version = self.version_for_source(&source);
+        cx.background_spawn(async move {
+            match typescript.diagnostics(document, version, source).await {
+                Ok(diagnostics) => diagnostics,
+                Err(error) => {
+                    tracing::debug!(%error, "TypeScript snippet diagnostics unavailable");
+                    Vec::new()
+                }
+            }
+        })
+    }
+
+    fn typescript_document(&self) -> TypeScriptDocumentKind {
+        let phase = match self.context.phase() {
+            SnippetTargetPhase::PreRequest => TypeScriptScriptPhase::PreRequest,
+            SnippetTargetPhase::PostResponse => TypeScriptScriptPhase::PostResponse,
+        };
+        match self.context {
+            SnippetEditorContext::PlainJavaScript(_) => TypeScriptDocumentKind::PlainSnippet(phase),
+            SnippetEditorContext::ExecutableGenerator(_) => {
+                TypeScriptDocumentKind::ExecutableSnippet(phase)
+            }
+        }
+    }
+
+    fn version_for_source(&self, source: &str) -> u64 {
+        let mut document = self.document.borrow_mut();
+        if document.source.as_deref() != Some(source) {
+            document.source = Some(source.to_owned());
+            document.version = NEXT_SNIPPET_DOCUMENT_VERSION.fetch_add(1, Ordering::Relaxed);
+        }
+        document.version
+    }
 }
 
 impl CompletionProvider for SnippetIntelligenceProvider {
@@ -355,11 +318,30 @@ impl CompletionProvider for SnippetIntelligenceProvider {
         offset: usize,
         _trigger: CompletionContext,
         _window: &mut Window,
-        _cx: &mut Context<InputState>,
+        cx: &mut Context<InputState>,
     ) -> Task<Result<CompletionResponse>> {
-        Task::ready(Ok(CompletionResponse::Array(
-            self.completion_items_for_source(&text.to_string(), offset),
-        )))
+        let source = text.to_string();
+        let Some(typescript) = self.typescript.clone() else {
+            return Task::ready(Ok(CompletionResponse::Array(
+                self.completion_items_for_source(&source, offset),
+            )));
+        };
+        let context = self.context;
+        let document = self.typescript_document();
+        let version = self.version_for_source(&source);
+        cx.background_spawn(async move {
+            let items = match typescript
+                .completion_items(document, version, source.clone(), offset)
+                .await
+            {
+                Ok(items) => items,
+                Err(error) => {
+                    tracing::debug!(%error, "TypeScript snippet completion unavailable");
+                    generator_completion_items(context, &source, offset)
+                }
+            };
+            Ok(CompletionResponse::Array(items))
+        })
     }
 
     fn is_completion_trigger(
@@ -368,7 +350,11 @@ impl CompletionProvider for SnippetIntelligenceProvider {
         new_text: &str,
         _cx: &mut Context<InputState>,
     ) -> bool {
-        generator_trigger(self.context, new_text)
+        if self.typescript.is_some() {
+            javascript_completion_trigger(new_text)
+        } else {
+            generator_trigger(self.context, new_text)
+        }
     }
 
     fn is_completion_trigger_in_text(
@@ -379,6 +365,9 @@ impl CompletionProvider for SnippetIntelligenceProvider {
         new_text: &str,
         _cx: &mut Context<InputState>,
     ) -> bool {
+        if self.typescript.is_some() {
+            return javascript_completion_trigger(new_text);
+        }
         if generator_trigger(self.context, new_text) {
             let source = text.to_string();
             completion_context(&source, cursor_offset).is_some_and(|path_context| {
@@ -400,10 +389,35 @@ impl HoverProvider for SnippetIntelligenceProvider {
         text: &Rope,
         offset: usize,
         _window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) -> Task<Result<Option<Hover>>> {
-        Task::ready(Ok(self.hover_for_source(&text.to_string(), offset)))
+        let source = text.to_string();
+        let Some(typescript) = self.typescript.clone() else {
+            return Task::ready(Ok(self.hover_for_source(&source, offset)));
+        };
+        let context = self.context;
+        let document = self.typescript_document();
+        let version = self.version_for_source(&source);
+        cx.background_spawn(async move {
+            match typescript
+                .hover(document, version, source.clone(), offset)
+                .await
+            {
+                Ok(hover) => Ok(hover),
+                Err(error) => {
+                    tracing::debug!(%error, "TypeScript snippet hover unavailable");
+                    Ok(generator_hover(context, &source, offset))
+                }
+            }
+        })
     }
+}
+
+fn javascript_completion_trigger(new_text: &str) -> bool {
+    !new_text.is_empty()
+        && new_text.chars().all(|character| {
+            character.is_alphanumeric() || matches!(character, '_' | '$' | '.' | '"' | '\'')
+        })
 }
 
 fn generator_completion_items(
@@ -1258,6 +1272,8 @@ fn source_range(source: &str, start: usize, end: usize) -> Range {
     Range::new(source_position(source, start), source_position(source, end))
 }
 
+// gpui-component maps an LSP column as a Unicode scalar index in its Rope.
+// Keep fallback edits aligned with the TypeScript-service conversion.
 fn source_position(source: &str, requested_offset: usize) -> Position {
     let offset = clipped_char_boundary(source, requested_offset);
     let prefix = &source[..offset];
@@ -1265,7 +1281,7 @@ fn source_position(source: &str, requested_offset: usize) -> Position {
     let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
     Position::new(
         u32::try_from(line).unwrap_or(u32::MAX),
-        u32::try_from(source[line_start..offset].encode_utf16().count()).unwrap_or(u32::MAX),
+        u32::try_from(source[line_start..offset].chars().count()).unwrap_or(u32::MAX),
     )
 }
 
@@ -1332,6 +1348,10 @@ mod tests {
 
         let executable_labels = labels(executable().completion_items_for_source("sni", 3));
         assert_eq!(executable_labels, vec!["snippet"]);
+        assert_eq!(
+            executable().typescript_document(),
+            TypeScriptDocumentKind::ExecutableSnippet(TypeScriptScriptPhase::PostResponse)
+        );
         assert!(
             SnippetEditorContext::ExecutableGenerator(SnippetTargetPhase::PostResponse)
                 .ambient_declarations()
@@ -1506,6 +1526,8 @@ mod tests {
             "jsonPath(): string",
             "jsonPointer(): string",
             "expression(options?: ExpressionOptions): string",
+            "interface GeneratorReturn",
+            "readonly cursor?: number | null",
             "write(value: unknown): void",
             "result(text: unknown, options?: ResultOptions): Result",
             "declare function write(value: unknown): void",
@@ -1545,7 +1567,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_edits_use_utf16_positions_after_unicode() {
+    fn completion_edits_use_gpui_unicode_scalar_positions() {
         let source = "const marker = \"🎉\"; snippet.sel";
         let item = executable()
             .completion_items_for_source(source, source.len())
@@ -1557,12 +1579,9 @@ mod tests {
         };
         assert_eq!(
             edit.range.start.character,
-            "const marker = \"🎉\"; snippet.".encode_utf16().count() as u32
+            "const marker = \"🎉\"; snippet.".chars().count() as u32
         );
-        assert_eq!(
-            edit.range.end.character,
-            source.encode_utf16().count() as u32
-        );
+        assert_eq!(edit.range.end.character, source.chars().count() as u32);
 
         let template_source = "const label = `🎉 ${api.response?.st";
         let template_item = executable()
@@ -1580,9 +1599,9 @@ mod tests {
             Range::new(
                 Position::new(
                     0,
-                    "const label = `🎉 ${api.response?.".encode_utf16().count() as u32,
+                    "const label = `🎉 ${api.response?.".chars().count() as u32,
                 ),
-                Position::new(0, template_source.encode_utf16().count() as u32),
+                Position::new(0, template_source.chars().count() as u32),
             )
         );
     }

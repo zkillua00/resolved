@@ -2,6 +2,7 @@ use gpui_component::group_box::GroupBoxVariant;
 use gpui_component::setting::{
     SettingField, SettingGroup, SettingItem, SettingPage, Settings as SettingsView,
 };
+use gpui_component::switch::Switch;
 
 use super::*;
 
@@ -33,9 +34,42 @@ impl ApiTester {
     }
 
     pub(super) fn render_settings_workspace(&self, cx: &mut Context<Self>) -> AnyElement {
+        let editor_page = SettingPage::new("Editor")
+            .description(
+                "Tune every code editor and the built-in JSON, JavaScript, and TypeScript formatters.",
+            )
+            .default_open(true)
+            .resettable(false)
+            .group(
+                SettingGroup::new()
+                    .title("Editing")
+                    .description("Changes apply immediately to every open editor.")
+                    .items([
+                        self.editor_tab_size_setting_item(cx),
+                        self.editor_hard_tabs_setting_item(cx),
+                        self.editor_soft_wrap_setting_item(cx),
+                        self.editor_line_numbers_setting_item(cx),
+                        self.editor_indent_guides_setting_item(cx),
+                        self.editor_auto_close_pairs_setting_item(cx),
+                    ]),
+            )
+            .group(
+                SettingGroup::new()
+                    .title("Formatting")
+                    .description(
+                        "Controls applied when formatting JSON, JavaScript, or TypeScript source.",
+                    )
+                    .items([
+                        self.formatter_indent_size_setting_item(cx),
+                        self.formatter_hard_tabs_setting_item(cx),
+                        self.formatter_line_width_setting_item(cx),
+                        self.formatter_quote_style_setting_item(cx),
+                        self.formatter_semicolons_setting_item(cx),
+                        self.formatter_trailing_commas_setting_item(cx),
+                    ]),
+            );
         let mut keyboard_page = SettingPage::new("Keyboard")
             .description("Record shortcuts directly. Defaults follow familiar macOS conventions.")
-            .default_open(true)
             .resettable(false);
         for category in shortcuts::ShortcutCategory::ALL {
             let mut items = shortcuts::shortcut_descriptors()
@@ -90,10 +124,518 @@ impl ApiTester {
                     SettingsView::new("api-tester-settings")
                         .sidebar_width(px(220.))
                         .with_group_variant(GroupBoxVariant::Outline)
-                        .pages([keyboard_page, appearance_page, developer_page]),
+                        .pages([editor_page, keyboard_page, appearance_page, developer_page]),
                 ),
             )
             .into_any_element()
+    }
+
+    fn editor_tab_size_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Tab size",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let selected = state.settings.editor.tab_size;
+                let writable = state.settings_writable;
+                let menu_this = this.clone();
+
+                Button::new("editor-tab-size-picker")
+                    .label(format!("{selected} spaces"))
+                    .dropdown_caret(true)
+                    .outline()
+                    .w(px(220.))
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        "Choose the visual width of a tab",
+                    ))
+                    .dropdown_menu(move |mut menu, _, _| {
+                        menu = menu.min_w(px(220.));
+                        for tab_size in [1_u8, 2, 4, 8] {
+                            let item_this = menu_this.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(format!("{tab_size} spaces"))
+                                    .checked(tab_size == selected)
+                                    .on_click(move |_, window, cx| {
+                                        if tab_size == selected {
+                                            return;
+                                        }
+                                        if let Some(this) = item_this.upgrade() {
+                                            this.update(cx, |this, cx| {
+                                                this.set_editor_tab_size(tab_size, window, cx);
+                                            });
+                                        }
+                                    }),
+                            );
+                        }
+                        menu
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description("Sets indentation width and how wide existing tab characters appear.")
+    }
+
+    fn editor_hard_tabs_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Use hard tabs",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let checked = state.settings.editor.hard_tabs;
+                let writable = state.settings_writable;
+                let change_this = this.clone();
+
+                Switch::new("editor-hard-tabs")
+                    .checked(checked)
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        "Insert tabs instead of spaces when indenting",
+                    ))
+                    .on_click(move |checked, window, cx| {
+                        if let Some(this) = change_this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.set_editor_hard_tabs(*checked, window, cx);
+                            });
+                        }
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description("Insert tab characters for indentation. Tab size still controls their width.")
+    }
+
+    fn editor_soft_wrap_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Soft wrap",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let checked = state.settings.editor.soft_wrap;
+                let writable = state.settings_writable;
+                let change_this = this.clone();
+
+                Switch::new("editor-soft-wrap")
+                    .checked(checked)
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        "Wrap long lines within the editor viewport",
+                    ))
+                    .on_click(move |checked, window, cx| {
+                        if let Some(this) = change_this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.set_editor_soft_wrap(*checked, window, cx);
+                            });
+                        }
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description("Wrap long lines visually without changing their contents.")
+    }
+
+    fn editor_line_numbers_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Line numbers",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let checked = state.settings.editor.line_numbers;
+                let writable = state.settings_writable;
+                let change_this = this.clone();
+
+                Switch::new("editor-line-numbers")
+                    .checked(checked)
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        "Show line numbers beside code",
+                    ))
+                    .on_click(move |checked, window, cx| {
+                        if let Some(this) = change_this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.set_editor_line_numbers(*checked, window, cx);
+                            });
+                        }
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description("Show a line-number gutter in code editors.")
+    }
+
+    fn editor_indent_guides_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Indent guides",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let checked = state.settings.editor.indent_guides;
+                let writable = state.settings_writable;
+                let change_this = this.clone();
+
+                Switch::new("editor-indent-guides")
+                    .checked(checked)
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        "Show vertical indentation guides",
+                    ))
+                    .on_click(move |checked, window, cx| {
+                        if let Some(this) = change_this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.set_editor_indent_guides(*checked, window, cx);
+                            });
+                        }
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description("Show guides that make nested code structure easier to follow.")
+    }
+
+    fn editor_auto_close_pairs_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Auto-close pairs",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let checked = state.settings.editor.auto_close_pairs;
+                let writable = state.settings_writable;
+                let change_this = this.clone();
+
+                Switch::new("editor-auto-close-pairs")
+                    .checked(checked)
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        "Insert matching brackets and quotes",
+                    ))
+                    .on_click(move |checked, window, cx| {
+                        if let Some(this) = change_this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.set_editor_auto_close_pairs(*checked, window, cx);
+                            });
+                        }
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description("Automatically insert matching brackets, braces, parentheses, and quotes.")
+    }
+
+    fn formatter_indent_size_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Indent size",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let selected = state.settings.formatter.indent_size;
+                let writable = state.settings_writable;
+                let menu_this = this.clone();
+
+                Button::new("formatter-indent-size-picker")
+                    .label(format!("{selected} spaces"))
+                    .dropdown_caret(true)
+                    .outline()
+                    .w(px(220.))
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        "Choose the indentation width produced by the formatter",
+                    ))
+                    .dropdown_menu(move |mut menu, _, _| {
+                        menu = menu.min_w(px(220.));
+                        for indent_size in [1_u8, 2, 4, 8] {
+                            let item_this = menu_this.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(format!("{indent_size} spaces"))
+                                    .checked(indent_size == selected)
+                                    .on_click(move |_, _, cx| {
+                                        if indent_size == selected {
+                                            return;
+                                        }
+                                        if let Some(this) = item_this.upgrade() {
+                                            this.update(cx, |this, cx| {
+                                                this.set_formatter_indent_size(indent_size, cx);
+                                            });
+                                        }
+                                    }),
+                            );
+                        }
+                        menu
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description("Sets indentation width when formatting JSON, JavaScript, or TypeScript.")
+    }
+
+    fn formatter_hard_tabs_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Use hard tabs",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let checked = state.settings.formatter.hard_tabs;
+                let writable = state.settings_writable;
+                let change_this = this.clone();
+
+                Switch::new("formatter-hard-tabs")
+                    .checked(checked)
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        "Format indentation with tabs instead of spaces",
+                    ))
+                    .on_click(move |checked, _, cx| {
+                        if let Some(this) = change_this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.set_formatter_hard_tabs(*checked, cx);
+                            });
+                        }
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description("Emit tab characters for indentation in formatted output.")
+    }
+
+    fn formatter_line_width_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Line width",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let selected = state.settings.formatter.line_width;
+                let writable = state.settings_writable;
+                let menu_this = this.clone();
+
+                Button::new("formatter-line-width-picker")
+                    .label(format!("{selected} columns"))
+                    .dropdown_caret(true)
+                    .outline()
+                    .w(px(220.))
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        "Choose the formatter's preferred maximum line width",
+                    ))
+                    .dropdown_menu(move |mut menu, _, _| {
+                        menu = menu.min_w(px(220.));
+                        for line_width in [40_u16, 60, 80, 100, 120, 160, 240] {
+                            let item_this = menu_this.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(format!("{line_width} columns"))
+                                    .checked(line_width == selected)
+                                    .on_click(move |_, _, cx| {
+                                        if line_width == selected {
+                                            return;
+                                        }
+                                        if let Some(this) = item_this.upgrade() {
+                                            this.update(cx, |this, cx| {
+                                                this.set_formatter_line_width(line_width, cx);
+                                            });
+                                        }
+                                    }),
+                            );
+                        }
+                        menu
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description("Preferred maximum line width for JavaScript and TypeScript formatting.")
+    }
+
+    fn formatter_quote_style_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "JavaScript quotes",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let selected = state.settings.formatter.quote_style;
+                let writable = state.settings_writable;
+                let menu_this = this.clone();
+
+                Button::new("formatter-quote-style-picker")
+                    .label(selected.label())
+                    .dropdown_caret(true)
+                    .outline()
+                    .w(px(220.))
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        "Choose the preferred JavaScript string quote style",
+                    ))
+                    .dropdown_menu(move |mut menu, _, _| {
+                        menu = menu.min_w(px(220.));
+                        for quote_style in crate::core::FormatterQuoteStyle::ALL {
+                            let item_this = menu_this.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(quote_style.label())
+                                    .checked(quote_style == selected)
+                                    .on_click(move |_, _, cx| {
+                                        if quote_style == selected {
+                                            return;
+                                        }
+                                        if let Some(this) = item_this.upgrade() {
+                                            this.update(cx, |this, cx| {
+                                                this.set_formatter_quote_style(
+                                                    quote_style.key(),
+                                                    cx,
+                                                );
+                                            });
+                                        }
+                                    }),
+                            );
+                        }
+                        menu
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description(
+            "Prefer double or single quotes when formatting JavaScript and TypeScript strings.",
+        )
+    }
+
+    fn formatter_semicolons_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Semicolons",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let selected = state.settings.formatter.semicolons;
+                let writable = state.settings_writable;
+                let menu_this = this.clone();
+
+                Button::new("formatter-semicolon-picker")
+                    .label(selected.label())
+                    .dropdown_caret(true)
+                    .outline()
+                    .w(px(220.))
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        "Choose whether formatted JavaScript prefers semicolons",
+                    ))
+                    .dropdown_menu(move |mut menu, _, _| {
+                        menu = menu.min_w(px(220.));
+                        for semicolons in crate::core::FormatterSemicolons::ALL {
+                            let item_this = menu_this.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(semicolons.label())
+                                    .checked(semicolons == selected)
+                                    .on_click(move |_, _, cx| {
+                                        if semicolons == selected {
+                                            return;
+                                        }
+                                        if let Some(this) = item_this.upgrade() {
+                                            this.update(cx, |this, cx| {
+                                                this.set_formatter_semicolons(semicolons.key(), cx);
+                                            });
+                                        }
+                                    }),
+                            );
+                        }
+                        menu
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description(
+            "Prefer explicit semicolons or rely on automatic insertion in JavaScript and TypeScript.",
+        )
+    }
+
+    fn formatter_trailing_commas_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Trailing commas",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let selected = state.settings.formatter.trailing_commas;
+                let writable = state.settings_writable;
+                let menu_this = this.clone();
+
+                Button::new("formatter-trailing-commas-picker")
+                    .label(selected.label())
+                    .dropdown_caret(true)
+                    .outline()
+                    .w(px(220.))
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        "Choose when formatted JavaScript uses trailing commas",
+                    ))
+                    .dropdown_menu(move |mut menu, _, _| {
+                        menu = menu.min_w(px(220.));
+                        for trailing_commas in crate::core::FormatterTrailingCommas::ALL {
+                            let item_this = menu_this.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(trailing_commas.label())
+                                    .checked(trailing_commas == selected)
+                                    .on_click(move |_, _, cx| {
+                                        if trailing_commas == selected {
+                                            return;
+                                        }
+                                        if let Some(this) = item_this.upgrade() {
+                                            this.update(cx, |this, cx| {
+                                                this.set_formatter_trailing_commas(
+                                                    trailing_commas.key(),
+                                                    cx,
+                                                );
+                                            });
+                                        }
+                                    }),
+                            );
+                        }
+                        menu
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description("Choose whether collections and parameter lists receive trailing commas.")
     }
 
     fn shortcut_setting_item(
@@ -943,6 +1485,14 @@ fn theme_selection_tooltip(
         "Save or revert your changes before switching themes"
     } else {
         available
+    }
+}
+
+fn settings_control_tooltip(writable: bool, available: &'static str) -> &'static str {
+    if writable {
+        available
+    } else {
+        "Settings are read-only because they could not be loaded safely"
     }
 }
 

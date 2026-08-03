@@ -1,14 +1,38 @@
 use super::request_tab_reconciliation::reconcile_restored_request_tabs;
 use super::*;
 
+fn embedded_typescript_service() -> Option<TypeScriptServiceHandle> {
+    static SERVICE: OnceLock<Option<TypeScriptServiceHandle>> = OnceLock::new();
+
+    SERVICE
+        .get_or_init(|| match TypeScriptServiceHandle::start() {
+            Ok(service) => Some(service),
+            Err(error) => {
+                tracing::warn!(%error, "JavaScript language service unavailable");
+                None
+            }
+        })
+        .clone()
+}
+
 impl ApiTester {
     pub fn new(
         base_key_bindings: Vec<gpui::KeyBinding>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_with_database_store(base_key_bindings, DatabaseStore::default(), window, cx)
+    }
+
+    pub(super) fn new_with_database_store(
+        base_key_bindings: Vec<gpui::KeyBinding>,
+        database_store: DatabaseStore,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let snippet_menu_owner = cx.entity().downgrade();
         let script_variable_catalog = ScriptVariableCatalog::default().shared();
+        let typescript_service = embedded_typescript_service();
         let template_variable_catalog = TemplateVariableCatalog::default().shared();
         let method = cx.new(|cx| {
             InputState::new(window, cx)
@@ -46,14 +70,15 @@ impl ApiTester {
             )
         });
         let pre_completion_catalog = Rc::clone(&script_variable_catalog);
-        let pre_diagnostic_catalog = Rc::clone(&script_variable_catalog);
         let pre_request_script = cx.new(|cx| {
             let completion_catalog = Rc::clone(&pre_completion_catalog);
-            let diagnostic_catalog = Rc::clone(&pre_diagnostic_catalog);
-            let intelligence = Rc::new(ScriptCompletionProvider::new(
-                ScriptEditorPhase::PreRequest,
-                completion_catalog,
-            ));
+            let mut intelligence =
+                ScriptCompletionProvider::new(ScriptEditorPhase::PreRequest, completion_catalog);
+            if let Some(service) = typescript_service.clone() {
+                intelligence = intelligence.with_typescript_service(service);
+            }
+            let intelligence = Rc::new(intelligence);
+            let diagnostic_intelligence = Rc::clone(&intelligence);
             CodeEditor::new(
                 CodeEditorConfig::default()
                     .language(CodeLanguage::JavaScript)
@@ -62,31 +87,35 @@ impl ApiTester {
                     )
                     .rows(12)
                     .soft_wrap(false)
+                    .format_action(true)
                     .context_menu_builder(snippet_context_menu_builder(
                         snippet_menu_owner.clone(),
                         SnippetMenuSurface::PreRequestScript,
                     ))
                     .completion_provider(intelligence.clone())
                     .hover_provider(intelligence)
-                    .diagnostic_provider(move |source| {
-                        diagnostics_for_source(source, &diagnostic_catalog.borrow())
-                            .into_iter()
-                            .map(Into::into)
-                            .collect()
+                    .async_diagnostic_provider(move |source, cx| {
+                        let diagnostics = diagnostic_intelligence.diagnostics_task(source, cx);
+                        cx.background_spawn(async move {
+                            diagnostics.await.into_iter().map(Into::into).collect()
+                        })
                     }),
                 window,
                 cx,
             )
         });
         let post_completion_catalog = Rc::clone(&script_variable_catalog);
-        let post_diagnostic_catalog = Rc::clone(&script_variable_catalog);
         let post_response_script = cx.new(|cx| {
             let completion_catalog = Rc::clone(&post_completion_catalog);
-            let diagnostic_catalog = Rc::clone(&post_diagnostic_catalog);
-            let intelligence = Rc::new(ScriptCompletionProvider::new(
+            let mut intelligence = ScriptCompletionProvider::new(
                 ScriptEditorPhase::PostResponse,
                 completion_catalog,
-            ));
+            );
+            if let Some(service) = typescript_service.clone() {
+                intelligence = intelligence.with_typescript_service(service);
+            }
+            let intelligence = Rc::new(intelligence);
+            let diagnostic_intelligence = Rc::clone(&intelligence);
             CodeEditor::new(
                 CodeEditorConfig::default()
                     .language(CodeLanguage::JavaScript)
@@ -95,17 +124,18 @@ impl ApiTester {
                     )
                     .rows(12)
                     .soft_wrap(false)
+                    .format_action(true)
                     .context_menu_builder(snippet_context_menu_builder(
                         snippet_menu_owner.clone(),
                         SnippetMenuSurface::PostResponseScript,
                     ))
                     .completion_provider(intelligence.clone())
                     .hover_provider(intelligence)
-                    .diagnostic_provider(move |source| {
-                        diagnostics_for_source(source, &diagnostic_catalog.borrow())
-                            .into_iter()
-                            .map(Into::into)
-                            .collect()
+                    .async_diagnostic_provider(move |source, cx| {
+                        let diagnostics = diagnostic_intelligence.diagnostics_task(source, cx);
+                        cx.background_spawn(async move {
+                            diagnostics.await.into_iter().map(Into::into).collect()
+                        })
                     }),
                 window,
                 cx,
@@ -129,7 +159,6 @@ impl ApiTester {
         });
         let debug_overlay = cx.new(DebugOverlay::new);
 
-        let database_store = DatabaseStore::default();
         let (
             history,
             workspace,
@@ -399,6 +428,7 @@ impl ApiTester {
             &workspace,
             workspace_writable,
             Rc::clone(&script_variable_catalog),
+            typescript_service.clone(),
             window,
             cx,
         );
@@ -441,12 +471,29 @@ impl ApiTester {
                     this.refresh_request_dirty_part(RequestDirtyPart::PreScript, cx);
                 }
             });
+        let pre_request_format_subscription =
+            cx.subscribe_in(&pre_request_script, window, |this, _, event, window, cx| {
+                if matches!(event, CodeEditorEvent::FormatRequested) {
+                    let editor = this.pre_request_script.clone();
+                    this.format_script_editor(editor, "pre-request", window, cx);
+                }
+            });
         let post_response_subscription =
             cx.subscribe(&post_response_script, |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.refresh_request_dirty_part(RequestDirtyPart::PostScript, cx);
                 }
             });
+        let post_response_format_subscription = cx.subscribe_in(
+            &post_response_script,
+            window,
+            |this, _, event, window, cx| {
+                if matches!(event, CodeEditorEvent::FormatRequested) {
+                    let editor = this.post_response_script.clone();
+                    this.format_script_editor(editor, "post-response", window, cx);
+                }
+            },
+        );
         let collection_name_subscription =
             cx.subscribe_in(&collection_name, window, |this, _, event, _, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
@@ -568,6 +615,7 @@ impl ApiTester {
             next_variable_row_id: 0,
             pending_delete: None,
             script_variable_catalog,
+            typescript_service,
             template_variable_catalog,
             template_highlight_tasks: HashMap::new(),
             template_variable_hover_task: None,
@@ -583,7 +631,9 @@ impl ApiTester {
                 body_subscription,
                 body_format_subscription,
                 pre_request_subscription,
+                pre_request_format_subscription,
                 post_response_subscription,
+                post_response_format_subscription,
                 collection_name_subscription,
                 folder_name_subscription,
                 saved_request_name_subscription,
@@ -591,6 +641,7 @@ impl ApiTester {
                 shortcut_capture_subscription,
             ],
         };
+        this.apply_code_editor_settings(window, cx);
         this.push_header_row("", "", true, window, cx);
         this.refresh_variable_intelligence(cx);
         this.loaded_request_baseline = this.request_template(cx);

@@ -4,10 +4,15 @@
 //! collection values (including secrets) must never enter completion items,
 //! diagnostics, logs, or the provider's retained state.
 
-use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::BTreeSet,
+    rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use anyhow::Result;
-use gpui::{App, Context, Task, Window};
+use gpui::{App, AppContext as _, Context, Task, Window};
 use gpui_component::input::{CompletionProvider, HoverProvider, InputState, Rope};
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit,
@@ -15,7 +20,10 @@ use lsp_types::{
     NumberOrString, Position, Range, TextEdit,
 };
 
-use crate::core::{BodyFieldKind, BodyMode, RawBodyLanguage, STANDARD_HTTP_METHODS};
+use crate::{
+    core::{BodyFieldKind, BodyMode, RawBodyLanguage, STANDARD_HTTP_METHODS},
+    typescript_service::{TypeScriptDocumentKind, TypeScriptScriptPhase, TypeScriptServiceHandle},
+};
 
 const DIAGNOSTIC_SOURCE: &str = "Resolved";
 const MISSING_VARIABLE_CODE: &str = "missing-script-variable";
@@ -32,6 +40,13 @@ const VARIABLE_CONTEXT_PADDING: usize = 96;
 pub enum ScriptEditorPhase {
     PreRequest,
     PostResponse,
+}
+
+const fn typescript_phase(phase: ScriptEditorPhase) -> TypeScriptScriptPhase {
+    match phase {
+        ScriptEditorPhase::PreRequest => TypeScriptScriptPhase::PreRequest,
+        ScriptEditorPhase::PostResponse => TypeScriptScriptPhase::PostResponse,
+    }
 }
 
 /// A value-blind snapshot of the variable names visible to a script.
@@ -127,15 +142,52 @@ where
 }
 
 /// Completion provider for the sandboxed pre-request/post-response API.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ScriptCompletionProvider {
     phase: ScriptEditorPhase,
     variables: ScriptVariableCatalogHandle,
+    typescript: Option<TypeScriptServiceHandle>,
+    typescript_document: TypeScriptDocumentKind,
+    document: Rc<RefCell<ScriptDocumentVersion>>,
 }
+
+#[derive(Default)]
+struct ScriptDocumentVersion {
+    source: Option<String>,
+    version: u64,
+}
+
+static NEXT_SCRIPT_DOCUMENT_VERSION: AtomicU64 = AtomicU64::new(1);
 
 impl ScriptCompletionProvider {
     pub fn new(phase: ScriptEditorPhase, variables: ScriptVariableCatalogHandle) -> Self {
-        Self { phase, variables }
+        Self {
+            phase,
+            variables,
+            typescript: None,
+            typescript_document: TypeScriptDocumentKind::Script(typescript_phase(phase)),
+            document: Rc::new(RefCell::new(ScriptDocumentVersion::default())),
+        }
+    }
+
+    /// Builds request-script intelligence for a plain snippet without sharing
+    /// the live request editor's TypeScript document slot.
+    pub fn for_plain_snippet(
+        phase: ScriptEditorPhase,
+        variables: ScriptVariableCatalogHandle,
+    ) -> Self {
+        Self {
+            typescript_document: TypeScriptDocumentKind::PlainSnippet(typescript_phase(phase)),
+            ..Self::new(phase, variables)
+        }
+    }
+
+    /// Adds Microsoft's embedded TypeScript Language Service for ordinary
+    /// JavaScript semantics. Resolved-specific API and live variable-name
+    /// completion remains a narrow, value-blind overlay.
+    pub fn with_typescript_service(mut self, typescript: TypeScriptServiceHandle) -> Self {
+        self.typescript = Some(typescript);
+        self
     }
 
     /// Synchronous completion entrypoint used by the GPUI provider and focused
@@ -148,6 +200,42 @@ impl ScriptCompletionProvider {
     /// the pointer. Environment and collection values never enter the hover.
     pub fn hover_for_source(&self, source: &str, offset: usize) -> Option<Hover> {
         hover_for_source(source, offset, self.phase, &self.variables.borrow())
+    }
+
+    /// Produces semantic JavaScript diagnostics asynchronously and merges the
+    /// result with Resolved's value-blind variable warnings.
+    pub fn diagnostics_task(&self, source: String, cx: &mut App) -> Task<Vec<Diagnostic>> {
+        let variables = self.variables.borrow().clone();
+        let typescript_request = self.typescript.clone().map(|typescript| {
+            (
+                typescript,
+                self.typescript_document,
+                self.version_for_source(&source),
+            )
+        });
+
+        cx.background_spawn(async move {
+            let local = diagnostics_for_source(&source, &variables);
+            let Some((typescript, document, version)) = typescript_request else {
+                return local;
+            };
+            match typescript.diagnostics(document, version, source).await {
+                Ok(typescript_diagnostics) => merge_diagnostics(local, typescript_diagnostics),
+                Err(error) => {
+                    tracing::debug!(%error, "TypeScript diagnostics unavailable");
+                    local
+                }
+            }
+        })
+    }
+
+    fn version_for_source(&self, source: &str) -> u64 {
+        let mut document = self.document.borrow_mut();
+        if document.source.as_deref() != Some(source) {
+            document.source = Some(source.to_owned());
+            document.version = NEXT_SCRIPT_DOCUMENT_VERSION.fetch_add(1, Ordering::Relaxed);
+        }
+        document.version
     }
 }
 
@@ -162,11 +250,32 @@ impl CompletionProvider for ScriptCompletionProvider {
         offset: usize,
         _trigger: CompletionContext,
         _window: &mut Window,
-        _cx: &mut Context<InputState>,
+        cx: &mut Context<InputState>,
     ) -> Task<Result<CompletionResponse>> {
         let source = text.to_string();
-        let items = self.completion_items_for_source(&source, offset);
-        Task::ready(Ok(CompletionResponse::Array(items)))
+        let Some(typescript) = self.typescript.clone() else {
+            let local = self.completion_items_for_source(&source, offset);
+            return Task::ready(Ok(CompletionResponse::Array(local)));
+        };
+        let variables = self.variables.borrow().clone();
+        let local_phase = self.phase;
+        let document = self.typescript_document;
+        let version = self.version_for_source(&source);
+
+        cx.background_spawn(async move {
+            let local = completion_items(&source, offset, local_phase, &variables);
+            let items = match typescript
+                .completion_items(document, version, source, offset)
+                .await
+            {
+                Ok(typescript_items) => merge_completion_items(local, typescript_items),
+                Err(error) => {
+                    tracing::debug!(%error, "TypeScript completion unavailable");
+                    local
+                }
+            };
+            Ok(CompletionResponse::Array(items))
+        })
     }
 
     fn is_completion_trigger(
@@ -197,7 +306,13 @@ impl CompletionProvider for ScriptCompletionProvider {
             return false;
         }
 
-        script_completion_is_active(text, cursor_offset, self.phase, &self.variables.borrow())
+        self.typescript.is_some()
+            || script_completion_is_active(
+                text,
+                cursor_offset,
+                self.phase,
+                &self.variables.borrow(),
+            )
     }
 }
 
@@ -207,10 +322,65 @@ impl HoverProvider for ScriptCompletionProvider {
         text: &Rope,
         offset: usize,
         _window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) -> Task<Result<Option<Hover>>> {
-        Task::ready(Ok(self.hover_for_source(&text.to_string(), offset)))
+        let source = text.to_string();
+        let Some(typescript) = self.typescript.clone() else {
+            return Task::ready(Ok(self.hover_for_source(&source, offset)));
+        };
+        let variables = self.variables.borrow().clone();
+        let local_phase = self.phase;
+        let document = self.typescript_document;
+        let version = self.version_for_source(&source);
+
+        cx.background_spawn(async move {
+            if let Some(hover) = hover_for_source(&source, offset, local_phase, &variables) {
+                return Ok(Some(hover));
+            }
+            match typescript.hover(document, version, source, offset).await {
+                Ok(hover) => Ok(hover),
+                Err(error) => {
+                    tracing::debug!(%error, "TypeScript hover unavailable");
+                    Ok(None)
+                }
+            }
+        })
     }
+}
+
+fn merge_completion_items(
+    local: Vec<CompletionItem>,
+    typescript: Vec<CompletionItem>,
+) -> Vec<CompletionItem> {
+    let mut labels = local
+        .iter()
+        .map(|item| item.label.clone())
+        .collect::<BTreeSet<_>>();
+    let mut merged = local;
+    merged.extend(
+        typescript
+            .into_iter()
+            .filter(|item| labels.insert(item.label.clone())),
+    );
+    merged
+}
+
+fn merge_diagnostics(local: Vec<Diagnostic>, typescript: Vec<Diagnostic>) -> Vec<Diagnostic> {
+    let mut seen = BTreeSet::new();
+    let mut merged = Vec::with_capacity(local.len() + typescript.len());
+    for diagnostic in local.into_iter().chain(typescript) {
+        let key = (
+            diagnostic.range.start.line,
+            diagnostic.range.start.character,
+            diagnostic.range.end.line,
+            diagnostic.range.end.character,
+            diagnostic.message.clone(),
+        );
+        if seen.insert(key) {
+            merged.push(diagnostic);
+        }
+    }
+    merged
 }
 
 fn script_completion_is_active(
@@ -503,7 +673,7 @@ const RESPONSE_MEMBERS: &[CompletionSpec] = &[
     ),
     method(
         "json",
-        "(): unknown",
+        "(): any",
         "Parses `text()` with `JSON.parse`. Invalid or truncated JSON throws.",
     ),
 ];
@@ -2084,6 +2254,18 @@ mod tests {
     }
 
     #[test]
+    fn plain_snippets_use_an_isolated_typescript_document() {
+        let provider = ScriptCompletionProvider::for_plain_snippet(
+            ScriptEditorPhase::PreRequest,
+            ScriptVariableCatalog::default().shared(),
+        );
+        assert_eq!(
+            provider.typescript_document,
+            TypeScriptDocumentKind::PlainSnippet(TypeScriptScriptPhase::PreRequest)
+        );
+    }
+
+    #[test]
     fn catalog_is_value_blind_and_deterministic() {
         let catalog = ScriptVariableCatalog::from_names(
             ["zeta", "", "alpha", "zeta"],
@@ -2549,7 +2731,7 @@ api.environment.set("later", "value");
         assert!(hover_markdown(&post_headers).contains("api.request.headers: ReadonlyHeaders"));
 
         let response = hover_at(&post, "api.response.json()", "json");
-        assert!(hover_markdown(&response).contains("api.response.json(): unknown"));
+        assert!(hover_markdown(&response).contains("api.response.json(): any"));
     }
 
     #[test]

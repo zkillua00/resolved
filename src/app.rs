@@ -3,7 +3,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::PathBuf,
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
@@ -58,9 +58,7 @@ use crate::{
     },
     debug_overlay::DebugOverlay,
     request_dirty::{RequestDirtyPart, RequestDirtyState},
-    script_intelligence::{
-        ScriptCompletionProvider, ScriptEditorPhase, ScriptVariableCatalog, diagnostics_for_source,
-    },
+    script_intelligence::{ScriptCompletionProvider, ScriptEditorPhase, ScriptVariableCatalog},
     shortcuts::{self, ShortcutId},
     snippet_intelligence::{SnippetEditorContext, SnippetIntelligenceProvider, SnippetTargetPhase},
     template_intelligence::{
@@ -69,6 +67,7 @@ use crate::{
         semantic_style_spans,
     },
     theme::ApiThemeExt as _,
+    typescript_service::TypeScriptServiceHandle,
     web_preview::{HtmlPreview, can_preview},
 };
 
@@ -78,6 +77,7 @@ mod bootstrap;
 mod collection_folder_actions;
 mod collections_actions;
 mod collections_page;
+mod editor_settings;
 mod environment_browser;
 mod environment_detail;
 mod environment_selector;
@@ -193,6 +193,7 @@ struct SnippetEditorSession {
     preview_cancellation: Option<SnippetCancellation>,
     _input_subscriptions: Vec<Subscription>,
     _editor_subscription: Subscription,
+    _editor_format_subscription: Subscription,
 }
 
 pub struct ApiTester {
@@ -277,6 +278,7 @@ pub struct ApiTester {
     next_variable_row_id: usize,
     pending_delete: Option<PendingDelete>,
     script_variable_catalog: Rc<RefCell<ScriptVariableCatalog>>,
+    typescript_service: Option<TypeScriptServiceHandle>,
     template_variable_catalog: TemplateVariableCatalogHandle,
     template_highlight_tasks: HashMap<EntityId, Task<()>>,
     template_variable_hover_task: Option<Task<()>>,

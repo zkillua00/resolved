@@ -54,7 +54,10 @@ const MAX_SNIPPET_LANGUAGE_BYTES: usize = 64;
 const MAX_JSON_SELECTION_DEPTH: usize = 256;
 const MAX_JSON_SELECTION_NODES: usize = 200_000;
 const SNIPPET_PRELUDE: &str = include_str!("snippet_runtime.js");
-pub(crate) const GENERATOR_WRAPPER_PREFIX: &str = "(function () { \"use strict\"; ";
+pub(crate) const GENERATOR_WRAPPER_PREFIX: &str = concat!(
+    "(/** @returns {string | ResolvedSnippet.GeneratorReturn | void} */ ",
+    "function () { \"use strict\"; ",
+);
 pub(crate) const GENERATOR_WRAPPER_SUFFIX: &str = "\n}).call(undefined)";
 
 static NEXT_SNIPPET_ID: AtomicU64 = AtomicU64::new(0);
@@ -2801,6 +2804,28 @@ write(`console.log(${snippet.selection.expression()});`);
             generate_snippet(&asynchronous, &context, &SnippetCancellation::new()).unwrap_err();
         assert_eq!(error.diagnostic.kind, SnippetErrorKind::InvalidOutput);
         assert!(error.diagnostic.message.contains("async"));
+    }
+
+    #[test]
+    fn generator_return_contract_accepts_structural_results_and_rejects_numbers() {
+        let context = SnippetInvocationContext::new(SnippetCategory::PreRequest, &request());
+        let numeric = snippet(
+            SnippetCategory::PreRequest,
+            SnippetKind::Executable,
+            "return 42;",
+        );
+        let error = generate_snippet(&numeric, &context, &SnippetCancellation::new()).unwrap_err();
+        assert_eq!(error.diagnostic.kind, SnippetErrorKind::InvalidOutput);
+
+        let structural = snippet(
+            SnippetCategory::PreRequest,
+            SnippetKind::Executable,
+            "return { text: 'structural result' };",
+        );
+        let generated =
+            generate_snippet(&structural, &context, &SnippetCancellation::new()).unwrap();
+        assert_eq!(generated.text, "structural result");
+        assert_eq!(generated.cursor, None);
     }
 
     #[test]

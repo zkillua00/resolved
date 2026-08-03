@@ -72,6 +72,15 @@ struct SnippetMenuInvocation {
     marker: SnippetMenuInvocationMarker,
 }
 
+struct SnippetSourceEditorOptions {
+    category: SnippetCategory,
+    kind: SnippetKind,
+    source: String,
+    read_only: bool,
+    variable_catalog: Rc<RefCell<ScriptVariableCatalog>>,
+    typescript_service: Option<TypeScriptServiceHandle>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SnippetMenuStaleReason {
     SourceDocument,
@@ -132,6 +141,7 @@ impl ApiTester {
         workspace: &Workspace,
         workspace_writable: bool,
         variable_catalog: Rc<RefCell<ScriptVariableCatalog>>,
+        typescript_service: Option<TypeScriptServiceHandle>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> SnippetEditorSession {
@@ -158,11 +168,14 @@ impl ApiTester {
                 .default_value(initial_description)
         });
         let editor = Self::new_snippet_source_editor(
-            category,
-            kind,
-            baseline.source.clone(),
-            !workspace_writable,
-            variable_catalog,
+            SnippetSourceEditorOptions {
+                category,
+                kind,
+                source: baseline.source.clone(),
+                read_only: !workspace_writable,
+                variable_catalog,
+                typescript_service,
+            },
             window,
             cx,
         );
@@ -193,12 +206,8 @@ impl ApiTester {
                     cx.notify();
                 }
             });
-        let editor_subscription = cx.subscribe(&editor, |this, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                this.invalidate_snippet_preview();
-                cx.notify();
-            }
-        });
+        let (editor_subscription, editor_format_subscription) =
+            Self::subscribe_snippet_source_editor(&editor, window, cx);
 
         SnippetEditorSession {
             search,
@@ -225,18 +234,23 @@ impl ApiTester {
                 description_subscription,
             ],
             _editor_subscription: editor_subscription,
+            _editor_format_subscription: editor_format_subscription,
         }
     }
 
     fn new_snippet_source_editor(
-        category: SnippetCategory,
-        kind: SnippetKind,
-        source: String,
-        read_only: bool,
-        variable_catalog: Rc<RefCell<ScriptVariableCatalog>>,
+        options: SnippetSourceEditorOptions,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<CodeEditor> {
+        let SnippetSourceEditorOptions {
+            category,
+            kind,
+            source,
+            read_only,
+            variable_catalog,
+            typescript_service,
+        } = options;
         let phase = match category {
             SnippetCategory::PreRequest => SnippetTargetPhase::PreRequest,
             SnippetCategory::PostResponse => SnippetTargetPhase::PostResponse,
@@ -248,6 +262,7 @@ impl ApiTester {
                 .rows(18)
                 .soft_wrap(false)
                 .read_only(read_only)
+                .format_action(!read_only)
                 .placeholder(match kind {
                     SnippetKind::Plain => "JavaScript inserted into the target script",
                     SnippetKind::Executable => {
@@ -256,35 +271,74 @@ impl ApiTester {
                 });
             config = match kind {
                 SnippetKind::Plain => {
-                    let diagnostic_catalog = Rc::clone(&variable_catalog);
-                    let intelligence = Rc::new(ScriptCompletionProvider::new(
+                    let mut intelligence = ScriptCompletionProvider::for_plain_snippet(
                         phase.script_editor_phase(),
                         variable_catalog,
-                    ));
+                    );
+                    if let Some(service) = typescript_service.clone() {
+                        intelligence = intelligence.with_typescript_service(service);
+                    }
+                    let intelligence = Rc::new(intelligence);
+                    let diagnostic_intelligence = Rc::clone(&intelligence);
                     config
                         .completion_provider(intelligence.clone())
                         .hover_provider(intelligence)
-                        .diagnostic_provider(move |source| {
-                            diagnostics_for_source(source, &diagnostic_catalog.borrow())
-                                .into_iter()
-                                .map(Into::into)
-                                .collect()
+                        .async_diagnostic_provider(move |source, cx| {
+                            let diagnostics = diagnostic_intelligence.diagnostics_task(source, cx);
+                            cx.background_spawn(async move {
+                                diagnostics.await.into_iter().map(Into::into).collect()
+                            })
                         })
                 }
                 SnippetKind::Executable => {
-                    let intelligence = Rc::new(SnippetIntelligenceProvider::new(
+                    let mut intelligence = SnippetIntelligenceProvider::new(
                         SnippetEditorContext::ExecutableGenerator(phase),
-                    ));
+                    );
+                    if let Some(service) = typescript_service.clone() {
+                        intelligence = intelligence.with_typescript_service(service);
+                    }
+                    let intelligence = Rc::new(intelligence);
+                    let diagnostic_intelligence = Rc::clone(&intelligence);
                     config
                         .completion_provider(intelligence.clone())
                         .hover_provider(intelligence)
+                        .async_diagnostic_provider(move |source, cx| {
+                            let diagnostics = diagnostic_intelligence.diagnostics_task(source, cx);
+                            cx.background_spawn(async move {
+                                diagnostics.await.into_iter().map(Into::into).collect()
+                            })
+                        })
                 }
             };
             CodeEditor::new(config, window, cx)
         })
     }
 
-    fn replace_snippet_source_editor(
+    fn subscribe_snippet_source_editor(
+        editor: &Entity<CodeEditor>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Subscription, Subscription) {
+        let change_subscription = cx.subscribe(editor, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.invalidate_snippet_preview();
+                cx.notify();
+            }
+        });
+        let format_editor = editor.clone();
+        let format_subscription = cx.subscribe_in(
+            editor,
+            window,
+            move |this, _, event: &CodeEditorEvent, window, cx| {
+                if matches!(event, CodeEditorEvent::FormatRequested) {
+                    this.format_snippet_source_editor(format_editor.clone(), window, cx);
+                }
+            },
+        );
+        (change_subscription, format_subscription)
+    }
+
+    pub(super) fn replace_snippet_source_editor(
         &mut self,
         category: SnippetCategory,
         kind: SnippetKind,
@@ -294,22 +348,26 @@ impl ApiTester {
     ) {
         self.invalidate_snippet_preview();
         let editor = Self::new_snippet_source_editor(
-            category,
-            kind,
-            source,
-            !self.workspace_writable,
-            Rc::clone(&self.script_variable_catalog),
+            SnippetSourceEditorOptions {
+                category,
+                kind,
+                source,
+                read_only: !self.workspace_writable,
+                variable_catalog: Rc::clone(&self.script_variable_catalog),
+                typescript_service: self.typescript_service.clone(),
+            },
             window,
             cx,
         );
-        let subscription = cx.subscribe(&editor, |this, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                this.invalidate_snippet_preview();
-                cx.notify();
-            }
+        let editor_settings = self.settings.editor.clone();
+        editor.update(cx, |editor, cx| {
+            editor.apply_editor_settings(&editor_settings, window, cx);
         });
+        let (subscription, format_subscription) =
+            Self::subscribe_snippet_source_editor(&editor, window, cx);
         self.snippet_editor.editor = editor.clone();
         self.snippet_editor._editor_subscription = subscription;
+        self.snippet_editor._editor_format_subscription = format_subscription;
         self.snippet_editor.category = category;
         self.snippet_editor.kind = kind;
         self.snippet_editor.preview_running = false;
@@ -317,6 +375,65 @@ impl ApiTester {
         self.snippet_editor.preview_status = None;
         self.snippet_editor.preview_logs.clear();
         editor.read(cx).focus_handle(cx).focus(window);
+        cx.notify();
+    }
+
+    fn format_snippet_source_editor(
+        &mut self,
+        editor: Entity<CodeEditor>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.workspace_writable || editor.entity_id() != self.snippet_editor.editor.entity_id()
+        {
+            return;
+        }
+        let source = editor.read(cx).value(cx).to_string();
+        if source.trim().is_empty() {
+            self.set_snippet_notice("The snippet source buffer is empty.", true);
+            cx.notify();
+            return;
+        }
+
+        // dprint's JavaScript parser deliberately accepts `return` outside a
+        // function, so executable generator bodies can be formatted directly.
+        // Avoiding a synthetic wrapper also preserves raw template-literal
+        // indentation byte-for-byte.
+        let formatted = match format_snippet_source(&source, &self.settings.formatter) {
+            Ok(formatted) => formatted,
+            Err(message) => {
+                self.set_snippet_notice(message, true);
+                cx.notify();
+                return;
+            }
+        };
+        if formatted == source {
+            self.set_snippet_notice("The snippet source is already formatted.", false);
+            cx.notify();
+            return;
+        }
+
+        let input = editor.read(cx).input_state();
+        input.update(cx, |input, cx| {
+            let original_cursor = input.cursor();
+            let full_range = 0..source.encode_utf16().count();
+            EntityInputHandler::replace_text_in_range(
+                input,
+                Some(full_range),
+                &formatted,
+                window,
+                cx,
+            );
+
+            let mut restored_offset = original_cursor.min(formatted.len());
+            while !formatted.is_char_boundary(restored_offset) {
+                restored_offset = restored_offset.saturating_sub(1);
+            }
+            let cursor = input.text().offset_to_position(restored_offset);
+            input.set_cursor_position(cursor, window, cx);
+        });
+        self.invalidate_snippet_preview();
+        self.set_snippet_notice("Formatted snippet JavaScript.", false);
         cx.notify();
     }
 
@@ -2236,6 +2353,13 @@ impl ApiTester {
     }
 }
 
+fn format_snippet_source(
+    source: &str,
+    settings: &crate::core::FormatterSettings,
+) -> Result<String, String> {
+    crate::core::format_script_source(source, settings)
+}
+
 fn snippet_category_order(category: SnippetCategory) -> u8 {
     match category {
         SnippetCategory::PreRequest => 0,
@@ -2543,5 +2667,15 @@ mod tests {
         assert!(pre.contains("api.response is intentionally absent"));
         assert!(!pre.contains("nullable api.response"));
         assert!(post.contains("nullable api.response"));
+    }
+
+    #[test]
+    fn executable_function_body_formats_without_changing_template_text() {
+        let source = "return `first line\n  literal indent ${api.request.method}`";
+        let formatted =
+            format_snippet_source(source, &crate::core::FormatterSettings::default()).unwrap();
+
+        assert!(formatted.starts_with("return `first line\n  literal indent"));
+        assert!(formatted.contains("${api.request.method}`;"));
     }
 }

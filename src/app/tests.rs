@@ -7,6 +7,7 @@ fn raw_json_formatter_pretty_prints_without_changing_values() {
     let formatted = format_raw_body_source(
         RawBodyLanguage::Json,
         r#"{"nested":{"ok":true},"items":[1,2]}"#,
+        &Default::default(),
     )
     .unwrap();
     assert_eq!(
@@ -18,7 +19,8 @@ fn raw_json_formatter_pretty_prints_without_changing_values() {
 #[test]
 fn raw_formatter_does_not_guess_for_unsupported_languages() {
     let source = "name: value";
-    let error = format_raw_body_source(RawBodyLanguage::Yaml, source).unwrap_err();
+    let error =
+        format_raw_body_source(RawBodyLanguage::Yaml, source, &Default::default()).unwrap_err();
     assert!(error.contains("not available for YAML"));
     assert_eq!(source, "name: value");
 }

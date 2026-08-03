@@ -148,6 +148,190 @@ impl ApiTester {
         cx.notify();
     }
 
+    pub(super) fn set_editor_tab_size(
+        &mut self,
+        tab_size: u8,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut candidate = self.settings.clone();
+        candidate.editor.set_tab_size(tab_size);
+        if candidate.editor == self.settings.editor {
+            return;
+        }
+        self.commit_editor_settings_change(
+            candidate,
+            format!("Editor tab size set to {tab_size}."),
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn set_editor_hard_tabs(
+        &mut self,
+        hard_tabs: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut candidate = self.settings.clone();
+        candidate.editor.hard_tabs = hard_tabs;
+        if candidate.editor == self.settings.editor {
+            return;
+        }
+        self.commit_editor_settings_change(candidate, "Editor indentation updated.", window, cx);
+    }
+
+    pub(super) fn set_editor_soft_wrap(
+        &mut self,
+        soft_wrap: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut candidate = self.settings.clone();
+        candidate.editor.soft_wrap = soft_wrap;
+        if candidate.editor == self.settings.editor {
+            return;
+        }
+        self.commit_editor_settings_change(candidate, "Editor wrapping updated.", window, cx);
+    }
+
+    pub(super) fn set_editor_line_numbers(
+        &mut self,
+        line_numbers: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut candidate = self.settings.clone();
+        candidate.editor.line_numbers = line_numbers;
+        if candidate.editor == self.settings.editor {
+            return;
+        }
+        self.commit_editor_settings_change(candidate, "Editor line numbers updated.", window, cx);
+    }
+
+    pub(super) fn set_editor_indent_guides(
+        &mut self,
+        indent_guides: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut candidate = self.settings.clone();
+        candidate.editor.indent_guides = indent_guides;
+        if candidate.editor == self.settings.editor {
+            return;
+        }
+        self.commit_editor_settings_change(candidate, "Editor indent guides updated.", window, cx);
+    }
+
+    pub(super) fn set_editor_auto_close_pairs(
+        &mut self,
+        auto_close_pairs: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut candidate = self.settings.clone();
+        candidate.editor.auto_close_pairs = auto_close_pairs;
+        if candidate.editor == self.settings.editor {
+            return;
+        }
+        self.commit_editor_settings_change(candidate, "Editor pair insertion updated.", window, cx);
+    }
+
+    pub(super) fn set_formatter_indent_size(&mut self, indent_size: u8, cx: &mut Context<Self>) {
+        let mut candidate = self.settings.clone();
+        candidate.formatter.set_indent_size(indent_size);
+        if candidate.formatter == self.settings.formatter {
+            return;
+        }
+        self.commit_formatter_settings_change(
+            candidate,
+            format!("Formatter indent size set to {indent_size}."),
+            cx,
+        );
+    }
+
+    pub(super) fn set_formatter_hard_tabs(&mut self, hard_tabs: bool, cx: &mut Context<Self>) {
+        let mut candidate = self.settings.clone();
+        candidate.formatter.hard_tabs = hard_tabs;
+        if candidate.formatter == self.settings.formatter {
+            return;
+        }
+        self.commit_formatter_settings_change(candidate, "Formatter indentation updated.", cx);
+    }
+
+    pub(super) fn set_formatter_line_width(&mut self, line_width: u16, cx: &mut Context<Self>) {
+        let mut candidate = self.settings.clone();
+        candidate.formatter.set_line_width(line_width);
+        if candidate.formatter == self.settings.formatter {
+            return;
+        }
+        self.commit_formatter_settings_change(
+            candidate,
+            format!("Formatter line width set to {line_width}."),
+            cx,
+        );
+    }
+
+    pub(super) fn set_formatter_quote_style(&mut self, key: &str, cx: &mut Context<Self>) {
+        let mut candidate = self.settings.clone();
+        if !candidate.formatter.set_quote_style_key(key)
+            || candidate.formatter == self.settings.formatter
+        {
+            return;
+        }
+        self.commit_formatter_settings_change(candidate, "JavaScript quote style updated.", cx);
+    }
+
+    pub(super) fn set_formatter_semicolons(&mut self, key: &str, cx: &mut Context<Self>) {
+        let mut candidate = self.settings.clone();
+        if !candidate.formatter.set_semicolons_key(key)
+            || candidate.formatter == self.settings.formatter
+        {
+            return;
+        }
+        self.commit_formatter_settings_change(candidate, "Semicolon policy updated.", cx);
+    }
+
+    pub(super) fn set_formatter_trailing_commas(&mut self, key: &str, cx: &mut Context<Self>) {
+        let mut candidate = self.settings.clone();
+        if !candidate.formatter.set_trailing_commas_key(key)
+            || candidate.formatter == self.settings.formatter
+        {
+            return;
+        }
+        self.commit_formatter_settings_change(candidate, "Trailing comma policy updated.", cx);
+    }
+
+    fn commit_editor_settings_change(
+        &mut self,
+        candidate: AppSettings,
+        notice: impl Into<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.commit_settings(candidate, false, cx) {
+            Ok(()) => {
+                self.apply_code_editor_settings(window, cx);
+                self.settings_notice = Some(notice.into());
+            }
+            Err(error) => self.settings_notice = Some(error),
+        }
+        cx.notify();
+    }
+
+    fn commit_formatter_settings_change(
+        &mut self,
+        candidate: AppSettings,
+        notice: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        match self.commit_settings(candidate, false, cx) {
+            Ok(()) => self.settings_notice = Some(notice.into()),
+            Err(error) => self.settings_notice = Some(error),
+        }
+        cx.notify();
+    }
+
     pub(super) fn commit_settings(
         &mut self,
         candidate: AppSettings,

@@ -1,10 +1,63 @@
+diff --git a/src/button/button.rs b/src/button/button.rs
+index 6982b1c..4181ab8 100644
+--- a/src/button/button.rs
++++ b/src/button/button.rs
+@@ -430,0 +431,2 @@ impl RenderOnce for Button {
++        let class_style = cx.theme().button_style.clone();
++        let has_class_rounding = class_style.border_radius.is_some();
+@@ -442 +444 @@ impl RenderOnce for Button {
+-        let rounding = match self.rounded {
++        let rounding = class_style.border_radius.unwrap_or_else(|| match self.rounded {
+@@ -448 +450 @@ impl RenderOnce for Button {
+-        };
++        });
+@@ -534,0 +537,31 @@ impl RenderOnce for Button {
++            .when_some(class_style.width, |this, width| this.w(width))
++            .when_some(class_style.min_width, |this, min_width| {
++                this.min_w(min_width)
++            })
++            .when_some(class_style.height, |this, height| this.h(height))
++            .when_some(class_style.margin, |this, margin| {
++                this.mt(margin.top)
++                    .mr(margin.right)
++                    .mb(margin.bottom)
++                    .ml(margin.left)
++            })
++            .when_some(class_style.padding, |this, padding| {
++                this.pt(padding.top)
++                    .pr(padding.right)
++                    .pb(padding.bottom)
++                    .pl(padding.left)
++            })
++            .when(has_class_rounding && self.border_corners.top_left, |this| {
++                this.rounded_tl(rounding)
++            })
++            .when(has_class_rounding && self.border_corners.top_right, |this| {
++                this.rounded_tr(rounding)
++            })
++            .when(
++                has_class_rounding && self.border_corners.bottom_left,
++                |this| this.rounded_bl(rounding),
++            )
++            .when(
++                has_class_rounding && self.border_corners.bottom_right,
++                |this| this.rounded_br(rounding),
++            )
+@@ -573,0 +607,7 @@ impl RenderOnce for Button {
++                    .when_some(class_style.gap, |this, gap| this.gap(gap))
++                    .when_some(class_style.font_family.clone(), |this, font_family| {
++                        this.font_family(font_family)
++                    })
++                    .when_some(class_style.font_size, |this, font_size| {
++                        this.text_size(font_size)
++                    })
 diff --git a/src/input/blink_cursor.rs b/src/input/blink_cursor.rs
+index 0ce7d95..5c6c8f4 100644
 --- a/src/input/blink_cursor.rs
 +++ b/src/input/blink_cursor.rs
-@@ -38,4 +38,10 @@
-     pub fn stop(&mut self, cx: &mut Context<Self>) {
+@@ -38,0 +39 @@ impl BlinkCursor {
 +        let was_visible = self.visible();
-         self.epoch = 0;
+@@ -40 +41,6 @@ impl BlinkCursor {
 -        cx.notify();
 +        self.paused = false;
 +        self.visible = false;
@@ -12,13 +65,7 @@ diff --git a/src/input/blink_cursor.rs b/src/input/blink_cursor.rs
 +        if was_visible {
 +            cx.notify();
 +        }
-     }
-@@ -88,5 +94,30 @@
-                 .ok();
-             }
-         });
-+    }
-+}
+@@ -92,0 +99,25 @@ impl BlinkCursor {
 +
 +#[cfg(test)]
 +mod tests {
@@ -42,273 +89,13 @@ diff --git a/src/input/blink_cursor.rs b/src/input/blink_cursor.rs
 +        std::thread::sleep(INTERVAL + Duration::from_millis(50));
 +        cx.run_until_parked();
 +        assert!(!cx.read(|cx| cursor.read(cx).visible()));
-     }
- }
-diff --git a/src/input/state.rs b/src/input/state.rs
---- a/src/input/state.rs
-+++ b/src/input/state.rs
-@@ -5,10 +5,11 @@
- use anyhow::Result;
- use gpui::{
-     Action, App, AppContext, Bounds, ClipboardItem, Context, Entity, EntityInputHandler,
--    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
--    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
--    Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, SharedString, Styled as _, Subscription,
--    Task, UTF16Selection, Window, actions, div, point, prelude::FluentBuilder as _, px,
-+    EventEmitter, FocusHandle, Focusable, HighlightStyle, InteractiveElement as _, IntoElement,
-+    KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-+    ParentElement as _, Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, SharedString,
-+    Styled as _, Subscription, Task, UTF16Selection, Window, actions, div, point,
-+    prelude::FluentBuilder as _, px,
- };
- use ropey::{Rope, RopeSlice};
- use serde::Deserialize;
-@@ -222,6 +223,28 @@ pub(crate) fn init(cx: &mut App) {
-     number_input::init(cx);
- }
-
-+fn previous_word_start_in_line(line_start: usize, text_before_cursor: &str) -> usize {
-+    UnicodeSegmentation::split_word_bound_indices(text_before_cursor)
-+        .rfind(|(_, segment)| !segment.trim_start().is_empty())
-+        .map(|(offset, _)| line_start + offset)
-+        .unwrap_or(line_start)
-+}
-+
-+fn previous_line_break_start(text: &Rope, line_start: usize) -> usize {
-+    if line_start == 0 {
-+        return 0;
-+    }
-+
-+    let newline_start = text.clip_offset(line_start - 1, Bias::Left);
-+    if text.char_at(newline_start) == Some('\n') && newline_start > 0 {
-+        let possible_carriage_return = text.clip_offset(newline_start - 1, Bias::Left);
-+        if text.char_at(possible_carriage_return) == Some('\r') {
-+            return possible_carriage_return;
-+        }
-+    }
-+    newline_start
-+}
-+
- #[derive(Clone)]
- pub(super) struct LastLayout {
-     /// The visible range (no wrap) of lines in the viewport, the value is row (0-based) index.
-@@ -284,6 +307,8 @@ pub struct InputState {
-     pub(super) input_bounds: Bounds<Pixels>,
-     /// The text bounds
-     pub(super) last_bounds: Option<Bounds<Pixels>>,
-+    /// Application-provided semantic highlight ranges, stored as UTF-8 byte offsets.
-+    pub(super) semantic_highlights: Vec<(Range<usize>, HighlightStyle)>,
-     pub(super) last_selected_range: Option<Selection>,
-     pub(super) selecting: bool,
-     pub(super) size: Size,
-@@ -350,14 +375,15 @@ impl InputState {
-             cx.observe(&blink_cursor, |_, _, cx| cx.notify()),
-             // Blink the cursor when the window is active, pause when it's not.
-             cx.observe_window_activation(window, |input, window, cx| {
--                if window.is_window_active() {
--                    let focus_handle = input.focus_handle.clone();
--                    if focus_handle.is_focused(window) {
--                        input.blink_cursor.update(cx, |blink_cursor, cx| {
--                            blink_cursor.start(cx);
--                        });
-+                let should_blink =
-+                    window.is_window_active() && input.focus_handle.is_focused(window);
-+                input.blink_cursor.update(cx, |blink_cursor, cx| {
-+                    if should_blink {
-+                        blink_cursor.start(cx);
-+                    } else {
-+                        blink_cursor.stop(cx);
-                     }
--                }
-+                });
-             }),
-             cx.on_focus(&focus_handle, window, Self::on_focus),
-             cx.on_blur(&focus_handle, window, Self::on_blur),
-@@ -390,6 +415,7 @@ impl InputState {
-             mode: InputMode::default(),
-             last_layout: None,
-             last_bounds: None,
-+            semantic_highlights: Vec::new(),
-             last_selected_range: None,
-             last_cursor: None,
-             scroll_handle: ScrollHandle::new(),
-@@ -515,16 +541,19 @@ impl InputState {
-         new_language: impl Into<SharedString>,
-         cx: &mut Context<Self>,
-     ) {
--        match &mut self.mode {
-+        let new_language = new_language.into();
-+        let language_changed = match &mut self.mode {
-             InputMode::CodeEditor {
-                 language,
-                 highlighter,
-                 ..
--            } => {
--                *language = new_language.into();
-+            } if *language != new_language => {
-+                *language = new_language;
-                 *highlighter.borrow_mut() = None;
-+                true
-             }
--            _ => {}
--        }
-+            _ => false,
-+        };
-+        self._pending_update |= language_changed;
-         cx.notify();
-     }
-@@ -549,6 +578,27 @@ impl InputState {
-         self.mode.diagnostics_mut()
-     }
- 
-+    /// Replace application-provided semantic highlights.
-+    ///
-+    /// Incoming ranges use LSP line/character positions. They are converted to
-+    /// UTF-8 byte offsets immediately so painting does not need to repeat the
-+    /// conversion on every frame.
-+    pub fn set_semantic_highlights(
-+        &mut self,
-+        highlights: Vec<(lsp_types::Range, HighlightStyle)>,
-+        cx: &mut Context<Self>,
-+    ) {
-+        self.semantic_highlights = highlights
-+            .into_iter()
-+            .filter_map(|(range, style)| {
-+                let start = self.text.position_to_offset(&range.start);
-+                let end = self.text.position_to_offset(&range.end);
-+                (start < end).then_some((start..end, style))
-+            })
-+            .collect();
-+        cx.notify();
-+    }
-+
-     /// Set placeholder
-     pub fn set_placeholder(
-         &mut self,
-@@ -602,9 +652,18 @@ impl InputState {
-         window: &mut Window,
-         cx: &mut Context<Self>,
-     ) {
-+        let value: SharedString = value.into();
-+        let skip_unchanged_code_editor_value = self.mode.is_code_editor()
-+            && self.text.len() == value.len()
-+            && self.text.chars().eq(value.chars());
-         self.history.ignore = true;
-         let was_disabled = self.disabled;
-         self.disabled = false;
--        self.replace_text(value, window, cx);
-+        if skip_unchanged_code_editor_value {
-+            self.ime_marked_range.take();
-+            cx.emit(InputEvent::Change);
-+        } else {
-+            self.replace_text(value, window, cx);
-+        }
-         self.disabled = was_disabled;
-         self.history.ignore = false;
-@@ -619,4 +678,4 @@ impl InputState {
-         if self.mode.is_code_editor() {
--            self._pending_update = true;
-+            self._pending_update |= !skip_unchanged_code_editor_value;
-             self.lsp.reset();
-         }
-@@ -921,13 +980,15 @@ impl InputState {
-     pub(super) fn previous_start_of_word(&mut self) -> usize {
-         let offset = self.selected_range.start;
-         let offset = self.offset_from_utf16(self.offset_to_utf16(offset));
--        // FIXME: Avoid to_string
--        let left_part = self.text.slice(0..offset).to_string();
-+        let row = self.text.offset_to_point(offset).row;
-+        let line_start = self.text.line_start_offset(row);
-+        if offset == line_start {
-+            return previous_line_break_start(&self.text, line_start);
-+        }
-
--        UnicodeSegmentation::split_word_bound_indices(left_part.as_str())
--            .rfind(|(_, s)| !s.trim_start().is_empty())
--            .map(|(i, _)| i)
--            .unwrap_or(0)
-+        // FIXME: Avoid to_string
-+        let text_before_cursor = self.text.slice(line_start..offset).to_string();
-+        previous_word_start_in_line(line_start, &text_before_cursor)
-     }
-
-     /// Return the next end offset of the next word.
-@@ -1699,6 +1761,10 @@ impl InputState {
--    fn on_focus(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-+    fn on_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-         self.blink_cursor.update(cx, |cursor, cx| {
--            cursor.start(cx);
-+            if window.is_window_active() {
-+                cursor.start(cx);
-+            } else {
-+                cursor.stop(cx);
-+            }
-         });
-         cx.emit(InputEvent::Focus);
-     }
-@@ -1993,6 +2054,7 @@ impl EntityInputHandler for InputState {
-         if let Some(diagnostics) = self.mode.diagnostics_mut() {
-             diagnostics.reset(&self.text)
-         }
-+        self.semantic_highlights.clear();
-         self.text_wrapper
-             .update(&self.text, &range, &Rope::from(new_text), cx);
-         self.mode
-@@ -2048,6 +2110,7 @@ impl EntityInputHandler for InputState {
-         if let Some(diagnostics) = self.mode.diagnostics_mut() {
-             diagnostics.reset(&self.text)
-         }
-+        self.semantic_highlights.clear();
-         self.text_wrapper
-             .update(&self.text, &range, &Rope::from(new_text), cx);
-         self.mode
-@@ -2176,3 +2239,39 @@ impl Render for InputState {
-             .children(self.hover_popover.clone())
-     }
- }
-+
-+#[cfg(test)]
-+mod word_boundary_tests {
-+    use super::{previous_line_break_start, previous_word_start_in_line};
-+    use ropey::Rope;
-+
-+    #[test]
-+    fn previous_word_stays_within_the_current_line() {
-+        assert_eq!(previous_word_start_in_line(0, "alpha beta gamma"), 11);
-+        assert_eq!(previous_word_start_in_line(7, "    next"), 11);
-+        assert_eq!(previous_word_start_in_line(7, "    "), 7);
-+
-+        let url = "https://httpbin.org/get";
-+        assert_eq!(
-+            previous_word_start_in_line(0, url),
-+            url.rfind("get").unwrap()
-+        );
-+    }
-+
-+    #[test]
-+    fn previous_word_uses_utf8_byte_offsets() {
-+        let text = "éclair 😀 中";
-+        assert_eq!(
-+            previous_word_start_in_line(0, text),
-+            text.rfind('中').unwrap()
-+        );
-+    }
-+
-+    #[test]
-+    fn line_break_is_deleted_without_crossing_into_the_previous_line() {
-+        assert_eq!(previous_line_break_start(&Rope::from("alpha\n"), 6), 5);
-+        assert_eq!(previous_line_break_start(&Rope::from("alpha\r\n"), 7), 5);
-+        assert_eq!(previous_line_break_start(&Rope::from("é\n"), 3), 2);
-+        assert_eq!(previous_line_break_start(&Rope::from("alpha"), 0), 0);
 +    }
 +}
 diff --git a/src/input/element.rs b/src/input/element.rs
+index 4e7941c..08c33f7 100644
 --- a/src/input/element.rs
 +++ b/src/input/element.rs
-@@ -20,6 +20,50 @@
- pub(super) const RIGHT_MARGIN: Pixels = px(10.);
- pub(super) const LINE_NUMBER_RIGHT_MARGIN: Pixels = px(10.);
- 
+@@ -22,0 +23,44 @@ pub(super) const LINE_NUMBER_RIGHT_MARGIN: Pixels = px(10.);
 +/// Overlay application-owned semantic styles in a stable order.
 +///
 +/// GPUI's general-purpose `combine_highlights` intentionally treats active
@@ -353,19 +140,8 @@ diff --git a/src/input/element.rs b/src/input/element.rs
 +    base
 +}
 +
- pub(super) struct TextElement {
-     pub(crate) state: Entity<InputState>,
-     placeholder: SharedString,
-@@ -744,39 +744,45 @@ impl TextElement {
-         let text = &state.text;
-         let is_multi_line = state.mode.is_multi_line();
-+        let has_visible_semantic_highlights = state.semantic_highlights.iter().any(|(range, _)| {
-+            range.start < visible_byte_range.end && range.end > visible_byte_range.start
-+        });
-+        if !state.mode.is_code_editor() && !has_visible_semantic_highlights {
-+            return None;
-+        }
- 
+@@ -746,10 +790,6 @@ impl TextElement {
+-
 -        let (highlighter, diagnostics) = match &state.mode {
 -            InputMode::CodeEditor {
 -                highlighter,
@@ -375,8 +151,13 @@ diff --git a/src/input/element.rs b/src/input/element.rs
 -            _ => return None,
 -        };
 -        let highlighter = highlighter.as_ref()?;
--
-         let mut offset = visible_byte_range.start;
++        let has_visible_semantic_highlights = state.semantic_highlights.iter().any(|(range, _)| {
++            range.start < visible_byte_range.end && range.end > visible_byte_range.start
++        });
++        if !state.mode.is_code_editor() && !has_visible_semantic_highlights {
++            return None;
++        }
+@@ -758,6 +798,8 @@ impl TextElement {
 -        let mut styles = vec![];
 -
 -        for line in text
@@ -391,7 +172,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
 +            diagnostics,
 +            ..
 +        } = &state.mode
-         {
+@@ -765,6 +807,12 @@ impl TextElement {
 -            let line_len = if is_multi_line {
 -                // +1 for `\n`
 -                line.len() + 1
@@ -410,30 +191,24 @@ diff --git a/src/input/element.rs b/src/input/element.rs
 +                    } else {
 +                        line.len()
 +                    };
- 
+@@ -772,3 +820,3 @@ impl TextElement {
 -            let range = offset..offset + line_len;
 -            let line_styles = highlighter.styles(&range, &cx.theme().highlight_theme);
 -            styles = gpui::combine_highlights(styles, line_styles).collect();
 +                    let range = offset..offset + line_len;
 +                    let line_styles = highlighter.styles(&range, &cx.theme().highlight_theme);
 +                    styles = gpui::combine_highlights(styles, line_styles).collect();
- 
+@@ -776,2 +824,3 @@ impl TextElement {
 -            offset = range.end;
 -        }
 +                    offset = range.end;
 +                }
 +            }
- 
+@@ -779 +828,2 @@ impl TextElement {
 -        let diagnostic_styles = diagnostics.styles_for_range(&visible_byte_range, cx);
 +            diagnostic_styles = diagnostics.styles_for_range(&visible_byte_range, cx);
 +        }
- 
-         // hover definition style
-         if let Some(hover_style) = self.layout_hover_definition(cx) {
-@@ -786,6 +786,16 @@ impl TextElement {
-         // Combine marker styles
-         styles = gpui::combine_highlights(diagnostic_styles, styles).collect();
- 
+@@ -788,0 +839,10 @@ impl TextElement {
 +        let semantic_styles = state
 +            .semantic_highlights
 +            .iter()
@@ -444,16 +219,168 @@ diff --git a/src/input/element.rs b/src/input/element.rs
 +            });
 +        styles = overlay_semantic_highlights(styles, semantic_styles);
 +
-         Some(styles)
-     }
- }
+diff --git a/src/input/indent.rs b/src/input/indent.rs
+index 489cdee..f7a1c27 100644
+--- a/src/input/indent.rs
++++ b/src/input/indent.rs
+@@ -32,0 +33,4 @@ impl TabSize {
++    fn width(&self) -> usize {
++        self.tab_size.max(1)
++    }
++
+@@ -37 +41,10 @@ impl TabSize {
+-            " ".repeat(self.tab_size).into()
++            " ".repeat(self.width()).into()
++        }
++    }
++
++    fn inline_string(&self, column: usize) -> SharedString {
++        if self.hard_tabs {
++            "\t".into()
++        } else {
++            let width = self.width();
++            " ".repeat(width - column % width).into()
+@@ -55,0 +69,46 @@ impl TabSize {
++fn visual_column(text: &str, tab: TabSize) -> usize {
++    let width = tab.width();
++    text.chars().fold(0, |column, character| {
++        if character == '\t' {
++            column + width - column % width
++        } else {
++            column + 1
++        }
++    })
++}
++
++/// Return the UTF-8 offset at or before the previous visual tab stop.
++///
++/// `text_before_cursor` must be from the beginning of the current line to the
++/// cursor. A tab that spans the target stop is removed in full, which keeps
++/// mixed space/tab indentation deterministic.
++pub(super) fn previous_tab_stop_offset(
++    line_start: usize,
++    text_before_cursor: &str,
++    tab: TabSize,
++) -> usize {
++    let width = tab.width();
++    let current_column = visual_column(text_before_cursor, tab);
++    if current_column == 0 {
++        return line_start;
++    }
++
++    let target_column = ((current_column - 1) / width) * width;
++    let mut column = 0;
++    let mut relative_offset = 0;
++    for (offset, character) in text_before_cursor.char_indices() {
++        let next_column = if character == '\t' {
++            column + width - column % width
++        } else {
++            column + 1
++        };
++        if next_column > target_column {
++            break;
++        }
++        column = next_column;
++        relative_offset = offset + character.len_utf8();
++    }
++
++    line_start + relative_offset
++}
++
+@@ -218,0 +278,11 @@ impl InputState {
++    /// Update the tab size for an existing multiline input.
++    pub fn set_tab_size(&mut self, tab: TabSize, _: &mut Window, cx: &mut Context<Self>) {
++        debug_assert!(self.mode.is_multi_line() || self.mode.is_code_editor());
++        match &mut self.mode {
++            InputMode::PlainText { tab: current, .. } => *current = tab,
++            InputMode::CodeEditor { tab: current, .. } => *current = tab,
++            _ => {}
++        }
++        cx.notify();
++    }
++
+@@ -221 +291 @@ impl InputState {
+-        _: &IndentInline,
++        action: &IndentInline,
+@@ -224,0 +295,6 @@ impl InputState {
++        // A visible completion menu has precedence over inline completion and
++        // indentation, matching Enter and production code-editor behavior.
++        if self.handle_action_for_context_menu(Box::new(action.clone()), window, cx) {
++            return;
++        }
++
+@@ -298,0 +375,7 @@ impl InputState {
++            let row = self.text.offset_to_point(offset).row;
++            let line_start = self.text.line_start_offset(row);
++            let text_before_cursor = self.text.slice(line_start..offset).to_string();
++            let inline_indent = self
++                .mode
++                .tab_size()
++                .inline_string(visual_column(&text_before_cursor, self.mode.tab_size()));
+@@ -301 +384 @@ impl InputState {
+-                &tab_indent,
++                &inline_indent,
+@@ -305 +388 @@ impl InputState {
+-            added_len = tab_indent.len();
++            added_len = inline_indent.len();
+@@ -363,0 +447,19 @@ impl InputState {
++            let row = self.text.offset_to_point(start_offset).row;
++            let line_start = self.text.line_start_offset(row);
++            let text_before_cursor = self.text.slice(line_start..start_offset).to_string();
++            if !text_before_cursor.is_empty()
++                && text_before_cursor
++                    .chars()
++                    .all(|character| matches!(character, ' ' | '\t'))
++            {
++                let previous_stop =
++                    previous_tab_stop_offset(line_start, &text_before_cursor, self.mode.tab_size());
++                self.replace_text_in_range_silent(
++                    Some(self.range_to_utf16(&(previous_stop..start_offset))),
++                    "",
++                    window,
++                    cx,
++                );
++                return;
++            }
++
+@@ -391 +493 @@ mod tests {
+-    use super::TabSize;
++    use super::{TabSize, previous_tab_stop_offset, visual_column};
+@@ -431,0 +534,29 @@ mod tests {
++
++    #[test]
++    fn inline_soft_tabs_advance_to_the_next_visual_stop() {
++        let tab = TabSize {
++            tab_size: 4,
++            hard_tabs: false,
++        };
++
++        assert_eq!(tab.inline_string(0), "    ");
++        assert_eq!(tab.inline_string(1), "   ");
++        assert_eq!(tab.inline_string(3), " ");
++        assert_eq!(tab.inline_string(4), "    ");
++        assert_eq!(visual_column(" \t", tab), 4);
++        assert_eq!(visual_column("\t ", tab), 5);
++    }
++
++    #[test]
++    fn previous_tab_stop_handles_partial_and_mixed_indentation() {
++        let tab = TabSize {
++            tab_size: 4,
++            hard_tabs: false,
++        };
++
++        assert_eq!(previous_tab_stop_offset(10, "   ", tab), 10);
++        assert_eq!(previous_tab_stop_offset(10, "    ", tab), 10);
++        assert_eq!(previous_tab_stop_offset(10, "     ", tab), 14);
++        assert_eq!(previous_tab_stop_offset(10, "\t ", tab), 11);
++        assert_eq!(previous_tab_stop_offset(10, " \t", tab), 10);
++    }
 diff --git a/src/input/lsp/completions.rs b/src/input/lsp/completions.rs
+index 7aa1756..b47f06e 100644
 --- a/src/input/lsp/completions.rs
 +++ b/src/input/lsp/completions.rs
-@@ -67,6 +67,14 @@ pub trait CompletionProvider {
-         DEFAULT_INLINE_COMPLETION_DEBOUNCE
-     }
- 
+@@ -69,0 +70,8 @@ pub trait CompletionProvider {
 +    /// Whether this provider implements inline ghost-text completions.
 +    ///
 +    /// Menu-only providers can opt out to avoid cloning the Rope and spawning a
@@ -462,13 +389,7 @@ diff --git a/src/input/lsp/completions.rs b/src/input/lsp/completions.rs
 +        true
 +    }
 +
-     fn resolve_completions(
-         &self,
-         _completion_indices: Vec<usize>,
-@@ -85,6 +93,23 @@ pub trait CompletionProvider {
-         new_text: &str,
-         cx: &mut Context<InputState>,
-     ) -> bool;
+@@ -87,0 +96,17 @@ pub trait CompletionProvider {
 +
 +    /// Determines whether completion should run with access to the current
 +    /// buffer and cursor position after the edit.
@@ -486,35 +407,71 @@ diff --git a/src/input/lsp/completions.rs b/src/input/lsp/completions.rs
 +    ) -> bool {
 +        self.is_completion_trigger(edit_start, new_text, cx)
 +    }
- }
- 
- pub(crate) struct InlineCompletion {
-@@ -119,14 +144,14 @@ impl InputState {
-             return;
-         };
- 
+@@ -118,0 +144 @@ impl InputState {
++            self.hide_context_menu(cx);
+@@ -122,3 +148,3 @@ impl InputState {
 -        // Always schedule inline completion (debounced).
 -        // It will check if menu is open before showing the suggestion.
 -        self.schedule_inline_completion(window, cx);
 +        if provider.supports_inline_completion() {
 +            self.schedule_inline_completion(window, cx);
 +        }
- 
-         let start = range.end;
-         let new_offset = self.cursor();
- 
+@@ -129 +155,2 @@ impl InputState {
 -        if !provider.is_completion_trigger(start, new_text, cx) {
 +        if !provider.is_completion_trigger_in_text(&self.text, new_offset, start, new_text, cx) {
-             return;
-         }
- 
++            self.hide_context_menu(cx);
+@@ -149,0 +177 @@ impl InputState {
++            self.hide_context_menu(cx);
+@@ -162 +190,4 @@ impl InputState {
+-        _ = menu.update(cx, |menu, _| {
++        _ = menu.update(cx, |menu, cx| {
++            // Do not let Tab or Enter confirm results for the previous buffer
++            // while the provider is calculating a fresher response.
++            menu.hide(cx);
+diff --git a/src/input/lsp/hover.rs b/src/input/lsp/hover.rs
+index 04f63ce..8bccea8 100644
+--- a/src/input/lsp/hover.rs
++++ b/src/input/lsp/hover.rs
+@@ -68 +68,2 @@ impl InputState {
+-                    let hover_popover = HoverPopover::new(cx.entity(), symbol_range, &hover, cx);
++                    let hover_popover =
++                        HoverPopover::new(cx.entity(), symbol_range, offset, &hover, cx);
+diff --git a/src/input/otp_input.rs b/src/input/otp_input.rs
+index 02bb914..a00d9b1 100644
+--- a/src/input/otp_input.rs
++++ b/src/input/otp_input.rs
+@@ -31,6 +31,7 @@ impl OtpState {
+-                if window.is_window_active() {
+-                    let focus_handle = this.focus_handle.clone();
+-                    if focus_handle.is_focused(window) {
+-                        this.blink_cursor.update(cx, |blink_cursor, cx| {
+-                            blink_cursor.start(cx);
+-                        });
++                let should_blink =
++                    window.is_window_active() && this.focus_handle.is_focused(window);
++                this.blink_cursor.update(cx, |blink_cursor, cx| {
++                    if should_blink {
++                        blink_cursor.start(cx);
++                    } else {
++                        blink_cursor.stop(cx);
+@@ -38 +39 @@ impl OtpState {
+-                }
++                });
+@@ -143 +144 @@ impl OtpState {
+-    fn on_focus(&mut self, _: &mut Window, cx: &mut Context<Self>) {
++    fn on_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+@@ -145 +146,5 @@ impl OtpState {
+-            cursor.start(cx);
++            if window.is_window_active() {
++                cursor.start(cx);
++            } else {
++                cursor.stop(cx);
++            }
 diff --git a/src/input/popovers/completion_menu.rs b/src/input/popovers/completion_menu.rs
+index 0132e87..24ed61e 100644
 --- a/src/input/popovers/completion_menu.rs
 +++ b/src/input/popovers/completion_menu.rs
-@@ -22,6 +22,18 @@ use crate::{
-     list::{List, ListDelegate, ListEvent, ListState},
- };
- 
+@@ -24,0 +25,16 @@ use crate::{
 +fn matching_label_prefix_len(label: &str, query: &str) -> usize {
 +    let mut matched_len = 0;
 +    for ((byte_offset, label_character), query_character) in label.char_indices().zip(query.chars())
@@ -527,13 +484,11 @@ diff --git a/src/input/popovers/completion_menu.rs b/src/input/popovers/completi
 +    matched_len
 +}
 +
- struct ContextMenuDelegate {
-     query: SharedString,
-     menu: Entity<CompletionMenu>,
-@@ -86,19 +98,22 @@ impl RenderOnce for CompletionMenuItem {
-         let item = self.item;
- 
-         let deprecated = item.deprecated.unwrap_or(false);
++fn action_confirms_completion(action: &dyn Action) -> bool {
++    action.partial_eq(&input::Enter { secondary: false }) || action.partial_eq(&input::IndentInline)
++}
++
+@@ -89,13 +105,16 @@ impl RenderOnce for CompletionMenuItem {
 -        let matched_len = item
 -            .filter_text
 -            .as_ref()
@@ -563,13 +518,30 @@ diff --git a/src/input/popovers/completion_menu.rs b/src/input/popovers/completi
 +            })
 +            .into_iter()
 +            .collect::<Vec<_>>();
- 
-         h_flex()
-             .id(self.ix)
-@@ -466,3 +481,17 @@ impl Render for CompletionMenu {
-         .into_any_element()
-     }
- }
+@@ -285,2 +304 @@ impl CompletionMenu {
+-        cx.propagate();
+-        if action.partial_eq(&input::Enter { secondary: false }) {
++        if action_confirms_completion(action.as_ref()) {
+@@ -389,0 +408,18 @@ impl CompletionMenu {
++#[cfg(test)]
++mod action_tests {
++    use super::action_confirms_completion;
++    use crate::input;
++
++    #[test]
++    fn enter_and_tab_confirm_the_selected_completion() {
++        assert!(action_confirms_completion(&input::Enter {
++            secondary: false,
++        }));
++        assert!(action_confirms_completion(&input::IndentInline));
++        assert!(!action_confirms_completion(&input::Enter {
++            secondary: true,
++        }));
++        assert!(!action_confirms_completion(&input::Escape));
++    }
++}
++
+@@ -468,0 +505,14 @@ impl Render for CompletionMenu {
 +
 +#[cfg(test)]
 +mod tests {
@@ -584,55 +556,21 @@ diff --git a/src/input/popovers/completion_menu.rs b/src/input/popovers/completi
 +        assert_eq!(matching_label_prefix_len("éclair", "é"), 2);
 +    }
 +}
-diff --git a/src/input/lsp/hover.rs b/src/input/lsp/hover.rs
---- a/src/input/lsp/hover.rs
-+++ b/src/input/lsp/hover.rs
-@@ -65,7 +65,8 @@
-                         let end = editor.text.position_to_offset(&range.end);
-                         symbol_range = start..end;
-                     }
--                    let hover_popover = HoverPopover::new(cx.entity(), symbol_range, &hover, cx);
-+                    let hover_popover =
-+                        HoverPopover::new(cx.entity(), symbol_range, offset, &hover, cx);
-                     editor.hover_popover = Some(hover_popover);
-                 }
-                 None => {
 diff --git a/src/input/popovers/hover_popover.rs b/src/input/popovers/hover_popover.rs
+index 4a76816..832416b 100644
 --- a/src/input/popovers/hover_popover.rs
 +++ b/src/input/popovers/hover_popover.rs
-@@ -16,5 +16,7 @@
-     editor: Entity<InputState>,
-     /// The symbol range byte of the hover trigger.
-     pub(crate) symbol_range: Range<usize>,
+@@ -18,0 +19,2 @@ pub struct HoverPopover {
 +    /// Original caret-style offset reported by GPUI mouse hit-testing.
 +    trigger_offset: usize,
-     pub(crate) hover: Rc<lsp_types::Hover>,
- }
-@@ -23,6 +25,7 @@
-     pub fn new(
-         editor: Entity<InputState>,
-         symbol_range: Range<usize>,
+@@ -25,0 +28 @@ impl HoverPopover {
 +        trigger_offset: usize,
-         hover: &lsp_types::Hover,
-         cx: &mut App,
-     ) -> Entity<Self> {
-@@ -31,15 +34,24 @@
-         cx.new(|_| Self {
-             editor,
-             symbol_range,
+@@ -33,0 +37 @@ impl HoverPopover {
 +            trigger_offset,
-             hover,
-         })
-     }
--
-+
-     pub(crate) fn is_same(&self, offset: usize) -> bool {
+@@ -39 +43 @@ impl HoverPopover {
 -        self.symbol_range.contains(&offset)
 +        hover_matches_offset(&self.symbol_range, self.trigger_offset, offset)
-     }
- }
--
-+
+@@ -42,0 +47,8 @@ impl HoverPopover {
 +fn hover_matches_offset(
 +    symbol_range: &Range<usize>,
 +    trigger_offset: usize,
@@ -641,14 +579,7 @@ diff --git a/src/input/popovers/hover_popover.rs b/src/input/popovers/hover_popo
 +    symbol_range.contains(&offset) || trigger_offset == offset
 +}
 +
- impl Render for HoverPopover {
-     fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-         let contents = match self.hover.contents.clone() {
-@@ -68,6 +80,27 @@
-     }
- }
--
-+
+@@ -70,0 +83,21 @@ impl Render for HoverPopover {
 +#[cfg(test)]
 +mod tests {
 +    use super::hover_matches_offset;
@@ -670,10 +601,402 @@ diff --git a/src/input/popovers/hover_popover.rs b/src/input/popovers/hover_popo
 +    }
 +}
 +
- pub(crate) struct Popover {
-     id: ElementId,
-     style: StyleRefinement,
+diff --git a/src/input/state.rs b/src/input/state.rs
+index 89b3ffa..b6938c8 100644
+--- a/src/input/state.rs
++++ b/src/input/state.rs
+@@ -8,4 +8,5 @@ use gpui::{
+-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
+-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
+-    Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, SharedString, Styled as _, Subscription,
+-    Task, UTF16Selection, Window, actions, div, point, prelude::FluentBuilder as _, px,
++    EventEmitter, FocusHandle, Focusable, HighlightStyle, InteractiveElement as _, IntoElement,
++    KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
++    ParentElement as _, Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, SharedString,
++    Styled as _, Subscription, Task, UTF16Selection, Window, actions, div, point,
++    prelude::FluentBuilder as _, px,
+@@ -21,2 +22,3 @@ use super::{
+-    blink_cursor::BlinkCursor, change::Change, element::TextElement, mask_pattern::MaskPattern,
+-    mode::InputMode, number_input, text_wrapper::TextWrapper,
++    blink_cursor::BlinkCursor, change::Change, element::TextElement,
++    indent::previous_tab_stop_offset, mask_pattern::MaskPattern, mode::InputMode, number_input,
++    text_wrapper::TextWrapper,
+@@ -34 +36 @@ use crate::input::{
+-use crate::input::{InlineCompletion, RopeExt as _, Selection};
++use crate::input::{InlineCompletion, RopeExt as _, Selection, TabSize};
+@@ -224,0 +227,130 @@ pub(crate) fn init(cx: &mut App) {
++#[derive(Copy, Clone, Eq, PartialEq)]
++enum WordCharacterKind {
++    Whitespace,
++    Word,
++    Punctuation,
++}
++
++fn word_character_kind(character: char) -> WordCharacterKind {
++    if character.is_whitespace() {
++        WordCharacterKind::Whitespace
++    } else if character.is_alphanumeric() || character == '_' {
++        WordCharacterKind::Word
++    } else {
++        WordCharacterKind::Punctuation
++    }
++}
++
++fn previous_word_start_in_line(line_start: usize, text_before_cursor: &str) -> usize {
++    let mut characters = text_before_cursor.char_indices().rev();
++    let Some((mut right_offset, mut right)) = characters.next() else {
++        return line_start;
++    };
++
++    let mut is_first_iteration = true;
++    for (left_offset, left) in characters {
++        let left_kind = word_character_kind(left);
++        let right_kind = word_character_kind(right);
++
++        // Match Zed/VS Code word movement: a caret immediately after one
++        // punctuation character skips that punctuation together with the word.
++        if is_first_iteration
++            && right_kind == WordCharacterKind::Punctuation
++            && left_kind != WordCharacterKind::Punctuation
++        {
++            is_first_iteration = false;
++            right_offset = left_offset;
++            right = left;
++            continue;
++        }
++
++        is_first_iteration = false;
++        if left_kind != right_kind && right_kind != WordCharacterKind::Whitespace {
++            return line_start + right_offset;
++        }
++        right_offset = left_offset;
++        right = left;
++    }
++
++    line_start
++}
++
++fn previous_deletion_start_in_line(line_start: usize, text_before_cursor: &str) -> usize {
++    let candidate = previous_word_start_in_line(0, text_before_cursor);
++    line_start + adjust_backward_deletion_start(text_before_cursor, candidate)
++}
++
++fn is_bracket(character: char) -> bool {
++    matches!(character, '(' | ')' | '[' | ']' | '{' | '}')
++}
++
++/// Reduce an otherwise word-greedy backward deletion at ergonomic boundaries.
++///
++/// Like Zed, a run of at least two whitespace characters is deleted without
++/// also deleting the word before it. Brackets also stop a deletion that would
++/// otherwise consume both the bracket and adjacent whitespace.
++fn adjust_backward_deletion_start(text_before_cursor: &str, candidate: usize) -> usize {
++    let deletion = &text_before_cursor[candidate..];
++    let mut bracket_boundary = 0;
++    for (offset, character) in deletion.char_indices() {
++        if !is_bracket(character) {
++            continue;
++        }
++        for boundary in [offset, offset + character.len_utf8()] {
++            if boundary > 0 && boundary < deletion.len() {
++                bracket_boundary = bracket_boundary.max(boundary);
++            }
++        }
++    }
++
++    let trimmed = &deletion[bracket_boundary..];
++    let mut whitespace_start = None;
++    let mut whitespace_len = 0;
++    let mut closest_whitespace_start = None;
++    for (offset, character) in trimmed.char_indices() {
++        if character.is_whitespace() {
++            whitespace_start.get_or_insert(offset);
++            whitespace_len += 1;
++        } else {
++            if whitespace_len >= 2 {
++                closest_whitespace_start = whitespace_start;
++            }
++            whitespace_start = None;
++            whitespace_len = 0;
++        }
++    }
++    if whitespace_len >= 2 {
++        closest_whitespace_start = whitespace_start;
++    }
++
++    candidate + bracket_boundary + closest_whitespace_start.unwrap_or(0)
++}
++
++fn previous_line_break_start(text: &Rope, line_start: usize) -> usize {
++    if line_start == 0 {
++        return 0;
++    }
++
++    let newline_start = text.clip_offset(line_start - 1, Bias::Left);
++    if text.char_at(newline_start) == Some('\n') && newline_start > 0 {
++        let possible_carriage_return = text.clip_offset(newline_start - 1, Bias::Left);
++        if text.char_at(possible_carriage_return) == Some('\r') {
++            return possible_carriage_return;
++        }
++    }
++    newline_start
++}
++
++fn is_matching_bracket_pair(open: Option<char>, close: Option<char>) -> bool {
++    matches!(
++        (open, close),
++        (Some('('), Some(')')) | (Some('['), Some(']')) | (Some('{'), Some('}'))
++    )
++}
++
++fn paired_newline_text(indent: &str, tab: TabSize) -> (String, usize) {
++    let inner_indent = tab.to_string();
++    let caret_offset = 1 + indent.len() + inner_indent.len();
++    (format!("\n{indent}{inner_indent}\n{indent}"), caret_offset)
++}
++
+@@ -286,0 +419,2 @@ pub struct InputState {
++    /// Application-provided semantic highlight ranges, stored as UTF-8 byte offsets.
++    pub(super) semantic_highlights: Vec<(Range<usize>, HighlightStyle)>,
+@@ -353,6 +487,7 @@ impl InputState {
+-                if window.is_window_active() {
+-                    let focus_handle = input.focus_handle.clone();
+-                    if focus_handle.is_focused(window) {
+-                        input.blink_cursor.update(cx, |blink_cursor, cx| {
+-                            blink_cursor.start(cx);
+-                        });
++                let should_blink =
++                    window.is_window_active() && input.focus_handle.is_focused(window);
++                input.blink_cursor.update(cx, |blink_cursor, cx| {
++                    if should_blink {
++                        blink_cursor.start(cx);
++                    } else {
++                        blink_cursor.stop(cx);
+@@ -360 +495 @@ impl InputState {
+-                }
++                });
+@@ -392,0 +528 @@ impl InputState {
++            semantic_highlights: Vec::new(),
+@@ -518 +654,2 @@ impl InputState {
+-        match &mut self.mode {
++        let new_language = new_language.into();
++        let language_changed = match &mut self.mode {
+@@ -523,2 +660,2 @@ impl InputState {
+-            } => {
+-                *language = new_language.into();
++            } if *language != new_language => {
++                *language = new_language;
+@@ -525,0 +663 @@ impl InputState {
++                true
+@@ -527,2 +665,3 @@ impl InputState {
+-            _ => {}
+-        }
++            _ => false,
++        };
++        self._pending_update |= language_changed;
+@@ -551,0 +691,21 @@ impl InputState {
++    /// Replace application-provided semantic highlights.
++    ///
++    /// Incoming ranges use LSP line/character positions. They are converted to
++    /// UTF-8 byte offsets immediately so painting does not need to repeat the
++    /// conversion on every frame.
++    pub fn set_semantic_highlights(
++        &mut self,
++        highlights: Vec<(lsp_types::Range, HighlightStyle)>,
++        cx: &mut Context<Self>,
++    ) {
++        self.semantic_highlights = highlights
++            .into_iter()
++            .filter_map(|(range, style)| {
++                let start = self.text.position_to_offset(&range.start);
++                let end = self.text.position_to_offset(&range.end);
++                (start < end).then_some((start..end, style))
++            })
++            .collect();
++        cx.notify();
++    }
++
+@@ -604,0 +765,4 @@ impl InputState {
++        let value: SharedString = value.into();
++        let skip_unchanged_code_editor_value = self.mode.is_code_editor()
++            && self.text.len() == value.len()
++            && self.text.chars().eq(value.chars());
+@@ -608 +772,6 @@ impl InputState {
+-        self.replace_text(value, window, cx);
++        if skip_unchanged_code_editor_value {
++            self.ime_marked_range.take();
++            cx.emit(InputEvent::Change);
++        } else {
++            self.replace_text(value, window, cx);
++        }
+@@ -620 +789 @@ impl InputState {
+-            self._pending_update = true;
++            self._pending_update |= !skip_unchanged_code_editor_value;
+@@ -923,0 +1093,6 @@ impl InputState {
++        let row = self.text.offset_to_point(offset).row;
++        let line_start = self.text.line_start_offset(row);
++        if offset == line_start {
++            return previous_line_break_start(&self.text, line_start);
++        }
++
+@@ -925 +1100,3 @@ impl InputState {
+-        let left_part = self.text.slice(0..offset).to_string();
++        let text_before_cursor = self.text.slice(line_start..offset).to_string();
++        previous_word_start_in_line(line_start, &text_before_cursor)
++    }
+@@ -927,4 +1104,11 @@ impl InputState {
+-        UnicodeSegmentation::split_word_bound_indices(left_part.as_str())
+-            .rfind(|(_, s)| !s.trim_start().is_empty())
+-            .map(|(i, _)| i)
+-            .unwrap_or(0)
++    fn previous_start_of_deletion(&mut self) -> usize {
++        let offset = self.selected_range.start;
++        let offset = self.offset_from_utf16(self.offset_to_utf16(offset));
++        let row = self.text.offset_to_point(offset).row;
++        let line_start = self.text.line_start_offset(row);
++        if offset == line_start {
++            return previous_line_break_start(&self.text, line_start);
++        }
++
++        let text_before_cursor = self.text.slice(line_start..offset).to_string();
++        previous_deletion_start_in_line(line_start, &text_before_cursor)
+@@ -1033 +1217,15 @@ impl InputState {
+-            self.select_to(self.previous_boundary(self.cursor()), cx)
++            let cursor = self.cursor();
++            let row = self.text.offset_to_point(cursor).row;
++            let line_start = self.text.line_start_offset(row);
++            let text_before_cursor = self.text.slice(line_start..cursor).to_string();
++            let previous = if self.mode.is_code_editor()
++                && !text_before_cursor.is_empty()
++                && text_before_cursor
++                    .chars()
++                    .all(|character| matches!(character, ' ' | '\t'))
++            {
++                previous_tab_stop_offset(line_start, &text_before_cursor, self.mode.tab_size())
++            } else {
++                self.previous_boundary(cursor)
++            };
++            self.select_to(previous, cx)
+@@ -1109 +1307 @@ impl InputState {
+-        let offset = self.previous_start_of_word();
++        let offset = self.previous_start_of_deletion();
+@@ -1159,2 +1357,17 @@ impl InputState {
+-            // Add newline and indent
+-            let new_line_text = format!("\n{}", indent);
++            let cursor = self.cursor();
++            let has_paired_brackets = self.mode.is_code_editor()
++                && self.selected_range.is_empty()
++                && cursor > 0
++                && is_matching_bracket_pair(
++                    self.text.char_at(self.previous_boundary(cursor)),
++                    self.text.char_at(cursor),
++                );
++
++            // Add newline and indent. Between paired brackets, install a
++            // second newline so the closer remains aligned with the opener.
++            let (new_line_text, inner_cursor) = if has_paired_brackets {
++                let (text, caret_offset) = paired_newline_text(&indent, self.mode.tab_size());
++                (text, Some(cursor + caret_offset))
++            } else {
++                (format!("\n{}", indent), None)
++            };
+@@ -1161,0 +1375,3 @@ impl InputState {
++            if let Some(inner_cursor) = inner_cursor {
++                self.move_to(inner_cursor, None, cx);
++            }
+@@ -1699 +1915 @@ impl InputState {
+-    fn on_focus(&mut self, _: &mut Window, cx: &mut Context<Self>) {
++    fn on_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+@@ -1701 +1917,5 @@ impl InputState {
+-            cursor.start(cx);
++            if window.is_window_active() {
++                cursor.start(cx);
++            } else {
++                cursor.stop(cx);
++            }
+@@ -1995,0 +2216 @@ impl EntityInputHandler for InputState {
++        self.semantic_highlights.clear();
+@@ -2007,0 +2229,2 @@ impl EntityInputHandler for InputState {
++        } else {
++            self.hide_context_menu(cx);
+@@ -2050,0 +2274 @@ impl EntityInputHandler for InputState {
++        self.semantic_highlights.clear();
+@@ -2071,0 +2296 @@ impl EntityInputHandler for InputState {
++        self.hide_context_menu(cx);
+@@ -2178,0 +2404,71 @@ impl Render for InputState {
++
++#[cfg(test)]
++mod word_boundary_tests {
++    use super::{
++        is_matching_bracket_pair, paired_newline_text, previous_deletion_start_in_line,
++        previous_line_break_start, previous_word_start_in_line,
++    };
++    use crate::input::TabSize;
++    use ropey::Rope;
++
++    #[test]
++    fn previous_word_stays_within_the_current_line() {
++        assert_eq!(previous_word_start_in_line(0, "alpha beta gamma"), 11);
++        assert_eq!(previous_word_start_in_line(7, "    next"), 11);
++        assert_eq!(previous_word_start_in_line(7, "    "), 7);
++
++        let url = "https://httpbin.org/get";
++        assert_eq!(
++            previous_word_start_in_line(0, url),
++            url.rfind("get").unwrap()
++        );
++    }
++
++    #[test]
++    fn previous_word_uses_utf8_byte_offsets() {
++        let text = "éclair 😀 中";
++        assert_eq!(
++            previous_word_start_in_line(0, text),
++            text.rfind('中').unwrap()
++        );
++    }
++
++    #[test]
++    fn word_movement_remains_greedy_while_deletion_stops_at_ergonomic_boundaries() {
++        assert_eq!(previous_word_start_in_line(0, "alpha   "), 0);
++        assert_eq!(previous_deletion_start_in_line(0, "alpha "), 0);
++        assert_eq!(previous_deletion_start_in_line(0, "alpha   "), 5);
++        assert_eq!(previous_deletion_start_in_line(0, "alpha\t "), 5);
++        assert_eq!(previous_deletion_start_in_line(0, "alpha( "), 6);
++        assert_eq!(previous_deletion_start_in_line(0, "alpha() "), 7);
++        assert_eq!(previous_deletion_start_in_line(0, "alpha()"), 6);
++        assert_eq!(previous_word_start_in_line(0, "items.map"), 6);
++        assert_eq!(previous_deletion_start_in_line(0, "items.map"), 6);
++    }
++
++    #[test]
++    fn line_break_is_deleted_without_crossing_into_the_previous_line() {
++        assert_eq!(previous_line_break_start(&Rope::from("alpha\n"), 6), 5);
++        assert_eq!(previous_line_break_start(&Rope::from("alpha\r\n"), 7), 5);
++        assert_eq!(previous_line_break_start(&Rope::from("é\n"), 3), 2);
++        assert_eq!(previous_line_break_start(&Rope::from("alpha"), 0), 0);
++    }
++
++    #[test]
++    fn paired_brackets_get_an_indented_interior_line() {
++        for pair in [('{', '}'), ('[', ']'), ('(', ')')] {
++            assert!(is_matching_bracket_pair(Some(pair.0), Some(pair.1)));
++        }
++        assert!(!is_matching_bracket_pair(Some('{'), Some(']')));
++
++        let (text, caret_offset) = paired_newline_text(
++            "  ",
++            TabSize {
++                tab_size: 2,
++                hard_tabs: false,
++            },
++        );
++        assert_eq!(text, "\n    \n  ");
++        assert_eq!(caret_offset, 5);
++    }
++}
 diff --git a/src/setting/group.rs b/src/setting/group.rs
+index 36ebf18..a8f6f39 100644
 --- a/src/setting/group.rs
 +++ b/src/setting/group.rs
 @@ -8 +8 @@ use crate::{
@@ -683,24 +1006,30 @@ diff --git a/src/setting/group.rs b/src/setting/group.rs
 +    variant: Option<GroupBoxVariant>,
 @@ -34,0 +36 @@ impl SettingGroup {
 +            variant: None,
-@@ -39,0 +42,6 @@ impl SettingGroup {
-+
+@@ -40,0 +43,6 @@ impl SettingGroup {
 +    /// Override the default group-box variant for this group.
 +    pub fn with_variant(mut self, variant: GroupBoxVariant) -> Self {
 +        self.variant = Some(variant);
 +        self
 +    }
++
 @@ -86 +94 @@ impl SettingGroup {
 -            .with_variant(options.group_variant)
 +            .with_variant(self.variant.unwrap_or(options.group_variant))
 diff --git a/src/setting/item.rs b/src/setting/item.rs
+index c466937..fb7f2a3 100644
 --- a/src/setting/item.rs
 +++ b/src/setting/item.rs
-@@ -29,0 +30 @@
+@@ -29,0 +30 @@ pub enum SettingItem {
 +        search_text: Option<SharedString>,
-@@ -54,0 +56 @@
+@@ -54,0 +56,15 @@ impl SettingItem {
 +            search_text: None,
-@@ -60,0 +63,14 @@
++            render: Rc::new(move |options, window, cx| {
++                render(options, window, cx).into_any_element()
++            }),
++        }
++    }
++
 +    /// Create a searchable custom element setting item with a render closure.
 +    pub fn render_searchable<R, E>(search_text: impl Into<SharedString>, render: R) -> Self
 +    where
@@ -709,13 +1038,7 @@ diff --git a/src/setting/item.rs b/src/setting/item.rs
 +    {
 +        SettingItem::Element {
 +            search_text: Some(search_text.into()),
-+            render: Rc::new(move |options, window, cx| {
-+                render(options, window, cx).into_any_element()
-+            }),
-+        }
-+    }
-+
-@@ -97,2 +113,7 @@
+@@ -97,2 +113,7 @@ impl SettingItem {
 -            // We need to show all custom elements when not searching.
 -            SettingItem::Element { .. } => query.is_empty(),
 +            // Show unindexed custom elements only when not searching.
@@ -725,16 +1048,17 @@ diff --git a/src/setting/item.rs b/src/setting/item.rs
 +                        .as_ref()
 +                        .is_some_and(|text| text.to_lowercase().contains(&query.to_lowercase()))
 +            }
-@@ -205 +226 @@
+@@ -205 +226 @@ impl SettingItem {
 -                SettingItem::Element { render } => {
 +                SettingItem::Element { render, .. } => {
 diff --git a/src/theme/mod.rs b/src/theme/mod.rs
+index 2b96572..b9793e7 100644
 --- a/src/theme/mod.rs
 +++ b/src/theme/mod.rs
-@@ -2 +2 @@
+@@ -2 +2 @@ use crate::{highlighter::HighlightTheme, scroll::ScrollbarShow};
 -use gpui::{px, App, Global, Hsla, Pixels, SharedString, Window, WindowAppearance};
 +use gpui::{App, Edges, Global, Hsla, Pixels, SharedString, Window, WindowAppearance, px};
-@@ -38,0 +39,16 @@
+@@ -38,0 +39,16 @@ impl ActiveTheme for App {
 +/// Optional application CSS overrides for every button.
 +///
 +/// `None` preserves the component's native size- and variant-specific value.
@@ -751,101 +1075,10 @@ diff --git a/src/theme/mod.rs b/src/theme/mod.rs
 +    pub font_size: Option<Pixels>,
 +}
 +
-@@ -75,0 +92,4 @@
+@@ -75,0 +92,4 @@ pub struct Theme {
 +    /// Application CSS overrides for buttons.
 +    #[serde(skip)]
 +    #[schemars(skip)]
 +    pub button_style: ButtonClassStyle,
-@@ -204,0 +225 @@
+@@ -204,0 +225 @@ impl From<&ThemeColor> for Theme {
 +            button_style: ButtonClassStyle::default(),
-diff --git a/src/button/button.rs b/src/button/button.rs
---- a/src/button/button.rs
-+++ b/src/button/button.rs
-@@ -430,0 +431,2 @@
-+        let class_style = cx.theme().button_style.clone();
-+        let has_class_rounding = class_style.border_radius.is_some();
-@@ -442 +444 @@
--        let rounding = match self.rounded {
-+        let rounding = class_style.border_radius.unwrap_or_else(|| match self.rounded {
-@@ -448 +450 @@
--        };
-+        });
-@@ -534,0 +537,31 @@
-+            .when_some(class_style.width, |this, width| this.w(width))
-+            .when_some(class_style.min_width, |this, min_width| {
-+                this.min_w(min_width)
-+            })
-+            .when_some(class_style.height, |this, height| this.h(height))
-+            .when_some(class_style.margin, |this, margin| {
-+                this.mt(margin.top)
-+                    .mr(margin.right)
-+                    .mb(margin.bottom)
-+                    .ml(margin.left)
-+            })
-+            .when_some(class_style.padding, |this, padding| {
-+                this.pt(padding.top)
-+                    .pr(padding.right)
-+                    .pb(padding.bottom)
-+                    .pl(padding.left)
-+            })
-+            .when(has_class_rounding && self.border_corners.top_left, |this| {
-+                this.rounded_tl(rounding)
-+            })
-+            .when(has_class_rounding && self.border_corners.top_right, |this| {
-+                this.rounded_tr(rounding)
-+            })
-+            .when(
-+                has_class_rounding && self.border_corners.bottom_left,
-+                |this| this.rounded_bl(rounding),
-+            )
-+            .when(
-+                has_class_rounding && self.border_corners.bottom_right,
-+                |this| this.rounded_br(rounding),
-+            )
-@@ -573,0 +607,7 @@
-+                    .when_some(class_style.gap, |this, gap| this.gap(gap))
-+                    .when_some(class_style.font_family.clone(), |this, font_family| {
-+                        this.font_family(font_family)
-+                    })
-+                    .when_some(class_style.font_size, |this, font_size| {
-+                        this.text_size(font_size)
-+                    })
-diff --git a/src/input/otp_input.rs b/src/input/otp_input.rs
---- a/src/input/otp_input.rs
-+++ b/src/input/otp_input.rs
-@@ -28,14 +28,15 @@
-             cx.observe(&blink_cursor, |_, _, cx| cx.notify()),
-             // Blink the cursor when the window is active, pause when it's not.
-             cx.observe_window_activation(window, |this, window, cx| {
--                if window.is_window_active() {
--                    let focus_handle = this.focus_handle.clone();
--                    if focus_handle.is_focused(window) {
--                        this.blink_cursor.update(cx, |blink_cursor, cx| {
--                            blink_cursor.start(cx);
--                        });
-+                let should_blink =
-+                    window.is_window_active() && this.focus_handle.is_focused(window);
-+                this.blink_cursor.update(cx, |blink_cursor, cx| {
-+                    if should_blink {
-+                        blink_cursor.start(cx);
-+                    } else {
-+                        blink_cursor.stop(cx);
-                     }
--                }
-+                });
-             }),
-             cx.on_focus(&focus_handle, window, Self::on_focus),
-             cx.on_blur(&focus_handle, window, Self::on_blur),
-@@ -143,6 +144,10 @@
--    fn on_focus(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-+    fn on_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-         self.blink_cursor.update(cx, |cursor, cx| {
--            cursor.start(cx);
-+            if window.is_window_active() {
-+                cursor.start(cx);
-+            } else {
-+                cursor.stop(cx);
-+            }
-         });
-         cx.emit(InputEvent::Focus);
-     }

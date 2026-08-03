@@ -384,6 +384,10 @@ impl ApiTester {
                 cx,
             )
         });
+        let editor_settings = self.settings.editor.clone();
+        editor.update(cx, |editor, cx| {
+            editor.apply_editor_settings(&editor_settings, window, cx);
+        });
         let changed_editor_id = editor_id.clone();
         let subscription = cx.subscribe(&editor, move |this, _, event: &InputEvent, cx| {
             if !matches!(event, InputEvent::Change) {
