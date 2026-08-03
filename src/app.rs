@@ -3,7 +3,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::PathBuf,
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
@@ -54,9 +54,7 @@ use crate::{
     },
     debug_overlay::DebugOverlay,
     request_dirty::{RequestDirtyPart, RequestDirtyState},
-    script_intelligence::{
-        ScriptCompletionProvider, ScriptEditorPhase, ScriptVariableCatalog, diagnostics_for_source,
-    },
+    script_intelligence::{ScriptCompletionProvider, ScriptEditorPhase, ScriptVariableCatalog},
     shortcuts::{self, ShortcutId},
     template_intelligence::{
         TemplateClassification, TemplateCompletionProvider, TemplateHighlightColors,
@@ -64,6 +62,7 @@ use crate::{
         semantic_style_spans,
     },
     theme::ApiThemeExt as _,
+    typescript_service::TypeScriptServiceHandle,
     web_preview::{HtmlPreview, can_preview},
 };
 
@@ -73,6 +72,7 @@ mod bootstrap;
 mod collection_folder_actions;
 mod collections_actions;
 mod collections_page;
+mod editor_settings;
 mod environment_browser;
 mod environment_detail;
 mod environment_selector;

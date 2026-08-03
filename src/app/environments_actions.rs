@@ -298,7 +298,7 @@ impl ApiTester {
     }
 
     pub(super) fn save_environment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.workspace_writable {
+        if self.sending || !self.workspace_writable {
             return;
         }
         let Some(environment_id) = self.selected_environment_id.clone() else {

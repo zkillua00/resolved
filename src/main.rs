@@ -17,6 +17,7 @@ mod script_intelligence;
 mod shortcuts;
 mod template_intelligence;
 mod theme;
+mod typescript_service;
 mod web_preview;
 
 use app::ApiTester;

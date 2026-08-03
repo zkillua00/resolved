@@ -424,6 +424,12 @@ impl ApiTester {
     }
 
     pub(super) fn format_raw_body(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.body_mode != BodyMode::Raw {
+            self.request_notice =
+                Some("Formatting is available when the request body uses Raw mode.".to_owned());
+            cx.notify();
+            return;
+        }
         let source = self.body.read(cx).value(cx).to_string();
         if source.trim().is_empty() {
             self.request_notice = Some("The raw body buffer is empty.".to_owned());
@@ -431,7 +437,8 @@ impl ApiTester {
             return;
         }
 
-        let formatted = format_raw_body_source(self.raw_body_language, &source);
+        let formatted =
+            format_raw_body_source(self.raw_body_language, &source, &self.settings.formatter);
         let formatted = match formatted {
             Ok(formatted) => formatted,
             Err(message) => {
@@ -446,20 +453,41 @@ impl ApiTester {
             return;
         }
 
-        let input = self.body.read(cx).input_state();
-        input.update(cx, |input, cx| {
-            let cursor = input.cursor_position();
-            let full_range = 0..source.encode_utf16().count();
-            EntityInputHandler::replace_text_in_range(
-                input,
-                Some(full_range),
-                &formatted,
-                window,
-                cx,
-            );
-            input.set_cursor_position(cursor, window, cx);
-        });
-        self.request_notice = Some("Formatted raw JSON body.".to_owned());
+        replace_editor_source(&self.body, &source, &formatted, window, cx);
+        self.request_notice = Some(format!("Formatted raw {} body.", self.raw_body_language));
+        cx.notify();
+    }
+
+    pub(super) fn format_script_editor(
+        &mut self,
+        editor: Entity<CodeEditor>,
+        label: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let source = editor.read(cx).value(cx).to_string();
+        if source.trim().is_empty() {
+            self.request_notice = Some(format!("The {label} script buffer is empty."));
+            cx.notify();
+            return;
+        }
+
+        let formatted = match crate::core::format_script_source(&source, &self.settings.formatter) {
+            Ok(formatted) => formatted,
+            Err(message) => {
+                self.request_notice = Some(message);
+                cx.notify();
+                return;
+            }
+        };
+        if formatted == source {
+            self.request_notice = Some(format!("The {label} script is already formatted."));
+            cx.notify();
+            return;
+        }
+
+        replace_editor_source(&editor, &source, &formatted, window, cx);
+        self.request_notice = Some(format!("Formatted {label} JavaScript."));
         cx.notify();
     }
 
@@ -624,4 +652,26 @@ impl ApiTester {
         self.hide_preview(cx);
         cx.notify();
     }
+}
+
+fn replace_editor_source(
+    editor: &Entity<CodeEditor>,
+    source: &str,
+    formatted: &str,
+    window: &mut Window,
+    cx: &mut Context<ApiTester>,
+) {
+    let input = editor.read(cx).input_state();
+    input.update(cx, |input, cx| {
+        let original_cursor = input.cursor();
+        let full_range = 0..source.encode_utf16().count();
+        EntityInputHandler::replace_text_in_range(input, Some(full_range), formatted, window, cx);
+
+        let mut restored_offset = original_cursor.min(formatted.len());
+        while !formatted.is_char_boundary(restored_offset) {
+            restored_offset = restored_offset.saturating_sub(1);
+        }
+        let cursor = input.text().offset_to_position(restored_offset);
+        input.set_cursor_position(cursor, window, cx);
+    });
 }

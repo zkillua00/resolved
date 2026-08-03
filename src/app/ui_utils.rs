@@ -97,15 +97,9 @@ pub(super) fn code_language_for_raw_body(language: RawBodyLanguage) -> CodeLangu
 pub(super) fn format_raw_body_source(
     language: RawBodyLanguage,
     source: &str,
+    settings: &crate::core::FormatterSettings,
 ) -> Result<String, String> {
-    match language {
-        RawBodyLanguage::Json => serde_json::from_str::<serde_json::Value>(source)
-            .and_then(|value| serde_json::to_string_pretty(&value))
-            .map_err(|error| format!("JSON could not be formatted: {error}")),
-        language => Err(format!(
-            "Format buffer is not available for {language} yet. The buffer was not changed."
-        )),
-    }
+    crate::core::format_raw_source(language, source, settings)
 }
 
 pub(super) fn response_language(response: &ResponseData) -> CodeLanguage {

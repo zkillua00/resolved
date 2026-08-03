@@ -12,7 +12,7 @@ mod workspace;
 mod mvp_smoke_test;
 
 pub use database::DatabaseStore;
-pub use format::{format_body, is_probably_text};
+pub use format::{format_body, format_raw_source, format_script_source, is_probably_text};
 pub use history::{HistoryEntry, REDACTED_VALUE, RequestHistory};
 pub use request::{
     BodyField, BodyFieldKind, BodyMode, HeaderEntry, RawBodyLanguage, RequestDraft, RequestError,
@@ -30,7 +30,10 @@ pub use script::{
 #[cfg(test)]
 pub use script::{ScriptLog, ScriptTestResult};
 #[allow(unused_imports)]
-pub use settings::{AppSettings, MetricsPosition, SavedTheme, ShortcutOverride, ThemeSettings};
+pub use settings::{
+    AppSettings, EditorSettings, FormatterQuoteStyle, FormatterSemicolons, FormatterSettings,
+    FormatterTrailingCommas, MetricsPosition, SavedTheme, ShortcutOverride, ThemeSettings,
+};
 pub use template::{RequestTemplate, ResolvedRequest, resolve_request};
 pub use workspace::{
     Collection, Environment, RequestScripts, SavedRequest, Workspace, WorkspaceMutationError,

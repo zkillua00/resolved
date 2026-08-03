@@ -193,7 +193,7 @@ pub const SHORTCUT_DESCRIPTORS: &[ShortcutDescriptor] = &[
     },
     ShortcutDescriptor {
         id: ShortcutId::FormatRawBody,
-        label: "Format raw body",
+        label: "Format active request editor",
         category: ShortcutCategory::ActiveRequest,
         default_binding: "alt-shift-f",
     },

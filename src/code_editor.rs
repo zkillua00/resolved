@@ -4,19 +4,19 @@ use gpui::{
     App, AppContext as _, Context, Corner, DismissEvent, Entity, EntityInputHandler, EventEmitter,
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, ParentElement as _, Pixels, Point, Render, SharedString, Styled as _,
-    Subscription, Task, Timer, Window, anchored, deferred, div, prelude::FluentBuilder as _, px,
+    Subscription, Task, Window, anchored, deferred, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, RopeExt as _,
     highlighter::Diagnostic,
     input::{
         CompletionProvider, Copy, Cut, HoverProvider, Input, InputEvent, InputState, Paste,
-        SelectAll,
+        SelectAll, TabSize,
     },
     menu::{PopupMenu, PopupMenuItem},
 };
 
-use crate::theme::ApiThemeExt as _;
+use crate::{core::EditorSettings, theme::ApiThemeExt as _};
 
 const DIAGNOSTIC_REFRESH_DEBOUNCE: Duration = Duration::from_millis(120);
 
@@ -90,6 +90,13 @@ impl From<SharedString> for CodeLanguage {
 
 /// Construction options for [`CodeEditor`].
 type DiagnosticProvider = Rc<dyn Fn(&str) -> Vec<Diagnostic>>;
+type AsyncDiagnosticProvider = Rc<dyn Fn(String, &mut App) -> Task<Vec<Diagnostic>>>;
+
+#[derive(Clone)]
+enum DiagnosticProviderKind {
+    Synchronous(DiagnosticProvider),
+    Asynchronous(AsyncDiagnosticProvider),
+}
 
 #[derive(Clone)]
 pub struct CodeEditorConfig {
@@ -101,11 +108,13 @@ pub struct CodeEditorConfig {
     line_numbers: bool,
     read_only: bool,
     auto_close: bool,
+    tab_size: TabSize,
+    indent_guides: bool,
     framed: bool,
     format_action: bool,
     completion_provider: Option<Rc<dyn CompletionProvider>>,
     hover_provider: Option<Rc<dyn HoverProvider>>,
-    diagnostic_provider: Option<DiagnosticProvider>,
+    diagnostic_provider: Option<DiagnosticProviderKind>,
 }
 
 impl Default for CodeEditorConfig {
@@ -119,6 +128,8 @@ impl Default for CodeEditorConfig {
             line_numbers: true,
             read_only: false,
             auto_close: true,
+            tab_size: TabSize::default(),
+            indent_guides: true,
             framed: true,
             format_action: false,
             completion_provider: None,
@@ -170,6 +181,18 @@ impl CodeEditorConfig {
         self
     }
 
+    pub fn editor_settings(mut self, settings: &EditorSettings) -> Self {
+        self.soft_wrap = settings.soft_wrap;
+        self.line_numbers = settings.line_numbers;
+        self.auto_close = settings.auto_close_pairs;
+        self.tab_size = TabSize {
+            tab_size: settings.effective_tab_size(),
+            hard_tabs: settings.hard_tabs,
+        };
+        self.indent_guides = settings.indent_guides;
+        self
+    }
+
     pub fn framed(mut self, framed: bool) -> Self {
         self.framed = framed;
         self
@@ -194,7 +217,17 @@ impl CodeEditorConfig {
         mut self,
         provider: impl Fn(&str) -> Vec<Diagnostic> + 'static,
     ) -> Self {
-        self.diagnostic_provider = Some(Rc::new(provider));
+        self.diagnostic_provider = Some(DiagnosticProviderKind::Synchronous(Rc::new(provider)));
+        self
+    }
+
+    /// Install a diagnostic provider whose work can outlive the current UI
+    /// update. The source is owned so the returned task can safely retain it.
+    pub fn async_diagnostic_provider(
+        mut self,
+        provider: impl Fn(String, &mut App) -> Task<Vec<Diagnostic>> + 'static,
+    ) -> Self {
+        self.diagnostic_provider = Some(DiagnosticProviderKind::Asynchronous(Rc::new(provider)));
         self
     }
 }
@@ -221,8 +254,9 @@ pub struct CodeEditor {
     format_action: bool,
     context_menu: Option<Entity<PopupMenu>>,
     context_menu_position: Point<Pixels>,
-    diagnostic_provider: Option<DiagnosticProvider>,
+    diagnostic_provider: Option<DiagnosticProviderKind>,
     diagnostic_refresh_task: Task<()>,
+    diagnostic_generation: u64,
     _input_subscription: Subscription,
     _context_menu_subscription: Option<Subscription>,
 }
@@ -239,6 +273,8 @@ impl CodeEditor {
             line_numbers,
             read_only,
             auto_close,
+            tab_size,
+            indent_guides,
             framed,
             format_action,
             completion_provider,
@@ -253,7 +289,9 @@ impl CodeEditor {
                 .code_editor(highlighter_language)
                 .rows(rows)
                 .soft_wrap(soft_wrap)
-                .line_number(line_numbers);
+                .line_number(line_numbers)
+                .tab_size(tab_size)
+                .indent_guides(indent_guides);
 
             if !placeholder.is_empty() {
                 state = state.placeholder(placeholder);
@@ -269,13 +307,7 @@ impl CodeEditor {
         let input_subscription = cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
             cx.emit(event.clone());
             if matches!(event, InputEvent::Change) && this.diagnostic_provider.is_some() {
-                this.diagnostic_refresh_task = cx.spawn(async move |this, cx| {
-                    Timer::after(DIAGNOSTIC_REFRESH_DEBOUNCE).await;
-                    if let Some(this) = this.upgrade() {
-                        this.update(cx, |this, cx| this.refresh_diagnostics(cx))
-                            .ok();
-                    }
-                });
+                this.schedule_diagnostic_refresh(cx);
             }
         });
 
@@ -292,6 +324,7 @@ impl CodeEditor {
             context_menu_position: Point::default(),
             diagnostic_provider,
             diagnostic_refresh_task: Task::ready(()),
+            diagnostic_generation: 0,
             _input_subscription: input_subscription,
             _context_menu_subscription: None,
         };
@@ -325,7 +358,6 @@ impl CodeEditor {
         let value = value.into();
         self.input
             .update(cx, |input, cx| input.set_value(value, window, cx));
-        self.diagnostic_refresh_task = Task::ready(());
         self.refresh_diagnostics(cx);
     }
 
@@ -355,19 +387,111 @@ impl CodeEditor {
             .update(cx, |input, cx| input.set_soft_wrap(soft_wrap, window, cx));
     }
 
+    pub fn apply_editor_settings(
+        &mut self,
+        settings: &EditorSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.auto_close = settings.auto_close_pairs;
+        let tab_size = TabSize {
+            tab_size: settings.effective_tab_size(),
+            hard_tabs: settings.hard_tabs,
+        };
+        self.input.update(cx, |input, cx| {
+            input.set_soft_wrap(settings.soft_wrap, window, cx);
+            input.set_line_number(settings.line_numbers, window, cx);
+            input.set_indent_guides(settings.indent_guides, window, cx);
+            input.set_tab_size(tab_size, window, cx);
+        });
+        cx.notify();
+    }
+
     pub fn refresh_diagnostics(&mut self, cx: &mut Context<Self>) {
         let Some(provider) = self.diagnostic_provider.clone() else {
             return;
         };
+        let generation = self.next_diagnostic_generation();
+        let source = self.input.read(cx).text().to_string();
+
+        match provider {
+            DiagnosticProviderKind::Synchronous(provider) => {
+                self.diagnostic_refresh_task = Task::ready(());
+                let diagnostics = provider(&source);
+                self.apply_diagnostics_if_current(generation, diagnostics, cx);
+            }
+            DiagnosticProviderKind::Asynchronous(provider) => {
+                let diagnostics_task = provider(source, cx);
+                self.diagnostic_refresh_task = cx.spawn(async move |this, cx| {
+                    let diagnostics = diagnostics_task.await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.apply_diagnostics_if_current(generation, diagnostics, cx);
+                    });
+                });
+            }
+        }
+    }
+
+    fn schedule_diagnostic_refresh(&mut self, cx: &mut Context<Self>) {
+        let Some(provider) = self.diagnostic_provider.clone() else {
+            return;
+        };
+        let generation = self.next_diagnostic_generation();
+        let source = self.input.read(cx).text().to_string();
+
+        self.diagnostic_refresh_task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(DIAGNOSTIC_REFRESH_DEBOUNCE)
+                .await;
+            let is_current = this
+                .read_with(cx, |this, _| this.diagnostic_generation == generation)
+                .unwrap_or(false);
+            if !is_current {
+                return;
+            }
+
+            let diagnostics = match provider {
+                DiagnosticProviderKind::Synchronous(provider) => provider(&source),
+                DiagnosticProviderKind::Asynchronous(provider) => {
+                    let diagnostics_task = match this.update(cx, |this, cx| {
+                        (this.diagnostic_generation == generation).then(|| provider(source, cx))
+                    }) {
+                        Ok(Some(task)) => task,
+                        _ => return,
+                    };
+                    diagnostics_task.await
+                }
+            };
+
+            let _ = this.update(cx, |this, cx| {
+                this.apply_diagnostics_if_current(generation, diagnostics, cx);
+            });
+        });
+    }
+
+    fn next_diagnostic_generation(&mut self) -> u64 {
+        self.diagnostic_generation = self.diagnostic_generation.wrapping_add(1);
+        self.diagnostic_generation
+    }
+
+    fn apply_diagnostics_if_current(
+        &mut self,
+        generation: u64,
+        diagnostics: Vec<Diagnostic>,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.diagnostic_generation {
+            return;
+        }
         self.input.update(cx, |input, cx| {
             let text = input.text().clone();
-            let diagnostics = provider(&text.to_string());
             if let Some(set) = input.diagnostics_mut() {
                 set.reset(&text);
                 set.extend(diagnostics);
             }
             cx.notify();
         });
+        cx.notify();
     }
 
     fn capture_mouse_down(
@@ -777,7 +901,44 @@ mod tests {
         ListAlignment, ListState, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, div,
         list, point, px, size,
     };
+    use gpui_component::Rope;
     use gpui_component::setting::{SettingGroup, SettingItem, SettingPage, Settings};
+    use lsp_types::{CompletionContext, CompletionItem, CompletionResponse};
+    use std::cell::Cell;
+
+    struct FixedCompletionProvider;
+
+    impl CompletionProvider for FixedCompletionProvider {
+        fn supports_inline_completion(&self) -> bool {
+            false
+        }
+
+        fn completions(
+            &self,
+            _text: &Rope,
+            _offset: usize,
+            _trigger: CompletionContext,
+            _window: &mut Window,
+            _cx: &mut Context<InputState>,
+        ) -> Task<anyhow::Result<CompletionResponse>> {
+            Task::ready(Ok(CompletionResponse::Array(vec![CompletionItem {
+                label: "map".to_owned(),
+                ..Default::default()
+            }])))
+        }
+
+        fn is_completion_trigger(
+            &self,
+            _offset: usize,
+            new_text: &str,
+            _cx: &mut Context<InputState>,
+        ) -> bool {
+            !new_text.is_empty()
+                && new_text
+                    .chars()
+                    .all(|character| character.is_alphanumeric() || matches!(character, '_' | '.'))
+        }
+    }
 
     struct NestedScrollView {
         editor: Entity<CodeEditor>,
@@ -828,6 +989,331 @@ mod tests {
                         ),
                 )
         }
+    }
+
+    fn test_diagnostic(message: &str) -> Diagnostic {
+        Diagnostic {
+            message: message.to_owned().into(),
+            ..Default::default()
+        }
+    }
+
+    #[gpui::test]
+    fn synchronous_diagnostic_provider_remains_immediate(cx: &mut TestAppContext) {
+        let mut editor = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            crate::theme::configure(cx);
+            let code_editor = cx.new(|cx| {
+                CodeEditor::new(
+                    CodeEditorConfig::default()
+                        .initial_value("const value = ;")
+                        .diagnostic_provider(|_| vec![test_diagnostic("expected expression")]),
+                    window,
+                    cx,
+                )
+            });
+            editor = Some(code_editor.clone());
+            gpui_component::Root::new(code_editor, window, cx)
+        });
+
+        let editor = editor.expect("the window builder installs the editor");
+        let input = cx.read(|cx| editor.read(cx).input_state());
+        assert_eq!(
+            cx.read(|cx| input.read(cx).diagnostics().map_or(0, |set| set.len())),
+            1
+        );
+    }
+
+    #[gpui::test]
+    fn async_diagnostics_apply_latest_generation_and_clear(cx: &mut TestAppContext) {
+        let calls = Rc::new(Cell::new(0));
+        let mut editor = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            crate::theme::configure(cx);
+            let provider_calls = calls.clone();
+            let code_editor = cx.new(|cx| {
+                CodeEditor::new(
+                    CodeEditorConfig::default()
+                        .initial_value("invalid")
+                        .async_diagnostic_provider(move |source, _| {
+                            provider_calls.set(provider_calls.get() + 1);
+                            Task::ready(if source.is_empty() {
+                                Vec::new()
+                            } else {
+                                vec![test_diagnostic("invalid source")]
+                            })
+                        }),
+                    window,
+                    cx,
+                )
+            });
+            editor = Some(code_editor.clone());
+            gpui_component::Root::new(code_editor, window, cx)
+        });
+        cx.run_until_parked();
+
+        let editor = editor.expect("the window builder installs the editor");
+        let input = cx.read(|cx| editor.read(cx).input_state());
+        assert_eq!(calls.get(), 1, "initial construction requests diagnostics");
+        assert_eq!(
+            cx.read(|cx| input.read(cx).diagnostics().map_or(0, |set| set.len())),
+            1
+        );
+
+        cx.update(|window, cx| input.read(cx).focus_handle(cx).focus(window));
+        cx.simulate_input("abc");
+        cx.executor().advance_clock(DIAGNOSTIC_REFRESH_DEBOUNCE);
+        cx.run_until_parked();
+        assert_eq!(
+            calls.get(),
+            2,
+            "rapid input changes are coalesced into one diagnostic request"
+        );
+        let stale_generation = cx.read(|cx| editor.read(cx).diagnostic_generation);
+
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| editor.set_value("", window, cx));
+        });
+        cx.run_until_parked();
+        assert!(calls.get() >= 2, "set_value requests fresh diagnostics");
+        assert_eq!(
+            cx.read(|cx| input.read(cx).diagnostics().map_or(0, |set| set.len())),
+            0,
+            "an empty latest result clears prior diagnostics"
+        );
+
+        editor.update(cx, |editor, cx| {
+            editor.apply_diagnostics_if_current(
+                stale_generation,
+                vec![test_diagnostic("stale")],
+                cx,
+            );
+        });
+        assert_eq!(
+            cx.read(|cx| input.read(cx).diagnostics().map_or(0, |set| set.len())),
+            0,
+            "a stale generation must not replace the latest result"
+        );
+    }
+
+    #[gpui::test]
+    fn tab_and_enter_both_confirm_completion(cx: &mut TestAppContext) {
+        let mut editor = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            crate::theme::configure(cx);
+            let code_editor = cx.new(|cx| {
+                CodeEditor::new(
+                    CodeEditorConfig::default()
+                        .language(CodeLanguage::JavaScript)
+                        .initial_value("items.")
+                        .completion_provider(Rc::new(FixedCompletionProvider)),
+                    window,
+                    cx,
+                )
+            });
+            editor = Some(code_editor.clone());
+            gpui_component::Root::new(code_editor, window, cx)
+        });
+        let editor = editor.expect("the window builder installs the editor");
+        let input = cx.read(|cx| editor.read(cx).input_state());
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.set_cursor_position(lsp_types::Position::new(0, 6), window, cx);
+            });
+        });
+
+        cx.simulate_input("ma");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("tab");
+        assert_eq!(
+            cx.read(|cx| input.read(cx).value().to_string()),
+            "items.map"
+        );
+
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.set_value("items.", window, cx);
+                input.set_cursor_position(lsp_types::Position::new(0, 6), window, cx);
+            });
+        });
+        cx.simulate_input("ma");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            cx.read(|cx| input.read(cx).value().to_string()),
+            "items.map"
+        );
+    }
+
+    #[gpui::test]
+    fn non_triggering_and_silent_edits_invalidate_completion(cx: &mut TestAppContext) {
+        let mut editor = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            crate::theme::configure(cx);
+            let code_editor = cx.new(|cx| {
+                CodeEditor::new(
+                    CodeEditorConfig::default()
+                        .language(CodeLanguage::JavaScript)
+                        .initial_value("items.")
+                        .completion_provider(Rc::new(FixedCompletionProvider)),
+                    window,
+                    cx,
+                )
+            });
+            editor = Some(code_editor.clone());
+            gpui_component::Root::new(code_editor, window, cx)
+        });
+        let editor = editor.expect("the window builder installs the editor");
+        let input = cx.read(|cx| editor.read(cx).input_state());
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.set_cursor_position(lsp_types::Position::new(0, 6), window, cx);
+            });
+        });
+
+        cx.simulate_input("ma");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("backspace");
+        cx.simulate_keystrokes("tab");
+        assert_eq!(
+            cx.read(|cx| input.read(cx).value().to_string()),
+            "items.m ",
+            "Backspace must not leave a confirmable completion for old text"
+        );
+
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.set_value("items.", window, cx);
+                input.set_cursor_position(lsp_types::Position::new(0, 6), window, cx);
+            });
+        });
+        cx.simulate_input("ma");
+        cx.run_until_parked();
+        cx.simulate_input(";");
+        cx.simulate_keystrokes("tab");
+        assert_eq!(
+            cx.read(|cx| input.read(cx).value().to_string()),
+            "items.ma; ",
+            "non-triggering punctuation must invalidate completion"
+        );
+
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.set_value("items.ma", window, cx);
+                input.set_cursor_position(lsp_types::Position::new(0, 8), window, cx);
+            });
+        });
+        cx.simulate_input("p");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("alt-backspace");
+        assert_eq!(
+            cx.read(|cx| input.read(cx).value().to_string()),
+            "items.",
+            "Option-Backspace must stop at the preceding punctuation boundary"
+        );
+        cx.simulate_keystrokes("tab");
+        assert_eq!(
+            cx.read(|cx| input.read(cx).value().to_string()),
+            "items.  ",
+            "silent editor commands must invalidate completion"
+        );
+    }
+
+    #[gpui::test]
+    fn option_backspace_uses_deletion_boundary_without_changing_option_left(
+        cx: &mut TestAppContext,
+    ) {
+        let mut editor = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            crate::theme::configure(cx);
+            let code_editor = cx.new(|cx| {
+                CodeEditor::new(
+                    CodeEditorConfig::default()
+                        .language(CodeLanguage::JavaScript)
+                        .initial_value("alpha   "),
+                    window,
+                    cx,
+                )
+            });
+            editor = Some(code_editor.clone());
+            gpui_component::Root::new(code_editor, window, cx)
+        });
+        let editor = editor.expect("the window builder installs the editor");
+        let input = cx.read(|cx| editor.read(cx).input_state());
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.set_cursor_position(lsp_types::Position::new(0, 8), window, cx);
+            });
+        });
+
+        cx.simulate_keystrokes("alt-backspace");
+        assert_eq!(cx.read(|cx| input.read(cx).value().to_string()), "alpha");
+
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.set_value("alpha   ", window, cx);
+                input.set_cursor_position(lsp_types::Position::new(0, 8), window, cx);
+            });
+        });
+        cx.simulate_keystrokes("alt-left");
+        cx.simulate_input("|");
+        assert_eq!(
+            cx.read(|cx| input.read(cx).value().to_string()),
+            "|alpha   ",
+            "word navigation remains greedy while deletion narrows whitespace"
+        );
+
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.set_value("items.map", window, cx);
+                input.set_cursor_position(lsp_types::Position::new(0, 9), window, cx);
+            });
+        });
+        cx.simulate_keystrokes("alt-backspace");
+        assert_eq!(
+            cx.read(|cx| input.read(cx).value().to_string()),
+            "items.",
+            "Option-Backspace stops at punctuation within a code expression"
+        );
+    }
+
+    #[gpui::test]
+    fn enter_between_brackets_creates_indented_line(cx: &mut TestAppContext) {
+        let mut editor = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            crate::theme::configure(cx);
+            let code_editor = cx.new(|cx| {
+                CodeEditor::new(
+                    CodeEditorConfig::default()
+                        .language(CodeLanguage::JavaScript)
+                        .initial_value("{}"),
+                    window,
+                    cx,
+                )
+            });
+            editor = Some(code_editor.clone());
+            gpui_component::Root::new(code_editor, window, cx)
+        });
+        let editor = editor.expect("the window builder installs the editor");
+        let input = cx.read(|cx| editor.read(cx).input_state());
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.set_cursor_position(lsp_types::Position::new(0, 1), window, cx);
+            });
+        });
+
+        cx.simulate_keystrokes("enter");
+        assert_eq!(cx.read(|cx| input.read(cx).value().to_string()), "{\n  \n}");
+        assert_eq!(
+            cx.read(|cx| input.read(cx).cursor_position()),
+            lsp_types::Position::new(1, 2)
+        );
     }
 
     #[gpui::test]

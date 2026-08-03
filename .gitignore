@@ -1,5 +1,6 @@
 /target/
 /vendor/gpui-0.2.2/
 /vendor/gpui-component-0.5.1/
+/vendor/typescript-service-6.0.2/
 .DS_Store
 *.log

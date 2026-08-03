@@ -9,7 +9,7 @@ impl ApiTester {
     ) {
         let language = response_language(response);
         let content = if is_probably_text(&response.body) {
-            format_body(&response.body, self.pretty_body)
+            format_body(&response.body, self.pretty_body, &self.settings.formatter)
         } else {
             format!(
                 "Binary response ({}). The post-response script receives a bounded Base64 view.",
@@ -89,7 +89,9 @@ impl ApiTester {
                 .collect::<Vec<_>>()
                 .join("\n"),
             ResponseTab::Body => self.response_editor.read(cx).value(cx).to_string(),
-            ResponseTab::Preview => format_body(&response.body, self.pretty_body),
+            ResponseTab::Preview => {
+                format_body(&response.body, self.pretty_body, &self.settings.formatter)
+            }
             ResponseTab::Scripts => unreachable!("script copying is handled without a response"),
         };
         cx.write_to_clipboard(ClipboardItem::new_string(value));

@@ -20,7 +20,9 @@ WKWebView through `gpui-wry` only when the Preview tab is selected.
 - Text and streamed local-file multipart fields with a native macOS file picker
 - Cancelable requests with a 60-second timeout and bounded redirects
 - Status, duration, size, HTTP version, final URL, response headers, and body
-- Reusable code editors with line numbers and tree-sitter syntax highlighting
+- Reusable code editors with configurable indentation, Zed-inspired Tab,
+  Enter, and word-deletion behavior, line numbers, and tree-sitter syntax
+  highlighting
 - Pretty JSON, content-aware response highlighting, and clipboard copy
 - Sandboxed JavaScript pre-request and post-response scripts
 - Persistent request tabs with independent drafts, named/color-coded collapsible
@@ -58,14 +60,22 @@ snapshots so Pretty/Raw, Copy, Preview, and post-response scripts cannot silentl
 diverge.
 
 Raw and script editors automatically close language-appropriate braces, brackets,
-parentheses, and quote marks, including closer overtyping. The raw editor's
-context menu can format valid JSON as one undoable whole-buffer edit; invalid
-JSON and languages without a safe formatter are left unchanged. Script editors
-complete the phase-appropriate `api` surface and enabled variable names from the
-active environment. Pre-request assignments also complete canonical HTTP
-methods, body modes, raw-body languages, and structured-field kinds inside
-quoted values. Literal reads of missing or disabled variables receive editor
-warnings without exposing variable values to the completion engine.
+parentheses, and quote marks, including closer overtyping. Tab and Enter both
+accept an open completion menu, indentation advances to the next tab stop,
+paired braces split into an indented block on Enter, and Option-Backspace uses
+Zed-inspired word, punctuation, whitespace, and line-boundary deletion. The
+context menu and, inside the request workspace, `⌥⇧F` format JSON, JavaScript,
+and TypeScript as one undoable whole-buffer edit; invalid source and languages
+without a safe formatter are left unchanged.
+
+Script completion combines the phase-appropriate `api` surface and enabled
+variable names with Microsoft's embedded TypeScript LanguageService. It provides
+JavaScript completion, hover information, and syntactic and semantic diagnostics
+for the current script buffer. Resolved's value-blind overlay adds warnings for
+literal reads of missing or disabled variables without exposing their values to
+the language service. Pre-request assignments also complete canonical HTTP
+methods, body modes, raw-body languages, and structured-field kinds inside quoted
+values.
 
 URL, header, raw-body, and structured-body fields also understand request
 templates while editing. Typing `{{` inserts the matching braces and opens
@@ -151,7 +161,15 @@ request. New Request reuses that clean backing tab, so the tab strip stays tidy.
 
 ## Settings, shortcuts, and themes
 
-Open Settings from the navigation rail or with `⌘,`. On the Keyboard page,
+Open Settings from the navigation rail or with `⌘,`. The Editor page's Editing
+section controls tab width, spaces versus hard tabs, soft wrapping, line
+numbers, indent guides, and automatic pair insertion. Its Formatting section
+controls indentation, tabs, line width, quote style, semicolons, and trailing
+commas for the embedded JSON/JavaScript/TypeScript formatter. Changes persist
+to SQLite; editor changes apply to open editors immediately, and response
+Pretty mode uses the same JSON indentation settings.
+
+On the Keyboard page,
 click a binding and press its replacement shortcut. `Escape` cancels recording,
 `Delete` or `Backspace` clears the binding, Reset restores one default, and
 Reset shortcuts restores all defaults. Invalid or conflicting assignments are
@@ -167,7 +185,7 @@ scan:
 | Section | Commands |
 | --- | --- |
 | Request tabs | Create, close, and move between request tabs |
-| Active request | Send or cancel, save, focus the URL, and format the raw body |
+| Active request | Send or cancel, save, focus the URL, and format the active request editor |
 | Navigation | Open Collections, Environments, History, or Settings |
 | Interface | Toggle navigation density or the performance HUD |
 | Application | Quit the application |
@@ -179,7 +197,7 @@ scan:
 | Send or cancel request | `⌘↩` |
 | Save / Save as | `⌘S` / `⌘⇧S` |
 | Focus request URL | `⌘L` |
-| Format raw body | `⌥⇧F` |
+| Format active request editor | `⌥⇧F` |
 | Collections / Environments / History | `⌘1` / `⌘2` / `⌘3` |
 | Settings | `⌘,` |
 | Toggle navigation size | `⌘\` |
@@ -391,9 +409,12 @@ Command Line Tools and does not require the full Xcode Metal command-line
 compiler. The wrapper obtains the verified crates.io GPUI 0.2.2 and GPUI
 Component 0.5.1 archives from Cargo's local cache when available (or crates.io
 otherwise), applies the small renderer, native-theme, and input-integration
-patches, and then
-forwards its arguments to Cargo. The generated `vendor/gpui-0.2.2/` and
-`vendor/gpui-component-0.5.1/` directories are ignored by Git.
+patches, and then forwards its arguments to Cargo. It also obtains the official,
+checksum-verified TypeScript 6.0.2 npm archive and prepares the embedded
+JavaScript language service with only `typescript.js`, its ES library
+declarations, and required notices. The generated `vendor/gpui-0.2.2/`,
+`vendor/gpui-component-0.5.1/`, and `vendor/typescript-service-6.0.2/`
+directories are ignored by Git.
 
 To build a launchable application bundle:
 
@@ -409,7 +430,9 @@ uses the Git commit count as its build number. See
 
 The bundle is ad-hoc signed by the Rust linker and is intended for local
 development. Distribution outside the local machine will require a Developer ID
-signature and notarization.
+signature and notarization. TypeScript's Apache 2.0 license and third-party
+notice are copied to
+`Resolved.app/Contents/Resources/ThirdPartyLicenses/TypeScript-6.0.2/`.
 
 ## HTML preview boundary
 
