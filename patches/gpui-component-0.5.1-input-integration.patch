@@ -1,3 +1,49 @@
+diff --git a/src/input/blink_cursor.rs b/src/input/blink_cursor.rs
+--- a/src/input/blink_cursor.rs
++++ b/src/input/blink_cursor.rs
+@@ -38,4 +38,10 @@
+     pub fn stop(&mut self, cx: &mut Context<Self>) {
++        let was_visible = self.visible();
+         self.epoch = 0;
+-        cx.notify();
++        self.paused = false;
++        self.visible = false;
++        self._task = Task::ready(());
++        if was_visible {
++            cx.notify();
++        }
+     }
+@@ -88,5 +94,30 @@
+                 .ok();
+             }
+         });
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{BlinkCursor, INTERVAL};
++    use gpui::AppContext as _;
++    use std::time::Duration;
++
++    #[gpui::test]
++    fn stop_cancels_the_pending_blink(cx: &mut gpui::TestAppContext) {
++        let cursor = cx.new(|_| BlinkCursor::new());
++
++        cursor.update(cx, |cursor, cx| cursor.start(cx));
++        assert!(cx.read(|cx| cursor.read(cx).visible()));
++
++        cx.run_until_parked();
++        std::thread::sleep(INTERVAL + Duration::from_millis(50));
++        cx.run_until_parked();
++        assert!(!cx.read(|cx| cursor.read(cx).visible()));
++
++        cursor.update(cx, |cursor, cx| cursor.stop(cx));
++        std::thread::sleep(INTERVAL + Duration::from_millis(50));
++        cx.run_until_parked();
++        assert!(!cx.read(|cx| cursor.read(cx).visible()));
+     }
+ }
 diff --git a/src/input/state.rs b/src/input/state.rs
 --- a/src/input/state.rs
 +++ b/src/input/state.rs
@@ -55,6 +101,29 @@ diff --git a/src/input/state.rs b/src/input/state.rs
      pub(super) last_selected_range: Option<Selection>,
      pub(super) selecting: bool,
      pub(super) size: Size,
+@@ -350,14 +375,15 @@ impl InputState {
+             cx.observe(&blink_cursor, |_, _, cx| cx.notify()),
+             // Blink the cursor when the window is active, pause when it's not.
+             cx.observe_window_activation(window, |input, window, cx| {
+-                if window.is_window_active() {
+-                    let focus_handle = input.focus_handle.clone();
+-                    if focus_handle.is_focused(window) {
+-                        input.blink_cursor.update(cx, |blink_cursor, cx| {
+-                            blink_cursor.start(cx);
+-                        });
++                let should_blink =
++                    window.is_window_active() && input.focus_handle.is_focused(window);
++                input.blink_cursor.update(cx, |blink_cursor, cx| {
++                    if should_blink {
++                        blink_cursor.start(cx);
++                    } else {
++                        blink_cursor.stop(cx);
+                     }
+-                }
++                });
+             }),
+             cx.on_focus(&focus_handle, window, Self::on_focus),
+             cx.on_blur(&focus_handle, window, Self::on_blur),
 @@ -390,6 +415,7 @@ impl InputState {
              mode: InputMode::default(),
              last_layout: None,
@@ -63,7 +132,32 @@ diff --git a/src/input/state.rs b/src/input/state.rs
              last_selected_range: None,
              last_cursor: None,
              scroll_handle: ScrollHandle::new(),
-@@ -549,6 +575,27 @@ impl InputState {
+@@ -515,16 +541,19 @@ impl InputState {
+         new_language: impl Into<SharedString>,
+         cx: &mut Context<Self>,
+     ) {
+-        match &mut self.mode {
++        let new_language = new_language.into();
++        let language_changed = match &mut self.mode {
+             InputMode::CodeEditor {
+                 language,
+                 highlighter,
+                 ..
+-            } => {
+-                *language = new_language.into();
++            } if *language != new_language => {
++                *language = new_language;
+                 *highlighter.borrow_mut() = None;
++                true
+             }
+-            _ => {}
+-        }
++            _ => false,
++        };
++        self._pending_update |= language_changed;
+         cx.notify();
+     }
+@@ -549,6 +578,27 @@ impl InputState {
          self.mode.diagnostics_mut()
      }
  
@@ -91,7 +185,33 @@ diff --git a/src/input/state.rs b/src/input/state.rs
      /// Set placeholder
      pub fn set_placeholder(
          &mut self,
-@@ -921,13 +968,15 @@ impl InputState {
+@@ -602,9 +652,18 @@ impl InputState {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
++        let value: SharedString = value.into();
++        let skip_unchanged_code_editor_value = self.mode.is_code_editor()
++            && self.text.len() == value.len()
++            && self.text.chars().eq(value.chars());
+         self.history.ignore = true;
+         let was_disabled = self.disabled;
+         self.disabled = false;
+-        self.replace_text(value, window, cx);
++        if skip_unchanged_code_editor_value {
++            self.ime_marked_range.take();
++            cx.emit(InputEvent::Change);
++        } else {
++            self.replace_text(value, window, cx);
++        }
+         self.disabled = was_disabled;
+         self.history.ignore = false;
+@@ -619,4 +678,4 @@ impl InputState {
+         if self.mode.is_code_editor() {
+-            self._pending_update = true;
++            self._pending_update |= !skip_unchanged_code_editor_value;
+             self.lsp.reset();
+         }
+@@ -921,13 +980,15 @@ impl InputState {
      pub(super) fn previous_start_of_word(&mut self) -> usize {
          let offset = self.selected_range.start;
          let offset = self.offset_from_utf16(self.offset_to_utf16(offset));
@@ -113,7 +233,20 @@ diff --git a/src/input/state.rs b/src/input/state.rs
      }
 
      /// Return the next end offset of the next word.
-@@ -1993,6 +2042,7 @@ impl EntityInputHandler for InputState {
+@@ -1699,6 +1761,10 @@ impl InputState {
+-    fn on_focus(&mut self, _: &mut Window, cx: &mut Context<Self>) {
++    fn on_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+         self.blink_cursor.update(cx, |cursor, cx| {
+-            cursor.start(cx);
++            if window.is_window_active() {
++                cursor.start(cx);
++            } else {
++                cursor.stop(cx);
++            }
+         });
+         cx.emit(InputEvent::Focus);
+     }
+@@ -1993,6 +2054,7 @@ impl EntityInputHandler for InputState {
          if let Some(diagnostics) = self.mode.diagnostics_mut() {
              diagnostics.reset(&self.text)
          }
@@ -121,7 +254,7 @@ diff --git a/src/input/state.rs b/src/input/state.rs
          self.text_wrapper
              .update(&self.text, &range, &Rope::from(new_text), cx);
          self.mode
-@@ -2048,6 +2098,7 @@ impl EntityInputHandler for InputState {
+@@ -2048,6 +2110,7 @@ impl EntityInputHandler for InputState {
          if let Some(diagnostics) = self.mode.diagnostics_mut() {
              diagnostics.reset(&self.text)
          }
@@ -129,7 +262,7 @@ diff --git a/src/input/state.rs b/src/input/state.rs
          self.text_wrapper
              .update(&self.text, &range, &Rope::from(new_text), cx);
          self.mode
-@@ -2176,3 +2227,39 @@ impl Render for InputState {
+@@ -2176,3 +2239,39 @@ impl Render for InputState {
              .children(self.hover_popover.clone())
      }
  }
@@ -677,3 +810,42 @@ diff --git a/src/button/button.rs b/src/button/button.rs
 +                    .when_some(class_style.font_size, |this, font_size| {
 +                        this.text_size(font_size)
 +                    })
+diff --git a/src/input/otp_input.rs b/src/input/otp_input.rs
+--- a/src/input/otp_input.rs
++++ b/src/input/otp_input.rs
+@@ -28,14 +28,15 @@
+             cx.observe(&blink_cursor, |_, _, cx| cx.notify()),
+             // Blink the cursor when the window is active, pause when it's not.
+             cx.observe_window_activation(window, |this, window, cx| {
+-                if window.is_window_active() {
+-                    let focus_handle = this.focus_handle.clone();
+-                    if focus_handle.is_focused(window) {
+-                        this.blink_cursor.update(cx, |blink_cursor, cx| {
+-                            blink_cursor.start(cx);
+-                        });
++                let should_blink =
++                    window.is_window_active() && this.focus_handle.is_focused(window);
++                this.blink_cursor.update(cx, |blink_cursor, cx| {
++                    if should_blink {
++                        blink_cursor.start(cx);
++                    } else {
++                        blink_cursor.stop(cx);
+                     }
+-                }
++                });
+             }),
+             cx.on_focus(&focus_handle, window, Self::on_focus),
+             cx.on_blur(&focus_handle, window, Self::on_blur),
+@@ -143,6 +144,10 @@
+-    fn on_focus(&mut self, _: &mut Window, cx: &mut Context<Self>) {
++    fn on_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+         self.blink_cursor.update(cx, |cursor, cx| {
+-            cursor.start(cx);
++            if window.is_window_active() {
++                cursor.start(cx);
++            } else {
++                cursor.stop(cx);
++            }
+         });
+         cx.emit(InputEvent::Focus);
+     }

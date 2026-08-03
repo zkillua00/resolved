@@ -126,7 +126,7 @@ fn register_app_action_handlers(view: &Entity<ApiTester>, cx: &mut App) {
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
         let bytes: &'static [u8] = match path {
-            ICON_ASSET_PATH => include_bytes!("../assets/brand/resolved-icon.png"),
+            ICON_ASSET_PATH => include_bytes!("../assets/brand/resolved-runtime.png"),
             "icons/folder-open.svg" => include_bytes!("../assets/icons/folder-open.svg"),
             "icons/gallery-vertical-end.svg" => {
                 include_bytes!("../assets/icons/gallery-vertical-end.svg")

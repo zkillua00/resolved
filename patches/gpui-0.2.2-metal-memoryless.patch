@@ -1,7 +1,18 @@
 diff --git a/src/platform/mac/metal_renderer.rs b/src/platform/mac/metal_renderer.rs
 --- a/src/platform/mac/metal_renderer.rs
 +++ b/src/platform/mac/metal_renderer.rs
-@@ -327,6 +327,7 @@ impl MetalRenderer {
+@@ -143,7 +143,9 @@ impl MetalRenderer {
+         layer.set_device(&device);
+         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+         layer.set_opaque(false);
+-        layer.set_maximum_drawable_count(3);
++        // Two drawables are sufficient for this desktop UI and avoid retaining
++        // a third full-window IOSurface.
++        layer.set_maximum_drawable_count(2);
+         unsafe {
+             let _: () = msg_send![&*layer, setAllowsNextDrawableTimeout: NO];
+             let _: () = msg_send![&*layer, setNeedsDisplayOnBoundsChange: YES];
+@@ -327,6 +329,7 @@ impl MetalRenderer {
          texture_descriptor.set_width(size.width.0 as u64);
          texture_descriptor.set_height(size.height.0 as u64);
          texture_descriptor.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
@@ -9,7 +20,7 @@ diff --git a/src/platform/mac/metal_renderer.rs b/src/platform/mac/metal_rendere
          texture_descriptor
              .set_usage(metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead);
          self.path_intermediate_texture = Some(self.device.new_texture(&texture_descriptor));
-@@ -334,7 +335,18 @@ impl MetalRenderer {
+@@ -334,7 +337,18 @@ impl MetalRenderer {
          if self.path_sample_count > 1 {
              let mut msaa_descriptor = texture_descriptor;
              msaa_descriptor.set_texture_type(metal::MTLTextureType::D2Multisample);
@@ -29,3 +40,35 @@ diff --git a/src/platform/mac/metal_renderer.rs b/src/platform/mac/metal_rendere
              msaa_descriptor.set_sample_count(self.path_sample_count as _);
              self.path_intermediate_msaa_texture = Some(self.device.new_texture(&msaa_descriptor));
          } else {
+diff --git a/src/platform/mac/metal_atlas.rs b/src/platform/mac/metal_atlas.rs
+--- a/src/platform/mac/metal_atlas.rs
++++ b/src/platform/mac/metal_atlas.rs
+@@ -119,16 +119,26 @@ impl MetalAtlasState {
+         min_size: Size<DevicePixels>,
+         kind: AtlasTextureKind,
+     ) -> &mut MetalAtlasTexture {
+-        const DEFAULT_ATLAS_SIZE: Size<DevicePixels> = Size {
++        const DEFAULT_MONOCHROME_ATLAS_SIZE: Size<DevicePixels> = Size {
+             width: DevicePixels(1024),
+             height: DevicePixels(1024),
+         };
++        const DEFAULT_POLYCHROME_ATLAS_SIZE: Size<DevicePixels> = Size {
++            // The largest in-app raster is 256 px; 512 leaves room for the
++            // remaining small UI assets without a 4 MiB minimum allocation.
++            width: DevicePixels(512),
++            height: DevicePixels(512),
++        };
+         // Max texture size on all modern Apple GPUs. Anything bigger than that crashes in validateWithDevice.
+         const MAX_ATLAS_SIZE: Size<DevicePixels> = Size {
+             width: DevicePixels(16384),
+             height: DevicePixels(16384),
+         };
+-        let size = min_size.min(&MAX_ATLAS_SIZE).max(&DEFAULT_ATLAS_SIZE);
++        let default_size = match kind {
++            AtlasTextureKind::Monochrome => DEFAULT_MONOCHROME_ATLAS_SIZE,
++            AtlasTextureKind::Polychrome => DEFAULT_POLYCHROME_ATLAS_SIZE,
++        };
++        let size = min_size.min(&MAX_ATLAS_SIZE).max(&default_size);
+         let texture_descriptor = metal::TextureDescriptor::new();
+         texture_descriptor.set_width(size.width.into());
+         texture_descriptor.set_height(size.height.into());

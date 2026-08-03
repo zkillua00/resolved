@@ -110,6 +110,7 @@ name = "api-tester"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "chrono",
  "csscolorparser",
  "cssparser 0.37.0",

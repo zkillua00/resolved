@@ -471,7 +471,7 @@ mod tests {
             final_url: "https://example.com".to_owned(),
             headers: Vec::new(),
             content_type: Some("application/json".to_owned()),
-            body: br#"{"ok":true}"#.to_vec(),
+            body: br#"{"ok":true}"#.to_vec().into(),
             duration: Duration::from_millis(42),
         }
     }

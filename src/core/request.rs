@@ -3,6 +3,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
@@ -430,7 +431,9 @@ pub struct ResponseData {
     pub final_url: String,
     pub headers: Vec<ResponseHeader>,
     pub content_type: Option<String>,
-    pub body: Vec<u8>,
+    /// Immutable shared storage keeps UI, script, and tab snapshots from
+    /// duplicating a response that may be as large as the buffering limit.
+    pub body: Bytes,
     pub duration: Duration,
 }
 
@@ -598,7 +601,7 @@ pub async fn send_request(
         final_url,
         headers,
         content_type,
-        body,
+        body: body.into(),
         duration: started_at.elapsed(),
     })
 }
@@ -1303,7 +1306,7 @@ mod tests {
         assert_eq!(response.status, 201);
         assert_eq!(response.status_text, "Created");
         assert_eq!(response.content_type.as_deref(), Some("application/json"));
-        assert_eq!(response.body, br#"{"received":true}"#);
+        assert_eq!(response.body.as_ref(), br#"{"received":true}"#);
         assert!(
             response
                 .headers
@@ -1346,5 +1349,34 @@ mod tests {
         let result = runtime.block_on(task.wait());
         assert!(matches!(result, Err(RequestError::Cancelled)));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn cloned_responses_share_buffered_body_storage() {
+        const BODY_LEN: usize = 8 * 1024 * 1024;
+        let mut buffered_body = Vec::with_capacity(BODY_LEN + 4096);
+        buffered_body.resize(BODY_LEN, 0x5a);
+        assert!(buffered_body.capacity() > buffered_body.len());
+        let buffered_body_ptr = buffered_body.as_ptr();
+        let shared_body = Bytes::from(buffered_body);
+        assert_eq!(buffered_body_ptr, shared_body.as_ptr());
+
+        let response = ResponseData {
+            status: 200,
+            status_text: "OK".to_owned(),
+            http_version: "HTTP/2".to_owned(),
+            final_url: "https://example.test/large".to_owned(),
+            headers: Vec::new(),
+            content_type: Some("application/octet-stream".to_owned()),
+            body: shared_body,
+            duration: Duration::from_millis(1),
+        };
+
+        let first = response.clone();
+        let second = response.clone();
+
+        assert_eq!(response.body.len(), BODY_LEN);
+        assert_eq!(response.body.as_ptr(), first.body.as_ptr());
+        assert_eq!(response.body.as_ptr(), second.body.as_ptr());
     }
 }

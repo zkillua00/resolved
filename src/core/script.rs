@@ -1334,7 +1334,7 @@ api.request.bodyFields.push({
                 value: "application/json".to_owned(),
             }],
             content_type: Some("application/json".to_owned()),
-            body: br#"{"token":"next-token"}"#.to_vec(),
+            body: br#"{"token":"next-token"}"#.to_vec().into(),
             duration: Duration::from_millis(42),
         };
 
@@ -1585,7 +1585,7 @@ throw new Error("rotated=a%20b/c");
             final_url: "https://example.test".to_owned(),
             headers: Vec::new(),
             content_type: None,
-            body: Vec::new(),
+            body: Vec::new().into(),
             duration: Duration::from_millis(1),
         };
         execute_post_response(
@@ -1607,7 +1607,7 @@ throw new Error("rotated=a%20b/c");
             final_url: "https://example.test".to_owned(),
             headers: Vec::new(),
             content_type: Some("application/json".to_owned()),
-            body: br#"{"ok":true}"#.to_vec(),
+            body: br#"{"ok":true}"#.to_vec().into(),
             duration: Duration::from_millis(1),
         };
         let result = execute_post_response(
@@ -1637,7 +1637,7 @@ throw new Error("rotated=a%20b/c");
             final_url: "https://example.test/binary".to_owned(),
             headers: Vec::new(),
             content_type: Some("application/octet-stream".to_owned()),
-            body: vec![0xff; MAX_SCRIPT_BODY_BYTES + 1],
+            body: vec![0xff; MAX_SCRIPT_BODY_BYTES + 1].into(),
             duration: Duration::from_millis(1),
         };
         let result = execute_post_response(

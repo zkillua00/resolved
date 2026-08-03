@@ -186,7 +186,10 @@ fn sqlite_backed_mvp_request_flow_persists_scripts_mutations_and_redacted_histor
         .block_on(request_task.wait())
         .expect("execute loopback request");
     assert_eq!(response.status, 200);
-    assert_eq!(response.body, br#"{"ok":true,"session":"server-session"}"#);
+    assert_eq!(
+        response.body.as_ref(),
+        br#"{"ok":true,"session":"server-session"}"#
+    );
 
     let captured_request = captured_request_rx
         .recv_timeout(Duration::from_secs(2))
