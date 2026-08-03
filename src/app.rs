@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::Local;
+use chrono::{Local, Utc};
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Corner, Entity, EntityId,
     EntityInputHandler, Focusable as _, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent,
@@ -38,19 +38,23 @@ use tokio::{runtime::Runtime, task::AbortHandle};
 use crate::{
     brand::{BRAND_EXPLANATION, BRAND_HEADLINE, ICON_ASSET_PATH, PRODUCT_NAME},
     code_editor::{
-        CodeEditor, CodeEditorConfig, CodeEditorEvent, CodeLanguage, apply_template_pair_edit,
+        CodeEditor, CodeEditorConfig, CodeEditorContextMenuBuilder, CodeEditorContextMenuContext,
+        CodeEditorEvent, CodeLanguage, apply_template_pair_edit,
     },
     core::{
         AppSettings, BodyField, BodyFieldKind, BodyMode, Collection, DEFAULT_REQUEST_TAB_TITLE,
         DatabaseStore, Environment, EnvironmentMutation, HeaderEntry, HistoryEntry,
-        PostResponseResult, PreRequestResult, REDACTED_VALUE, RawBodyLanguage, RequestDraft,
-        RequestError, RequestHistory, RequestScripts, RequestTabAssociation, RequestTabCloseScope,
-        RequestTabGroup, RequestTabGroupColor, RequestTabGroupId, RequestTabId, RequestTabRecord,
-        RequestTabs, RequestTask, RequestTemplate, ResponseData, STANDARD_HTTP_METHODS,
-        SavedRequest, SavedTheme, ScriptCancellation, ScriptDiagnostic, ScriptEnvironment,
-        ScriptError, ScriptErrorKind, ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope,
-        ShortcutOverride, Workspace, build_client, execute_post_response, execute_pre_request,
-        format_body, is_probably_text, resolve_request, spawn_request,
+        MAX_SNIPPET_NAME_BYTES, PostResponseResult, PreRequestResult, REDACTED_VALUE,
+        RawBodyLanguage, RequestDraft, RequestError, RequestHistory, RequestScripts,
+        RequestTabAssociation, RequestTabCloseScope, RequestTabGroup, RequestTabGroupColor,
+        RequestTabGroupId, RequestTabId, RequestTabRecord, RequestTabs, RequestTask,
+        RequestTemplate, ResponseData, STANDARD_HTTP_METHODS, SavedRequest, SavedTheme,
+        ScriptCancellation, ScriptDiagnostic, ScriptEnvironment, ScriptError, ScriptErrorKind,
+        ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope, ShortcutOverride, Snippet,
+        SnippetCancellation, SnippetCategory, SnippetKind, SnippetLog, SnippetRequirement,
+        SnippetSelection, SnippetSelectionArea, SnippetSelectionSource, SnippetTextRange,
+        Workspace, build_client, execute_post_response, execute_pre_request, format_body,
+        generate_snippet, is_probably_text, resolve_request, spawn_request,
     },
     debug_overlay::DebugOverlay,
     request_dirty::{RequestDirtyPart, RequestDirtyState},
@@ -58,6 +62,7 @@ use crate::{
         ScriptCompletionProvider, ScriptEditorPhase, ScriptVariableCatalog, diagnostics_for_source,
     },
     shortcuts::{self, ShortcutId},
+    snippet_intelligence::{SnippetEditorContext, SnippetIntelligenceProvider, SnippetTargetPhase},
     template_intelligence::{
         TemplateClassification, TemplateCompletionProvider, TemplateHighlightColors,
         TemplateVariableCatalog, TemplateVariableCatalogHandle, scan_template_spans,
@@ -110,6 +115,7 @@ mod shell;
 mod shortcut_actions;
 mod sidebar;
 mod sidebar_tab;
+mod snippets;
 mod template_variable_popover;
 mod template_variable_popover_model;
 mod template_variables;
@@ -130,6 +136,7 @@ use request_tab_runtime::*;
 use response_tab::*;
 use script_console_model::*;
 use sidebar_tab::*;
+use snippets::*;
 use template_variable_popover_model::*;
 use template_variables::*;
 use ui_utils::*;
@@ -155,6 +162,39 @@ struct ThemeEditorSession {
     _subscription: Subscription,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SnippetDraftSnapshot {
+    name: String,
+    description: String,
+    category: SnippetCategory,
+    kind: SnippetKind,
+    source: String,
+    requirements: Vec<SnippetRequirement>,
+}
+
+struct SnippetEditorSession {
+    search: Entity<InputState>,
+    name: Entity<InputState>,
+    description: Entity<InputState>,
+    editor: Entity<CodeEditor>,
+    preview_editor: Entity<CodeEditor>,
+    selected_id: Option<String>,
+    category: SnippetCategory,
+    kind: SnippetKind,
+    requirements: Vec<SnippetRequirement>,
+    baseline: SnippetDraftSnapshot,
+    notice: Option<String>,
+    notice_is_error: bool,
+    preview_status: Option<String>,
+    preview_logs: Vec<SnippetLog>,
+    preview_running: bool,
+    preview_valid: bool,
+    preview_generation: u64,
+    preview_cancellation: Option<SnippetCancellation>,
+    _input_subscriptions: Vec<Subscription>,
+    _editor_subscription: Subscription,
+}
+
 pub struct ApiTester {
     method: Entity<InputState>,
     url: Entity<InputState>,
@@ -177,6 +217,8 @@ pub struct ApiTester {
     abort_handle: Option<AbortHandle>,
     script_cancellation: Option<ScriptCancellation>,
     response: Option<ResponseData>,
+    response_request: Option<RequestDraft>,
+    response_sensitive_values: Vec<String>,
     request_error: Option<String>,
     script_diagnostic: Option<ScriptDiagnostic>,
     pre_script_report: Option<ScriptReport>,
@@ -216,6 +258,9 @@ pub struct ApiTester {
     recording_shortcut_id: Option<ShortcutId>,
     settings_notice: Option<String>,
     theme_editors: HashMap<String, ThemeEditorSession>,
+    snippet_editor: SnippetEditorSession,
+    snippet_apply_generation: u64,
+    snippet_apply_cancellation: Option<SnippetCancellation>,
     selected_environment_id: Option<String>,
     collection_search: Entity<InputState>,
     environment_search: Entity<InputState>,

@@ -1363,6 +1363,7 @@ impl ApiTester {
 
     pub(crate) fn flush_local_state(&mut self, cx: &mut Context<Self>) -> bool {
         let tabs_saved = self.flush_request_tabs(cx);
+        let snippet_saved = self.flush_snippet_editor(cx);
         let editor_ids = self.theme_editors.keys().cloned().collect::<Vec<_>>();
         let theme_saved = editor_ids
             .iter()
@@ -1371,7 +1372,7 @@ impl ApiTester {
             self.settings_notice = Some("Your theme changes could not be saved.".into());
             cx.notify();
         }
-        tabs_saved && theme_saved
+        tabs_saved && snippet_saved && theme_saved
     }
 
     fn current_theme_source(&self) -> &str {

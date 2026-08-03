@@ -42,6 +42,8 @@ impl ApiTester {
         };
         if let Some(error) = validation_error {
             self.response = None;
+            self.response_request = None;
+            self.response_sensitive_values.clear();
             self.request_error = Some(error);
             self.script_diagnostic = None;
             self.execution_stage = None;
@@ -64,6 +66,8 @@ impl ApiTester {
         self.sending = true;
         self.execution_stage = Some(ExecutionStage::PreRequest);
         self.response = None;
+        self.response_request = None;
+        self.response_sensitive_values.clear();
         self.request_error = None;
         self.script_diagnostic = None;
         self.pre_script_report = None;
@@ -250,6 +254,8 @@ impl ApiTester {
         let mut display_response = response.clone();
         display_response.final_url = resolved.redact_secrets(&response.final_url);
         self.response = Some(display_response.clone());
+        self.response_request = Some(resolved.request.clone());
+        self.response_sensitive_values = resolved.sensitive_values.clone();
         self.update_response_editor(&display_response, window, cx);
 
         self.execution_stage = Some(ExecutionStage::PostResponse);

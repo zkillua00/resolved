@@ -43,6 +43,10 @@ pub(super) fn render_open_tabs_menu(app: &ApiTester, cx: &mut Context<ApiTester>
         .collect::<Vec<_>>();
     let welcome_open = app.workspace_tabs.welcome_is_open();
     let welcome_active = app.workspace_tabs.active() == ActiveWorkspaceTab::Welcome;
+    let snippets_open = app.workspace_tabs.snippets_open();
+    let snippets_active = app
+        .workspace_tabs
+        .tool_is_active(&WorkspaceToolTab::Snippets);
     let settings_open = app.workspace_tabs.settings_open();
     let settings_active = app
         .workspace_tabs
@@ -108,8 +112,27 @@ pub(super) fn render_open_tabs_menu(app: &ApiTester, cx: &mut Context<ApiTester>
                         }),
                 );
             }
-            if settings_open || !theme_editors.is_empty() {
+            if snippets_open || settings_open || !theme_editors.is_empty() {
                 menu = menu.separator().label("Tools");
+            }
+            if snippets_open {
+                let owner = owner.clone();
+                menu = menu.item(
+                    PopupMenuItem::new("Snippets")
+                        .icon(IconName::CaseSensitive)
+                        .checked(snippets_active)
+                        .on_click(move |_, window, cx| {
+                            if let Some(owner) = owner.upgrade() {
+                                owner.update(cx, |this, cx| {
+                                    this.activate_workspace_tab(
+                                        WorkspaceTab::Tool(WorkspaceToolTab::Snippets),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                        }),
+                );
             }
             if settings_open {
                 let owner = owner.clone();

@@ -92,6 +92,8 @@ impl ApiTester {
                 response_tab: self.response_tab,
                 pretty_body: self.pretty_body,
                 response: self.response.clone(),
+                response_request: self.response_request.clone(),
+                response_sensitive_values: self.response_sensitive_values.clone(),
                 request_error: self.request_error.clone(),
                 script_diagnostic: self.script_diagnostic.clone(),
                 pre_script_report: self.pre_script_report.clone(),
@@ -285,6 +287,8 @@ impl ApiTester {
         self.response_tab = runtime.response_tab;
         self.pretty_body = runtime.pretty_body;
         self.response = runtime.response;
+        self.response_request = runtime.response_request;
+        self.response_sensitive_values = runtime.response_sensitive_values;
         self.request_error = runtime.request_error;
         self.script_diagnostic = runtime.script_diagnostic;
         self.pre_script_report = runtime.pre_script_report;

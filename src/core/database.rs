@@ -22,6 +22,7 @@ use super::{
     history::{DEFAULT_HISTORY_LIMIT, HistoryEntry, RequestHistory, ResponseSummary},
     request::{BodyField, BodyFieldKind, BodyMode, HeaderEntry, RawBodyLanguage, RequestDraft},
     request_tabs::RequestTabs,
+    snippet::{Snippet, SnippetCategory, SnippetKind, SnippetRequirement},
     template::RequestTemplate,
     workspace::{
         Collection, CollectionFolder, Environment, EnvironmentVariable, RequestScripts,
@@ -32,7 +33,7 @@ use super::{
 #[cfg(test)]
 use super::request_tabs::RequestTabGroupColor;
 
-const CURRENT_SCHEMA_VERSION: i64 = 5;
+const CURRENT_SCHEMA_VERSION: i64 = 6;
 const LEGACY_HISTORY_FILE_VERSION: u32 = 1;
 const LEGACY_HISTORY_IMPORT_MARKER: &str = "history-json-v1";
 const LEGACY_WORKSPACE_IMPORT_MARKER: &str = "workspace-json-v1";
@@ -258,6 +259,39 @@ CREATE TABLE app_settings (
     state_json  TEXT NOT NULL,
     updated_at  INTEGER NOT NULL,
     version     INTEGER NOT NULL CHECK (version >= 1)
+);
+"#;
+
+const MIGRATION_6: &str = r#"
+CREATE TABLE snippets (
+    id                      TEXT PRIMARY KEY NOT NULL,
+    name                    TEXT NOT NULL CHECK (length(trim(name)) > 0),
+    description             TEXT NOT NULL,
+    category                TEXT NOT NULL CHECK (category IN ('pre_request', 'post_response')),
+    kind                    TEXT NOT NULL CHECK (kind IN ('plain', 'executable')),
+    output_language         TEXT NOT NULL CHECK (length(trim(output_language)) > 0),
+    source                  TEXT NOT NULL,
+    generator_api_version   INTEGER NOT NULL CHECK (generator_api_version >= 1),
+    position                INTEGER NOT NULL CHECK (position >= 0),
+    created_at              INTEGER NOT NULL,
+    updated_at              INTEGER NOT NULL,
+    version                 INTEGER NOT NULL CHECK (version >= 1)
+);
+
+CREATE INDEX snippets_position_idx
+    ON snippets(position, id);
+
+CREATE TABLE snippet_requirements (
+    snippet_id    TEXT NOT NULL REFERENCES snippets(id) ON DELETE CASCADE,
+    position      INTEGER NOT NULL CHECK (position >= 0),
+    requirement   TEXT NOT NULL CHECK (
+        requirement IN (
+            'all', 'has-request', 'has-response', 'has-selected-block',
+            'has-request-selection', 'has-response-selection', 'has-json-selection'
+        )
+    ),
+    PRIMARY KEY(snippet_id, position),
+    UNIQUE(snippet_id, requirement)
 );
 "#;
 
@@ -658,6 +692,8 @@ impl DatabaseStore {
                 SELECT 1 FROM collections
                 UNION ALL
                 SELECT 1 FROM environments
+                UNION ALL
+                SELECT 1 FROM snippets
             )",
         )?;
         if imported {
@@ -841,6 +877,7 @@ fn migrate(connection: &mut Connection) -> Result<(), DatabaseError> {
             3 => transaction.execute_batch(MIGRATION_3)?,
             4 => transaction.execute_batch(MIGRATION_4)?,
             5 => transaction.execute_batch(MIGRATION_5)?,
+            6 => transaction.execute_batch(MIGRATION_6)?,
             _ => {
                 return Err(DatabaseError::UnsupportedSchemaVersion {
                     found: next,
@@ -1083,6 +1120,52 @@ fn save_workspace_tx(
         &environment_ids,
     )?;
 
+    let mut snippet_ids = HashSet::new();
+    for (snippet_position, snippet) in workspace.snippets.iter().enumerate() {
+        snippet_ids.insert(snippet.id.clone());
+        transaction.execute(
+            "INSERT INTO snippets(
+                id, name, description, category, kind, output_language, source,
+                generator_api_version, position, created_at, updated_at, version
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                category = excluded.category,
+                kind = excluded.kind,
+                output_language = excluded.output_language,
+                source = excluded.source,
+                generator_api_version = excluded.generator_api_version,
+                position = excluded.position,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at,
+                version = snippets.version + 1",
+            params![
+                &snippet.id,
+                &snippet.name,
+                &snippet.description,
+                snippet.category.as_db_str(),
+                snippet.kind.as_db_str(),
+                &snippet.output_language,
+                &snippet.source,
+                to_i64(
+                    snippet.generator_api_version,
+                    "snippet generator_api_version",
+                )?,
+                to_i64(snippet_position, "snippet position")?,
+                snippet.created_at.timestamp_micros(),
+                snippet.updated_at.timestamp_micros(),
+            ],
+        )?;
+        sync_snippet_requirements(transaction, snippet)?;
+    }
+    delete_missing_ids(
+        transaction,
+        "SELECT id FROM snippets",
+        "DELETE FROM snippets WHERE id = ?1",
+        &snippet_ids,
+    )?;
+
     transaction.execute(
         "INSERT INTO metadata(singleton, active_environment_id, updated_at, version)
          VALUES (1, ?1, ?2, 1)
@@ -1218,6 +1301,30 @@ fn sync_saved_request_body_fields(
             to_i64(body_fields.len(), "saved request body field count")?
         ],
     )?;
+    Ok(())
+}
+
+fn sync_snippet_requirements(
+    transaction: &Transaction<'_>,
+    snippet: &Snippet,
+) -> Result<(), DatabaseError> {
+    // Replacing this short child list avoids uniqueness conflicts when the
+    // user reorders two existing requirements in one workspace save.
+    transaction.execute(
+        "DELETE FROM snippet_requirements WHERE snippet_id = ?1",
+        params![&snippet.id],
+    )?;
+    for (position, requirement) in snippet.requirements.iter().enumerate() {
+        transaction.execute(
+            "INSERT INTO snippet_requirements(snippet_id, position, requirement)
+             VALUES (?1, ?2, ?3)",
+            params![
+                &snippet.id,
+                to_i64(position, "snippet requirement position")?,
+                requirement.as_db_str(),
+            ],
+        )?;
+    }
     Ok(())
 }
 
@@ -1407,6 +1514,79 @@ fn load_workspace_tx(transaction: &Transaction<'_>) -> Result<Workspace, Databas
         });
     }
 
+    let snippet_rows = {
+        let mut statement = transaction.prepare(
+            "SELECT
+                id, name, description, category, kind, output_language, source,
+                generator_api_version, created_at, updated_at
+             FROM snippets
+             ORDER BY position ASC, id ASC",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, i64>(9)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut snippets = Vec::with_capacity(snippet_rows.len());
+    for (
+        id,
+        name,
+        description,
+        category,
+        kind,
+        output_language,
+        source,
+        generator_api_version,
+        created_at,
+        updated_at,
+    ) in snippet_rows
+    {
+        let raw_requirements = {
+            let mut statement = transaction.prepare(
+                "SELECT requirement
+                 FROM snippet_requirements
+                 WHERE snippet_id = ?1
+                 ORDER BY position ASC",
+            )?;
+            statement
+                .query_map(params![&id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let requirements = raw_requirements
+            .into_iter()
+            .map(|requirement| snippet_requirement_from_db(&requirement))
+            .collect::<Result<Vec<_>, _>>()?;
+        snippets.push(Snippet {
+            id,
+            name,
+            description,
+            category: snippet_category_from_db(&category)?,
+            kind: snippet_kind_from_db(&kind)?,
+            output_language,
+            source,
+            requirements,
+            generator_api_version: u32_from_i64(
+                generator_api_version,
+                "snippet generator_api_version",
+            )?,
+            created_at: datetime_from_micros(created_at, "snippet created_at")?,
+            updated_at: datetime_from_micros(updated_at, "snippet updated_at")?,
+        });
+    }
+
     let active_environment_id = transaction
         .query_row(
             "SELECT active_environment_id FROM metadata WHERE singleton = 1",
@@ -1418,6 +1598,7 @@ fn load_workspace_tx(transaction: &Transaction<'_>) -> Result<Workspace, Databas
     let workspace = Workspace {
         collections,
         environments,
+        snippets,
         active_environment_id,
     };
     workspace.validate()?;
@@ -1810,6 +1991,27 @@ fn body_field_kind_from_db(
     })
 }
 
+fn snippet_category_from_db(value: &str) -> Result<SnippetCategory, DatabaseError> {
+    SnippetCategory::from_db_str(value).ok_or_else(|| DatabaseError::CorruptData {
+        field: "snippet category",
+        value: value.to_owned(),
+    })
+}
+
+fn snippet_kind_from_db(value: &str) -> Result<SnippetKind, DatabaseError> {
+    SnippetKind::from_db_str(value).ok_or_else(|| DatabaseError::CorruptData {
+        field: "snippet kind",
+        value: value.to_owned(),
+    })
+}
+
+fn snippet_requirement_from_db(value: &str) -> Result<SnippetRequirement, DatabaseError> {
+    SnippetRequirement::from_db_str(value).ok_or_else(|| DatabaseError::CorruptData {
+        field: "snippet requirement",
+        value: value.to_owned(),
+    })
+}
+
 fn delete_missing_ids(
     transaction: &Transaction<'_>,
     select_sql: &str,
@@ -1922,6 +2124,7 @@ fn read_legacy_workspace(path: &Path) -> Result<Option<Workspace>, DatabaseError
     let workspace = Workspace {
         collections: file.collections,
         environments: file.environments,
+        snippets: Vec::new(),
         active_environment_id: file.active_environment_id,
     };
     workspace.validate()?;
@@ -1976,6 +2179,13 @@ where
 
 fn u16_from_i64(value: i64, field: &'static str) -> Result<u16, DatabaseError> {
     u16::try_from(value).map_err(|_| DatabaseError::CorruptData {
+        field,
+        value: value.to_string(),
+    })
+}
+
+fn u32_from_i64(value: i64, field: &'static str) -> Result<u32, DatabaseError> {
+    u32::try_from(value).map_err(|_| DatabaseError::CorruptData {
         field,
         value: value.to_string(),
     })
@@ -2103,8 +2313,43 @@ mod tests {
                     },
                 ],
             }],
+            snippets: Vec::new(),
             active_environment_id: Some("environment-1".to_owned()),
         }
+    }
+
+    fn sample_snippets() -> Vec<Snippet> {
+        let mut plain = Snippet::new(
+            "Log request",
+            SnippetCategory::PreRequest,
+            SnippetKind::Plain,
+        )
+        .unwrap();
+        plain.id = "snippet-plain".to_owned();
+        plain.description = "A reusable request log statement.".to_owned();
+        plain.output_language = "javascript".to_owned();
+        plain.source = "console.log(api.request.url);".to_owned();
+        plain.created_at = timestamp(1_700_000_000_000_101);
+        plain.updated_at = timestamp(1_700_000_000_000_102);
+
+        let mut executable = Snippet::new(
+            "Log selected response",
+            SnippetCategory::PostResponse,
+            SnippetKind::Executable,
+        )
+        .unwrap();
+        executable.id = "snippet-executable".to_owned();
+        executable.description = "Generates a log statement for selected JSON.".to_owned();
+        executable.output_language = "javascript".to_owned();
+        executable.source = "return `console.log(${snippet.selection.expression()})`;".to_owned();
+        executable.requirements = vec![
+            SnippetRequirement::HasResponseSelection,
+            SnippetRequirement::HasJsonSelection,
+        ];
+        executable.created_at = timestamp(1_700_000_000_000_201);
+        executable.updated_at = timestamp(1_700_000_000_000_202);
+
+        vec![plain, executable]
     }
 
     fn sample_history() -> RequestHistory {
@@ -2255,6 +2500,8 @@ mod tests {
             "saved_request_headers",
             "saved_requests",
             "schema_version",
+            "snippet_requirements",
+            "snippets",
         ] {
             assert!(tables.contains(table), "missing table {table}");
         }
@@ -2304,6 +2551,7 @@ mod tests {
             "saved_requests",
         );
         assert_cascade("history_body_fields", "history_entry_id", "history_entries");
+        assert_cascade("snippet_requirements", "snippet_id", "snippets");
     }
 
     #[test]
@@ -2637,6 +2885,66 @@ mod tests {
     }
 
     #[test]
+    fn migrates_handcrafted_v5_database_with_empty_snippets() {
+        let (_directory, store) = database();
+        let connection = Connection::open(store.path()).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE schema_version (
+                    singleton   INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    version     INTEGER NOT NULL CHECK (version >= 0),
+                    updated_at  INTEGER NOT NULL
+                 );
+                 INSERT INTO schema_version(singleton, version, updated_at)
+                 VALUES (1, 5, 1700000000000000);",
+            )
+            .unwrap();
+        connection.execute_batch(MIGRATION_1).unwrap();
+        connection.execute_batch(MIGRATION_2).unwrap();
+        connection.execute_batch(MIGRATION_3).unwrap();
+        connection.execute_batch(MIGRATION_4).unwrap();
+        connection.execute_batch(MIGRATION_5).unwrap();
+        let settings = AppSettings {
+            navigation_compact: true,
+            ..AppSettings::default()
+        };
+        connection
+            .execute(
+                "INSERT INTO app_settings(singleton, state_json, updated_at, version)
+                 VALUES (1, ?1, 1700000000000000, 1)",
+                params![serde_json::to_string(&settings).unwrap()],
+            )
+            .unwrap();
+        drop(connection);
+
+        store.initialize().unwrap();
+        assert!(store.load_workspace().unwrap().snippets.is_empty());
+        assert_eq!(store.load_app_settings().unwrap(), settings);
+
+        let connection = store.open_connection().unwrap();
+        let schema_version: i64 = connection
+            .query_row(
+                "SELECT version FROM schema_version WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema_version, CURRENT_SCHEMA_VERSION);
+        for table in ["snippets", "snippet_requirements"] {
+            let count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table' AND name = ?1",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "migration must create {table}");
+        }
+    }
+
+    #[test]
     fn rejects_a_database_from_a_newer_schema_version() {
         let (_directory, store) = database();
         let connection = Connection::open(store.path()).unwrap();
@@ -2766,6 +3074,79 @@ mod tests {
     }
 
     #[test]
+    fn rejects_corrupt_snippet_enums_and_generator_version() {
+        let (_directory, store) = database();
+        let mut workspace = sample_workspace();
+        workspace.snippets = sample_snippets();
+        store.save_workspace(&workspace).unwrap();
+        let connection = store.open_connection().unwrap();
+        connection
+            .pragma_update(None, "ignore_check_constraints", true)
+            .unwrap();
+
+        connection
+            .execute(
+                "UPDATE snippets SET category = 'broken_category'
+                 WHERE id = 'snippet-plain'",
+                [],
+            )
+            .unwrap();
+        assert_corrupt(
+            store.load_workspace(),
+            "snippet category",
+            "broken_category",
+        );
+        connection
+            .execute(
+                "UPDATE snippets SET category = 'pre_request', kind = 'broken_kind'
+                 WHERE id = 'snippet-plain'",
+                [],
+            )
+            .unwrap();
+        assert_corrupt(store.load_workspace(), "snippet kind", "broken_kind");
+        connection
+            .execute(
+                "UPDATE snippets SET kind = 'plain'
+                 WHERE id = 'snippet-plain'",
+                [],
+            )
+            .unwrap();
+
+        connection
+            .execute(
+                "UPDATE snippet_requirements SET requirement = 'broken_requirement'
+                 WHERE snippet_id = 'snippet-executable' AND position = 0",
+                [],
+            )
+            .unwrap();
+        assert_corrupt(
+            store.load_workspace(),
+            "snippet requirement",
+            "broken_requirement",
+        );
+        connection
+            .execute(
+                "UPDATE snippet_requirements SET requirement = 'has-response-selection'
+                 WHERE snippet_id = 'snippet-executable' AND position = 0",
+                [],
+            )
+            .unwrap();
+
+        connection
+            .execute(
+                "UPDATE snippets SET generator_api_version = -1
+                 WHERE id = 'snippet-plain'",
+                [],
+            )
+            .unwrap();
+        assert_corrupt(
+            store.load_workspace(),
+            "snippet generator_api_version",
+            "-1",
+        );
+    }
+
+    #[test]
     fn workspace_and_history_round_trip_as_one_aggregate() {
         let (_directory, store) = database();
         let workspace = sample_workspace();
@@ -2808,6 +3189,89 @@ mod tests {
             .optional()
             .unwrap();
         assert_eq!(foreign_key_violation, None);
+    }
+
+    #[test]
+    fn snippets_round_trip_preserves_order_and_deletes_missing_rows() {
+        let (_directory, store) = database();
+        let mut workspace = sample_workspace();
+        workspace.snippets = sample_snippets();
+
+        store.save_workspace(&workspace).unwrap();
+        assert_eq!(store.load_workspace().unwrap(), workspace);
+
+        workspace.snippets.reverse();
+        workspace.snippets[0].requirements.reverse();
+        store.save_workspace(&workspace).unwrap();
+        assert_eq!(store.load_workspace().unwrap(), workspace);
+
+        let connection = store.open_connection().unwrap();
+        let snippet_rows = {
+            let mut statement = connection
+                .prepare("SELECT id, position, version FROM snippets ORDER BY position")
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            snippet_rows,
+            vec![
+                ("snippet-executable".to_owned(), 0, 2),
+                ("snippet-plain".to_owned(), 1, 2),
+            ]
+        );
+        let requirement_rows = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT requirement, position
+                     FROM snippet_requirements
+                     WHERE snippet_id = 'snippet-executable'
+                     ORDER BY position",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            requirement_rows,
+            vec![
+                ("has-json-selection".to_owned(), 0),
+                ("has-response-selection".to_owned(), 1),
+            ]
+        );
+        drop(connection);
+
+        workspace
+            .snippets
+            .retain(|snippet| snippet.id != "snippet-executable");
+        store.save_workspace(&workspace).unwrap();
+        assert_eq!(store.load_workspace().unwrap(), workspace);
+
+        let connection = store.open_connection().unwrap();
+        let snippet_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM snippets", [], |row| row.get(0))
+            .unwrap();
+        let requirement_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM snippet_requirements", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(snippet_count, 1);
+        assert_eq!(requirement_count, 0);
     }
 
     #[test]
@@ -3190,6 +3654,42 @@ mod tests {
             )
             .unwrap();
         assert_eq!(marker_count, 2);
+    }
+
+    #[test]
+    fn legacy_workspace_import_does_not_overwrite_a_snippet_only_workspace() {
+        let (directory, store) = database();
+        let history_path = directory.path().join("history.json");
+        let workspace_path = directory.path().join("workspace.json");
+        let snippet_workspace = Workspace {
+            snippets: sample_snippets(),
+            ..Workspace::default()
+        };
+        store.save_workspace(&snippet_workspace).unwrap();
+
+        let legacy_workspace = sample_workspace();
+        let workspace_file = LegacyWorkspaceFile {
+            version: WORKSPACE_FILE_VERSION,
+            collections: legacy_workspace.collections,
+            environments: legacy_workspace.environments,
+            active_environment_id: legacy_workspace.active_environment_id,
+        };
+        fs::write(
+            &workspace_path,
+            serde_json::to_vec_pretty(&workspace_file).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            store
+                .import_legacy_json(&history_path, &workspace_path)
+                .unwrap(),
+            LegacyImportOutcome::Imported {
+                workspace_imported: false,
+                history_imported: false,
+            }
+        );
+        assert_eq!(store.load_workspace().unwrap(), snippet_workspace);
     }
 
     #[test]

@@ -5,7 +5,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::template::RequestTemplate;
+use super::{
+    snippet::{Snippet, SnippetCategory, SnippetValidationError},
+    template::RequestTemplate,
+};
 
 pub const WORKSPACE_FILE_VERSION: u32 = 1;
 
@@ -50,6 +53,8 @@ pub struct Workspace {
     pub environments: Vec<Environment>,
     #[serde(default)]
     pub active_environment_id: Option<String>,
+    #[serde(default)]
+    pub snippets: Vec<Snippet>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -313,6 +318,8 @@ impl Workspace {
         let mut request_ids = HashSet::new();
         let mut environment_ids = HashSet::new();
         let mut variable_ids = HashSet::new();
+        let mut snippet_ids = HashSet::new();
+        let mut snippet_names = HashSet::new();
 
         for collection in &self.collections {
             validate_id("collection", &collection.id, &mut collection_ids)?;
@@ -435,7 +442,28 @@ impl Workspace {
             });
         }
 
+        for snippet in &self.snippets {
+            validate_id("snippet", &snippet.id, &mut snippet_ids)?;
+            snippet
+                .validate()
+                .map_err(|source| WorkspaceValidationError::InvalidSnippet {
+                    id: snippet.id.clone(),
+                    source,
+                })?;
+            let name_key = (snippet.category, snippet.name.to_lowercase());
+            if !snippet_names.insert(name_key) {
+                return Err(WorkspaceValidationError::DuplicateSnippetName {
+                    category: snippet.category,
+                    name: snippet.name.clone(),
+                });
+            }
+        }
+
         Ok(())
+    }
+
+    pub fn snippet(&self, id: &str) -> Option<&Snippet> {
+        self.snippets.iter().find(|snippet| snippet.id == id)
     }
 
     pub fn collection(&self, id: &str) -> Option<&Collection> {
@@ -924,6 +952,19 @@ pub enum WorkspaceValidationError {
 
     #[error("environment '{environment_id}' has duplicate variable key '{key}'")]
     DuplicateVariableKey { environment_id: String, key: String },
+
+    #[error("snippet '{id}' is invalid")]
+    InvalidSnippet {
+        id: String,
+        #[source]
+        source: SnippetValidationError,
+    },
+
+    #[error("duplicate {category} snippet name '{name}'")]
+    DuplicateSnippetName {
+        category: SnippetCategory,
+        name: String,
+    },
 }
 
 #[cfg(test)]
@@ -1105,6 +1146,8 @@ struct WorkspaceFile {
     environments: Vec<Environment>,
     #[serde(default)]
     active_environment_id: Option<String>,
+    #[serde(default)]
+    snippets: Vec<Snippet>,
 }
 
 #[cfg(test)]
@@ -1115,6 +1158,7 @@ impl WorkspaceFile {
             collections: workspace.collections.clone(),
             environments: workspace.environments.clone(),
             active_environment_id: workspace.active_environment_id.clone(),
+            snippets: workspace.snippets.clone(),
         }
     }
 
@@ -1123,6 +1167,7 @@ impl WorkspaceFile {
             collections: self.collections,
             environments: self.environments,
             active_environment_id: self.active_environment_id,
+            snippets: self.snippets,
         }
     }
 }

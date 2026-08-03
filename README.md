@@ -23,6 +23,9 @@ WKWebView through `gpui-wry` only when the Preview tab is selected.
 - Reusable code editors with line numbers and tree-sitter syntax highlighting
 - Pretty JSON, content-aware response highlighting, and clipboard copy
 - Sandboxed JavaScript pre-request and post-response scripts
+- A persistent Snippets library with phase-aware plain JavaScript and bounded
+  executable JavaScript generators, previews, applicability rules, and direct
+  code-editor context-menu insertion
 - Persistent request tabs with independent drafts, named/color-coded collapsible
   groups, dirty-close protection, and restoration across launches
 - Browser-style tab menus for closing the current, other, left, right, all, or
@@ -66,6 +69,10 @@ active environment. Pre-request assignments also complete canonical HTTP
 methods, body modes, raw-body languages, and structured-field kinds inside
 quoted values. Literal reads of missing or disabled variables receive editor
 warnings without exposing variable values to the completion engine.
+Right-clicking the raw request body, response body, or either script editor
+opens `Snippets`. Script editors filter to their own target category; entries
+whose response or selection conditions are not currently met stay visibly
+disabled.
 
 URL, header, raw-body, and structured-body fields also understand request
 templates while editing. Typing `{{` inserts the matching braces and opens
@@ -330,6 +337,46 @@ Node.js environment, browser DOM, `fetch`, `WebSocket`, `XMLHttpRequest`,
 native QuickJS engine. Only run scripts you trust. Imported collection formats
 and an isolated helper-process sandbox are not part of this MVP.
 
+## Snippets
+
+Open the Snippets workspace from the navigation rail to create, search,
+duplicate, preview, or delete reusable JavaScript. Every definition has a
+required target:
+
+- **Pre-request** inserts into the pre-request script and never advertises a
+  response API.
+- **Post-response** inserts into the post-response script and may use response
+  context when one exists.
+
+Plain snippets are inserted verbatim and use the same phase-specific editor
+intelligence as their destination script. Executable snippets are JavaScript
+generator bodies. They run in a fresh bounded QuickJS runtime and must return a
+string, return `snippet.result(text, options)`, or call `snippet.write(value)`.
+The compatibility `write(value)` alias is also available.
+
+Executable generators receive immutable snapshots. `api.request` is available
+in both categories; `api.response` exists only for post-response generators and
+is nullable before a response has completed. `snippet.selection` describes the
+invoking editor selection and can produce a JSONPath, JSON Pointer, or safe
+JavaScript expression when the selected range maps to JSON. `snippet.result`
+can additionally specify a preferred UTF-16 caret offset.
+Generator intelligence models this read-only API rather than the mutable
+pre-request/post-response script API, so unavailable members are not suggested.
+
+The optional menu conditions are evaluated together: current response,
+selected block, request selection, response selection, and selected JSON value.
+Use a snippet by right-clicking a code editor and choosing
+`Snippets → Snippet name`. Invoking it inside its destination script replaces
+the current selection; invoking it from a request or response body appends the
+result to the snippet's target script. Generation is cancelled or discarded if
+the target changes before insertion, and insertion remains one undoable editor
+operation.
+
+Snippet generators have a 500 ms deadline, 32 MiB heap, 256 KiB stack and
+source, 1 MiB generated-output and selected-text limits, an 8 MiB serialized
+context limit, and bounded redacted console output. They expose no filesystem,
+network, module-loader, DOM, process, or environment-mutation APIs.
+
 ## Performance HUD
 
 Enable Settings → Developer Settings → Metrics to show the optional in-app HUD.
@@ -353,8 +400,9 @@ so existing history, workspaces, request tabs, settings, and themes continue to
 load after the product rename:
 
 - `api-tester.sqlite3`: the versioned SQLite database for history, collections,
-  saved requests and scripts, environments, variables, request tabs, shortcut
-  overrides, the CSS theme snapshot, and other app settings
+  saved requests and scripts, snippets and their applicability rules,
+  environments, variables, request tabs, shortcut overrides, the CSS theme
+  snapshot, and other app settings
 
 The database uses foreign keys, WAL mode, a short bounded busy timeout, explicit
 forward-only schema migrations, normalized body-field tables, transactional
@@ -362,7 +410,8 @@ aggregate writes, and a startup integrity check. Schema v2 adds request-body
 metadata, schema v3 adds nested collection folders, and schema v4 adds
 persistent request-tab state. Schema v5 adds application settings, including
 shortcuts, theme selection, and navigation density; earlier rows migrate
-without losing request content. It is embedded behind a storage interface;
+without losing request content. Schema v6 adds ordered snippets and normalized
+applicability rules. It is embedded behind a storage interface;
 there is no localhost database server or open port. A process-level workspace
 lock rejects a second app instance so stale in-memory aggregates cannot
 overwrite each other.

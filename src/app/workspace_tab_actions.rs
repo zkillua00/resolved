@@ -77,6 +77,9 @@ impl ApiTester {
             }
             WorkspaceTab::Request(tab_id) => self.activate_request_tab(tab_id, window, cx),
             WorkspaceTab::Tool(tool) => match tool {
+                WorkspaceToolTab::Snippets => {
+                    self.open_workspace_tool_tab(WorkspaceToolTab::Snippets, window, cx);
+                }
                 WorkspaceToolTab::Settings => {
                     self.open_workspace_tool_tab(WorkspaceToolTab::Settings, window, cx);
                 }
@@ -105,6 +108,7 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) {
         let closed = match &tab {
+            WorkspaceToolTab::Snippets => self.workspace_tabs.close_tool(&tab),
             WorkspaceToolTab::Settings => {
                 self.cancel_shortcut_recording(cx);
                 self.workspace_tabs.close_tool(&tab)
@@ -249,6 +253,7 @@ impl ApiTester {
     ) {
         for tool in tools.into_iter().rev() {
             let closed = match &tool {
+                WorkspaceToolTab::Snippets => self.workspace_tabs.close_tool(&tool),
                 WorkspaceToolTab::Settings => {
                     self.cancel_shortcut_recording(cx);
                     self.workspace_tabs.close_tool(&tool)
@@ -278,6 +283,9 @@ impl ApiTester {
             ActiveWorkspaceTab::Request => {
                 let tab_id = self.request_tabs.active_tab_id().clone();
                 self.request_close_request_tab(tab_id, window, cx);
+            }
+            ActiveWorkspaceTab::Snippets => {
+                self.close_workspace_tool_tab(WorkspaceToolTab::Snippets, window, cx);
             }
             ActiveWorkspaceTab::Settings => {
                 self.close_workspace_tool_tab(WorkspaceToolTab::Settings, window, cx);
@@ -314,7 +322,9 @@ impl ApiTester {
                     self.show_preview(window, cx);
                 }
             }
-            ActiveWorkspaceTab::Settings | ActiveWorkspaceTab::ThemeCss => {
+            ActiveWorkspaceTab::Snippets
+            | ActiveWorkspaceTab::Settings
+            | ActiveWorkspaceTab::ThemeCss => {
                 self.hide_preview(cx);
             }
         }

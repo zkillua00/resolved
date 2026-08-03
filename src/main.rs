@@ -15,6 +15,7 @@ mod instance_guard;
 mod request_dirty;
 mod script_intelligence;
 mod shortcuts;
+mod snippet_intelligence;
 mod template_intelligence;
 mod theme;
 mod web_preview;

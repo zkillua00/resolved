@@ -51,6 +51,13 @@ impl ApiTester {
             }
             previous_group_id = tab.group_id().cloned();
         }
+        if self.workspace_tabs.snippets_open() {
+            elements.push(render_workspace_tool_tab(
+                self,
+                WorkspaceToolTab::Snippets,
+                cx,
+            ));
+        }
         if self.workspace_tabs.settings_open() {
             elements.push(render_workspace_tool_tab(
                 self,

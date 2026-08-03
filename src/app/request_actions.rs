@@ -592,6 +592,8 @@ impl ApiTester {
         self.update_body_language(cx);
 
         self.response = None;
+        self.response_request = None;
+        self.response_sensitive_values.clear();
         self.request_error = None;
         self.script_diagnostic = None;
         self.pre_script_report = None;

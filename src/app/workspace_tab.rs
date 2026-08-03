@@ -2,19 +2,22 @@ use crate::core::{RequestTabId, RequestTabs};
 
 /// The content surface currently shown below the workspace tab strip.
 ///
-/// Request records stay in [`RequestTabs`]. Settings and theme editors are
-/// runtime-only tools and never enter request persistence.
+/// Request records stay in [`RequestTabs`]. Snippets, Settings, and theme
+/// editors are runtime-only tool surfaces and never enter request-tab
+/// persistence.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum ActiveWorkspaceTab {
     #[default]
     Request,
     Welcome,
+    Snippets,
     Settings,
     ThemeCss,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum WorkspaceToolTab {
+    Snippets,
     Settings,
     ThemeCss(String),
 }
@@ -38,6 +41,7 @@ pub(super) enum WorkspaceTabCloseScope {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct WorkspaceTabs {
     active: ActiveWorkspaceTab,
+    snippets_open: bool,
     settings_open: bool,
     theme_editor_ids: Vec<String>,
     active_theme_editor_id: Option<String>,
@@ -60,6 +64,10 @@ impl WorkspaceTabs {
 
     pub fn settings_open(&self) -> bool {
         self.settings_open
+    }
+
+    pub fn snippets_open(&self) -> bool {
+        self.snippets_open
     }
 
     pub fn theme_editor_ids(&self) -> &[String] {
@@ -104,6 +112,7 @@ impl WorkspaceTabs {
 
     pub fn tool_is_active(&self, tab: &WorkspaceToolTab) -> bool {
         match tab {
+            WorkspaceToolTab::Snippets => self.active == ActiveWorkspaceTab::Snippets,
             WorkspaceToolTab::Settings => self.active == ActiveWorkspaceTab::Settings,
             WorkspaceToolTab::ThemeCss(editor_id) => {
                 self.active == ActiveWorkspaceTab::ThemeCss
@@ -114,6 +123,10 @@ impl WorkspaceTabs {
 
     pub fn open_tool(&mut self, tab: WorkspaceToolTab) {
         match tab {
+            WorkspaceToolTab::Snippets => {
+                self.snippets_open = true;
+                self.active = ActiveWorkspaceTab::Snippets;
+            }
             WorkspaceToolTab::Settings => {
                 self.settings_open = true;
                 self.active = ActiveWorkspaceTab::Settings;
@@ -159,6 +172,24 @@ impl WorkspaceTabs {
     /// tab to its right, then the previous tool, then the retained request.
     pub fn close_tool(&mut self, tab: &WorkspaceToolTab) -> bool {
         match tab {
+            WorkspaceToolTab::Snippets => {
+                if !self.snippets_open {
+                    return false;
+                }
+                self.snippets_open = false;
+                if self.active == ActiveWorkspaceTab::Snippets {
+                    self.active = if self.settings_open {
+                        ActiveWorkspaceTab::Settings
+                    } else if !self.theme_editor_ids.is_empty() {
+                        self.active_theme_editor_id = self.theme_editor_ids.first().cloned();
+                        ActiveWorkspaceTab::ThemeCss
+                    } else if self.welcome_visible {
+                        ActiveWorkspaceTab::Welcome
+                    } else {
+                        ActiveWorkspaceTab::Request
+                    };
+                }
+            }
             WorkspaceToolTab::Settings => {
                 if !self.settings_open {
                     return false;
@@ -168,6 +199,8 @@ impl WorkspaceTabs {
                     self.active = if !self.theme_editor_ids.is_empty() {
                         self.active_theme_editor_id = self.theme_editor_ids.first().cloned();
                         ActiveWorkspaceTab::ThemeCss
+                    } else if self.snippets_open {
+                        ActiveWorkspaceTab::Snippets
                     } else if self.welcome_visible {
                         ActiveWorkspaceTab::Welcome
                     } else {
@@ -197,6 +230,9 @@ impl WorkspaceTabs {
                     } else if self.settings_open {
                         self.active_theme_editor_id = None;
                         ActiveWorkspaceTab::Settings
+                    } else if self.snippets_open {
+                        self.active_theme_editor_id = None;
+                        ActiveWorkspaceTab::Snippets
                     } else if self.welcome_visible {
                         self.active_theme_editor_id = None;
                         ActiveWorkspaceTab::Welcome
@@ -242,6 +278,7 @@ impl WorkspaceTabs {
             ActiveWorkspaceTab::Request => {
                 WorkspaceTab::Request(request_tabs.active_tab_id().clone())
             }
+            ActiveWorkspaceTab::Snippets => WorkspaceTab::Tool(WorkspaceToolTab::Snippets),
             ActiveWorkspaceTab::Settings => WorkspaceTab::Tool(WorkspaceToolTab::Settings),
             ActiveWorkspaceTab::ThemeCss => WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss(
                 self.active_theme_editor_id
@@ -266,6 +303,9 @@ impl WorkspaceTabs {
                 })
                 .map(|tab| WorkspaceTab::Request(tab.id().clone())),
         );
+        if self.snippets_open {
+            tabs.push(WorkspaceTab::Tool(WorkspaceToolTab::Snippets));
+        }
         if self.settings_open {
             tabs.push(WorkspaceTab::Tool(WorkspaceToolTab::Settings));
         }
@@ -344,6 +384,18 @@ mod tests {
             ]
         );
 
+        tabs.open_tool(WorkspaceToolTab::Snippets);
+        tabs.open_tool(WorkspaceToolTab::Snippets);
+        assert_eq!(tabs.active(), ActiveWorkspaceTab::Snippets);
+        assert_eq!(
+            tabs.visible_tabs(&requests),
+            vec![
+                WorkspaceTab::Request(requests.active_tab_id().clone()),
+                WorkspaceTab::Tool(WorkspaceToolTab::Snippets),
+                WorkspaceTab::Tool(WorkspaceToolTab::Settings),
+            ]
+        );
+
         tabs.open_tool(WorkspaceToolTab::ThemeCss("ocean".to_owned()));
         tabs.open_tool(WorkspaceToolTab::ThemeCss("forest".to_owned()));
         assert_eq!(tabs.active(), ActiveWorkspaceTab::ThemeCss);
@@ -351,6 +403,7 @@ mod tests {
             tabs.visible_tabs(&requests),
             vec![
                 WorkspaceTab::Request(requests.active_tab_id().clone()),
+                WorkspaceTab::Tool(WorkspaceToolTab::Snippets),
                 WorkspaceTab::Tool(WorkspaceToolTab::Settings),
                 WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss("ocean".to_owned())),
                 WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss("forest".to_owned())),
@@ -434,6 +487,47 @@ mod tests {
         assert!(tabs.close_tool(&WorkspaceToolTab::Settings));
         assert_eq!(tabs.active(), ActiveWorkspaceTab::ThemeCss);
         assert!(tabs.tool_is_active(&WorkspaceToolTab::ThemeCss("ocean".to_owned())));
+    }
+
+    #[test]
+    fn singleton_snippets_follow_visual_neighbor_close_fallbacks() {
+        let requests = RequestTabs::default();
+        let mut tabs = WorkspaceTabs::default();
+        tabs.open_tool(WorkspaceToolTab::ThemeCss("ocean".to_owned()));
+        tabs.open_tool(WorkspaceToolTab::Settings);
+        tabs.open_tool(WorkspaceToolTab::Snippets);
+
+        assert_eq!(
+            tabs.visible_tabs(&requests),
+            vec![
+                WorkspaceTab::Request(requests.active_tab_id().clone()),
+                WorkspaceTab::Tool(WorkspaceToolTab::Snippets),
+                WorkspaceTab::Tool(WorkspaceToolTab::Settings),
+                WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss("ocean".to_owned())),
+            ]
+        );
+        assert!(tabs.tool_is_active(&WorkspaceToolTab::Snippets));
+
+        assert!(tabs.close_tool(&WorkspaceToolTab::Snippets));
+        assert_eq!(tabs.active(), ActiveWorkspaceTab::Settings);
+        assert!(!tabs.snippets_open());
+        assert!(!tabs.close_tool(&WorkspaceToolTab::Snippets));
+
+        tabs.open_tool(WorkspaceToolTab::Snippets);
+        assert!(tabs.close_tool(&WorkspaceToolTab::Settings));
+        assert_eq!(tabs.active(), ActiveWorkspaceTab::Snippets);
+        assert!(tabs.close_tool(&WorkspaceToolTab::Snippets));
+        assert!(tabs.tool_is_active(&WorkspaceToolTab::ThemeCss("ocean".to_owned())));
+    }
+
+    #[test]
+    fn closing_settings_falls_back_to_snippets_without_a_right_hand_tool() {
+        let mut tabs = WorkspaceTabs::default();
+        tabs.open_tool(WorkspaceToolTab::Snippets);
+        tabs.open_tool(WorkspaceToolTab::Settings);
+
+        assert!(tabs.close_tool(&WorkspaceToolTab::Settings));
+        assert_eq!(tabs.active(), ActiveWorkspaceTab::Snippets);
     }
 
     #[test]

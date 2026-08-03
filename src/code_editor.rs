@@ -1,4 +1,4 @@
-use std::{rc::Rc, time::Duration};
+use std::{ops::Range, rc::Rc, time::Duration};
 
 use gpui::{
     App, AppContext as _, Context, Corner, DismissEvent, Entity, EntityInputHandler, EventEmitter,
@@ -90,6 +90,33 @@ impl From<SharedString> for CodeLanguage {
 
 /// Construction options for [`CodeEditor`].
 type DiagnosticProvider = Rc<dyn Fn(&str) -> Vec<Diagnostic>>;
+/// Immutable editor state captured before a context menu is built.
+///
+/// Builders must not synchronously read the editor entity: the editor is still
+/// leased by its mouse handler while `PopupMenu::build` runs. The snapshot also
+/// makes builders deterministic and leaves the entity available for deferred
+/// click handlers.
+#[derive(Clone)]
+pub struct CodeEditorContextMenuContext {
+    pub editor: Entity<CodeEditor>,
+    pub range: Range<usize>,
+    /// The complete buffer at menu-open time. `SharedString` keeps subsequent
+    /// deferred-action clones cheap and lets them reject stale selections or
+    /// cursor locations without re-reading the leased editor while the menu is
+    /// being built.
+    pub document: SharedString,
+    pub selected_text: String,
+    pub language: CodeLanguage,
+}
+
+pub type CodeEditorContextMenuBuilder = Rc<
+    dyn Fn(
+        PopupMenu,
+        CodeEditorContextMenuContext,
+        &mut Window,
+        &mut Context<PopupMenu>,
+    ) -> PopupMenu,
+>;
 
 #[derive(Clone)]
 pub struct CodeEditorConfig {
@@ -106,6 +133,7 @@ pub struct CodeEditorConfig {
     completion_provider: Option<Rc<dyn CompletionProvider>>,
     hover_provider: Option<Rc<dyn HoverProvider>>,
     diagnostic_provider: Option<DiagnosticProvider>,
+    context_menu_builder: Option<CodeEditorContextMenuBuilder>,
 }
 
 impl Default for CodeEditorConfig {
@@ -124,6 +152,7 @@ impl Default for CodeEditorConfig {
             completion_provider: None,
             hover_provider: None,
             diagnostic_provider: None,
+            context_menu_builder: None,
         }
     }
 }
@@ -197,6 +226,16 @@ impl CodeEditorConfig {
         self.diagnostic_provider = Some(Rc::new(provider));
         self
     }
+
+    /// Adds application-specific entries to the editor's native context menu.
+    ///
+    /// Keeping this as a menu decorator lets callers inject dynamic actions
+    /// without coupling the reusable editor to application state. Language
+    /// services and context-menu capabilities therefore remain independent.
+    pub fn context_menu_builder(mut self, builder: CodeEditorContextMenuBuilder) -> Self {
+        self.context_menu_builder = Some(builder);
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -222,6 +261,7 @@ pub struct CodeEditor {
     context_menu: Option<Entity<PopupMenu>>,
     context_menu_position: Point<Pixels>,
     diagnostic_provider: Option<DiagnosticProvider>,
+    context_menu_builder: Option<CodeEditorContextMenuBuilder>,
     diagnostic_refresh_task: Task<()>,
     _input_subscription: Subscription,
     _context_menu_subscription: Option<Subscription>,
@@ -244,6 +284,7 @@ impl CodeEditor {
             completion_provider,
             hover_provider,
             diagnostic_provider,
+            context_menu_builder,
         } = config;
         let completion_enabled = completion_provider.is_some();
 
@@ -291,6 +332,7 @@ impl CodeEditor {
             context_menu: None,
             context_menu_position: Point::default(),
             diagnostic_provider,
+            context_menu_builder,
             diagnostic_refresh_task: Task::ready(()),
             _input_subscription: input_subscription,
             _context_menu_subscription: None,
@@ -376,7 +418,9 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if event.button != MouseButton::Right || !self.format_action {
+        if event.button != MouseButton::Right
+            || (!self.format_action && self.context_menu_builder.is_none())
+        {
             return;
         }
 
@@ -409,22 +453,55 @@ impl CodeEditor {
         cx.stop_propagation();
         let focus = self.input.read(cx).focus_handle(cx);
         let editor = cx.entity();
-        let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+        let (range, document, selected_text) = self.input.update(cx, |input, cx| {
+            let selection = EntityInputHandler::selected_text_range(input, true, window, cx)
+                .expect("InputState always provides a selection");
+            let mut adjusted = None;
+            let selected_text = EntityInputHandler::text_for_range(
+                input,
+                selection.range.clone(),
+                &mut adjusted,
+                window,
+                cx,
+            )
+            .unwrap_or_default();
+            let document = input.value();
+            (selection.range, document, selected_text)
+        });
+        let context = CodeEditorContextMenuContext {
+            editor: editor.clone(),
+            range,
+            document,
+            selected_text,
+            language: self.language.clone(),
+        };
+        let format_action = self.format_action;
+        let read_only = self.read_only;
+        let context_menu_builder = self.context_menu_builder.clone();
+        let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
             let editor = editor.clone();
-            menu.action_context(focus)
-                .item(
+            let mut menu = menu.action_context(focus.clone());
+            if let Some(builder) = context_menu_builder.as_ref() {
+                menu = builder(menu, context, window, cx).separator();
+            }
+            if format_action {
+                menu = menu.item(
                     PopupMenuItem::new("Format buffer").on_click(move |_, _, cx| {
                         editor.update(cx, |_, cx| {
                             cx.emit(CodeEditorEvent::FormatRequested);
                         });
                     }),
-                )
-                .separator()
-                .menu("Cut", Box::new(Cut))
-                .menu("Copy", Box::new(Copy))
-                .menu("Paste", Box::new(Paste))
-                .separator()
-                .menu("Select All", Box::new(SelectAll))
+                );
+                menu = menu.separator();
+            }
+            if !read_only {
+                menu = menu.menu("Cut", Box::new(Cut));
+            }
+            menu = menu.menu("Copy", Box::new(Copy));
+            if !read_only {
+                menu = menu.menu("Paste", Box::new(Paste));
+            }
+            menu.separator().menu("Select All", Box::new(SelectAll))
         });
         let subscription =
             cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, window, cx| {

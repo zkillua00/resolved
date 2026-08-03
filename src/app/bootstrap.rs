@@ -7,6 +7,7 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let snippet_menu_owner = cx.entity().downgrade();
         let script_variable_catalog = ScriptVariableCatalog::default().shared();
         let template_variable_catalog = TemplateVariableCatalog::default().shared();
         let method = cx.new(|cx| {
@@ -33,6 +34,10 @@ impl ApiTester {
                     .rows(12)
                     .soft_wrap(false)
                     .format_action(true)
+                    .context_menu_builder(snippet_context_menu_builder(
+                        snippet_menu_owner.clone(),
+                        SnippetMenuSurface::RequestBody,
+                    ))
                     .completion_provider(Rc::new(TemplateCompletionProvider::new(
                         body_completion_catalog,
                     ))),
@@ -57,6 +62,10 @@ impl ApiTester {
                     )
                     .rows(12)
                     .soft_wrap(false)
+                    .context_menu_builder(snippet_context_menu_builder(
+                        snippet_menu_owner.clone(),
+                        SnippetMenuSurface::PreRequestScript,
+                    ))
                     .completion_provider(intelligence.clone())
                     .hover_provider(intelligence)
                     .diagnostic_provider(move |source| {
@@ -86,6 +95,10 @@ impl ApiTester {
                     )
                     .rows(12)
                     .soft_wrap(false)
+                    .context_menu_builder(snippet_context_menu_builder(
+                        snippet_menu_owner.clone(),
+                        SnippetMenuSurface::PostResponseScript,
+                    ))
                     .completion_provider(intelligence.clone())
                     .hover_provider(intelligence)
                     .diagnostic_provider(move |source| {
@@ -105,7 +118,11 @@ impl ApiTester {
                     .placeholder("Response body")
                     .rows(20)
                     .soft_wrap(false)
-                    .read_only(true),
+                    .read_only(true)
+                    .context_menu_builder(snippet_context_menu_builder(
+                        snippet_menu_owner,
+                        SnippetMenuSurface::ResponseBody,
+                    )),
                 window,
                 cx,
             )
@@ -378,6 +395,13 @@ impl ApiTester {
                 .build()
                 .expect("failed to create the network runtime"),
         );
+        let snippet_editor = Self::create_snippet_editor_session(
+            &workspace,
+            workspace_writable,
+            Rc::clone(&script_variable_catalog),
+            window,
+            cx,
+        );
 
         let url_subscription = cx.subscribe_in(&url, window, |this, input, event, window, cx| {
             this.track_template_input_focus(input, event);
@@ -484,6 +508,8 @@ impl ApiTester {
             abort_handle: None,
             script_cancellation: None,
             response: None,
+            response_request: None,
+            response_sensitive_values: Vec::new(),
             request_error: None,
             script_diagnostic: None,
             pre_script_report: None,
@@ -523,6 +549,9 @@ impl ApiTester {
             recording_shortcut_id: None,
             settings_notice: None,
             theme_editors: HashMap::new(),
+            snippet_editor,
+            snippet_apply_generation: 0,
+            snippet_apply_cancellation: None,
             selected_environment_id,
             collection_search,
             environment_search,

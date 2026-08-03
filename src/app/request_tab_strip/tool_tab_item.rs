@@ -6,6 +6,11 @@ pub(super) fn render_workspace_tool_tab(
     cx: &mut Context<ApiTester>,
 ) -> AnyElement {
     let (tab_id, title, icon) = match &tool {
+        WorkspaceToolTab::Snippets => (
+            SharedString::from("workspace-tool-tab-snippets"),
+            "Snippets".to_owned(),
+            IconName::CaseSensitive,
+        ),
         WorkspaceToolTab::Settings => (
             SharedString::from("workspace-tool-tab-settings"),
             "Settings".to_owned(),
@@ -26,6 +31,7 @@ pub(super) fn render_workspace_tool_tab(
     let close_button_id: SharedString = format!("{tab_id}-close").into();
     let active = app.workspace_tabs.tool_is_active(&tool);
     let dirty = match &tool {
+        WorkspaceToolTab::Snippets => app.snippet_editor_is_dirty(cx),
         WorkspaceToolTab::Settings => false,
         WorkspaceToolTab::ThemeCss(editor_id) => app
             .theme_editor(editor_id)

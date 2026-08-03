@@ -14,8 +14,10 @@ impl Render for ApiTester {
                 .min_h_0()
                 .child(self.render_welcome_page(cx))
                 .into_any_element(),
-            // The open Settings surface is rendered separately below so its
-            // GPUI element state survives while another workspace tab is active.
+            // The open Snippets and Settings surfaces are rendered separately
+            // below so their GPUI element state survives while another
+            // workspace tab is active.
+            ActiveWorkspaceTab::Snippets => div().hidden().into_any_element(),
             ActiveWorkspaceTab::Settings => div().hidden().into_any_element(),
             ActiveWorkspaceTab::ThemeCss => div()
                 .size_full()
@@ -57,6 +59,16 @@ impl Render for ApiTester {
                 )
                 .into_any_element(),
         };
+        let snippets_workspace = self.workspace_tabs.snippets_open().then(|| {
+            div()
+                .size_full()
+                .min_h_0()
+                .when(
+                    active_workspace_tab != ActiveWorkspaceTab::Snippets,
+                    |this| this.hidden(),
+                )
+                .child(self.render_snippets_workspace(cx))
+        });
         let settings_workspace = self.workspace_tabs.settings_open().then(|| {
             div()
                 .size_full()
@@ -108,6 +120,7 @@ impl Render for ApiTester {
                                     .min_h_0()
                                     .overflow_hidden()
                                     .child(workspace)
+                                    .children(snippets_workspace)
                                     .children(settings_workspace),
                             )
                             .child(self.debug_overlay.clone()),
