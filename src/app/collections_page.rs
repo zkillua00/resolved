@@ -185,6 +185,7 @@ impl ApiTester {
         depth: usize,
         searching: bool,
         show_all: bool,
+        drag_enabled: bool,
         query: &str,
         cx: &mut Context<Self>,
     ) {
@@ -205,6 +206,7 @@ impl ApiTester {
                     request_count: index.request_count(&folder.id),
                     move_targets: index.move_targets(&folder.id),
                 },
+                drag_enabled,
                 cx,
             ));
             if !expanded {
@@ -219,6 +221,7 @@ impl ApiTester {
                 depth + 1,
                 searching,
                 show_all,
+                drag_enabled,
                 query,
                 cx,
             );
@@ -231,6 +234,7 @@ impl ApiTester {
                     collection_index,
                     request_index,
                     depth + 1,
+                    drag_enabled,
                     cx,
                 ));
             }
@@ -245,6 +249,7 @@ impl ApiTester {
             .trim()
             .to_lowercase();
         let searching = !query.is_empty();
+        let drag_enabled = !searching && self.workspace_writable && !self.sending;
         let mut tree_rows = Vec::new();
 
         for (collection_index, collection) in self.workspace.collections.iter().enumerate() {
@@ -268,7 +273,12 @@ impl ApiTester {
                 continue;
             }
 
-            tree_rows.push(self.render_collection_tree_row(collection_index, expanded, cx));
+            tree_rows.push(self.render_collection_tree_row(
+                collection_index,
+                expanded,
+                drag_enabled,
+                cx,
+            ));
 
             if !expanded {
                 continue;
@@ -285,6 +295,7 @@ impl ApiTester {
                 1,
                 searching,
                 collection_matches,
+                drag_enabled,
                 &query,
                 cx,
             );
@@ -300,6 +311,7 @@ impl ApiTester {
                     collection_index,
                     request_index,
                     1,
+                    drag_enabled,
                     cx,
                 ));
             }

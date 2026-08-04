@@ -57,23 +57,38 @@ impl ApiTester {
         let variable_count = self.environment_variables.len();
         let can_mutate = !self.sending && self.workspace_writable;
         let activate_id = environment_id.clone();
-        let delete_id = environment_id.clone();
-        let delete_this = cx.entity().downgrade();
+        let actions_id = environment_id.clone();
+        let context_id = environment_id.clone();
+        let actions_name = environment_name.clone();
+        let context_name = environment_name;
+        let actions_this = cx.entity().downgrade();
+        let context_this = actions_this.clone();
+        let header_context_enabled = Rc::new(RefCell::new(true));
+        let name_context_enabled = Rc::clone(&header_context_enabled);
+        let build_context_enabled = Rc::clone(&header_context_enabled);
+        let context_scope_id: SharedString =
+            format!("selected-environment-context-menu-scope-{environment_id}").into();
 
         v_flex()
             .size_full()
             .min_w_0()
             .bg(cx.api_surface())
             .child(
-                h_flex()
-                    .h(px(76.))
-                    .flex_shrink_0()
-                    .px_6()
-                    .gap_4()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(cx.api_outline_variant())
-                    .child(
+                div().id(context_scope_id).w_full().child(
+                    h_flex()
+                        .h(px(76.))
+                        .flex_shrink_0()
+                        .px_6()
+                        .gap_4()
+                        .justify_between()
+                        .border_b_1()
+                        .border_color(cx.api_outline_variant())
+                        .capture_any_mouse_down(move |event, _, _| {
+                            if event.button == MouseButton::Right {
+                                *header_context_enabled.borrow_mut() = true;
+                            }
+                        })
+                        .child(
                         v_flex()
                             .w(px(440.))
                             .min_w_0()
@@ -85,13 +100,22 @@ impl ApiTester {
                                     .text_color(cx.theme().muted_foreground)
                                     .child("ENVIRONMENT NAME"),
                             )
-                            .child(
-                                Input::new(&self.environment_name)
-                                    .large()
-                                    .disabled(!can_mutate),
-                            ),
-                    )
-                    .child(
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .capture_any_mouse_down(move |event, _, _| {
+                                            if event.button == MouseButton::Right {
+                                                *name_context_enabled.borrow_mut() = false;
+                                            }
+                                        })
+                                        .child(
+                                            Input::new(&self.environment_name)
+                                                .large()
+                                                .disabled(!can_mutate),
+                                        ),
+                                ),
+                        )
+                        .child(
                         h_flex()
                             .flex_shrink_0()
                             .gap_2()
@@ -162,31 +186,29 @@ impl ApiTester {
                                     .rounded_full()
                                     .tooltip("Environment actions")
                                     .dropdown_menu(move |menu, _, _| {
-                                        let delete_this = delete_this.clone();
-                                        let delete_id = delete_id.clone();
-                                        menu.item(
-                                            PopupMenuItem::new(format!(
-                                                "Delete “{}”…",
-                                                compact_label(&environment_name, 24)
-                                            ))
-                                            .disabled(!can_mutate)
-                                            .on_click(move |_, window, cx| {
-                                                let delete_this = delete_this.clone();
-                                                let delete_id = delete_id.clone();
-                                                window.defer(cx, move |window, cx| {
-                                                    if let Some(this) = delete_this.upgrade() {
-                                                        this.update(cx, |this, cx| {
-                                                            this.open_environment_delete_dialog(
-                                                                delete_id, window, cx,
-                                                            );
-                                                        });
-                                                    }
-                                                });
-                                            }),
+                                        build_selected_environment_actions_menu(
+                                            menu,
+                                            actions_this.clone(),
+                                            actions_id.clone(),
+                                            actions_name.clone(),
+                                            can_mutate,
                                         )
                                     }),
                             ),
-                    ),
+                        )
+                        .context_menu(move |menu, _, _| {
+                            if !*build_context_enabled.borrow() {
+                                return menu;
+                            }
+                            build_selected_environment_actions_menu(
+                                menu,
+                                context_this.clone(),
+                                context_id.clone(),
+                                context_name.clone(),
+                                can_mutate,
+                            )
+                        }),
+                ),
             )
             .child(
                 h_flex()
@@ -251,4 +273,34 @@ impl ApiTester {
             )
             .into_any_element()
     }
+}
+
+fn build_selected_environment_actions_menu(
+    menu: PopupMenu,
+    owner: gpui::WeakEntity<ApiTester>,
+    environment_id: String,
+    environment_name: String,
+    can_mutate: bool,
+) -> PopupMenu {
+    let delete_this = owner;
+    let delete_id = environment_id;
+
+    menu.item(
+        PopupMenuItem::new(format!(
+            "Delete “{}”…",
+            compact_label(&environment_name, 24)
+        ))
+        .disabled(!can_mutate)
+        .on_click(move |_, window, cx| {
+            let delete_this = delete_this.clone();
+            let delete_id = delete_id.clone();
+            window.defer(cx, move |window, cx| {
+                if let Some(this) = delete_this.upgrade() {
+                    this.update(cx, |this, cx| {
+                        this.open_environment_delete_dialog(delete_id, window, cx);
+                    });
+                }
+            });
+        }),
+    )
 }

@@ -488,6 +488,65 @@ impl RequestTabs {
             .collect()
     }
 
+    /// Move a tab immediately before another visible request tab.
+    ///
+    /// Tabs in the same group move independently within that group. Crossing a
+    /// group boundary moves only the dragged tab: it adopts the target tab's
+    /// group, or becomes ungrouped when the target is ungrouped.
+    pub fn reorder_tab_before(&mut self, tab_id: &RequestTabId, target_id: &RequestTabId) -> bool {
+        self.reorder_tab_relative(tab_id, target_id, false)
+    }
+
+    /// Move a tab immediately after another visible request tab.
+    ///
+    /// Same-group moves affect the individual member. Across group boundaries,
+    /// the dragged tab adopts the target tab's group membership.
+    pub fn reorder_tab_after(&mut self, tab_id: &RequestTabId, target_id: &RequestTabId) -> bool {
+        self.reorder_tab_relative(tab_id, target_id, true)
+    }
+
+    fn reorder_tab_relative(
+        &mut self,
+        tab_id: &RequestTabId,
+        target_id: &RequestTabId,
+        after: bool,
+    ) -> bool {
+        let Some(source_index) = self.tabs.iter().position(|tab| tab.id == *tab_id) else {
+            return false;
+        };
+        let Some(target_index) = self.tabs.iter().position(|tab| tab.id == *target_id) else {
+            return false;
+        };
+        if source_index == target_index {
+            return false;
+        }
+
+        let previous_order = self
+            .tabs
+            .iter()
+            .map(|tab| tab.id.clone())
+            .collect::<Vec<_>>();
+        let target_group_id = self.tabs[target_index].group_id.clone();
+        let previous_group_id = self.tabs[source_index].group_id.clone();
+        let mut tab = self.tabs.remove(source_index);
+        tab.group_id.clone_from(&target_group_id);
+        let target_index = self
+            .tabs
+            .iter()
+            .position(|candidate| candidate.id == *target_id)
+            .expect("the distinct target must remain after source removal");
+        let insertion_index = target_index + usize::from(after);
+        self.tabs.insert(insertion_index, tab);
+        self.prune_empty_groups();
+
+        previous_group_id != target_group_id
+            || self
+                .tabs
+                .iter()
+                .map(|tab| &tab.id)
+                .ne(previous_order.iter())
+    }
+
     /// Create a group containing `tab_id`.
     ///
     /// If the tab belonged to another group, it is moved immediately after
@@ -1526,6 +1585,95 @@ mod tests {
         )
         .unwrap();
         assert!(!legacy.welcome_is_open());
+    }
+
+    #[test]
+    fn tabs_reorder_before_and_after_without_changing_active_identity() {
+        let mut tabs = RequestTabs::new();
+        let first = tabs.active_tab_id().clone();
+        let second = tabs.open_new();
+        let third = tabs.open_new();
+        let ids = |tabs: &RequestTabs| {
+            tabs.tabs()
+                .iter()
+                .map(|tab| tab.id().clone())
+                .collect::<Vec<_>>()
+        };
+
+        assert!(tabs.reorder_tab_before(&third, &first));
+        assert_eq!(ids(&tabs), [third.clone(), first.clone(), second.clone()]);
+        assert_eq!(tabs.active_tab_id(), &third);
+
+        assert!(tabs.reorder_tab_after(&third, &second));
+        assert_eq!(ids(&tabs), [first.clone(), second.clone(), third.clone()]);
+        assert_eq!(tabs.active_tab_id(), &third);
+
+        assert!(!tabs.reorder_tab_after(&third, &third));
+        let missing = RequestTabId("missing".to_owned());
+        assert!(!tabs.reorder_tab_before(&missing, &first));
+        assert!(!tabs.reorder_tab_before(&first, &missing));
+        assert_eq!(ids(&tabs), [first, second, third]);
+
+        let restored: RequestTabs = serde_json::from_str(&serde_json::to_string(&tabs).unwrap())
+            .expect("reordered tabs should remain persistable");
+        assert_eq!(restored, tabs);
+    }
+
+    #[test]
+    fn cross_group_reorder_moves_one_tab_and_adopts_target_membership() {
+        let mut tabs = RequestTabs::new();
+        let first = tabs.active_tab_id().clone();
+        let second = tabs.open_new();
+        let third = tabs.open_new();
+        let fourth = tabs.open_new();
+        let fifth = tabs.open_new();
+        let first_group = tabs
+            .create_group_for_tab(&first, "First", RequestTabGroupColor::Green)
+            .unwrap();
+        assert!(tabs.set_tab_group(&second, Some(&first_group)));
+        let second_group = tabs
+            .create_group_for_tab(&fourth, "Second", RequestTabGroupColor::Orange)
+            .unwrap();
+        assert!(tabs.set_tab_group(&fifth, Some(&second_group)));
+
+        assert!(tabs.reorder_tab_before(&second, &fourth));
+        assert_eq!(tabs.get(&second).unwrap().group_id(), Some(&second_group));
+        assert_eq!(tabs.tabs_in_group(&first_group).len(), 1);
+        assert_eq!(
+            tabs.tabs_in_group(&second_group)
+                .into_iter()
+                .map(|tab| tab.id().clone())
+                .collect::<Vec<_>>(),
+            [second.clone(), fourth.clone(), fifth.clone()]
+        );
+
+        assert!(tabs.reorder_tab_after(&first, &third));
+        assert!(tabs.get(&first).unwrap().group_id().is_none());
+        assert!(tabs.group(&first_group).is_none());
+
+        assert!(tabs.reorder_tab_after(&third, &fourth));
+        assert_eq!(tabs.get(&third).unwrap().group_id(), Some(&second_group));
+        assert_eq!(
+            tabs.tabs_in_group(&second_group)
+                .into_iter()
+                .map(|tab| tab.id().clone())
+                .collect::<Vec<_>>(),
+            [second.clone(), fourth.clone(), third.clone(), fifth.clone()]
+        );
+
+        assert!(tabs.reorder_tab_before(&fifth, &second));
+        assert_eq!(
+            tabs.tabs_in_group(&second_group)
+                .into_iter()
+                .map(|tab| tab.id().clone())
+                .collect::<Vec<_>>(),
+            [fifth, second, fourth, third]
+        );
+        assert_eq!(tabs.groups().len(), 1);
+
+        let restored: RequestTabs = serde_json::from_str(&serde_json::to_string(&tabs).unwrap())
+            .expect("group-aware reordered tabs should remain persistable");
+        assert_eq!(restored, tabs);
     }
 
     #[test]

@@ -1,68 +1,63 @@
+use std::collections::HashSet;
+
 use super::super::*;
 
 #[derive(Clone)]
 struct OpenTabMenuEntry {
-    tab_id: RequestTabId,
+    tab: WorkspaceTab,
     title: String,
+    icon: Option<IconName>,
     active: bool,
     group_label: Option<String>,
 }
 
 pub(super) fn render_open_tabs_menu(app: &ApiTester, cx: &mut Context<ApiTester>) -> AnyElement {
-    let mut previous_group_id: Option<RequestTabGroupId> = None;
+    let active_tab = app.workspace_tabs.active_tab(&app.request_tabs);
+    let mut rendered_group_ids = HashSet::new();
     let entries = app
-        .request_tabs
-        .tabs()
-        .iter()
-        .filter(|tab| {
-            !app.workspace_tabs.welcome_is_open()
-                || app.workspace_tabs.welcome_request_tab_id() != Some(tab.id())
-        })
-        .map(|tab| {
-            let group_label = tab.group_id().and_then(|group_id| {
-                let starts_group = previous_group_id.as_ref() != Some(group_id);
-                previous_group_id = Some(group_id.clone());
-                starts_group.then(|| {
-                    app.request_tabs
-                        .group(group_id)
-                        .map(|group| format!("Group · {}", group.display_title()))
-                        .unwrap_or_else(|| "Group".to_owned())
-                })
-            });
-            if tab.group_id().is_none() {
-                previous_group_id = None;
-            }
-            OpenTabMenuEntry {
-                tab_id: tab.id().clone(),
-                title: tab.display_title().to_owned(),
-                active: app.workspace_tabs.active() == ActiveWorkspaceTab::Request
-                    && tab.id() == app.request_tabs.active_tab_id(),
+        .workspace_tabs
+        .visible_tabs(&app.request_tabs)
+        .into_iter()
+        .filter_map(|tab| {
+            let (title, icon, group_label) = match &tab {
+                WorkspaceTab::Welcome => (
+                    "Welcome".to_owned(),
+                    Some(IconName::GalleryVerticalEnd),
+                    None,
+                ),
+                WorkspaceTab::Request(tab_id) => {
+                    let request = app.request_tabs.get(tab_id)?;
+                    let group_label = request.group_id().and_then(|group_id| {
+                        rendered_group_ids.insert(group_id.clone()).then(|| {
+                            app.request_tabs
+                                .group(group_id)
+                                .map(|group| format!("Group · {}", group.display_title()))
+                                .unwrap_or_else(|| "Group".to_owned())
+                        })
+                    });
+                    (request.display_title().to_owned(), None, group_label)
+                }
+                WorkspaceTab::Tool(WorkspaceToolTab::Snippets) => {
+                    ("Snippets".to_owned(), Some(IconName::CaseSensitive), None)
+                }
+                WorkspaceTab::Tool(WorkspaceToolTab::Settings) => {
+                    ("Settings".to_owned(), Some(IconName::Settings2), None)
+                }
+                WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss(editor_id)) => (
+                    app.theme_editor_title(editor_id)
+                        .unwrap_or_else(|| "Theme CSS".to_owned()),
+                    Some(IconName::Palette),
+                    None,
+                ),
+            };
+            let active = tab == active_tab;
+            Some(OpenTabMenuEntry {
+                tab,
+                title,
+                icon,
+                active,
                 group_label,
-            }
-        })
-        .collect::<Vec<_>>();
-    let welcome_open = app.workspace_tabs.welcome_is_open();
-    let welcome_active = app.workspace_tabs.active() == ActiveWorkspaceTab::Welcome;
-    let snippets_open = app.workspace_tabs.snippets_open();
-    let snippets_active = app
-        .workspace_tabs
-        .tool_is_active(&WorkspaceToolTab::Snippets);
-    let settings_open = app.workspace_tabs.settings_open();
-    let settings_active = app
-        .workspace_tabs
-        .tool_is_active(&WorkspaceToolTab::Settings);
-    let theme_editors = app
-        .workspace_tabs
-        .theme_editor_ids()
-        .iter()
-        .map(|editor_id| {
-            let tool = WorkspaceToolTab::ThemeCss(editor_id.clone());
-            (
-                editor_id.clone(),
-                app.theme_editor_title(editor_id)
-                    .unwrap_or_else(|| "Theme CSS".to_owned()),
-                app.workspace_tabs.tool_is_active(&tool),
-            )
+            })
         })
         .collect::<Vec<_>>();
     let owner = cx.entity().downgrade();
@@ -75,105 +70,25 @@ pub(super) fn render_open_tabs_menu(app: &ApiTester, cx: &mut Context<ApiTester>
         .tooltip("All tabs")
         .dropdown_menu(move |mut menu, _, _| {
             menu = menu.max_h(px(520.)).scrollable(true);
-            if welcome_open {
-                let welcome_owner = owner.clone();
-                menu = menu.item(
-                    PopupMenuItem::new("Welcome")
-                        .icon(IconName::GalleryVerticalEnd)
-                        .checked(welcome_active)
-                        .on_click(move |_, window, cx| {
-                            if let Some(owner) = welcome_owner.upgrade() {
-                                owner.update(cx, |this, cx| {
-                                    this.activate_workspace_tab(WorkspaceTab::Welcome, window, cx);
-                                });
-                            }
-                        }),
-                );
-                if !entries.is_empty() {
-                    menu = menu.separator().label("Requests");
-                }
-            }
             for entry in &entries {
                 if let Some(group_label) = &entry.group_label {
                     menu = menu.label(group_label.clone());
                 }
                 let owner = owner.clone();
-                let tab_id = entry.tab_id.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(compact_label(&entry.title, 44))
-                        .checked(entry.active)
-                        .on_click(move |_, window, cx| {
-                            if let Some(owner) = owner.upgrade() {
-                                owner.update(cx, |this, cx| {
-                                    this.sidebar_tab = SidebarTab::Collections;
-                                    this.activate_request_tab(tab_id.clone(), window, cx);
-                                });
-                            }
-                        }),
-                );
-            }
-            if snippets_open || settings_open || !theme_editors.is_empty() {
-                menu = menu.separator().label("Tools");
-            }
-            if snippets_open {
-                let owner = owner.clone();
-                menu = menu.item(
-                    PopupMenuItem::new("Snippets")
-                        .icon(IconName::CaseSensitive)
-                        .checked(snippets_active)
-                        .on_click(move |_, window, cx| {
-                            if let Some(owner) = owner.upgrade() {
-                                owner.update(cx, |this, cx| {
-                                    this.activate_workspace_tab(
-                                        WorkspaceTab::Tool(WorkspaceToolTab::Snippets),
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }
-                        }),
-                );
-            }
-            if settings_open {
-                let owner = owner.clone();
-                menu = menu.item(
-                    PopupMenuItem::new("Settings")
-                        .icon(IconName::Settings2)
-                        .checked(settings_active)
-                        .on_click(move |_, window, cx| {
-                            if let Some(owner) = owner.upgrade() {
-                                owner.update(cx, |this, cx| {
-                                    this.activate_workspace_tab(
-                                        WorkspaceTab::Tool(WorkspaceToolTab::Settings),
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }
-                        }),
-                );
-            }
-            for (editor_id, title, active) in &theme_editors {
-                let owner = owner.clone();
-                let editor_id = editor_id.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(title.clone())
-                        .icon(IconName::Palette)
-                        .checked(*active)
-                        .on_click(move |_, window, cx| {
-                            if let Some(owner) = owner.upgrade() {
-                                owner.update(cx, |this, cx| {
-                                    this.activate_workspace_tab(
-                                        WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss(
-                                            editor_id.clone(),
-                                        )),
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }
-                        }),
-                );
+                let tab = entry.tab.clone();
+                let mut item = PopupMenuItem::new(compact_label(&entry.title, 44))
+                    .checked(entry.active)
+                    .on_click(move |_, window, cx| {
+                        if let Some(owner) = owner.upgrade() {
+                            owner.update(cx, |this, cx| {
+                                this.activate_workspace_tab(tab.clone(), window, cx);
+                            });
+                        }
+                    });
+                if let Some(icon) = entry.icon.clone() {
+                    item = item.icon(icon);
+                }
+                menu = menu.item(item);
             }
             menu
         })

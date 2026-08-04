@@ -12,7 +12,13 @@ impl ApiTester {
     pub(super) fn render_header_row(&self, row: &HeaderRow, cx: &mut Context<Self>) -> AnyElement {
         let id = row.id;
         let action_this = cx.entity().downgrade();
+        let context_this = action_this.clone();
+        let row_context_enabled = Rc::new(RefCell::new(true));
+        let name_context_enabled = Rc::clone(&row_context_enabled);
+        let value_context_enabled = Rc::clone(&row_context_enabled);
+        let build_context_enabled = Rc::clone(&row_context_enabled);
         let group_id: SharedString = format!("header-row-actions-{id}").into();
+        let context_scope_id: SharedString = format!("header-context-menu-scope-{id}").into();
         let name_hover_input = row.name.clone();
         let name_click_input = row.name.clone();
         let value_hover_input = row.value.clone();
@@ -22,7 +28,7 @@ impl ApiTester {
         let name_hover_input_id = row.name.entity_id();
         let value_hover_input_id = row.value.entity_id();
 
-        h_flex()
+        let row = h_flex()
             .id(("header-grid-row", id))
             .group(group_id.clone())
             .w_full()
@@ -33,6 +39,11 @@ impl ApiTester {
             .bg(cx.api_surface())
             .hover(|style| style.bg(cx.api_surface_low()))
             .when(!row.enabled, |this| this.opacity(0.55))
+            .capture_any_mouse_down(move |event, _, _| {
+                if event.button == MouseButton::Right {
+                    *row_context_enabled.borrow_mut() = true;
+                }
+            })
             .child(
                 div()
                     .w(px(44.))
@@ -63,6 +74,11 @@ impl ApiTester {
                     .h_full()
                     .border_l_1()
                     .border_color(cx.api_outline_variant())
+                    .capture_any_mouse_down(move |event, _, _| {
+                        if event.button == MouseButton::Right {
+                            *name_context_enabled.borrow_mut() = false;
+                        }
+                    })
                     .on_hover(move |hovered, window, cx| {
                         if let Some(this) = name_hover_this.upgrade() {
                             this.update(cx, |this, cx| {
@@ -110,6 +126,11 @@ impl ApiTester {
                     .h_full()
                     .border_l_1()
                     .border_color(cx.api_outline_variant())
+                    .capture_any_mouse_down(move |event, _, _| {
+                        if event.button == MouseButton::Right {
+                            *value_context_enabled.borrow_mut() = false;
+                        }
+                    })
                     .on_hover(move |hovered, window, cx| {
                         if let Some(this) = value_hover_this.upgrade() {
                             this.update(cx, |this, cx| {
@@ -169,40 +190,55 @@ impl ApiTester {
                             .group_hover(group_id, |style| style.visible())
                             .tooltip("Header actions")
                             .dropdown_menu(move |menu, _, _| {
-                                let duplicate_this = action_this.clone();
-                                let copy_this = action_this.clone();
-                                let remove_this = action_this.clone();
-                                menu.item(PopupMenuItem::new("Duplicate").on_click(
-                                    move |_, window, cx| {
-                                        if let Some(this) = duplicate_this.upgrade() {
-                                            this.update(cx, |this, cx| {
-                                                this.duplicate_header_row(id, window, cx);
-                                            });
-                                        }
-                                    },
-                                ))
-                                .item(PopupMenuItem::new("Copy header").on_click(
-                                    move |_, _, cx| {
-                                        if let Some(this) = copy_this.upgrade() {
-                                            this.update(cx, |this, cx| {
-                                                this.copy_header_row(id, cx);
-                                            });
-                                        }
-                                    },
-                                ))
-                                .separator()
-                                .item(
-                                    PopupMenuItem::new("Delete").on_click(move |_, window, cx| {
-                                        if let Some(this) = remove_this.upgrade() {
-                                            this.update(cx, |this, cx| {
-                                                this.remove_header_row(id, window, cx);
-                                            });
-                                        }
-                                    }),
-                                )
+                                build_header_actions_menu(menu, action_this.clone(), id)
                             }),
                     ),
             )
+            .context_menu(move |menu, _, _| {
+                if !*build_context_enabled.borrow() {
+                    return menu;
+                }
+                build_header_actions_menu(menu, context_this.clone(), id)
+            });
+
+        div()
+            .id(context_scope_id)
+            .w_full()
+            .child(row)
             .into_any_element()
     }
+}
+
+fn build_header_actions_menu(
+    menu: PopupMenu,
+    owner: gpui::WeakEntity<ApiTester>,
+    row_id: usize,
+) -> PopupMenu {
+    let duplicate_this = owner.clone();
+    let copy_this = owner.clone();
+    let remove_this = owner;
+    menu.item(
+        PopupMenuItem::new("Duplicate").on_click(move |_, window, cx| {
+            if let Some(this) = duplicate_this.upgrade() {
+                this.update(cx, |this, cx| {
+                    this.duplicate_header_row(row_id, window, cx);
+                });
+            }
+        }),
+    )
+    .item(PopupMenuItem::new("Copy header").on_click(move |_, _, cx| {
+        if let Some(this) = copy_this.upgrade() {
+            this.update(cx, |this, cx| {
+                this.copy_header_row(row_id, cx);
+            });
+        }
+    }))
+    .separator()
+    .item(PopupMenuItem::new("Delete").on_click(move |_, window, cx| {
+        if let Some(this) = remove_this.upgrade() {
+            this.update(cx, |this, cx| {
+                this.remove_header_row(row_id, window, cx);
+            });
+        }
+    }))
 }

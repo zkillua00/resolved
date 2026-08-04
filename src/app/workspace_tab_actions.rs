@@ -107,6 +107,11 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let closing = WorkspaceTab::Tool(tab.clone());
+        let active_will_close = self.workspace_tabs.active_tab(&self.request_tabs) == closing;
+        let fallback = self
+            .workspace_tabs
+            .fallback_after_closing(&self.request_tabs, std::slice::from_ref(&closing));
         let closed = match &tab {
             WorkspaceToolTab::Snippets => self.workspace_tabs.close_tool(&tab),
             WorkspaceToolTab::Settings => {
@@ -119,6 +124,10 @@ impl ApiTester {
             return;
         }
 
+        if active_will_close && let Some(fallback) = fallback {
+            self.activate_workspace_tab(fallback, window, cx);
+            return;
+        }
         self.restore_visible_workspace_after_tool_close(window, cx);
         cx.notify();
     }
@@ -251,6 +260,18 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let mut closing = request_ids
+            .iter()
+            .cloned()
+            .map(WorkspaceTab::Request)
+            .collect::<Vec<_>>();
+        closing.extend(tools.iter().cloned().map(WorkspaceTab::Tool));
+        let active_before = self.workspace_tabs.active_tab(&self.request_tabs);
+        let active_will_close = closing.contains(&active_before);
+        let fallback = self
+            .workspace_tabs
+            .fallback_after_closing(&self.request_tabs, &closing);
+
         for tool in tools.into_iter().rev() {
             let closed = match &tool {
                 WorkspaceToolTab::Snippets => self.workspace_tabs.close_tool(&tool),
@@ -266,11 +287,18 @@ impl ApiTester {
         }
 
         if request_ids.is_empty() {
+            if active_will_close && let Some(fallback) = fallback {
+                self.activate_workspace_tab(fallback, window, cx);
+                return;
+            }
             self.restore_visible_workspace_after_tool_close(window, cx);
             cx.notify();
             return;
         }
         self.close_request_tabs_now(request_ids, request_anchor_id, window, cx);
+        if active_will_close && let Some(fallback) = fallback {
+            self.activate_workspace_tab(fallback, window, cx);
+        }
     }
 
     pub(super) fn close_active_workspace_tab(

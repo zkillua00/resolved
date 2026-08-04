@@ -510,6 +510,53 @@ impl Workspace {
         Ok(())
     }
 
+    /// Move a collection immediately before another collection.
+    ///
+    /// Passing `None` for `before_collection_id` moves the collection to the
+    /// end. IDs are used instead of caller-provided vector indices so a drag
+    /// operation cannot accidentally move the wrong collection after the
+    /// visible tree changes.
+    pub fn reorder_collection(
+        &mut self,
+        collection_id: &str,
+        before_collection_id: Option<&str>,
+    ) -> Result<(), WorkspaceMutationError> {
+        let source_index = self
+            .collections
+            .iter()
+            .position(|collection| collection.id == collection_id)
+            .ok_or_else(|| WorkspaceMutationError::NotFound {
+                kind: "collection",
+                id: collection_id.to_owned(),
+            })?;
+
+        if before_collection_id == Some(collection_id) {
+            return Ok(());
+        }
+        if let Some(before_collection_id) = before_collection_id
+            && !self
+                .collections
+                .iter()
+                .any(|collection| collection.id == before_collection_id)
+        {
+            return Err(WorkspaceMutationError::NotFound {
+                kind: "collection",
+                id: before_collection_id.to_owned(),
+            });
+        }
+
+        let collection = self.collections.remove(source_index);
+        let insertion_index = before_collection_id
+            .and_then(|before_collection_id| {
+                self.collections
+                    .iter()
+                    .position(|candidate| candidate.id == before_collection_id)
+            })
+            .unwrap_or(self.collections.len());
+        self.collections.insert(insertion_index, collection);
+        Ok(())
+    }
+
     pub fn remove_collection(&mut self, id: &str) -> Result<Collection, WorkspaceMutationError> {
         let index = self
             .collections
@@ -570,6 +617,91 @@ impl Workspace {
         }
 
         collection.folder_mut(folder_id)?.parent_folder_id = parent_folder_id.map(str::to_owned);
+        Ok(())
+    }
+
+    /// Reparent a folder and place it immediately before a sibling.
+    ///
+    /// `before_folder_id` must identify a folder under `parent_folder_id`.
+    /// Passing `None` places the moved folder after the destination's current
+    /// children. Descendant records do not need to move in the flat vector:
+    /// rendering follows parent IDs, while the vector only determines sibling
+    /// order.
+    pub fn move_collection_folder_before(
+        &mut self,
+        collection_id: &str,
+        folder_id: &str,
+        parent_folder_id: Option<&str>,
+        before_folder_id: Option<&str>,
+    ) -> Result<(), WorkspaceMutationError> {
+        let collection = self.collection_mut(collection_id)?;
+        collection.ensure_folder_exists(Some(folder_id))?;
+        collection.ensure_folder_exists(parent_folder_id)?;
+
+        if parent_folder_id.is_some_and(|parent_id| {
+            parent_id == folder_id
+                || collection
+                    .folder_descendant_ids(folder_id)
+                    .contains(parent_id)
+        }) {
+            return Err(WorkspaceMutationError::FolderCycle {
+                folder_id: folder_id.to_owned(),
+            });
+        }
+
+        let current_parent_folder_id = collection
+            .folder(folder_id)
+            .expect("the source folder was validated above")
+            .parent_folder_id
+            .clone();
+        if before_folder_id == Some(folder_id) {
+            if current_parent_folder_id.as_deref() == parent_folder_id {
+                return Ok(());
+            }
+            return Err(WorkspaceMutationError::InvalidSiblingTarget {
+                kind: "folder",
+                id: folder_id.to_owned(),
+            });
+        }
+        if let Some(before_folder_id) = before_folder_id {
+            let before_folder = collection.folder(before_folder_id).ok_or_else(|| {
+                WorkspaceMutationError::NotFound {
+                    kind: "folder",
+                    id: before_folder_id.to_owned(),
+                }
+            })?;
+            if before_folder.parent_folder_id.as_deref() != parent_folder_id {
+                return Err(WorkspaceMutationError::InvalidSiblingTarget {
+                    kind: "folder",
+                    id: before_folder_id.to_owned(),
+                });
+            }
+        }
+
+        let source_index = collection
+            .folders
+            .iter()
+            .position(|folder| folder.id == folder_id)
+            .expect("the source folder was validated above");
+        let mut folder = collection.folders.remove(source_index);
+        folder.parent_folder_id = parent_folder_id.map(str::to_owned);
+
+        let insertion_index = if let Some(before_folder_id) = before_folder_id {
+            collection
+                .folders
+                .iter()
+                .position(|candidate| candidate.id == before_folder_id)
+                .expect("the sibling target was validated above")
+        } else {
+            collection
+                .folders
+                .iter()
+                .rposition(|candidate| candidate.parent_folder_id.as_deref() == parent_folder_id)
+                .map_or(source_index.min(collection.folders.len()), |index| {
+                    index + 1
+                })
+        };
+        collection.folders.insert(insertion_index, folder);
         Ok(())
     }
 
@@ -713,6 +845,112 @@ impl Workspace {
             })?;
         request.folder_id = folder_id.map(str::to_owned);
         request.updated_at = Utc::now();
+        Ok(())
+    }
+
+    /// Move a saved request to a collection/folder and place it before a
+    /// sibling request.
+    ///
+    /// The source and destination collections may differ. Passing `None` for
+    /// `before_request_id` places the request after the destination's current
+    /// requests. The operation validates every destination reference before
+    /// mutating either collection.
+    pub fn move_saved_request_before(
+        &mut self,
+        source_collection_id: &str,
+        request_id: &str,
+        target_collection_id: &str,
+        folder_id: Option<&str>,
+        before_request_id: Option<&str>,
+    ) -> Result<(), WorkspaceMutationError> {
+        let source_collection_index = self
+            .collections
+            .iter()
+            .position(|collection| collection.id == source_collection_id)
+            .ok_or_else(|| WorkspaceMutationError::NotFound {
+                kind: "collection",
+                id: source_collection_id.to_owned(),
+            })?;
+        let source_request_index = self.collections[source_collection_index]
+            .requests
+            .iter()
+            .position(|request| request.id == request_id)
+            .ok_or_else(|| WorkspaceMutationError::NotFound {
+                kind: "request",
+                id: request_id.to_owned(),
+            })?;
+        let target_collection_index = self
+            .collections
+            .iter()
+            .position(|collection| collection.id == target_collection_id)
+            .ok_or_else(|| WorkspaceMutationError::NotFound {
+                kind: "collection",
+                id: target_collection_id.to_owned(),
+            })?;
+        self.collections[target_collection_index].ensure_folder_exists(folder_id)?;
+
+        let current_folder_id = self.collections[source_collection_index].requests
+            [source_request_index]
+            .folder_id
+            .clone();
+        let same_location = source_collection_index == target_collection_index
+            && current_folder_id.as_deref() == folder_id;
+        if before_request_id == Some(request_id) {
+            if same_location {
+                return Ok(());
+            }
+            return Err(WorkspaceMutationError::InvalidSiblingTarget {
+                kind: "request",
+                id: request_id.to_owned(),
+            });
+        }
+        if let Some(before_request_id) = before_request_id {
+            let before_request = self.collections[target_collection_index]
+                .requests
+                .iter()
+                .find(|request| request.id == before_request_id)
+                .ok_or_else(|| WorkspaceMutationError::NotFound {
+                    kind: "request",
+                    id: before_request_id.to_owned(),
+                })?;
+            if before_request.folder_id.as_deref() != folder_id {
+                return Err(WorkspaceMutationError::InvalidSiblingTarget {
+                    kind: "request",
+                    id: before_request_id.to_owned(),
+                });
+            }
+        }
+
+        let mut request = self.collections[source_collection_index]
+            .requests
+            .remove(source_request_index);
+        if !same_location {
+            request.folder_id = folder_id.map(str::to_owned);
+            request.updated_at = Utc::now();
+        }
+
+        let target_requests = &mut self.collections[target_collection_index].requests;
+        let insertion_index = if let Some(before_request_id) = before_request_id {
+            target_requests
+                .iter()
+                .position(|candidate| candidate.id == before_request_id)
+                .expect("the sibling target was validated above")
+        } else {
+            target_requests
+                .iter()
+                .rposition(|candidate| candidate.folder_id.as_deref() == folder_id)
+                .map_or_else(
+                    || {
+                        if source_collection_index == target_collection_index {
+                            source_request_index.min(target_requests.len())
+                        } else {
+                            target_requests.len()
+                        }
+                    },
+                    |index| index + 1,
+                )
+        };
+        target_requests.insert(insertion_index, request);
         Ok(())
     }
 
@@ -874,6 +1112,9 @@ pub enum WorkspaceMutationError {
 
     #[error("folder '{folder_id}' cannot be moved beneath itself or one of its descendants")]
     FolderCycle { folder_id: String },
+
+    #[error("{kind} '{id}' is not a sibling in the requested destination")]
+    InvalidSiblingTarget { kind: &'static str, id: String },
 
     #[error("environment '{environment_id}' already has a variable named '{key}'")]
     DuplicateVariableKey { environment_id: String, key: String },
@@ -1463,6 +1704,48 @@ mod tests {
     }
 
     #[test]
+    fn collections_reorder_by_stable_anchor_without_partial_mutation() {
+        let mut workspace = Workspace::default();
+        let first = workspace.create_collection("First").unwrap();
+        let second = workspace.create_collection("Second").unwrap();
+        let third = workspace.create_collection("Third").unwrap();
+        let ids = |workspace: &Workspace| {
+            workspace
+                .collections
+                .iter()
+                .map(|collection| collection.id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        workspace.reorder_collection(&third, Some(&first)).unwrap();
+        assert_eq!(
+            ids(&workspace),
+            [third.clone(), first.clone(), second.clone()]
+        );
+
+        workspace.reorder_collection(&first, None).unwrap();
+        assert_eq!(
+            ids(&workspace),
+            [third.clone(), second.clone(), first.clone()]
+        );
+
+        let before_missing = workspace.clone();
+        assert_eq!(
+            workspace.reorder_collection(&second, Some("missing")),
+            Err(WorkspaceMutationError::NotFound {
+                kind: "collection",
+                id: "missing".to_owned(),
+            })
+        );
+        assert_eq!(workspace, before_missing);
+
+        workspace
+            .reorder_collection(&second, Some(&second))
+            .unwrap();
+        assert_eq!(workspace, before_missing);
+    }
+
+    #[test]
     fn duplicate_saved_request_inserts_fresh_copy_after_source() {
         let mut workspace = Workspace::default();
         let collection_id = workspace.create_collection("Requests").unwrap();
@@ -1596,6 +1879,110 @@ mod tests {
     }
 
     #[test]
+    fn collection_folders_reorder_and_reparent_at_sibling_anchors() {
+        let mut workspace = Workspace::default();
+        let collection_id = workspace.create_collection("Requests").unwrap();
+        let first_root = workspace
+            .create_collection_folder(&collection_id, None, "First root")
+            .unwrap();
+        let second_root = workspace
+            .create_collection_folder(&collection_id, None, "Second root")
+            .unwrap();
+        let first_child = workspace
+            .create_collection_folder(&collection_id, Some(&first_root), "First child")
+            .unwrap();
+        let second_child = workspace
+            .create_collection_folder(&collection_id, Some(&first_root), "Second child")
+            .unwrap();
+        let moving_child = workspace
+            .create_collection_folder(&collection_id, Some(&second_root), "Moving child")
+            .unwrap();
+        let children = |workspace: &Workspace, parent_id: &str| {
+            workspace
+                .collection(&collection_id)
+                .unwrap()
+                .folders
+                .iter()
+                .filter(|folder| folder.parent_folder_id.as_deref() == Some(parent_id))
+                .map(|folder| folder.id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        workspace
+            .move_collection_folder_before(
+                &collection_id,
+                &second_child,
+                Some(&first_root),
+                Some(&first_child),
+            )
+            .unwrap();
+        assert_eq!(
+            children(&workspace, &first_root),
+            [second_child.clone(), first_child.clone()]
+        );
+
+        workspace
+            .move_collection_folder_before(
+                &collection_id,
+                &moving_child,
+                Some(&first_root),
+                Some(&first_child),
+            )
+            .unwrap();
+        assert_eq!(
+            children(&workspace, &first_root),
+            [
+                second_child.clone(),
+                moving_child.clone(),
+                first_child.clone(),
+            ]
+        );
+        assert!(children(&workspace, &second_root).is_empty());
+
+        workspace
+            .move_collection_folder_before(&collection_id, &second_child, Some(&first_root), None)
+            .unwrap();
+        assert_eq!(
+            children(&workspace, &first_root),
+            [
+                moving_child.clone(),
+                first_child.clone(),
+                second_child.clone(),
+            ]
+        );
+
+        let before_invalid_sibling = workspace.clone();
+        assert_eq!(
+            workspace.move_collection_folder_before(
+                &collection_id,
+                &moving_child,
+                Some(&first_root),
+                Some(&second_root),
+            ),
+            Err(WorkspaceMutationError::InvalidSiblingTarget {
+                kind: "folder",
+                id: second_root.clone(),
+            })
+        );
+        assert_eq!(workspace, before_invalid_sibling);
+
+        let before_cycle = workspace.clone();
+        assert_eq!(
+            workspace.move_collection_folder_before(
+                &collection_id,
+                &first_root,
+                Some(&first_child),
+                None,
+            ),
+            Err(WorkspaceMutationError::FolderCycle {
+                folder_id: first_root,
+            })
+        );
+        assert_eq!(workspace, before_cycle);
+        workspace.validate().unwrap();
+    }
+
+    #[test]
     fn saved_requests_can_move_between_root_and_nested_folders() {
         let mut workspace = Workspace::default();
         let collection_id = workspace.create_collection("Requests").unwrap();
@@ -1659,6 +2046,172 @@ mod tests {
                 .folder_id,
             None
         );
+        workspace.validate().unwrap();
+    }
+
+    #[test]
+    fn saved_requests_reorder_and_relocate_across_collections_atomically() {
+        let mut workspace = Workspace::default();
+        let source_collection_id = workspace.create_collection("Source").unwrap();
+        let source_folder_id = workspace
+            .create_collection_folder(&source_collection_id, None, "Source folder")
+            .unwrap();
+        let first_source_request = workspace
+            .create_saved_request(
+                &source_collection_id,
+                "First source",
+                template("https://example.com/source/first"),
+            )
+            .unwrap();
+        let second_source_request = workspace
+            .create_saved_request(
+                &source_collection_id,
+                "Second source",
+                template("https://example.com/source/second"),
+            )
+            .unwrap();
+
+        let target_collection_id = workspace.create_collection("Target").unwrap();
+        let target_folder_id = workspace
+            .create_collection_folder(&target_collection_id, None, "Target folder")
+            .unwrap();
+        let target_root_request = workspace
+            .create_saved_request(
+                &target_collection_id,
+                "Target root",
+                template("https://example.com/target/root"),
+            )
+            .unwrap();
+        let first_target_request = workspace
+            .create_saved_request_in_folder(
+                &target_collection_id,
+                Some(&target_folder_id),
+                "First target",
+                template("https://example.com/target/first"),
+            )
+            .unwrap();
+        let second_target_request = workspace
+            .create_saved_request_in_folder(
+                &target_collection_id,
+                Some(&target_folder_id),
+                "Second target",
+                template("https://example.com/target/second"),
+            )
+            .unwrap();
+        let old_timestamp = Utc::now() - chrono::Duration::days(1);
+        workspace
+            .saved_request_mut(&source_collection_id, &first_source_request)
+            .unwrap()
+            .updated_at = old_timestamp;
+
+        let second_timestamp = workspace
+            .saved_request(&second_source_request)
+            .unwrap()
+            .1
+            .updated_at;
+        workspace
+            .move_saved_request_before(
+                &source_collection_id,
+                &second_source_request,
+                &source_collection_id,
+                None,
+                Some(&first_source_request),
+            )
+            .unwrap();
+        assert_eq!(
+            workspace
+                .collection(&source_collection_id)
+                .unwrap()
+                .requests
+                .iter()
+                .map(|request| request.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                second_source_request.as_str(),
+                first_source_request.as_str()
+            ]
+        );
+        assert_eq!(
+            workspace
+                .saved_request(&second_source_request)
+                .unwrap()
+                .1
+                .updated_at,
+            second_timestamp,
+            "pure ordering must not change request modification time"
+        );
+
+        workspace
+            .move_saved_request_before(
+                &source_collection_id,
+                &first_source_request,
+                &target_collection_id,
+                Some(&target_folder_id),
+                Some(&second_target_request),
+            )
+            .unwrap();
+        let (owner, moved) = workspace.saved_request(&first_source_request).unwrap();
+        assert_eq!(owner.id, target_collection_id);
+        assert_eq!(moved.folder_id.as_deref(), Some(target_folder_id.as_str()));
+        assert!(moved.updated_at > old_timestamp);
+        assert_eq!(
+            workspace
+                .collection(&target_collection_id)
+                .unwrap()
+                .requests
+                .iter()
+                .filter(|request| request.folder_id.as_deref() == Some(&target_folder_id))
+                .map(|request| request.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                first_target_request.as_str(),
+                first_source_request.as_str(),
+                second_target_request.as_str(),
+            ]
+        );
+        assert_eq!(
+            workspace
+                .collection(&target_collection_id)
+                .unwrap()
+                .requests
+                .iter()
+                .filter(|request| request.folder_id.is_none())
+                .map(|request| request.id.as_str())
+                .collect::<Vec<_>>(),
+            [target_root_request.as_str()]
+        );
+
+        let before_invalid_sibling = workspace.clone();
+        assert_eq!(
+            workspace.move_saved_request_before(
+                &target_collection_id,
+                &first_source_request,
+                &target_collection_id,
+                Some(&target_folder_id),
+                Some(&target_root_request),
+            ),
+            Err(WorkspaceMutationError::InvalidSiblingTarget {
+                kind: "request",
+                id: target_root_request,
+            })
+        );
+        assert_eq!(workspace, before_invalid_sibling);
+
+        let before_wrong_collection_folder = workspace.clone();
+        assert_eq!(
+            workspace.move_saved_request_before(
+                &source_collection_id,
+                &second_source_request,
+                &target_collection_id,
+                Some(&source_folder_id),
+                None,
+            ),
+            Err(WorkspaceMutationError::NotFound {
+                kind: "folder",
+                id: source_folder_id,
+            })
+        );
+        assert_eq!(workspace, before_wrong_collection_folder);
         workspace.validate().unwrap();
     }
 

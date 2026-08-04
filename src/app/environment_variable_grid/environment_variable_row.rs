@@ -19,12 +19,19 @@ impl ApiTester {
     ) -> AnyElement {
         let checkbox_id = row.id.clone();
         let secret_id = row.id.clone();
-        let duplicate_id = row.id.clone();
-        let remove_id = row.id.clone();
         let action_this = cx.entity().downgrade();
+        let context_this = action_this.clone();
+        let actions_row_id = row.id.clone();
+        let context_row_id = row.id.clone();
+        let row_context_enabled = Rc::new(RefCell::new(true));
+        let key_context_enabled = Rc::clone(&row_context_enabled);
+        let value_context_enabled = Rc::clone(&row_context_enabled);
+        let build_context_enabled = Rc::clone(&row_context_enabled);
         let group_id: SharedString = format!("environment-variable-actions-{}", row.id).into();
+        let context_scope_id: SharedString =
+            format!("environment-variable-context-menu-scope-{}", row.id).into();
 
-        h_flex()
+        let row = h_flex()
             .id(("environment-variable-grid-row", index))
             .group(group_id.clone())
             .w_full()
@@ -35,6 +42,11 @@ impl ApiTester {
             .bg(cx.api_surface())
             .hover(|style| style.bg(cx.api_surface_low()))
             .when(!row.enabled, |this| this.opacity(0.58))
+            .capture_any_mouse_down(move |event, _, _| {
+                if event.button == MouseButton::Right {
+                    *row_context_enabled.borrow_mut() = true;
+                }
+            })
             .child(
                 div()
                     .w(px(44.))
@@ -67,6 +79,11 @@ impl ApiTester {
                     .h_full()
                     .border_l_1()
                     .border_color(cx.api_outline_variant())
+                    .capture_any_mouse_down(move |event, _, _| {
+                        if event.button == MouseButton::Right {
+                            *key_context_enabled.borrow_mut() = false;
+                        }
+                    })
                     .child(
                         Input::new(&row.key)
                             .appearance(false)
@@ -83,6 +100,11 @@ impl ApiTester {
                     .h_full()
                     .border_l_1()
                     .border_color(cx.api_outline_variant())
+                    .capture_any_mouse_down(move |event, _, _| {
+                        if event.button == MouseButton::Right {
+                            *value_context_enabled.borrow_mut() = false;
+                        }
+                    })
                     .child(
                         Input::new(&row.value)
                             .appearance(false)
@@ -155,42 +177,67 @@ impl ApiTester {
                             .group_hover(group_id, |style| style.visible())
                             .tooltip("Variable actions")
                             .dropdown_menu(move |menu, _, _| {
-                                let duplicate_this = action_this.clone();
-                                let duplicate_id = duplicate_id.clone();
-                                let remove_this = action_this.clone();
-                                let remove_id = remove_id.clone();
-                                menu.item(
-                                    PopupMenuItem::new("Duplicate")
-                                        .disabled(!can_mutate)
-                                        .on_click(move |_, window, cx| {
-                                            if let Some(this) = duplicate_this.upgrade() {
-                                                this.update(cx, |this, cx| {
-                                                    this.duplicate_environment_row(
-                                                        &duplicate_id,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                });
-                                            }
-                                        }),
-                                )
-                                .separator()
-                                .item(
-                                    PopupMenuItem::new("Delete").disabled(!can_mutate).on_click(
-                                        move |_, _, cx| {
-                                            if let Some(this) = remove_this.upgrade() {
-                                                this.update(cx, |this, cx| {
-                                                    this.environment_variables
-                                                        .retain(|row| row.id != remove_id);
-                                                    cx.notify();
-                                                });
-                                            }
-                                        },
-                                    ),
+                                build_environment_variable_actions_menu(
+                                    menu,
+                                    action_this.clone(),
+                                    actions_row_id.clone(),
+                                    can_mutate,
                                 )
                             }),
                     ),
             )
+            .context_menu(move |menu, _, _| {
+                if !*build_context_enabled.borrow() {
+                    return menu;
+                }
+                build_environment_variable_actions_menu(
+                    menu,
+                    context_this.clone(),
+                    context_row_id.clone(),
+                    can_mutate,
+                )
+            });
+
+        div()
+            .id(context_scope_id)
+            .w_full()
+            .child(row)
             .into_any_element()
     }
+}
+
+fn build_environment_variable_actions_menu(
+    menu: PopupMenu,
+    owner: gpui::WeakEntity<ApiTester>,
+    row_id: String,
+    can_mutate: bool,
+) -> PopupMenu {
+    let duplicate_this = owner.clone();
+    let duplicate_id = row_id.clone();
+    let remove_this = owner;
+    let remove_id = row_id;
+    menu.item(
+        PopupMenuItem::new("Duplicate")
+            .disabled(!can_mutate)
+            .on_click(move |_, window, cx| {
+                if let Some(this) = duplicate_this.upgrade() {
+                    this.update(cx, |this, cx| {
+                        this.duplicate_environment_row(&duplicate_id, window, cx);
+                    });
+                }
+            }),
+    )
+    .separator()
+    .item(
+        PopupMenuItem::new("Delete")
+            .disabled(!can_mutate)
+            .on_click(move |_, _, cx| {
+                if let Some(this) = remove_this.upgrade() {
+                    this.update(cx, |this, cx| {
+                        this.environment_variables.retain(|row| row.id != remove_id);
+                        cx.notify();
+                    });
+                }
+            }),
+    )
 }

@@ -77,6 +77,7 @@ mod bootstrap;
 mod collection_folder_actions;
 mod collections_actions;
 mod collections_page;
+mod drag_drop;
 mod editor_settings;
 mod environment_browser;
 mod environment_detail;

@@ -663,6 +663,16 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let closing = close_ids
+            .iter()
+            .cloned()
+            .map(WorkspaceTab::Request)
+            .collect::<Vec<_>>();
+        let active_workspace_tab = self.workspace_tabs.active_tab(&self.request_tabs);
+        let active_will_close = closing.contains(&active_workspace_tab);
+        let fallback = self
+            .workspace_tabs
+            .fallback_after_closing(&self.request_tabs, &closing);
         let active_before = self.request_tabs.active_tab_id().clone();
         let request_surface_was_active =
             self.workspace_tabs.active() == ActiveWorkspaceTab::Request;
@@ -686,6 +696,10 @@ impl ApiTester {
                 .open_welcome(welcome_id, request_surface_was_active);
             self.hide_preview(cx);
             self.persist_request_tabs_now(cx);
+            if active_will_close && let Some(fallback) = fallback {
+                self.activate_workspace_tab(fallback, window, cx);
+                return;
+            }
             cx.notify();
             return;
         }
@@ -701,6 +715,9 @@ impl ApiTester {
             self.restore_active_request_tab(window, cx);
         } else {
             cx.notify();
+        }
+        if active_will_close && let Some(fallback) = fallback {
+            self.activate_workspace_tab(fallback, window, cx);
         }
         self.persist_request_tabs_now(cx);
     }
