@@ -121,6 +121,24 @@ impl WorkspaceTabControl {
                     }),
                 )
             })
+            .when(self.closable, |this| {
+                let middle_close = close_tab.clone();
+                this.on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        match middle_close.clone() {
+                            WorkspaceTab::Request(tab_id) => {
+                                this.request_close_request_tab(tab_id, window, cx);
+                            }
+                            WorkspaceTab::Tool(tool) => {
+                                this.close_workspace_tool_tab(tool, window, cx);
+                            }
+                            WorkspaceTab::Welcome => {}
+                        }
+                    }),
+                )
+            })
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.activate_workspace_tab(activate_tab.clone(), window, cx);
             }))
