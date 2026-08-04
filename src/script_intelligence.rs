@@ -1,12 +1,14 @@
 //! Lightweight editor intelligence for the Resolved script runtime.
 //!
-//! This module intentionally models variable *names* only. Environment and
-//! collection values (including secrets) must never enter completion items,
-//! diagnostics, logs, or the provider's retained state.
+//! Selected-environment values are available to the real request-script
+//! editors, where they help authors confirm the configured value behind a
+//! variable name. Plain snippets keep the same variable-name completion
+//! without exposing values. Values never enter diagnostics or `Debug` output.
 
 use std::{
     cell::RefCell,
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
+    fmt,
     rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -49,15 +51,31 @@ const fn typescript_phase(phase: ScriptEditorPhase) -> TypeScriptScriptPhase {
     }
 }
 
-/// A value-blind snapshot of the variable names visible to a script.
+/// A snapshot of variables visible to a script.
 ///
-/// The fields are private and the constructor accepts names, not key/value
-/// pairs, so secret values have no path into the editor-intelligence layer.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Values are private and its `Debug` implementation deliberately reports
+/// only their count. Providers decide whether their editor may display them.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct ScriptVariableCatalog {
     environment_names: BTreeSet<String>,
+    environment_values: BTreeMap<String, String>,
     disabled_environment_names: BTreeSet<String>,
     collection_names: BTreeSet<String>,
+}
+
+impl fmt::Debug for ScriptVariableCatalog {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScriptVariableCatalog")
+            .field("environment_names", &self.environment_names)
+            .field("environment_value_count", &self.environment_values.len())
+            .field(
+                "disabled_environment_names",
+                &self.disabled_environment_names,
+            )
+            .field("collection_names", &self.collection_names)
+            .finish()
+    }
 }
 
 impl ScriptVariableCatalog {
@@ -83,9 +101,40 @@ impl ScriptVariableCatalog {
         disabled_environment_names.retain(|name| !environment_names.contains(name));
         Self {
             environment_names,
+            environment_values: BTreeMap::new(),
             disabled_environment_names,
             collection_names: normalized_names(collection_names),
         }
+    }
+
+    /// Builds a catalog with the current values of enabled variables in the
+    /// selected environment. Values remain redacted from `Debug` output.
+    pub fn from_environment_values<E, D, C, K, V, DN, CN>(
+        environment_variables: E,
+        disabled_environment_names: D,
+        collection_names: C,
+    ) -> Self
+    where
+        E: IntoIterator<Item = (K, V)>,
+        D: IntoIterator<Item = DN>,
+        C: IntoIterator<Item = CN>,
+        K: Into<String>,
+        V: Into<String>,
+        DN: Into<String>,
+        CN: Into<String>,
+    {
+        let environment_values = environment_variables
+            .into_iter()
+            .map(|(name, value)| (name.into(), value.into()))
+            .filter(|(name, _)| !name.is_empty())
+            .collect::<BTreeMap<_, _>>();
+        let mut catalog = Self::from_names(
+            environment_values.keys().cloned(),
+            disabled_environment_names,
+            collection_names,
+        );
+        catalog.environment_values = environment_values;
+        catalog
     }
 
     pub fn environment_names(&self) -> impl ExactSizeIterator<Item = &str> {
@@ -99,8 +148,8 @@ impl ScriptVariableCatalog {
             .map(String::as_str)
     }
 
-    /// Replaces the value-blind snapshot in place. Providers sharing this
-    /// catalog see the selected-environment change on their next invocation.
+    /// Replaces the snapshot with names only. Providers sharing this catalog
+    /// see the selected-environment change on their next invocation.
     pub fn replace<E, D, C, EN, DN, CN>(
         &mut self,
         environment_names: E,
@@ -119,6 +168,35 @@ impl ScriptVariableCatalog {
             disabled_environment_names,
             collection_names,
         );
+    }
+
+    /// Replaces the snapshot with current selected-environment values.
+    pub fn replace_with_environment_values<E, D, C, K, V, DN, CN>(
+        &mut self,
+        environment_variables: E,
+        disabled_environment_names: D,
+        collection_names: C,
+    ) where
+        E: IntoIterator<Item = (K, V)>,
+        D: IntoIterator<Item = DN>,
+        C: IntoIterator<Item = CN>,
+        K: Into<String>,
+        V: Into<String>,
+        DN: Into<String>,
+        CN: Into<String>,
+    {
+        let replacement = Self::from_environment_values(
+            environment_variables,
+            disabled_environment_names,
+            collection_names,
+        );
+        let environment_values = replacement.environment_values;
+        self.replace(
+            replacement.environment_names,
+            replacement.disabled_environment_names,
+            replacement.collection_names,
+        );
+        self.environment_values = environment_values;
     }
 
     pub fn shared(self) -> ScriptVariableCatalogHandle {
@@ -146,6 +224,7 @@ where
 pub struct ScriptCompletionProvider {
     phase: ScriptEditorPhase,
     variables: ScriptVariableCatalogHandle,
+    expose_environment_values: bool,
     typescript: Option<TypeScriptServiceHandle>,
     typescript_document: TypeScriptDocumentKind,
     document: Rc<RefCell<ScriptDocumentVersion>>,
@@ -164,6 +243,7 @@ impl ScriptCompletionProvider {
         Self {
             phase,
             variables,
+            expose_environment_values: true,
             typescript: None,
             typescript_document: TypeScriptDocumentKind::Script(typescript_phase(phase)),
             document: Rc::new(RefCell::new(ScriptDocumentVersion::default())),
@@ -177,14 +257,15 @@ impl ScriptCompletionProvider {
         variables: ScriptVariableCatalogHandle,
     ) -> Self {
         Self {
+            expose_environment_values: false,
             typescript_document: TypeScriptDocumentKind::PlainSnippet(typescript_phase(phase)),
             ..Self::new(phase, variables)
         }
     }
 
     /// Adds Microsoft's embedded TypeScript Language Service for ordinary
-    /// JavaScript semantics. Resolved-specific API and live variable-name
-    /// completion remains a narrow, value-blind overlay.
+    /// JavaScript semantics. Resolved-specific API and live variable
+    /// completion remains a narrow overlay.
     pub fn with_typescript_service(mut self, typescript: TypeScriptServiceHandle) -> Self {
         self.typescript = Some(typescript);
         self
@@ -193,17 +274,29 @@ impl ScriptCompletionProvider {
     /// Synchronous completion entrypoint used by the GPUI provider and focused
     /// unit tests.
     pub fn completion_items_for_source(&self, source: &str, offset: usize) -> Vec<CompletionItem> {
-        completion_items(source, offset, self.phase, &self.variables.borrow())
+        completion_items(
+            source,
+            offset,
+            self.phase,
+            &self.variables.borrow(),
+            self.expose_environment_values,
+        )
     }
 
     /// Returns documentation for the runtime symbol or variable name under
-    /// the pointer. Environment and collection values never enter the hover.
+    /// the pointer.
     pub fn hover_for_source(&self, source: &str, offset: usize) -> Option<Hover> {
-        hover_for_source(source, offset, self.phase, &self.variables.borrow())
+        hover_for_source(
+            source,
+            offset,
+            self.phase,
+            &self.variables.borrow(),
+            self.expose_environment_values,
+        )
     }
 
     /// Produces semantic JavaScript diagnostics asynchronously and merges the
-    /// result with Resolved's value-blind variable warnings.
+    /// result with Resolved's variable warnings.
     pub fn diagnostics_task(&self, source: String, cx: &mut App) -> Task<Vec<Diagnostic>> {
         let variables = self.variables.borrow().clone();
         let typescript_request = self.typescript.clone().map(|typescript| {
@@ -259,11 +352,18 @@ impl CompletionProvider for ScriptCompletionProvider {
         };
         let variables = self.variables.borrow().clone();
         let local_phase = self.phase;
+        let expose_environment_values = self.expose_environment_values;
         let document = self.typescript_document;
         let version = self.version_for_source(&source);
 
         cx.background_spawn(async move {
-            let local = completion_items(&source, offset, local_phase, &variables);
+            let local = completion_items(
+                &source,
+                offset,
+                local_phase,
+                &variables,
+                expose_environment_values,
+            );
             let items = match typescript
                 .completion_items(document, version, source, offset)
                 .await
@@ -330,11 +430,18 @@ impl HoverProvider for ScriptCompletionProvider {
         };
         let variables = self.variables.borrow().clone();
         let local_phase = self.phase;
+        let expose_environment_values = self.expose_environment_values;
         let document = self.typescript_document;
         let version = self.version_for_source(&source);
 
         cx.background_spawn(async move {
-            if let Some(hover) = hover_for_source(&source, offset, local_phase, &variables) {
+            if let Some(hover) = hover_for_source(
+                &source,
+                offset,
+                local_phase,
+                &variables,
+                expose_environment_values,
+            ) {
                 return Ok(Some(hover));
             }
             match typescript.hover(document, version, source, offset).await {
@@ -870,6 +977,7 @@ fn completion_items(
     requested_offset: usize,
     phase: ScriptEditorPhase,
     variables: &ScriptVariableCatalog,
+    expose_environment_values: bool,
 ) -> Vec<CompletionItem> {
     let offset = clipped_char_boundary(source, requested_offset);
     let prefix = &source[..offset];
@@ -907,23 +1015,31 @@ fn completion_items(
     }
 
     if let Some(string_context) = variable_string_completion_context(&lexed.tokens, offset) {
+        let (environment_names, _) =
+            script_environment_state_before(&lexed.tokens, string_context.call_start, variables);
+        let item_context = VariableCompletionItemContext {
+            source,
+            replace_start: string_context.replace_start,
+            offset,
+            quote: string_context.quote,
+            namespace: string_context.namespace,
+            environment_names: &environment_names,
+            environment_values: &variables.environment_values,
+            expose_environment_values,
+        };
         let names: Box<dyn Iterator<Item = &str> + '_> = match string_context.namespace {
-            VariableNamespace::Environment => Box::new(variables.environment_names()),
-            VariableNamespace::Variables => Box::new(variables.variable_names()),
+            VariableNamespace::Environment => {
+                Box::new(environment_names.iter().map(String::as_str))
+            }
+            VariableNamespace::Variables => Box::new(
+                environment_names
+                    .union(&variables.collection_names)
+                    .map(String::as_str),
+            ),
         };
         return names
             .filter(|name| name.starts_with(&string_context.typed))
-            .map(|name| {
-                variable_completion_item(
-                    source,
-                    string_context.replace_start,
-                    offset,
-                    name,
-                    string_context.quote,
-                    string_context.namespace,
-                    variables,
-                )
-            })
+            .map(|name| variable_completion_item(name, &item_context))
             .collect();
     }
 
@@ -992,6 +1108,7 @@ fn hover_for_source(
     requested_offset: usize,
     phase: ScriptEditorPhase,
     variables: &ScriptVariableCatalog,
+    expose_environment_values: bool,
 ) -> Option<Hover> {
     let offset = clipped_char_boundary(source, requested_offset);
     let tokens = lex(source).tokens;
@@ -1001,7 +1118,15 @@ fn hover_for_source(
         return runtime_symbol_hover(source, &tokens, token_index, phase);
     }
     if tokens[token_index].string_literal().is_some() {
-        return variable_name_hover(source, &tokens, token_index, offset, phase, variables);
+        return variable_name_hover(
+            source,
+            &tokens,
+            token_index,
+            offset,
+            phase,
+            variables,
+            expose_environment_values,
+        );
     }
     None
 }
@@ -1060,6 +1185,7 @@ fn variable_name_hover(
     offset: usize,
     phase: ScriptEditorPhase,
     variables: &ScriptVariableCatalog,
+    expose_environment_values: bool,
 ) -> Option<Hover> {
     let argument = tokens.get(token_index)?.string_literal()?;
     let name = argument.value.as_deref()?;
@@ -1098,6 +1224,7 @@ fn variable_name_hover(
         script_environment_state_before(tokens, call_start, variables);
     let variable_state = VariableHoverState {
         environment_names,
+        environment_values: &variables.environment_values,
         disabled_environment_names,
         collection_names: &variables.collection_names,
     };
@@ -1106,7 +1233,15 @@ fn variable_name_hover(
         source,
         argument.content_start,
         content_end,
-        variable_name_markdown(name, call, &variable_state, &full_path, *method, phase),
+        variable_name_markdown(
+            name,
+            call,
+            &variable_state,
+            &full_path,
+            *method,
+            phase,
+            expose_environment_values,
+        ),
     ))
 }
 
@@ -1125,6 +1260,7 @@ fn runtime_symbol_markdown(
 
 struct VariableHoverState<'a> {
     environment_names: BTreeSet<String>,
+    environment_values: &'a BTreeMap<String, String>,
     disabled_environment_names: BTreeSet<String>,
     collection_names: &'a BTreeSet<String>,
 }
@@ -1136,14 +1272,31 @@ fn variable_name_markdown(
     full_path: &str,
     method: CompletionSpec,
     phase: ScriptEditorPhase,
+    expose_environment_values: bool,
 ) -> String {
     let status = variable_name_status(name, call.namespace, variable_state);
+    let resolves_from_selected_environment = match call.namespace {
+        VariableNamespace::Environment => true,
+        VariableNamespace::Variables => variable_state.environment_names.contains(name),
+    };
+    let selected_environment_value = (expose_environment_values
+        && resolves_from_selected_environment)
+        .then(|| variable_state.environment_values.get(name))
+        .flatten()
+        .map(|value| {
+            format!(
+                "\n\n**Selected environment value:** {}",
+                markdown_inline_code(value)
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "```typescript\n{}\n```\n\n{}\n\n**Variable key:** {}\n\n{}\n\n_Values are intentionally hidden from script editor tooling._\n\n_{}_",
+        "```typescript\n{}\n```\n\n{}\n\n**Variable key:** {}\n\n{}{}\n\n_{}_",
         runtime_symbol_signature(full_path, method),
         method.documentation,
         markdown_inline_code(name),
         status,
+        selected_environment_value,
         phase_availability(phase),
     )
 }
@@ -1287,32 +1440,63 @@ fn spec_completion_item(
     }
 }
 
-fn variable_completion_item(
-    source: &str,
+struct VariableCompletionItemContext<'a> {
+    source: &'a str,
     replace_start: usize,
     offset: usize,
-    name: &str,
     quote: char,
     namespace: VariableNamespace,
-    variables: &ScriptVariableCatalog,
+    environment_names: &'a BTreeSet<String>,
+    environment_values: &'a BTreeMap<String, String>,
+    expose_environment_values: bool,
+}
+
+fn variable_completion_item(
+    name: &str,
+    context: &VariableCompletionItemContext<'_>,
 ) -> CompletionItem {
-    let detail = match namespace {
+    let detail = match context.namespace {
         VariableNamespace::Environment => "selected-environment variable",
-        VariableNamespace::Variables if variables.environment_names.contains(name) => {
+        VariableNamespace::Variables if context.environment_names.contains(name) => {
             "selected-environment variable"
         }
         VariableNamespace::Variables => "collection variable",
     };
+    let resolves_from_selected_environment = match context.namespace {
+        VariableNamespace::Environment => true,
+        VariableNamespace::Variables => context.environment_names.contains(name),
+    };
+    let documentation =
+        if context.expose_environment_values && resolves_from_selected_environment {
+            context.environment_values.get(name).map(|value| {
+                Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: format!(
+                        "**Selected environment value:** {}",
+                        markdown_inline_code(value)
+                    ),
+                })
+            })
+        } else {
+            None
+        }
+        .unwrap_or_else(|| {
+            Documentation::String(
+                match detail {
+                    "selected-environment variable" => "Available in the selected environment.",
+                    _ => "Available as a collection variable.",
+                }
+                .to_owned(),
+            )
+        });
     CompletionItem {
         label: name.to_owned(),
         kind: Some(CompletionItemKind::VARIABLE),
         detail: Some(detail.to_owned()),
-        documentation: Some(Documentation::String(
-            "Variable name only; its value is never exposed to editor intelligence.".to_owned(),
-        )),
+        documentation: Some(documentation),
         text_edit: Some(CompletionTextEdit::Edit(TextEdit {
-            range: source_range(source, replace_start, offset),
-            new_text: escape_for_quote(name, quote),
+            range: source_range(context.source, context.replace_start, context.offset),
+            new_text: escape_for_quote(name, context.quote),
         })),
         ..Default::default()
     }
@@ -1702,6 +1886,7 @@ struct VariableStringCompletionContext {
     typed: String,
     replace_start: usize,
     quote: char,
+    call_start: usize,
 }
 
 fn variable_string_completion_context(
@@ -1730,6 +1915,7 @@ fn variable_string_completion_context(
         typed: argument.value.clone()?,
         replace_start: argument.content_start,
         quote: argument.quote,
+        call_start,
     })
 }
 
@@ -2224,6 +2410,14 @@ mod tests {
         }
     }
 
+    fn completion_documentation(item: &CompletionItem) -> &str {
+        match item.documentation.as_ref() {
+            Some(Documentation::String(documentation)) => documentation,
+            Some(Documentation::MarkupContent(markup)) => &markup.value,
+            None => panic!("expected completion documentation for {:?}", item.label),
+        }
+    }
+
     fn hover_markdown(hover: &Hover) -> &str {
         match &hover.contents {
             HoverContents::Markup(markup) => &markup.value,
@@ -2266,9 +2460,13 @@ mod tests {
     }
 
     #[test]
-    fn catalog_is_value_blind_and_deterministic() {
-        let catalog = ScriptVariableCatalog::from_names(
-            ["zeta", "", "alpha", "zeta"],
+    fn catalog_orders_names_and_redacts_values_from_debug_output() {
+        let catalog = ScriptVariableCatalog::from_environment_values(
+            [
+                ("zeta", "super-secret-value"),
+                ("", "ignored"),
+                ("alpha", "visible-in-editor"),
+            ],
             std::iter::empty::<String>(),
             ["shared", "shared"],
         );
@@ -2289,10 +2487,16 @@ mod tests {
             catalog.variable_names().collect::<Vec<_>>(),
             ["alpha", "shared", "zeta"]
         );
+        assert_eq!(
+            catalog.environment_values.get("zeta").map(String::as_str),
+            Some("super-secret-value")
+        );
 
-        // Only names can be supplied or retained. A secret value is absent
-        // from both the catalog and its Debug representation.
-        assert!(!format!("{catalog:?}").contains("super-secret-value"));
+        let debug = format!("{catalog:?}");
+        assert!(debug.contains("environment_value_count: 2"));
+        for value in ["super-secret-value", "visible-in-editor"] {
+            assert!(!debug.contains(value));
+        }
     }
 
     #[test]
@@ -2374,7 +2578,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_offers_names_without_values() {
+    fn completion_offers_available_variable_names() {
         let provider = provider(ScriptEditorPhase::PreRequest, catalog());
 
         let environment = provider.completion_items_for_source(r#"api.environment.get("ba"#, 23);
@@ -2387,6 +2591,136 @@ mod tests {
         let environment_only =
             labels(provider.completion_items_for_source(r#"api.environment.get("c"#, 22));
         assert!(environment_only.is_empty());
+    }
+
+    #[test]
+    fn request_script_editors_show_values_but_plain_snippets_do_not() {
+        let rendered_value = "line `tick`\n**still a value**";
+        let variables = ScriptVariableCatalog::from_environment_values(
+            [
+                ("api_token", rendered_value),
+                ("base_url", "https://example.test"),
+            ],
+            std::iter::empty::<String>(),
+            ["collection_id"],
+        )
+        .shared();
+        let source = r#"api.environment.get("api"#;
+        let hover_source = r#"api.environment.get("api_token")"#;
+
+        for phase in [
+            ScriptEditorPhase::PreRequest,
+            ScriptEditorPhase::PostResponse,
+        ] {
+            let provider = ScriptCompletionProvider::new(phase, variables.clone());
+            let items = provider.completion_items_for_source(source, source.len());
+            assert_eq!(labels(items.clone()), ["api_token"]);
+            let documentation = completion_documentation(&items[0]);
+            assert!(documentation.contains("Selected environment value"));
+            assert!(documentation.contains(r#"line `tick`\n**still a value**"#));
+            assert!(!documentation.contains("line `tick`\n**still a value**"));
+
+            let hover = hover_at(&provider, hover_source, "api_token");
+            let markdown = hover_markdown(&hover);
+            assert!(markdown.contains("Selected environment value"));
+            assert!(markdown.contains(r#"line `tick`\n**still a value**"#));
+            assert!(!markdown.contains("line `tick`\n**still a value**"));
+        }
+
+        let plain =
+            ScriptCompletionProvider::for_plain_snippet(ScriptEditorPhase::PreRequest, variables);
+        let items = plain.completion_items_for_source(source, source.len());
+        assert_eq!(labels(items.clone()), ["api_token"]);
+        assert!(!completion_documentation(&items[0]).contains("Selected environment value"));
+        assert!(!completion_documentation(&items[0]).contains(rendered_value));
+        let hover = hover_at(&plain, hover_source, "api_token");
+        assert!(!hover_markdown(&hover).contains("Selected environment value"));
+        assert!(!hover_markdown(&hover).contains(rendered_value));
+
+        let repeated_set = concat!(
+            "api.environment.set(\"api_token\", firstValue);\n",
+            "api.environment.set(\"api_token\", secondValue);",
+        );
+        let provider = ScriptCompletionProvider::new(
+            ScriptEditorPhase::PostResponse,
+            ScriptVariableCatalog::from_environment_values(
+                [("api_token", "configured-token")],
+                std::iter::empty::<String>(),
+                std::iter::empty::<String>(),
+            )
+            .shared(),
+        );
+        let hover = hover_at(&provider, repeated_set, "api_token");
+        let markdown = hover_markdown(&hover);
+        assert!(markdown.contains("Selected environment value"));
+        assert!(markdown.contains("configured-token"));
+
+        let unset_then_read = concat!(
+            "api.environment.unset(\"api_token\");\n",
+            "api.environment.get(\"api_token\");",
+        );
+        let hover = hover_at(&provider, unset_then_read, "api_token");
+        let markdown = hover_markdown(&hover);
+        assert!(markdown.contains("Selected environment value"));
+        assert!(markdown.contains("configured-token"));
+    }
+
+    #[test]
+    fn variable_completion_applies_mutated_names_but_keeps_configured_values() {
+        let variables = ScriptVariableCatalog::from_environment_values(
+            [
+                ("api_token", "stored-secret"),
+                ("shared", "environment-value"),
+            ],
+            std::iter::empty::<String>(),
+            ["shared"],
+        )
+        .shared();
+        let provider = ScriptCompletionProvider::new(ScriptEditorPhase::PreRequest, variables);
+
+        let unset_environment = concat!(
+            "api.environment.unset(\"api_token\");\n",
+            "api.environment.get(\"api",
+        );
+        assert!(
+            provider
+                .completion_items_for_source(unset_environment, unset_environment.len())
+                .is_empty(),
+            "an unset environment key must no longer be offered",
+        );
+
+        let collection_fallback = concat!(
+            "api.environment.unset(\"shared\");\n",
+            "api.variables.get(\"sha",
+        );
+        let items =
+            provider.completion_items_for_source(collection_fallback, collection_fallback.len());
+        assert_eq!(labels(items.clone()), ["shared"]);
+        assert_eq!(items[0].detail.as_deref(), Some("collection variable"));
+        assert!(!completion_documentation(&items[0]).contains("environment-value"));
+
+        let created = concat!(
+            "api.environment.set(\"later\", \"created-in-script\");\n",
+            "api.environment.get(\"lat",
+        );
+        let items = provider.completion_items_for_source(created, created.len());
+        assert_eq!(labels(items.clone()), ["later"]);
+        assert_eq!(
+            items[0].detail.as_deref(),
+            Some("selected-environment variable")
+        );
+        assert!(!completion_documentation(&items[0]).contains("Selected environment value"));
+        assert!(!completion_documentation(&items[0]).contains("created-in-script"));
+
+        let overwritten = concat!(
+            "api.environment.set(\"api_token\", computeToken());\n",
+            "api.environment.get(\"api",
+        );
+        let items = provider.completion_items_for_source(overwritten, overwritten.len());
+        assert_eq!(labels(items.clone()), ["api_token"]);
+        let documentation = completion_documentation(&items[0]);
+        assert!(documentation.contains("Selected environment value"));
+        assert!(documentation.contains("stored-secret"));
     }
 
     #[test]

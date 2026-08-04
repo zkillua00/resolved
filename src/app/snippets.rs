@@ -183,7 +183,7 @@ impl ApiTester {
             CodeEditor::new(
                 CodeEditorConfig::default()
                     .language(CodeLanguage::JavaScript)
-                    .placeholder("Run the snippet to preview its generated JavaScript")
+                    .placeholder("Run preview to see the JavaScript this snippet will insert")
                     .rows(9)
                     .soft_wrap(false)
                     .read_only(true),
@@ -264,7 +264,7 @@ impl ApiTester {
                 .read_only(read_only)
                 .format_action(!read_only)
                 .placeholder(match kind {
-                    SnippetKind::Plain => "JavaScript inserted into the target script",
+                    SnippetKind::Plain => "JavaScript to add to the selected script",
                     SnippetKind::Executable => {
                         "return `console.log(${JSON.stringify(snippet.selection?.text ?? \"Hello\")})`;"
                     }
@@ -1091,17 +1091,12 @@ impl ApiTester {
                 this.snippet_editor.preview_running = false;
                 match result {
                     Ok(Ok(generated)) => {
-                        let status = format!(
-                            "Generated {} bytes in {:.1} ms",
-                            generated.text.len(),
-                            generated.report.duration.as_secs_f64() * 1_000.
-                        );
                         this.snippet_editor.preview_logs = generated.report.logs;
                         this.snippet_editor.preview_editor.update(cx, |editor, cx| {
                             editor.set_value(generated.text, window, cx);
                         });
                         this.snippet_editor.preview_valid = true;
-                        this.snippet_editor.preview_status = Some(status);
+                        this.snippet_editor.preview_status = Some("Preview ready".to_owned());
                     }
                     Ok(Err(error)) => {
                         this.snippet_editor.preview_valid = false;
@@ -1657,6 +1652,7 @@ impl ApiTester {
                 .value(cx)
                 .is_empty();
         let writable = self.workspace_writable;
+        let preview_help = snippet_preview_help(self.snippet_editor.category);
 
         v_flex()
             .size_full()
@@ -1771,9 +1767,9 @@ impl ApiTester {
                                                 }))
                                                 .child(
                                                     div().text_xs().child(if query.is_empty() {
-                                                        "Create one, then use it from any code editor context menu."
+                                                        "Create one, then right-click in an editor and choose it from Snippets."
                                                     } else {
-                                                        "Try a different name, description, or category."
+                                                        "Try a different name, description, or target."
                                                     }),
                                                 ),
                                         )
@@ -1871,7 +1867,7 @@ impl ApiTester {
                                             .child(snippet_step_header(
                                                 "4",
                                                 "Test the result",
-                                                "Preview with the active request, response, and any selection retained in the editors.",
+                                                preview_help,
                                                 cx,
                                             ))
                                             .child(
@@ -1897,7 +1893,7 @@ impl ApiTester {
                                                     )
                                                     .child(
                                                         Button::new("copy-snippet-preview")
-                                                            .label("Copy output")
+                                                            .label("Copy code")
                                                             .small()
                                                             .outline()
                                                             .disabled(preview_empty)
@@ -1946,7 +1942,7 @@ impl ApiTester {
                                                                 .child(if self.snippet_editor.preview_running {
                                                                     "Generating preview…"
                                                                 } else {
-                                                                    "Run preview to generate current output"
+                                                                    "Run preview to see what will be inserted"
                                                                 }),
                                                         )
                                                     }),
@@ -2029,7 +2025,7 @@ impl ApiTester {
             .child(snippet_step_header(
                 "1",
                 "Name the snippet",
-                "Names appear under Snippets in every compatible code-editor menu.",
+                "Names appear in the Snippets menu wherever the snippet can be used.",
                 cx,
             ))
             .child(
@@ -2070,7 +2066,7 @@ impl ApiTester {
             .child(snippet_step_header(
                 "2",
                 "Choose the target",
-                "The target controls both where generated code is inserted and which API namespace intelligence exposes.",
+                "Pre-request adds code to the script that runs before sending. Post-response adds code to the script that runs after a response arrives.",
                 cx,
             ))
             .child(
@@ -2115,21 +2111,6 @@ impl ApiTester {
                             }),
                     ),
             )
-            .child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(cx.theme().primary.opacity(0.25))
-                    .bg(cx.theme().primary.opacity(0.07))
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(snippet_namespace_summary(
-                        self.snippet_editor.category,
-                        self.snippet_editor.kind,
-                    )),
-            )
             .into_any_element()
     }
 
@@ -2141,27 +2122,27 @@ impl ApiTester {
             (
                 SnippetRequirement::HasResponse,
                 "Current response",
-                "Only available after a response exists.",
+                "Show only after a response arrives.",
             ),
             (
                 SnippetRequirement::HasSelection,
                 "Selected block",
-                "Requires selected text in the invoking editor.",
+                "Show only when text is selected.",
             ),
             (
                 SnippetRequirement::HasRequestSelection,
                 "Request selection",
-                "Requires a request body or pre-request selection.",
+                "Show only when text is selected in the request body or pre-request script.",
             ),
             (
                 SnippetRequirement::HasResponseSelection,
                 "Response selection",
-                "Requires a response body or post-response selection.",
+                "Show only when text is selected in the response body or post-response script.",
             ),
             (
                 SnippetRequirement::HasJsonSelection,
                 "Selected JSON value",
-                "Requires a selection that maps to a valid JSON path.",
+                "Show only when a value or field is selected in a JSON body.",
             ),
         ];
         let requirement_controls = requirements
@@ -2189,7 +2170,7 @@ impl ApiTester {
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child(if unavailable_for_phase {
-                                "Pre-request generators never receive api.response."
+                                "Responses are available only to post-response snippets."
                             } else {
                                 detail
                             }),
@@ -2202,7 +2183,7 @@ impl ApiTester {
             .child(snippet_step_header(
                 "3",
                 "Define the behavior",
-                "Plain snippets are inserted verbatim. Executable snippets run in a bounded JavaScript generator and return the code to insert.",
+                "Insert the code as written, or use JavaScript to build it when you choose the snippet.",
                 cx,
             ))
             .child(
@@ -2257,9 +2238,9 @@ impl ApiTester {
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
                                     .child(if self.snippet_editor.requirements.is_empty() {
-                                        "All matching contexts"
+                                        "No extra conditions"
                                     } else {
-                                        "Every selected condition is met"
+                                        "All selected conditions"
                                     }),
                             ),
                     )
@@ -2273,14 +2254,7 @@ impl ApiTester {
             SnippetKind::Plain => "Snippet JavaScript",
             SnippetKind::Executable => "Generator JavaScript",
         };
-        let detail = match self.snippet_editor.kind {
-            SnippetKind::Plain => {
-                "This code is inserted exactly as written and is checked against the selected target script API."
-            }
-            SnippetKind::Executable => {
-                "Return a string, return snippet.result(...), or call snippet.write(...). The generator has no network, filesystem, or mutation APIs."
-            }
-        };
+        let detail = snippet_source_help(self.snippet_editor.category, self.snippet_editor.kind);
         v_flex()
             .gap_2()
             .child(
@@ -2367,19 +2341,30 @@ fn snippet_category_order(category: SnippetCategory) -> u8 {
     }
 }
 
-fn snippet_namespace_summary(category: SnippetCategory, kind: SnippetKind) -> &'static str {
+fn snippet_source_help(category: SnippetCategory, kind: SnippetKind) -> &'static str {
     match (category, kind) {
         (SnippetCategory::PreRequest, SnippetKind::Plain) => {
-            "Pre-request target · intelligence includes the mutable pre-request script namespace (api.request, environment and variables)."
+            "This JavaScript is added to the pre-request script exactly as written."
         }
         (SnippetCategory::PostResponse, SnippetKind::Plain) => {
-            "Post-response target · intelligence additionally includes api.response, tests and assertions."
+            "This JavaScript is added to the post-response script exactly as written."
         }
         (SnippetCategory::PreRequest, SnippetKind::Executable) => {
-            "Pre-request generator · read-only api.request plus snippet.selection, snippet.write and snippet.result. api.response is intentionally absent."
+            "Use the current request and selected text, if any, to build the JavaScript that will be added."
         }
         (SnippetCategory::PostResponse, SnippetKind::Executable) => {
-            "Post-response generator · read-only api.request and nullable api.response plus snippet.selection, snippet.write and snippet.result."
+            "Use the current request, response, and selected text, if any, to build the JavaScript that will be added."
+        }
+    }
+}
+
+fn snippet_preview_help(category: SnippetCategory) -> &'static str {
+    match category {
+        SnippetCategory::PreRequest => {
+            "See the code this snippet will insert using the current request and selected text, if any."
+        }
+        SnippetCategory::PostResponse => {
+            "See the code this snippet will insert using the current request, response, and selected text, if any."
         }
     }
 }
@@ -2660,13 +2645,34 @@ mod tests {
     }
 
     #[test]
-    fn executable_namespace_copy_is_phase_accurate() {
-        let pre = snippet_namespace_summary(SnippetCategory::PreRequest, SnippetKind::Executable);
-        let post =
-            snippet_namespace_summary(SnippetCategory::PostResponse, SnippetKind::Executable);
-        assert!(pre.contains("api.response is intentionally absent"));
-        assert!(!pre.contains("nullable api.response"));
-        assert!(post.contains("nullable api.response"));
+    fn snippet_source_help_explains_the_available_context_in_plain_language() {
+        let pre = snippet_source_help(SnippetCategory::PreRequest, SnippetKind::Executable);
+        let post = snippet_source_help(SnippetCategory::PostResponse, SnippetKind::Executable);
+
+        assert_eq!(
+            pre,
+            "Use the current request and selected text, if any, to build the JavaScript that will be added."
+        );
+        assert_eq!(
+            post,
+            "Use the current request, response, and selected text, if any, to build the JavaScript that will be added."
+        );
+        assert_eq!(
+            snippet_source_help(SnippetCategory::PreRequest, SnippetKind::Plain),
+            "This JavaScript is added to the pre-request script exactly as written."
+        );
+        assert_eq!(
+            snippet_source_help(SnippetCategory::PostResponse, SnippetKind::Plain),
+            "This JavaScript is added to the post-response script exactly as written."
+        );
+        assert_eq!(
+            snippet_preview_help(SnippetCategory::PreRequest),
+            "See the code this snippet will insert using the current request and selected text, if any."
+        );
+        assert_eq!(
+            snippet_preview_help(SnippetCategory::PostResponse),
+            "See the code this snippet will insert using the current request, response, and selected text, if any."
+        );
     }
 
     #[test]

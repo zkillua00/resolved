@@ -511,12 +511,12 @@ pub(super) fn update_script_variable_catalog(
     catalog: &Rc<RefCell<ScriptVariableCatalog>>,
     workspace: &Workspace,
 ) {
-    let enabled_names = workspace
+    let enabled_variables = workspace
         .active_environment()
         .into_iter()
         .flat_map(|environment| environment.variables.iter())
         .filter(|variable| variable.enabled)
-        .map(|variable| variable.key.clone())
+        .map(|variable| (variable.key.clone(), variable.value.clone()))
         .collect::<Vec<_>>();
     let disabled_names = workspace
         .active_environment()
@@ -525,9 +525,11 @@ pub(super) fn update_script_variable_catalog(
         .filter(|variable| !variable.enabled)
         .map(|variable| variable.key.clone())
         .collect::<Vec<_>>();
-    catalog
-        .borrow_mut()
-        .replace(enabled_names, disabled_names, std::iter::empty::<String>());
+    catalog.borrow_mut().replace_with_environment_values(
+        enabled_variables,
+        disabled_names,
+        std::iter::empty::<String>(),
+    );
 }
 
 pub(super) fn template_input_state(
@@ -617,6 +619,22 @@ mod tests {
     use super::*;
     use crate::template_intelligence::TemplateVariable;
 
+    fn variable_completion_documentation(
+        provider: &ScriptCompletionProvider,
+        source: &str,
+    ) -> String {
+        let item = provider
+            .completion_items_for_source(source, source.len())
+            .into_iter()
+            .next()
+            .expect("expected environment-variable completion");
+        match item.documentation {
+            Some(lsp_types::Documentation::String(documentation)) => documentation,
+            Some(lsp_types::Documentation::MarkupContent(markup)) => markup.value,
+            None => panic!("expected environment-variable documentation"),
+        }
+    }
+
     fn catalog() -> TemplateVariableCatalog {
         TemplateVariableCatalog::from_parts(
             Some("env-1".to_owned()),
@@ -681,6 +699,59 @@ mod tests {
         .unwrap();
         assert_eq!(missing.initial_value, "");
         assert_eq!(missing.action, TemplateVariableAction::Create);
+    }
+
+    #[test]
+    fn workspace_refreshes_values_for_script_editors_but_not_plain_snippets() {
+        let mut workspace = Workspace::default();
+        let environment_id = workspace.create_environment("Development").unwrap();
+        let variable_id = workspace
+            .add_environment_variable(&environment_id, "api_token", "first-secret", true, true)
+            .unwrap();
+        workspace
+            .add_environment_variable(
+                &environment_id,
+                "disabled_token",
+                "disabled-secret",
+                false,
+                true,
+            )
+            .unwrap();
+        workspace
+            .set_active_environment(Some(&environment_id))
+            .unwrap();
+
+        let catalog = ScriptVariableCatalog::default().shared();
+        update_script_variable_catalog(&catalog, &workspace);
+        let script =
+            ScriptCompletionProvider::new(ScriptEditorPhase::PreRequest, Rc::clone(&catalog));
+        let plain = ScriptCompletionProvider::for_plain_snippet(
+            ScriptEditorPhase::PreRequest,
+            Rc::clone(&catalog),
+        );
+        let source = r#"api.environment.get("api"#;
+
+        assert!(variable_completion_documentation(&script, source).contains("first-secret"));
+        assert!(!variable_completion_documentation(&plain, source).contains("first-secret"));
+
+        workspace
+            .update_environment_variable(
+                &environment_id,
+                &variable_id,
+                "api_token",
+                "second-secret",
+                true,
+                true,
+            )
+            .unwrap();
+        update_script_variable_catalog(&catalog, &workspace);
+
+        let script_documentation = variable_completion_documentation(&script, source);
+        assert!(script_documentation.contains("second-secret"));
+        assert!(!script_documentation.contains("first-secret"));
+        let plain_documentation = variable_completion_documentation(&plain, source);
+        assert!(!plain_documentation.contains("second-secret"));
+        assert!(!plain_documentation.contains("disabled-secret"));
     }
 
     #[test]
