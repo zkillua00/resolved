@@ -1680,48 +1680,41 @@ impl ApiTester {
                     .min_h_0()
                     .child(
                         v_flex()
-                            .w(px(310.))
+                            .w(px(288.))
                             .h_full()
                             .flex_shrink_0()
                             .border_r_1()
-                            .border_color(cx.api_outline_variant())
+                            .border_color(cx.theme().sidebar_border)
                             .bg(cx.api_surface_low())
                             .child(
-                                v_flex()
-                                    .gap_3()
-                                    .p_3()
+                                h_flex()
+                                    .h(px(56.))
+                                    .px_4()
+                                    .flex_shrink_0()
+                                    .justify_between()
                                     .border_b_1()
-                                    .border_color(cx.api_outline_variant())
+                                    .border_color(cx.theme().sidebar_border)
+                                    .child(div().text_base().font_semibold().child("Snippets"))
                                     .child(
                                         h_flex()
-                                            .justify_between()
+                                            .items_center()
+                                            .gap_2()
                                             .child(
-                                                v_flex()
-                                                    .gap_0p5()
-                                                    .child(
-                                                        div()
-                                                            .text_sm()
-                                                            .font_semibold()
-                                                            .child("Library"),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_xs()
-                                                            .text_color(
-                                                                cx.theme().muted_foreground,
-                                                            )
-                                                            .child(format!(
-                                                                "{} saved",
-                                                                self.workspace.snippets.len()
-                                                            )),
-                                                    ),
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(format!(
+                                                        "{} saved",
+                                                        self.workspace.snippets.len()
+                                                    )),
                                             )
                                             .child(
                                                 Button::new("new-snippet")
                                                     .icon(IconName::Plus)
-                                                    .label("New")
                                                     .small()
-                                                    .primary()
+                                                    .ghost()
+                                                    .rounded_full()
+                                                    .tooltip("New snippet")
                                                     .disabled(!writable)
                                                     .on_click(move |_, window, cx| {
                                                         if let Some(this) = new_this.upgrade() {
@@ -1731,11 +1724,21 @@ impl ApiTester {
                                                         }
                                                     }),
                                             ),
-                                    )
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .h(px(56.))
+                                    .px_3()
+                                    .flex_shrink_0()
+                                    .border_b_1()
+                                    .border_color(cx.theme().sidebar_border)
                                     .child(
-                                        Input::new(&self.snippet_editor.search)
-                                            .prefix(IconName::Search)
-                                            .cleanable(true),
+                                        div().flex_1().min_w_0().child(
+                                            Input::new(&self.snippet_editor.search)
+                                                .prefix(IconName::Search)
+                                                .cleanable(true),
+                                        ),
                                     ),
                             )
                             .child(
@@ -1962,60 +1965,88 @@ impl ApiTester {
         let id = snippet.id.clone();
         let description =
             (!snippet.description.is_empty()).then(|| compact_label(&snippet.description, 54));
-        v_flex()
+        let leading_icon_color = if selected {
+            cx.api_primary_bright()
+        } else {
+            cx.theme().muted_foreground
+        };
+        div()
             .id(SharedString::from(format!("snippet-row-{}", snippet.id)))
             .w_full()
-            .gap_1p5()
-            .px_3()
-            .py_2p5()
-            .rounded_lg()
+            .flex()
             .cursor_pointer()
-            .border_1()
-            .border_color(if selected {
-                cx.theme().primary.opacity(0.45)
-            } else {
-                cx.api_outline_variant()
-            })
-            .bg(if selected {
-                cx.theme().primary.opacity(0.10)
-            } else {
-                cx.api_surface()
-            })
-            .hover(|style| style.bg(cx.api_surface_container()))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.request_select_snippet(id.clone(), window, cx);
             }))
             .child(
                 h_flex()
                     .w_full()
-                    .justify_between()
+                    .flex_1()
                     .gap_2()
+                    .px_2()
+                    .rounded_md()
+                    .when(selected, |this| this.bg(cx.theme().sidebar_accent))
+                    .hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.62)))
                     .child(
                         div()
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .child(
+                                Icon::new(IconName::CaseSensitive)
+                                    .small()
+                                    .text_color(leading_icon_color),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
                             .min_w_0()
                             .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_sm()
-                            .font_semibold()
-                            .child(snippet.name.clone()),
-                    )
-                    .child(snippet_badge(snippet.kind.label(), cx.theme().info)),
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_sm()
+                                    .font_semibold()
+                                    .child(snippet.name.clone()),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .whitespace_nowrap()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(snippet.category.label()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("·"),
+                                    )
+                                    .child(
+                                        div()
+                                            .whitespace_nowrap()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(snippet.kind.label()),
+                                    ),
+                            )
+                            .when_some(description, |this, description| {
+                                this.child(
+                                    div()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(description),
+                                )
+                            }),
+                    ),
             )
-            .child(snippet_badge(
-                snippet.category.label(),
-                match snippet.category {
-                    SnippetCategory::PreRequest => cx.theme().success,
-                    SnippetCategory::PostResponse => cx.theme().warning,
-                },
-            ))
-            .when_some(description, |this, description| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(description),
-                )
-            })
             .into_any_element()
     }
 
@@ -2418,21 +2449,6 @@ fn snippet_field_label(
         .when(required, |this| {
             this.child(div().text_color(cx.theme().danger).child("*"))
         })
-        .into_any_element()
-}
-
-fn snippet_badge(label: impl Into<SharedString>, color: Hsla) -> AnyElement {
-    div()
-        .px_1p5()
-        .py_0p5()
-        .rounded_md()
-        .bg(color.opacity(0.12))
-        .border_1()
-        .border_color(color.opacity(0.22))
-        .text_size(px(10.))
-        .font_semibold()
-        .text_color(color)
-        .child(label.into())
         .into_any_element()
 }
 

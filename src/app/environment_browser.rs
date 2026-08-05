@@ -39,11 +39,12 @@ impl ApiTester {
                 div()
                     .id(context_scope_id)
                     .w_full()
+                    .flex()
                     .child(
                         h_flex()
                             .id(("environment-browser-row", index))
                             .group(group_id.clone())
-                            .w_full()
+                            .flex_1()
                             .h(px(52.))
                             .px_2()
                             .gap_2()

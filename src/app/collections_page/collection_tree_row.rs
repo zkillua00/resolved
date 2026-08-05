@@ -31,7 +31,7 @@ impl ApiTester {
         let row = h_flex()
             .id(("collection-tree-row", collection_index))
             .relative()
-            .w_full()
+            .flex_1()
             .h(px(38.))
             .px_1()
             .gap_1()
@@ -174,6 +174,7 @@ impl ApiTester {
         div()
             .id(("collection-context-menu-scope", collection_index))
             .w_full()
+            .flex()
             .child(row)
             .into_any_element()
     }
