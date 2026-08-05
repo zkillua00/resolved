@@ -122,6 +122,7 @@ impl Render for DragPreview {
                     .shadow_lg()
                     .text_sm()
                     .font_medium()
+                    .text_color(cx.theme().foreground)
                     .child(self.label.clone()),
             )
     }
