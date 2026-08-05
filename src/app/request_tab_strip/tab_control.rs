@@ -9,6 +9,7 @@ pub(super) struct WorkspaceTabControl {
     dirty: bool,
     accent: Option<Hsla>,
     closable: bool,
+    pane_id: Option<PaneId>,
     row_debug_selector: Option<&'static str>,
     drag_debug_selector: Option<&'static str>,
 }
@@ -27,9 +28,17 @@ impl WorkspaceTabControl {
             icon: None,
             dirty: false,
             accent: None,
+            pane_id: None,
             row_debug_selector: None,
             drag_debug_selector: None,
         }
+    }
+
+    /// Associate this tab control with the pane whose strip hosts it so that
+    /// reordering is scoped to that pane.
+    pub(super) fn pane_opt(mut self, pane_id: Option<PaneId>) -> Self {
+        self.pane_id = pane_id;
+        self
     }
 
     pub(super) fn icon(mut self, icon: IconName) -> Self {
@@ -208,7 +217,7 @@ impl WorkspaceTabControl {
                 )
             })
             .when(can_reorder, |this| {
-                this.child(render_workspace_tab_drop_overlay(drop_target, cx))
+                this.child(render_workspace_tab_drop_overlay(drop_target, self.pane_id, cx))
             })
             .into_any_element()
     }

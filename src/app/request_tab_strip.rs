@@ -26,14 +26,26 @@ pub(in crate::app) enum RequestTabContextTarget {
 
 impl ApiTester {
     pub(super) fn render_request_tab_strip(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tabs = self.workspace_tabs.visible_tabs(&self.request_tabs);
+        self.render_request_tab_strip_with(&tabs, None, cx)
+    }
+
+    pub(super) fn render_request_tab_strip_with(
+        &self,
+        tabs: &[WorkspaceTab],
+        pane_id: Option<PaneId>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mut elements = Vec::new();
         let mut rendered_group_ids = HashSet::new();
 
-        for workspace_tab in self.workspace_tabs.visible_tabs(&self.request_tabs) {
+        for workspace_tab in tabs {
             match workspace_tab {
-                WorkspaceTab::Welcome => elements.push(render_welcome_tab(self, cx)),
+                WorkspaceTab::Welcome => {
+                    elements.push(render_welcome_tab(self, pane_id, cx))
+                }
                 WorkspaceTab::Request(tab_id) => {
-                    let Some(tab) = self.request_tabs.get(&tab_id) else {
+                    let Some(tab) = self.request_tabs.get(tab_id) else {
                         continue;
                     };
                     let group = tab
@@ -45,11 +57,16 @@ impl ApiTester {
                         elements.push(render_request_tab_group(self, group, cx));
                     }
                     if !group.is_some_and(RequestTabGroup::is_collapsed) {
-                        elements.push(render_request_tab(self, tab, cx));
+                        elements.push(render_request_tab(self, tab, pane_id, cx));
                     }
                 }
                 WorkspaceTab::Tool(tool) => {
-                    elements.push(render_workspace_tool_tab(self, tool, cx));
+                    elements.push(render_workspace_tool_tab(
+                        self,
+                        tool.clone(),
+                        pane_id,
+                        cx,
+                    ));
                 }
             }
         }

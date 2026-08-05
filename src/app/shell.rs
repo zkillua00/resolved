@@ -4,81 +4,6 @@ impl Render for ApiTester {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.debug_overlay.read(cx).record_ui_frame();
         let app_style = cx.api_theme().classes.app.clone();
-        let active_workspace_tab = self.workspace_tabs.active();
-        let show_workspace_tab_strip = active_workspace_tab != ActiveWorkspaceTab::Request
-            || self.sidebar_tab != SidebarTab::Environments;
-
-        let workspace = match active_workspace_tab {
-            ActiveWorkspaceTab::Welcome => div()
-                .size_full()
-                .min_h_0()
-                .child(self.render_welcome_page(cx))
-                .into_any_element(),
-            // The open Snippets and Settings surfaces are rendered separately
-            // below so their GPUI element state survives while another
-            // workspace tab is active.
-            ActiveWorkspaceTab::Snippets => div().hidden().into_any_element(),
-            ActiveWorkspaceTab::Settings => div().hidden().into_any_element(),
-            ActiveWorkspaceTab::ThemeCss => div()
-                .size_full()
-                .min_h_0()
-                .child(self.render_theme_css_workspace(cx))
-                .into_any_element(),
-            ActiveWorkspaceTab::Request if self.sidebar_tab == SidebarTab::Environments => {
-                self.render_environment_workspace(cx)
-            }
-            ActiveWorkspaceTab::Request => div()
-                .size_full()
-                .min_h_0()
-                .child(
-                    h_resizable("workspace-split")
-                        .child(
-                            resizable_panel()
-                                .size(px(360.))
-                                .size_range(px(320.)..px(480.))
-                                .child(self.render_sidebar(cx)),
-                        )
-                        .child(
-                            resizable_panel().child(
-                                v_flex().size_full().min_h_0().child(
-                                    v_resizable("request-response-split")
-                                        .child(
-                                            resizable_panel()
-                                                .size(px(480.))
-                                                .size_range(px(360.)..px(900.))
-                                                .child(self.render_request_panel(cx)),
-                                        )
-                                        .child(
-                                            resizable_panel()
-                                                .size_range(px(240.)..px(1_400.))
-                                                .child(self.render_response_panel(cx)),
-                                        ),
-                                ),
-                            ),
-                        ),
-                )
-                .into_any_element(),
-        };
-        let snippets_workspace = self.workspace_tabs.snippets_open().then(|| {
-            div()
-                .size_full()
-                .min_h_0()
-                .when(
-                    active_workspace_tab != ActiveWorkspaceTab::Snippets,
-                    |this| this.hidden(),
-                )
-                .child(self.render_snippets_workspace(cx))
-        });
-        let settings_workspace = self.workspace_tabs.settings_open().then(|| {
-            div()
-                .size_full()
-                .min_h_0()
-                .when(
-                    active_workspace_tab != ActiveWorkspaceTab::Settings,
-                    |this| this.hidden(),
-                )
-                .child(self.render_settings_workspace(cx))
-        });
 
         v_flex()
             .size_full()
@@ -110,19 +35,7 @@ impl Render for ApiTester {
                             .flex_1()
                             .min_w_0()
                             .overflow_hidden()
-                            .children(
-                                show_workspace_tab_strip.then(|| self.render_request_tab_strip(cx)),
-                            )
-                            .child(
-                                div()
-                                    .relative()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .overflow_hidden()
-                                    .child(workspace)
-                                    .children(snippets_workspace)
-                                    .children(settings_workspace),
-                            )
+                            .child(self.render_workspace_panes(cx))
                             .child(self.debug_overlay.clone()),
                     ),
             )

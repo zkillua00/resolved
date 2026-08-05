@@ -328,6 +328,15 @@ impl ApiTester {
             }
         }
         let workspace_tabs = WorkspaceTabs::from_request_tabs(&request_tabs);
+        let active_workspace_tab = workspace_tabs.active_tab(&request_tabs);
+        let visible_workspace_tabs = workspace_tabs.visible_tabs(&request_tabs);
+        let panes = PaneRoot::from_tabs(
+            visible_workspace_tabs.clone(),
+            visible_workspace_tabs
+                .iter()
+                .position(|tab| *tab == active_workspace_tab)
+                .unwrap_or(0),
+        );
 
         let selected_collection_id = request_tabs
             .active()
@@ -589,6 +598,7 @@ impl ApiTester {
             request_tabs_writable,
             request_tab_context_target: None,
             workspace_tabs,
+            panes,
             settings,
             settings_warning,
             settings_writable,

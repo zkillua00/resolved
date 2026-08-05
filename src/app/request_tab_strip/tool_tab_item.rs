@@ -4,6 +4,7 @@ use super::tab_control::WorkspaceTabControl;
 pub(super) fn render_workspace_tool_tab(
     app: &ApiTester,
     tool: WorkspaceToolTab,
+    pane_id: Option<PaneId>,
     cx: &mut Context<ApiTester>,
 ) -> AnyElement {
     let (row_id, drag_selector, title, icon, dirty) = match &tool {
@@ -35,6 +36,7 @@ pub(super) fn render_workspace_tool_tab(
         matches!(&tool, WorkspaceToolTab::Settings).then_some("workspace-settings-tab");
 
     WorkspaceTabControl::new(WorkspaceTab::Tool(tool), row_id, title)
+        .pane_opt(pane_id)
         .icon(icon)
         .dirty(dirty)
         .debug_selectors(row_debug_selector, Some(drag_selector))

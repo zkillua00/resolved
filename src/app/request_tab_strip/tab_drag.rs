@@ -4,6 +4,7 @@ use super::super::*;
 fn render_workspace_tab_drop_zone(
     target: WorkspaceTab,
     placement: DropPlacement,
+    pane_id: Option<PaneId>,
     cx: &mut Context<ApiTester>,
 ) -> AnyElement {
     let placement_label = match placement {
@@ -38,6 +39,7 @@ fn render_workspace_tab_drop_zone(
                 drag.tab.clone(),
                 drop_target.clone(),
                 placement,
+                pane_id,
                 cx,
             );
         }))
@@ -46,6 +48,7 @@ fn render_workspace_tab_drop_zone(
 
 pub(super) fn render_workspace_tab_drop_overlay(
     target: WorkspaceTab,
+    pane_id: Option<PaneId>,
     cx: &mut Context<ApiTester>,
 ) -> AnyElement {
     let before_target = target.clone();
@@ -58,11 +61,13 @@ pub(super) fn render_workspace_tab_drop_overlay(
         .child(render_workspace_tab_drop_zone(
             before_target,
             DropPlacement::Before,
+            pane_id,
             cx,
         ))
         .child(render_workspace_tab_drop_zone(
             target,
             DropPlacement::After,
+            pane_id,
             cx,
         ))
         .into_any_element()
@@ -88,23 +93,32 @@ fn workspace_tab_dom_key(tab: &WorkspaceTab) -> String {
 }
 
 impl ApiTester {
-    fn reorder_workspace_tab_from_drop(
+    pub(super) fn reorder_workspace_tab_from_drop(
         &mut self,
         dragged: WorkspaceTab,
         target: WorkspaceTab,
         placement: DropPlacement,
+        pane_id: Option<PaneId>,
         cx: &mut Context<Self>,
     ) {
         if self.sending || dragged == target || placement == DropPlacement::Inside {
             return;
         }
 
+        // When the drop happens in a specific pane, reorder within that pane's
+        // tab list. The shared (single-pane) strip still mirrors
+        // `workspace_tabs` for backward compatibility.
+        let within_pane = pane_id.is_some_and(|pane_id| {
+            self.panes
+                .reorder_within_pane(pane_id, &dragged, &target, placement == DropPlacement::After)
+        });
         if !self.workspace_tabs.reorder_tab(
             &self.request_tabs,
             &dragged,
             &target,
             placement == DropPlacement::After,
-        ) {
+        ) && !within_pane
+        {
             return;
         }
 
@@ -116,6 +130,92 @@ impl ApiTester {
         };
         if request_order_changed {
             self.persist_request_tabs_now(cx);
+        }
+        cx.notify();
+    }
+
+    /// Create a new split adjacent to `target_pane_id` and place the dragged
+    /// tab into the freshly created pane.
+    pub(in crate::app) fn on_workspace_tab_split(
+        &mut self,
+        drag: &WorkspaceTabDrag,
+        target_pane_id: PaneId,
+        direction: SplitDirection,
+        after: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sending {
+            return;
+        }
+        if let Some(source_pane_id) = self.panes.pane_for_tab(&drag.tab)
+            && source_pane_id == target_pane_id
+            && !self.panes.is_single_leaf()
+        {
+            return;
+        }
+        let Ok(new_pane_id) = self.panes.split_off_pane(target_pane_id, direction, after) else {
+            return;
+        };
+        if let Some(source_pane_id) = self.panes.pane_for_tab(&drag.tab) {
+            self.panes
+                .move_tab_between_panes(&drag.tab, source_pane_id, new_pane_id, 0);
+        } else if let Some(pane) = self.panes.pane_mut(new_pane_id) {
+            pane.insert_or_activate(drag.tab.clone());
+        }
+        self.sync_workspace_tabs_from_panes(cx);
+        cx.notify();
+    }
+
+    /// Move the dragged tab into `target_pane_id` at `index`.
+    pub(in crate::app) fn on_workspace_tab_move(
+        &mut self,
+        drag: &WorkspaceTabDrag,
+        target_pane_id: PaneId,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sending {
+            return;
+        }
+        let Some(source_pane_id) = self.panes.pane_for_tab(&drag.tab) else {
+            return;
+        };
+        if source_pane_id == target_pane_id {
+            return;
+        }
+        if self.panes.move_tab_between_panes(&drag.tab, source_pane_id, target_pane_id, index) {
+            self.sync_workspace_tabs_from_panes(cx);
+        }
+        cx.notify();
+    }
+
+    /// Reconcile the singleton `workspace_tabs` view so the active surface and
+    /// tool open/close flags track the pane tree after a move or split.
+    fn sync_workspace_tabs_from_panes(&mut self, cx: &mut Context<Self>) {
+        let tabs = self.panes.active_tabs();
+        let open_now = |tool: &WorkspaceToolTab| -> bool {
+            tabs.iter().any(|tab| tab == &WorkspaceTab::Tool(tool.clone()))
+        };
+        if !open_now(&WorkspaceToolTab::Snippets) {
+            let _ = self.workspace_tabs.close_tool(&WorkspaceToolTab::Snippets);
+        }
+        if !open_now(&WorkspaceToolTab::Settings) {
+            let _ = self.workspace_tabs.close_tool(&WorkspaceToolTab::Settings);
+        }
+        let active = self.workspace_tabs.active_tab(&self.request_tabs);
+        if self.panes.pane_for_tab(&active).is_none() {
+            let fallback = tabs.first().cloned();
+            match fallback {
+                Some(WorkspaceTab::Request(tab_id)) => {
+                    self.workspace_tabs.activate_request();
+                    let _ = self.request_tabs.activate(&tab_id);
+                }
+                Some(WorkspaceTab::Welcome) => {
+                    let _ = self.workspace_tabs.activate_welcome();
+                }
+                Some(WorkspaceTab::Tool(tool)) => self.workspace_tabs.open_tool(tool),
+                None => {}
+            }
         }
         cx.notify();
     }
