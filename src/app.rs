@@ -90,6 +90,8 @@ mod execution_stage;
 mod headers_editor;
 mod history_page;
 mod navigation_rail;
+mod pane_editor;
+mod pane_tree;
 mod pending_delete;
 mod persistence;
 mod request_actions;
@@ -127,10 +129,13 @@ mod ui_utils;
 mod welcome_page;
 mod workspace_tab;
 mod workspace_tab_actions;
+mod workspace_panes;
 
 use environment_variable_grid::EnvironmentVariableRow;
 use execution_stage::*;
 use headers_editor::HeaderRow;
+use pane_editor::*;
+use pane_tree::*;
 use pending_delete::*;
 use request_pane::*;
 use request_tab_runtime::*;
@@ -253,6 +258,8 @@ pub struct ApiTester {
     request_tabs_writable: bool,
     request_tab_context_target: Option<request_tab_strip::RequestTabContextTarget>,
     workspace_tabs: WorkspaceTabs,
+    panes: PaneRoot,
+    pane_editors: HashMap<PaneId, PaneEditorState>,
     settings: AppSettings,
     settings_warning: Option<String>,
     settings_writable: bool,
