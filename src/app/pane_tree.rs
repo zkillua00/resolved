@@ -82,7 +82,9 @@ impl Pane {
     }
 
     pub(super) fn active_tab(&self) -> Option<WorkspaceTab> {
-        self.tabs.get(self.active_index).map(|entry| entry.tab.clone())
+        self.tabs
+            .get(self.active_index)
+            .map(|entry| entry.tab.clone())
     }
 
     fn push_tab(&mut self, tab: WorkspaceTab) {
@@ -177,6 +179,96 @@ impl PaneRoot {
             .collect()
     }
 
+    /// Reconcile pane membership with the tabs that are currently open.
+    ///
+    /// The workspace tab model remains the authority for open/closed tabs,
+    /// while this tree owns their pane placement. This keeps those two models
+    /// aligned after ordinary tab actions (open, close, Welcome replacement)
+    /// that do not otherwise mutate the split tree.
+    pub(super) fn reconcile_open_tabs(
+        &mut self,
+        open_tabs: &[WorkspaceTab],
+        active_tab: &WorkspaceTab,
+    ) -> bool {
+        if let Self::Leaf(pane) = self {
+            let desired = open_tabs
+                .iter()
+                .cloned()
+                .map(|tab| PaneTab { tab })
+                .collect::<Vec<_>>();
+            let active_index = open_tabs
+                .iter()
+                .position(|tab| tab == active_tab)
+                .unwrap_or(0);
+            if pane.tabs == desired && pane.active_index == active_index {
+                return false;
+            }
+            pane.tabs = desired;
+            pane.active_index = active_index;
+            pane.clamp_active();
+            return true;
+        }
+
+        let open = open_tabs.iter().collect::<std::collections::HashSet<_>>();
+        let mut changed = false;
+        let mut removed_tabs = false;
+        let mut vacated_panes = Vec::new();
+        for pane in self.panes_mut() {
+            let previous_active = pane.active_tab();
+            let previous_len = pane.tabs.len();
+            pane.tabs.retain(|entry| open.contains(&entry.tab));
+            if pane.tabs.len() != previous_len {
+                changed = true;
+                removed_tabs = true;
+                if pane.tabs.is_empty() {
+                    vacated_panes.push(pane.id);
+                }
+            }
+            pane.active_index = previous_active
+                .and_then(|tab| pane.tabs.iter().position(|entry| entry.tab == tab))
+                .unwrap_or(0);
+            pane.clamp_active();
+        }
+
+        let existing = self
+            .active_tabs()
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        let missing = open_tabs
+            .iter()
+            .filter(|tab| !existing.contains(*tab))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            let target_id = vacated_panes
+                .first()
+                .copied()
+                .or_else(|| self.pane_for_tab(active_tab))
+                .or_else(|| self.panes().first().map(|pane| pane.id));
+            if let Some(target_id) = target_id
+                && let Some(pane) = self.pane_mut(target_id)
+            {
+                for tab in missing {
+                    pane.push_tab(tab);
+                }
+                changed = true;
+            }
+        }
+
+        if let Some(pane_id) = self.pane_for_tab(active_tab)
+            && let Some(pane) = self.pane_mut(pane_id)
+            && let Some(index) = pane.tabs.iter().position(|entry| &entry.tab == active_tab)
+            && pane.active_index != index
+        {
+            pane.active_index = index;
+            changed = true;
+        }
+        if removed_tabs {
+            self.remove_empty_panes();
+        }
+        changed
+    }
+
     /// Ensure no request id and no tool singleton is duplicated across panes.
     #[cfg(test)]
     pub(super) fn validate_tab_uniqueness(&self) -> bool {
@@ -204,7 +296,8 @@ impl PaneRoot {
             if pane.id != pane_id {
                 continue;
             }
-            let Some(source_index) = pane.tabs.iter().position(|entry| &entry.tab == dragged) else {
+            let Some(source_index) = pane.tabs.iter().position(|entry| &entry.tab == dragged)
+            else {
                 return false;
             };
             if !pane.tabs.iter().any(|entry| &entry.tab == target) {
@@ -226,11 +319,7 @@ impl PaneRoot {
             }
             pane.tabs = tabs;
             pane.active_index = active_tab
-                .and_then(|tab| {
-                    pane.tabs
-                        .iter()
-                        .position(|entry| entry.tab == tab)
-                })
+                .and_then(|tab| pane.tabs.iter().position(|entry| entry.tab == tab))
                 .unwrap_or(0);
             pane.clamp_active();
             return true;
@@ -279,7 +368,12 @@ impl PaneRoot {
                     return false;
                 }
                 let index = index.min(pane.tabs.len());
-                pane.tabs.insert(index, PaneTab { tab: dragged.clone() });
+                pane.tabs.insert(
+                    index,
+                    PaneTab {
+                        tab: dragged.clone(),
+                    },
+                );
                 if pane.tabs.len() == 1 {
                     pane.active_index = 0;
                 } else if index <= pane.active_index {
@@ -295,6 +389,29 @@ impl PaneRoot {
 
         self.remove_empty_panes();
         true
+    }
+
+    /// Remove `tab` from the pane `pane_id` without collapsing the tree.
+    ///
+    /// Used when moving the single tab of a freshly split pane: the creator
+    /// intentionally asked for two panes, so an empty source pane is kept
+    /// instead of being collapsed away.
+    pub(super) fn remove_tab_from_pane(&mut self, tab: &WorkspaceTab, pane_id: PaneId) -> bool {
+        for pane in self.panes_mut() {
+            if pane.id != pane_id {
+                continue;
+            }
+            let Some(position) = pane.tabs.iter().position(|entry| &entry.tab == tab) else {
+                return false;
+            };
+            pane.tabs.remove(position);
+            if pane.active_index >= position && pane.active_index > 0 {
+                pane.active_index -= 1;
+            }
+            pane.clamp_active();
+            return true;
+        }
+        false
     }
 
     /// Replace the anchor leaf with a split container holding the anchor pane
@@ -398,8 +515,7 @@ fn split_into(
                 if found.is_some() {
                     continue;
                 }
-                let replaced =
-                    std::mem::replace(child, PaneRoot::new_leaf());
+                let replaced = std::mem::replace(child, PaneRoot::new_leaf());
                 let (rebuilt, id) = split_into(replaced, anchor, direction, after);
                 *child = rebuilt;
                 found = id;
@@ -424,7 +540,10 @@ fn normalize(root: PaneRoot) -> PaneRoot {
             match children.len() {
                 0 => PaneRoot::new_leaf(),
                 1 => children.pop().expect("one child"),
-                _ => PaneRoot::Split(Box::new(Split { direction, children })),
+                _ => PaneRoot::Split(Box::new(Split {
+                    direction,
+                    children,
+                })),
             }
         }
     }
@@ -433,8 +552,8 @@ fn normalize(root: PaneRoot) -> PaneRoot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::RequestTabId;
     use crate::app::workspace_tab::WorkspaceToolTab;
+    use crate::core::RequestTabId;
 
     fn tab(request: &RequestTabId) -> WorkspaceTab {
         WorkspaceTab::Request(request.clone())
@@ -582,5 +701,69 @@ mod tests {
         assert!(root.close_tab(&tab(&a)));
         assert_eq!(root.active_tabs(), vec![WorkspaceTab::Welcome]);
         assert!(!root.close_tab(&tab(&a)));
+    }
+
+    #[test]
+    fn splitting_out_the_only_tab_keeps_an_empty_source_pane() {
+        let a = RequestTabId::new();
+        let mut root = single(&a);
+        let anchor = root.panes()[0].id();
+        let new_id = root
+            .split_off_pane(anchor, SplitDirection::Vertical, true)
+            .expect("split");
+        assert!(root.remove_tab_from_pane(&tab(&a), anchor));
+        assert!(root.pane_mut(new_id).is_some());
+        // An empty source pane survives: the user explicitly split, so the tree
+        // must not collapse back to a single pane.
+        assert!(!root.is_single_leaf());
+        assert_eq!(root.len(), 2);
+        assert_eq!(
+            root.pane(anchor)
+                .and_then(|pane| pane.tabs().first().cloned()),
+            None
+        );
+        assert!(!root.remove_tab_from_pane(&tab(&a), anchor));
+    }
+
+    #[test]
+    fn moving_a_split_tab_back_to_its_original_pane_collapses_the_split() {
+        let a = RequestTabId::new();
+        let b = RequestTabId::new();
+        let mut root = PaneRoot::from_tabs(vec![tab(&a), tab(&b)], 0);
+        let original = root.panes()[0].id();
+        let split = root
+            .split_off_pane(original, SplitDirection::Vertical, true)
+            .expect("split");
+        assert!(root.move_tab_between_panes(&tab(&b), original, split, 0));
+        assert_eq!(root.len(), 2);
+
+        assert!(root.move_tab_between_panes(&tab(&b), split, original, 1));
+        assert!(root.is_single_leaf());
+        assert_eq!(root.active_tabs(), vec![tab(&a), tab(&b)]);
+    }
+
+    #[test]
+    fn reconciling_closed_tabs_collapses_empty_panes_and_keeps_new_tabs_reachable() {
+        let a = RequestTabId::new();
+        let b = RequestTabId::new();
+        let replacement = RequestTabId::new();
+        let mut root = PaneRoot::from_tabs(vec![tab(&a), tab(&b)], 0);
+        let original = root.panes()[0].id();
+        let split = root
+            .split_off_pane(original, SplitDirection::Vertical, true)
+            .expect("split");
+        assert!(root.move_tab_between_panes(&tab(&b), original, split, 0));
+
+        assert!(root.reconcile_open_tabs(&[tab(&a)], &tab(&a)));
+        assert!(root.is_single_leaf());
+        assert_eq!(root.active_tabs(), vec![tab(&a)]);
+
+        assert!(root.reconcile_open_tabs(&[tab(&a), tab(&replacement)], &tab(&replacement),));
+        assert_eq!(root.active_tabs(), vec![tab(&a), tab(&replacement)]);
+        assert_eq!(
+            root.panes()[0].active_tab(),
+            Some(tab(&replacement)),
+            "a newly opened active tab must be assigned to a live pane",
+        );
     }
 }

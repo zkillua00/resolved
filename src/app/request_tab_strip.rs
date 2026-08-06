@@ -41,9 +41,7 @@ impl ApiTester {
 
         for workspace_tab in tabs {
             match workspace_tab {
-                WorkspaceTab::Welcome => {
-                    elements.push(render_welcome_tab(self, pane_id, cx))
-                }
+                WorkspaceTab::Welcome => elements.push(render_welcome_tab(self, pane_id, cx)),
                 WorkspaceTab::Request(tab_id) => {
                     let Some(tab) = self.request_tabs.get(tab_id) else {
                         continue;
@@ -61,17 +59,15 @@ impl ApiTester {
                     }
                 }
                 WorkspaceTab::Tool(tool) => {
-                    elements.push(render_workspace_tool_tab(
-                        self,
-                        tool.clone(),
-                        pane_id,
-                        cx,
-                    ));
+                    elements.push(render_workspace_tool_tab(self, tool.clone(), pane_id, cx));
                 }
             }
         }
 
         let context_owner = cx.entity().downgrade();
+        let empty_pane_drop_zone = pane_id
+            .filter(|_| tabs.is_empty())
+            .map(|pane_id| tab_drag::render_empty_pane_tab_drop_zone(pane_id, cx));
         let tab_scroller = h_flex()
             .id("request-tabs-scroll")
             .h_full()
@@ -79,6 +75,7 @@ impl ApiTester {
             .min_w_0()
             .overflow_x_scroll()
             .children(elements)
+            .children(empty_pane_drop_zone)
             .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, _| {
                 this.request_tab_context_target = None;
             }))

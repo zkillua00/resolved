@@ -2,6 +2,11 @@ use super::*;
 
 impl Render for ApiTester {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let visible_tabs = self.workspace_tabs.visible_tabs(&self.request_tabs);
+        let active_tab = self.workspace_tabs.active_tab(&self.request_tabs);
+        if self.panes.reconcile_open_tabs(&visible_tabs, &active_tab) {
+            self.reconcile_pane_editors(window, cx);
+        }
         self.debug_overlay.read(cx).record_ui_frame();
         let app_style = cx.api_theme().classes.app.clone();
 

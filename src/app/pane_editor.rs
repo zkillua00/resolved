@@ -508,9 +508,7 @@ impl ApiTester {
             .min_h_0()
             .relative()
             .can_drop(move |value, _, _| {
-                value
-                    .downcast_ref::<WorkspaceTabDrag>()
-                    .is_some_and(|drag| drag.tab != WorkspaceTab::Welcome)
+                value.downcast_ref::<WorkspaceTabDrag>().is_some()
             })
             .drag_over::<WorkspaceTabDrag>(move |style, _, _, cx| {
                 style.bg(cx.theme().drop_target.opacity(0.35))
@@ -1716,5 +1714,4 @@ mod tests {
         });
     }
 }
-
 
