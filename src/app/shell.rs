@@ -8,7 +8,30 @@ impl Render for ApiTester {
             self.reconcile_pane_editors(window, cx);
         }
         self.debug_overlay.read(cx).record_ui_frame();
+        self.sync_request_export_preview(window, cx);
         let app_style = cx.api_theme().classes.app.clone();
+        let workspace_surface = v_flex()
+            .relative()
+            .h_full()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .child(self.render_workspace_panes(cx))
+            .child(self.debug_overlay.clone());
+        let workspace_surface =
+            if let Some(interchange_panel) = self.render_request_interchange_panel(cx) {
+                h_resizable("request-interchange-layout")
+                    .child(resizable_panel().child(workspace_surface))
+                    .child(
+                        resizable_panel()
+                            .size(px(request_interchange::REQUEST_INTERCHANGE_PANEL_WIDTH))
+                            .size_range(px(400.)..px(720.))
+                            .child(interchange_panel),
+                    )
+                    .into_any_element()
+            } else {
+                workspace_surface.into_any_element()
+            };
 
         v_flex()
             .size_full()
@@ -33,16 +56,7 @@ impl Render for ApiTester {
                     .flex_1()
                     .min_h_0()
                     .child(self.render_navigation_rail(cx))
-                    .child(
-                        v_flex()
-                            .relative()
-                            .h_full()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .child(self.render_workspace_panes(cx))
-                            .child(self.debug_overlay.clone()),
-                    ),
+                    .child(workspace_surface),
             )
             .children(self.render_template_variable_popover(cx))
             .children(Root::render_dialog_layer(window, cx))

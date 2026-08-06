@@ -216,6 +216,32 @@ impl ApiTester {
                             }),
                     )
                     .child(
+                        Button::new("title-import-request")
+                            .label("Import")
+                            .large()
+                            .h(px(38.))
+                            .ghost()
+                            .rounded(px(20.))
+                            .disabled(self.sending)
+                            .tooltip("Open the request import workspace")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_request_import_panel(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("title-export-request")
+                            .label("Code")
+                            .large()
+                            .h(px(38.))
+                            .outline()
+                            .rounded(px(20.))
+                            .disabled(self.sending)
+                            .tooltip("Preview, copy, or save generated request code")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_request_export_panel(window, cx);
+                            })),
+                    )
+                    .child(
                         Button::new("title-save-request")
                             .label(if has_saved_request { "Update" } else { "Save" })
                             .large()

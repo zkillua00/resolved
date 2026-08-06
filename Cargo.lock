@@ -110,6 +110,7 @@ name = "api-tester"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "base64",
  "bytes",
  "chrono",
  "csscolorparser",
@@ -128,6 +129,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sysinfo 0.39.6",
  "tempfile",
  "thiserror 2.0.19",

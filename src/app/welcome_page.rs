@@ -35,17 +35,34 @@ impl ApiTester {
                     ),
             )
             .child(
-                Button::new("welcome-title-new-request")
-                    .icon(IconName::Plus)
-                    .label("New request")
-                    .large()
-                    .h(px(38.))
-                    .primary()
-                    .rounded(px(20.))
-                    .disabled(self.sending)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_blank_request_tab(window, cx);
-                    })),
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("welcome-title-import-request")
+                            .label("Import")
+                            .large()
+                            .h(px(38.))
+                            .outline()
+                            .rounded(px(20.))
+                            .disabled(self.sending)
+                            .tooltip("Open the request import workspace")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_request_import_panel(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("welcome-title-new-request")
+                            .icon(IconName::Plus)
+                            .label("New request")
+                            .large()
+                            .h(px(38.))
+                            .primary()
+                            .rounded(px(20.))
+                            .disabled(self.sending)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_blank_request_tab(window, cx);
+                            })),
+                    ),
             )
             .into_any_element()
     }
@@ -109,6 +126,16 @@ impl ApiTester {
                                             window,
                                             cx,
                                         );
+                                    })),
+                            )
+                            .child(
+                                Button::new("welcome-import-request")
+                                    .label("Import request")
+                                    .large()
+                                    .outline()
+                                    .disabled(self.sending)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_request_import_panel(window, cx);
                                     })),
                             ),
                     ),

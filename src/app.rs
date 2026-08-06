@@ -10,10 +10,11 @@ use std::{
 use chrono::{Local, Utc};
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Corner, Entity, EntityId,
-    EntityInputHandler, Focusable as _, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, PathPromptOptions, Pixels,
-    Point, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    Timer, Window, anchored, deferred, div, img, point, prelude::FluentBuilder as _, px,
+    EntityInputHandler, ExternalPaths, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _,
+    PathPromptOptions, Pixels, Point, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, Timer, Window, anchored, deferred, div, img, point,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Root, RopeExt as _, Selectable as _,
@@ -43,18 +44,19 @@ use crate::{
     },
     core::{
         AppSettings, BodyField, BodyFieldKind, BodyMode, Collection, DEFAULT_REQUEST_TAB_TITLE,
-        DatabaseStore, Environment, EnvironmentMutation, HeaderEntry, HistoryEntry,
-        MAX_SNIPPET_NAME_BYTES, PostResponseResult, PreRequestResult, REDACTED_VALUE,
-        RawBodyLanguage, RequestDraft, RequestError, RequestHistory, RequestScripts,
-        RequestTabAssociation, RequestTabCloseScope, RequestTabGroup, RequestTabGroupColor,
-        RequestTabGroupId, RequestTabId, RequestTabRecord, RequestTabs, RequestTask,
-        RequestTemplate, ResponseData, STANDARD_HTTP_METHODS, SavedRequest, SavedTheme,
-        ScriptCancellation, ScriptDiagnostic, ScriptEnvironment, ScriptError, ScriptErrorKind,
-        ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope, ShortcutOverride, Snippet,
-        SnippetCancellation, SnippetCategory, SnippetKind, SnippetLog, SnippetRequirement,
-        SnippetSelection, SnippetSelectionArea, SnippetSelectionSource, SnippetTextRange,
-        Workspace, build_client, execute_post_response, execute_pre_request, format_body,
-        generate_snippet, is_probably_text, resolve_request, spawn_request,
+        DatabaseStore, Environment, EnvironmentMutation, HeaderEntry, HistoryEntry, ImportBundle,
+        InterchangeFormat, MAX_INTERCHANGE_BYTES, MAX_SNIPPET_NAME_BYTES, PostResponseResult,
+        PreRequestResult, REDACTED_VALUE, RawBodyLanguage, RequestDraft, RequestError,
+        RequestHistory, RequestScripts, RequestTabAssociation, RequestTabCloseScope,
+        RequestTabGroup, RequestTabGroupColor, RequestTabGroupId, RequestTabId, RequestTabRecord,
+        RequestTabs, RequestTask, RequestTemplate, ResponseData, STANDARD_HTTP_METHODS,
+        SavedRequest, SavedTheme, ScriptCancellation, ScriptDiagnostic, ScriptEnvironment,
+        ScriptError, ScriptErrorKind, ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope,
+        ShortcutOverride, Snippet, SnippetCancellation, SnippetCategory, SnippetKind, SnippetLog,
+        SnippetRequirement, SnippetSelection, SnippetSelectionArea, SnippetSelectionSource,
+        SnippetTextRange, Workspace, build_client, execute_post_response, execute_pre_request,
+        export_request, format_body, generate_snippet, import_requests, is_probably_text,
+        resolve_request, spawn_request,
     },
     debug_overlay::DebugOverlay,
     request_dirty::{RequestDirtyPart, RequestDirtyState},
@@ -96,6 +98,7 @@ mod pending_delete;
 mod persistence;
 mod request_actions;
 mod request_body_editor;
+mod request_interchange;
 mod request_pane;
 mod request_tab_group_actions;
 mod request_tab_reconciliation;
@@ -137,6 +140,7 @@ use headers_editor::HeaderRow;
 use pane_editor::*;
 use pane_tree::*;
 use pending_delete::*;
+use request_interchange::RequestInterchangeState;
 use request_pane::*;
 use request_tab_runtime::*;
 use response_tab::*;
@@ -250,6 +254,7 @@ pub struct ApiTester {
     request_dirty: RequestDirtyState,
     loaded_request_baseline: RequestTemplate,
     request_notice: Option<String>,
+    request_interchange: RequestInterchangeState,
     request_tabs: RequestTabs,
     last_persisted_request_tabs: RequestTabs,
     request_tab_runtime: HashMap<String, RequestTabRuntime>,

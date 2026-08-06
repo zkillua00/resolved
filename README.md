@@ -30,6 +30,9 @@ WKWebView through `gpui-wry` only when the Preview tab is selected.
   code-editor context-menu insertion
 - Persistent request tabs with independent drafts, named/color-coded collapsible
   groups, dirty-close protection, and restoration across launches
+- Non-destructive request import from pasted commands/source or text files, plus
+  clipboard and file export across command-line, specification, HTTP Client,
+  and language/framework formats
 - Browser-style tab menus for closing the current, other, left, right, all, or
   grouped tabs with one aggregate unsaved-changes confirmation and a Welcome
   tab when the final request closes
@@ -166,6 +169,33 @@ their own context menu. The chevron beside the new-tab button lists every open
 tab, including tabs inside collapsed groups. Closing the final request opens a
 lightweight Welcome tab instead of immediately manufacturing another editable
 request. New Request reuses that clean backing tab, so the tab strip stays tidy.
+
+## Request import and export
+
+Import is available from both Welcome and the request title bar. It opens a
+resizable Request transfer drawer with a focused paste editor, live format and
+request-count detection, clipboard paste, multi-file selection, and native file
+drop. It accepts cURL, Wget, PowerShell
+`Invoke-WebRequest`/`Invoke-RestMethod` (and the common `Invoke-GetRequest`
+spelling), OpenAPI, AsyncAPI, IntelliJ HTTP Client files, and static request
+code. Multi-operation specifications and `.http` files open one unsaved tab per
+request; an existing draft is never overwritten. Dynamic source expressions
+are not executed or guessed and must be replaced by static URL/body literals
+first.
+
+Code in the request title bar opens the drawer's Generate view: category and
+client selectors update a live syntax-highlighted preview, with direct Copy code
+and Save actions. The active request can be generated as cURL, Wget, PowerShell,
+OpenAPI 3.1 YAML, AsyncAPI 3.0 YAML, IntelliJ HTTP Client, JavaScript
+Fetch/Axios/jQuery, Java `java.net.http`/OkHttp, Go `net/http`/Resty, C#
+HttpClient/RestSharp, Rust reqwest/ureq, C++ Boost.Beast/libcurl, PHP
+cURL/Guzzle, or Kotlin Ktor/OkHttp/`java.net.http`. Generated text carries an
+inert Resolved metadata comment (or specification extension) so importing it
+again preserves body modes, multipart file paths, and active request templates
+exactly. It deliberately excludes disabled headers, inactive body variants,
+and request scripts so a shareable code sample cannot conceal unsent or
+sensitive editor state. External source import recovers the common static URL,
+method, header, and body forms without executing the code.
 
 ## Settings, shortcuts, and themes
 
@@ -522,5 +552,6 @@ need permission to bind a local socket in a restricted environment.
 ## Deliberate MVP limits
 
 Cookie jars, response streaming/downloads, certificate controls, proxy
-controls, and collection import/export are not included yet. macOS is the only
-supported target for now.
+controls, and native collection-structure import/export are not included yet.
+Specification imports open operations as request tabs rather than manufacturing
+a saved collection. macOS is the only supported target for now.

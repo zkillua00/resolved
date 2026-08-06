@@ -157,6 +157,8 @@ impl ApiTester {
                 cx,
             )
         });
+        let (request_interchange, request_interchange_subscription) =
+            Self::create_request_interchange_state(window, cx);
         let debug_overlay = cx.new(DebugOverlay::new);
 
         let (
@@ -590,6 +592,7 @@ impl ApiTester {
             request_dirty: RequestDirtyState::default(),
             loaded_request_baseline: RequestTemplate::default(),
             request_notice: None,
+            request_interchange,
             request_tabs,
             last_persisted_request_tabs,
             request_tab_runtime: HashMap::new(),
@@ -648,6 +651,7 @@ impl ApiTester {
                 collection_name_subscription,
                 folder_name_subscription,
                 saved_request_name_subscription,
+                request_interchange_subscription,
                 quit_subscription,
                 shortcut_capture_subscription,
             ],

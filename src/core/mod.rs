@@ -1,6 +1,7 @@
 mod database;
 mod format;
 mod history;
+mod interchange;
 mod request;
 mod request_tabs;
 mod script;
@@ -15,6 +16,9 @@ mod mvp_smoke_test;
 pub use database::DatabaseStore;
 pub use format::{format_body, format_raw_source, format_script_source, is_probably_text};
 pub use history::{HistoryEntry, REDACTED_VALUE, RequestHistory};
+pub use interchange::{
+    ImportBundle, InterchangeFormat, MAX_INTERCHANGE_BYTES, export_request, import_requests,
+};
 pub use request::{
     BodyField, BodyFieldKind, BodyMode, HeaderEntry, RawBodyLanguage, RequestDraft, RequestError,
     RequestTask, ResponseData, STANDARD_HTTP_METHODS, build_client, spawn_request,
