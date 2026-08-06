@@ -177,11 +177,11 @@ resizable Request transfer drawer with a focused paste editor, live format and
 request-count detection, clipboard paste, multi-file selection, and native file
 drop. It accepts cURL, Wget, PowerShell
 `Invoke-WebRequest`/`Invoke-RestMethod` (and the common `Invoke-GetRequest`
-spelling), OpenAPI, AsyncAPI, IntelliJ HTTP Client files, and static request
-code. Multi-operation specifications and `.http` files open one unsaved tab per
-request; an existing draft is never overwritten. Dynamic source expressions
-are not executed or guessed and must be replaced by static URL/body literals
-first.
+spelling), OpenAPI, AsyncAPI, IntelliJ HTTP Client files, and request code.
+Multi-operation specifications and `.http` files open one unsaved tab per
+request; an existing draft is never overwritten. Source is never executed.
+Dynamic URL expressions are preserved as Resolved `{{variable}}` placeholders,
+including JavaScript template literals and direct URL variables.
 
 Code in the request title bar opens the drawer's Generate view: category and
 client selectors update a live syntax-highlighted preview, with direct Copy code
@@ -194,8 +194,8 @@ inert Resolved metadata comment (or specification extension) so importing it
 again preserves body modes, multipart file paths, and active request templates
 exactly. It deliberately excludes disabled headers, inactive body variants,
 and request scripts so a shareable code sample cannot conceal unsent or
-sensitive editor state. External source import recovers the common static URL,
-method, header, and body forms without executing the code.
+sensitive editor state. External source import recovers common URL expressions,
+methods, headers, and body forms without executing the code.
 
 ## Settings, shortcuts, and themes
 
@@ -496,12 +496,19 @@ declarations, and required notices. The generated `vendor/gpui-0.2.2/`,
 `vendor/gpui-component-0.5.1/`, and `vendor/typescript-service-6.0.2/`
 directories are ignored by Git.
 
-To build a launchable application bundle:
+To build a launchable application bundle and a transfer-safe release archive:
 
 ```sh
 scripts/bundle-macos.sh release
 open "target/release/Resolved.app"
 ```
+
+Release builds also produce
+`target/release/Resolved-<version>-<build>-macos.zip`. Send that ZIP to another
+Mac instead of sending the `Resolved.app` directory directly. The ZIP is made
+with macOS `ditto`, then extracted and checked by the build script to ensure
+`Contents/MacOS/api-tester` still has executable permission and the bundle's
+signature remains valid.
 
 The package follows a commit-driven pre-1.0 SemVer policy. Cargo owns the
 release version, while the bundle script copies it into the generated app and

@@ -1,9 +1,9 @@
 //! Safe, text-only request interchange.
 //!
-//! Importers never execute pasted source. They recover static request literals
-//! and reject dynamic snippets whose URL cannot be determined. Every generated
-//! command/snippet also carries a compact Resolved metadata comment, which makes
-//! exporting and re-importing lossless without affecting execution.
+//! Importers never execute pasted source. They recover request literals and
+//! preserve supported dynamic URL expressions as Resolved placeholders. Every
+//! generated command/snippet also carries a compact Resolved metadata comment,
+//! which makes exporting and re-importing lossless without affecting execution.
 
 use std::fmt::Write as _;
 
@@ -159,7 +159,7 @@ pub enum InterchangeError {
     Empty,
     #[error("the import is larger than the {MAX_INTERCHANGE_BYTES} byte safety limit")]
     TooLarge,
-    #[error("no static HTTP request could be found: {0}")]
+    #[error("no HTTP request could be found: {0}")]
     Unsupported(String),
     #[error("the request text could not be parsed: {0}")]
     Parse(String),
@@ -255,7 +255,7 @@ pub fn import_requests(source: &str) -> Result<ImportBundle, InterchangeError> {
         return one_request("PowerShell", parse_powershell(source)?);
     }
 
-    one_request(detect_source_label(source), parse_static_code(source)?)
+    one_request(detect_source_label(source), parse_code_request(source)?)
 }
 
 fn one_request(
@@ -3105,6 +3105,7 @@ fn import_intellij_http(source: &str) -> Result<ImportBundle, InterchangeError> 
 #[derive(Clone, Debug)]
 struct StringLiteral {
     start: usize,
+    quote: u8,
     value: String,
 }
 
@@ -3164,16 +3165,20 @@ fn string_literals(source: &str) -> Vec<StringLiteral> {
             value.push(character);
             index += character.len_utf8();
         }
-        literals.push(StringLiteral { start, value });
+        literals.push(StringLiteral {
+            start,
+            quote,
+            value,
+        });
     }
     literals
 }
 
-fn parse_static_code(source: &str) -> Result<ImportedRequest, InterchangeError> {
+fn parse_code_request(source: &str) -> Result<ImportedRequest, InterchangeError> {
     let literals = string_literals(source);
-    let url = find_static_url(source, &literals).ok_or_else(|| {
+    let url = find_code_url(source, &literals).ok_or_else(|| {
         InterchangeError::Unsupported(
-            "only static URL literals can be imported from source code".to_owned(),
+            "the source has no recognizable URL literal or expression".to_owned(),
         )
     })?;
     let mut request = RequestDraft::new(detect_code_method(source), url);
@@ -3187,13 +3192,27 @@ fn parse_static_code(source: &str) -> Result<ImportedRequest, InterchangeError> 
     imported_from_draft(request)
 }
 
-fn find_static_url(source: &str, literals: &[StringLiteral]) -> Option<String> {
+fn find_code_url(source: &str, literals: &[StringLiteral]) -> Option<String> {
+    let javascript = looks_like_javascript_request(source);
+    if javascript
+        && let Some(url) = literals
+            .iter()
+            .filter(|literal| literal.quote == b'`' && literal.value.contains("${"))
+            .find(|literal| javascript_template_is_url_context(source, literal.start))
+            .and_then(|literal| javascript_template_to_resolved(&literal.value))
+    {
+        return Some(url);
+    }
+    if javascript && let Some(url) = find_javascript_bare_url_argument(source) {
+        return Some(url);
+    }
+
     literals
         .iter()
         .find(|literal| {
             literal.value.starts_with("http://") || literal.value.starts_with("https://")
         })
-        .map(|literal| literal.value.clone())
+        .map(|literal| imported_code_literal(literal, javascript))
         .or_else(|| {
             for keyword in ["url", "uri", "baseurl", "endpoint"] {
                 let mut search_start = 0;
@@ -3204,7 +3223,7 @@ fn find_static_url(source: &str, literals: &[StringLiteral]) -> Option<String> {
                         .iter()
                         .find(|literal| literal.start > offset && literal.start < offset + 160)
                     {
-                        return Some(literal.value.clone());
+                        return Some(imported_code_literal(literal, javascript));
                     }
                     search_start = offset + keyword.len();
                 }
@@ -3239,6 +3258,147 @@ fn find_static_url(source: &str, literals: &[StringLiteral]) -> Option<String> {
                 };
             Some(format!("{scheme}://{}{target}", host.value))
         })
+}
+
+fn looks_like_javascript_request(source: &str) -> bool {
+    let lower = source.to_ascii_lowercase();
+    lower.contains("fetch")
+        || lower.contains("axios")
+        || lower.contains("$.ajax")
+        || lower.contains("jquery")
+}
+
+fn imported_code_literal(literal: &StringLiteral, javascript: bool) -> String {
+    if javascript && literal.quote == b'`' {
+        javascript_template_to_resolved(&literal.value).unwrap_or_else(|| literal.value.clone())
+    } else {
+        literal.value.clone()
+    }
+}
+
+fn javascript_template_is_url_context(source: &str, literal_start: usize) -> bool {
+    let context = source[..literal_start]
+        .chars()
+        .rev()
+        .take(256)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    [
+        "fetch(",
+        "newrequest(",
+        "axios.get(",
+        "axios.post(",
+        "axios.put(",
+        "axios.patch(",
+        "axios.delete(",
+        "axios.head(",
+        "axios.options(",
+        "url:",
+        "url=",
+        "uri:",
+        "uri=",
+        "endpoint:",
+        "endpoint=",
+    ]
+    .iter()
+    .any(|suffix| context.ends_with(suffix))
+}
+
+fn find_javascript_bare_url_argument(source: &str) -> Option<String> {
+    let lower = source.to_ascii_lowercase();
+    for call in [
+        "fetch(",
+        "axios.get(",
+        "axios.post(",
+        "axios.put(",
+        "axios.patch(",
+        "axios.delete(",
+        "axios.head(",
+        "axios.options(",
+    ] {
+        let Some(offset) = lower.find(call).map(|offset| offset + call.len()) else {
+            continue;
+        };
+        let argument = source[offset..].trim_start();
+        let end = argument
+            .find(|character: char| {
+                !character.is_ascii_alphanumeric() && !"_$.".contains(character)
+            })
+            .unwrap_or(argument.len());
+        let expression = &argument[..end];
+        let terminator = argument[end..].trim_start().as_bytes().first().copied();
+        if !expression.is_empty()
+            && matches!(terminator, Some(b',' | b')'))
+            && expression
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_' || byte == b'$')
+        {
+            return Some(format!("{{{{{expression}}}}}"));
+        }
+    }
+    None
+}
+
+fn javascript_template_to_resolved(template: &str) -> Option<String> {
+    let bytes = template.as_bytes();
+    let mut output = String::with_capacity(template.len());
+    let mut cursor = 0;
+    let mut found_interpolation = false;
+    while cursor < bytes.len() {
+        let Some(relative) = template[cursor..].find("${") else {
+            output.push_str(&template[cursor..]);
+            break;
+        };
+        let opening = cursor + relative;
+        output.push_str(&template[cursor..opening]);
+        let mut index = opening + 2;
+        let mut depth = 1usize;
+        let mut quote = None;
+        let mut escaped = false;
+        while index < bytes.len() {
+            let byte = bytes[index];
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if let Some(active_quote) = quote {
+                if byte == active_quote {
+                    quote = None;
+                }
+            } else if matches!(byte, b'\'' | b'"' | b'`') {
+                quote = Some(byte);
+            } else if byte == b'{' {
+                depth += 1;
+            } else if byte == b'}' {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            index += 1;
+        }
+        if depth != 0 {
+            return None;
+        }
+        let expression = template[opening + 2..index].trim();
+        if expression.is_empty()
+            || expression.contains('{')
+            || expression.contains('}')
+            || expression.contains("{{")
+            || expression.contains("}}")
+        {
+            return None;
+        }
+        let _ = write!(output, "{{{{{expression}}}}}");
+        found_interpolation = true;
+        cursor = index + 1;
+    }
+    found_interpolation.then_some(output)
 }
 
 fn detect_code_method(source: &str) -> String {
@@ -3449,6 +3609,7 @@ fn extract_code_body(
     headers: &[HeaderEntry],
 ) -> Option<String> {
     let lower = source.to_ascii_lowercase();
+    let javascript = looks_like_javascript_request(source);
     for pattern in [
         "postfields",
         "addstringbody(",
@@ -3473,7 +3634,7 @@ fn extract_code_body(
         if let Some(literal) = literals.iter().find(|literal| {
             literal.start > offset
                 && literal.start < offset + 1200
-                && literal.value != url
+                && imported_code_literal(literal, javascript) != url
                 && !headers
                     .iter()
                     .any(|header| literal.value == header.name || literal.value == header.value)
@@ -3856,7 +4017,44 @@ operations:
     }
 
     #[test]
-    fn rejects_dynamic_or_oversized_imports() {
+    fn imports_javascript_dynamic_urls_as_request_variables() {
+        let fetch = import_requests(
+            r#"fetch(`${baseUrl}/users/${userId}?expand=${includeDetails}`, { method: "PATCH", body: "{}" });"#,
+        )
+        .unwrap();
+        let request = &fetch.requests[0].template.request;
+        assert_eq!(
+            request.url,
+            "{{baseUrl}}/users/{{userId}}?expand={{includeDetails}}"
+        );
+        assert_eq!(request.method, "PATCH");
+        assert_eq!(request.body, "{}");
+
+        let alias = import_requests(
+            r#"const endpoint = `${apiBase}/v1/items/${itemId}`;
+axios.get(endpoint);"#,
+        )
+        .unwrap();
+        assert_eq!(
+            alias.requests[0].template.request.url,
+            "{{apiBase}}/v1/items/{{itemId}}"
+        );
+
+        let config = import_requests(
+            r#"axios({ method: "GET", url: `https://${tenant}.example.com/items/${itemId}` });"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.requests[0].template.request.url,
+            "https://{{tenant}}.example.com/items/{{itemId}}"
+        );
+
+        let bare = import_requests("fetch(config.apiUrl, options)").unwrap();
+        assert_eq!(bare.requests[0].template.request.url, "{{config.apiUrl}}");
+    }
+
+    #[test]
+    fn rejects_executable_url_expressions_or_oversized_imports() {
         assert!(matches!(
             import_requests("fetch(buildUrl(), options)"),
             Err(InterchangeError::Unsupported(_))

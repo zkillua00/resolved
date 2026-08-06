@@ -153,7 +153,7 @@ impl ApiTester {
                 CodeEditorConfig::default()
                     .language(CodeLanguage::Plain)
                     .placeholder(
-                        "Paste cURL, Wget, PowerShell, OpenAPI, AsyncAPI, an IntelliJ HTTP file, or static request code",
+                        "Paste cURL, Wget, PowerShell, OpenAPI, AsyncAPI, an IntelliJ HTTP file, or request code",
                     )
                     .rows(18)
                     .soft_wrap(false)
@@ -561,7 +561,7 @@ impl ApiTester {
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child(
-                                "Commands, specifications, HTTP Client files, and static source are detected automatically.",
+                                "Commands, specifications, HTTP Client files, and request source are detected automatically. Dynamic URL expressions become {{variables}}.",
                             ),
                     ),
             )
