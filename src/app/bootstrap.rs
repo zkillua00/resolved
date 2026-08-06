@@ -599,6 +599,7 @@ impl ApiTester {
             request_tab_context_target: None,
             workspace_tabs,
             panes,
+            pane_editors: HashMap::new(),
             settings,
             settings_warning,
             settings_writable,

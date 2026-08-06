@@ -142,6 +142,7 @@ impl ApiTester {
         target_pane_id: PaneId,
         direction: SplitDirection,
         after: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.sending {
@@ -163,6 +164,7 @@ impl ApiTester {
             pane.insert_or_activate(drag.tab.clone());
         }
         self.sync_workspace_tabs_from_panes(cx);
+        self.reconcile_pane_editors(window, cx);
         cx.notify();
     }
 
@@ -172,6 +174,7 @@ impl ApiTester {
         drag: &WorkspaceTabDrag,
         target_pane_id: PaneId,
         index: usize,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.sending {
@@ -185,6 +188,7 @@ impl ApiTester {
         }
         if self.panes.move_tab_between_panes(&drag.tab, source_pane_id, target_pane_id, index) {
             self.sync_workspace_tabs_from_panes(cx);
+            self.reconcile_pane_editors(window, cx);
         }
         cx.notify();
     }

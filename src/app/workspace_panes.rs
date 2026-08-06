@@ -6,9 +6,9 @@ impl ApiTester {
     ///
     /// A single-leaf tree renders exactly the legacy strip + content layout so
     /// the common case is unchanged. A split tree renders resizable panes, each
-    /// with its own tab strip; only the pane hosting the currently active
-    /// workspace tab renders real content, while other panes show a placeholder
-    /// (per-pane request editor state is a follow-up).
+    /// with its own tab strip; the pane hosting the currently active workspace
+    /// tab renders the primary surface, while secondary panes render their own
+    /// real request editor (see `render_secondary_pane_content`).
     pub(super) fn render_workspace_panes(&self, cx: &mut Context<Self>) -> AnyElement {
         if self.panes.is_single_leaf() {
             return self.render_single_pane_legacy(cx);
@@ -187,70 +187,11 @@ impl ApiTester {
     }
 
     fn render_pane_content(&self, pane: &Pane, is_primary: bool, cx: &mut Context<Self>) -> AnyElement {
+        // A non-primary pane either hosts a real per-pane request editor for
+        // its active request tab, or a lightweight surface for tool/welcome
+        // tabs. Sessions are kept coherent by `reconcile_pane_editors`.
         if !is_primary {
-            let pane_id = pane.id();
-            let insert_index = pane.tabs().len();
-            return v_flex()
-                .size_full()
-                .flex_1()
-                .min_h_0()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .can_drop(move |value, _, _| {
-                    value
-                        .downcast_ref::<WorkspaceTabDrag>()
-                        .is_some_and(|drag| {
-                            drag.tab != WorkspaceTab::Welcome
-                        })
-                })
-                .drag_over::<WorkspaceTabDrag>(move |style, _, _, cx| {
-                    style.bg(cx.theme().drop_target.opacity(0.35))
-                })
-                .on_drop(cx.listener(move |this, drag: &WorkspaceTabDrag, _, cx| {
-                    this.on_workspace_tab_move(drag, pane_id, insert_index, cx);
-                }))
-                .child(
-                    v_flex()
-                        .items_center()
-                        .gap_2()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(
-                            div()
-                                .size(px(40.))
-                                .rounded_full()
-                                .bg(cx.api_surface_low())
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(
-                                    div()
-                                        .size_full()
-                                        .rounded_full()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .text_xs()
-                                        .child("+"),
-                                ),
-                        )
-                        .child(
-                            div().text_sm().child(
-                                if pane.tabs().is_empty() {
-                                    "No tabs in this pane"
-                                } else {
-                                    "Secondary pane"
-                                }
-                                .to_owned(),
-                            ),
-                        )
-                        .child(
-                            div().text_xs().child(
-                                "Per-pane request editors are a follow-up; drop a tab here or use the strip above to move tabs.",
-                            ),
-                        ),
-                )
-                .into_any_element();
+            return self.render_secondary_pane_content(pane, cx);
         }
 
         // The primary pane's content is the existing single surface plus the
@@ -355,8 +296,8 @@ fn render_workspace_pane_split_edge(
         .drag_over::<WorkspaceTabDrag>(move |style, _, _, cx| {
             style.bg(cx.theme().drop_target.opacity(0.5))
         })
-        .on_drop(cx.listener(move |this, drag: &WorkspaceTabDrag, _, cx| {
-            this.on_workspace_tab_split(drag, pane_id, direction, after, cx);
+        .on_drop(cx.listener(move |this, drag: &WorkspaceTabDrag, window, cx| {
+            this.on_workspace_tab_split(drag, pane_id, direction, after, window, cx);
         }))
         .into_any_element()
 }

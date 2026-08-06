@@ -81,7 +81,6 @@ impl Pane {
         self.tabs.iter().any(|entry| &entry.tab == tab)
     }
 
-    #[cfg(test)]
     pub(super) fn active_tab(&self) -> Option<WorkspaceTab> {
         self.tabs.get(self.active_index).map(|entry| entry.tab.clone())
     }
