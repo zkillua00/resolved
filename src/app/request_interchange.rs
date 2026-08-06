@@ -130,7 +130,7 @@ fn export_code_language(format: InterchangeFormat) -> CodeLanguage {
         }
         InterchangeFormat::GoNetHttp | InterchangeFormat::GoResty => CodeLanguage::from("go"),
         InterchangeFormat::CSharpHttpClient | InterchangeFormat::CSharpRestSharp => {
-            CodeLanguage::from("c_sharp")
+            CodeLanguage::from("csharp")
         }
         InterchangeFormat::RustReqwest | InterchangeFormat::RustUreq => CodeLanguage::Rust,
         InterchangeFormat::CppBoostBeast | InterchangeFormat::CppLibcurl => {
@@ -1037,6 +1037,28 @@ fn safe_export_file_name(value: &str) -> String {
 mod tests {
     use super::*;
     use gpui::{TestAppContext, px, size};
+    use gpui_component::highlighter::LanguageRegistry;
+
+    #[test]
+    fn every_code_export_resolves_to_a_real_highlight_query() {
+        crate::syntax_languages::register();
+
+        for format in InterchangeFormat::ALL
+            .iter()
+            .copied()
+            .filter(|format| *format != InterchangeFormat::IntelliJHttp)
+        {
+            let language = export_code_language(format);
+            let config = LanguageRegistry::singleton()
+                .language(language.as_str())
+                .unwrap_or_else(|| panic!("{} has no registered syntax language", format.label()));
+            assert!(
+                !config.highlights.is_empty(),
+                "{} resolves to a grammar without a highlight query",
+                format.label()
+            );
+        }
+    }
 
     #[test]
     fn export_file_names_are_safe_and_stable() {

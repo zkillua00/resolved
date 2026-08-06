@@ -16,6 +16,7 @@ mod request_dirty;
 mod script_intelligence;
 mod shortcuts;
 mod snippet_intelligence;
+mod syntax_languages;
 mod template_intelligence;
 mod theme;
 mod typescript_service;
@@ -189,6 +190,7 @@ fn main() {
         .with_assets(AppAssets)
         .run(|cx: &mut App| {
             gpui_component::init(cx);
+            syntax_languages::register();
             let base_key_bindings = shortcuts::capture_base_key_bindings(cx);
             theme::configure(cx);
 
