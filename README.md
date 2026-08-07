@@ -505,20 +505,37 @@ open "target/release/Resolved.app"
 
 Release builds also produce
 `target/release/Resolved-<version>-<build>-macos.zip`. Send that ZIP to another
-Mac instead of sending the `Resolved.app` directory directly. The ZIP is made
-with macOS `ditto`, then extracted and checked by the build script to ensure
-`Contents/MacOS/api-tester` still has executable permission and the bundle's
-signature remains valid.
+Mac instead of sending the `Resolved.app` directory directly. The ZIP preserves
+Unix modes while excluding quarantine, per-user access records, and other
+build-machine extended attributes. It is then extracted and checked by the
+build script to ensure `Contents/MacOS/api-tester` still has executable
+permission, contains no packaged security attributes, and retains a valid
+signature.
+
+Some sandboxed file-sharing applications can mark downloaded code as created
+without user consent. That produces an immediate “can't be opened” error instead
+of the normal Gatekeeper warning and **Open Anyway** entry. For a trusted local
+build, inspect and clear that receiving-machine quarantine state after moving
+the app to its final location:
+
+```sh
+xattr -p com.apple.quarantine "/Applications/Resolved.app"
+xattr -dr com.apple.quarantine "/Applications/Resolved.app"
+```
+
+Only clear quarantine after verifying that the archive came from the expected
+source. A direct, user-initiated browser download normally avoids the
+non-overridable quarantine state produced by some transfer applications.
 
 The package follows a commit-driven pre-1.0 SemVer policy. Cargo owns the
 release version, while the bundle script copies it into the generated app and
 uses the Git commit count as its build number. See
 [Versioning and releases](docs/versioning.md) for bump rules and release steps.
 
-The bundle is ad-hoc signed by the Rust linker and is intended for local
-development. Distribution outside the local machine will require a Developer ID
-signature and notarization. TypeScript's Apache 2.0 license and third-party
-notice are copied to
+The bundle is ad-hoc signed by the Rust linker. Trusted testers can run it using
+the quarantine procedure above; seamless public distribution without a security
+override requires a Developer ID signature and notarization. TypeScript's Apache
+2.0 license and third-party notice are copied to
 `Resolved.app/Contents/Resources/ThirdPartyLicenses/TypeScript-6.0.2/`.
 
 ## HTML preview boundary

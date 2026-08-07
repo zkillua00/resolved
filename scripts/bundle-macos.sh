@@ -65,6 +65,12 @@ install -m 644 "$project_dir/macos/Info.plist" "$contents_dir/Info.plist"
 /usr/libexec/PlistBuddy \
     -c "Add :CFBundleVersion string $build_number" \
     "$contents_dir/Info.plist"
+
+# Do not sign or distribute Finder, quarantine, or per-user access metadata left
+# behind by opening an earlier build on the build Mac. Some security attributes
+# are regenerated locally by macOS and cannot be cleared, so the archive step
+# below also excludes all source extended attributes and ACLs.
+xattr -cr "$bundle_dir"
 codesign --force --deep --sign - "$bundle_dir"
 
 echo "$bundle_dir ($package_version, build $build_number)"
@@ -81,10 +87,12 @@ if [ "$profile" = "release" ]; then
     }
     trap cleanup_archive_staging EXIT HUP INT TERM
 
-    # macOS application bundles must be transferred as an archive. ditto records
-    # Unix modes and macOS metadata that may be lost when an .app directory is
-    # sent directly through a file-sharing service.
-    ditto -c -k --sequesterRsrc --keepParent "$bundle_dir" "$archive_staging_path"
+    # macOS application bundles must be transferred as an archive. Preserve Unix
+    # modes, but do not ship quarantine, provenance, per-user access records, or
+    # ACLs from the build Mac. The receiving Mac creates its own security metadata.
+    ditto -c -k --norsrc --noextattr --noacl --keepParent \
+        "$bundle_dir" \
+        "$archive_staging_path"
 
     # Exercise the same archive boundary recipients use. A locally valid bundle
     # is not sufficient if extraction drops the main executable's +x bits.
@@ -94,6 +102,11 @@ if [ "$profile" = "release" ]; then
     archived_executable="$archived_bundle_dir/Contents/MacOS/api-tester"
     if [ ! -x "$archived_executable" ]; then
         echo "error: packaged executable is not executable: $archived_executable" >&2
+        exit 1
+    fi
+    if xattr -lr "$archived_bundle_dir" 2>/dev/null \
+        | grep -Eq 'com\.apple\.(macl|quarantine):'; then
+        echo "error: packaged app contains build-machine security attributes" >&2
         exit 1
     fi
     codesign --verify --deep --strict "$archived_bundle_dir"
