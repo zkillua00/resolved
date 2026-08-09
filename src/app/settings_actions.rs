@@ -349,6 +349,15 @@ impl ApiTester {
         self.database_store
             .save_app_settings(&candidate)
             .map_err(|error| format!("Settings could not be saved: {error}"))?;
+        self.apply_persisted_settings(candidate, rebind_shortcuts, cx)
+    }
+
+    pub(super) fn apply_persisted_settings(
+        &mut self,
+        candidate: AppSettings,
+        rebind_shortcuts: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         if rebind_shortcuts {
             shortcuts::apply_key_bindings(cx, &self.base_key_bindings, &candidate)
                 .map_err(|error| format!("Shortcut keymap could not be applied: {error}"))?;
@@ -391,6 +400,9 @@ fn semantic_settings_warning(settings: &AppSettings) -> Option<String> {
     }
     if let Some(catalog_warning) = theme_catalog_warning(settings) {
         warnings.push(catalog_warning);
+    }
+    if let Some(upstream_warning) = settings.upstreams.validation_warning() {
+        warnings.push(upstream_warning);
     }
     (!warnings.is_empty()).then(|| warnings.join("\n"))
 }

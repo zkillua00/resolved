@@ -19,7 +19,7 @@ impl ApiTester {
         if !self.workspace_writable {
             return Err("Database is read-only for this session.".to_owned());
         }
-        match self.database_store.save_workspace(&candidate) {
+        match self.workspace_providers.active().save_workspace(&candidate) {
             Ok(()) => {
                 self.workspace = candidate;
                 self.workspace_warning = None;
@@ -47,7 +47,8 @@ impl ApiTester {
             return Ok(());
         }
         match self
-            .database_store
+            .workspace_providers
+            .active()
             .save_workspace_and_request_tabs(&candidate_workspace, &candidate_request_tabs)
         {
             Ok(()) => {

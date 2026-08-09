@@ -26,12 +26,14 @@ reqwest = { version = "=0.13.4", default-features = false, features = [
     "deflate",
     "gzip",
     "http2",
+    "json",
     "multipart",
     "rustls",
     "stream",
     "system-proxy",
     "zstd",
 ] }
+ring = "=0.17.14"
 rquickjs = { version = "=0.12.1", default-features = false, features = ["std"] }
 rquickjs-serde = "=0.6.1"
 rusqlite = { version = "=0.40.1", features = ["bundled"] }
@@ -50,6 +52,10 @@ tree-sitter-php = "=0.24.2"
 tree-sitter-powershell = "=0.26.4"
 url = { version = "2.5", features = ["serde"] }
 wry = "=0.53.3"
+zeroize = "=1.9.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "=3.7.0"
 
 [dev-dependencies]
 gpui = { version = "=0.2.2", features = ["test-support"] }

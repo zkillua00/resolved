@@ -32,6 +32,9 @@ impl Render for ApiTester {
             } else {
                 workspace_surface.into_any_element()
             };
+        let upstream_login_page = self
+            .upstream_login_open
+            .then(|| self.render_upstream_login_page(cx));
 
         v_flex()
             .size_full()
@@ -59,6 +62,7 @@ impl Render for ApiTester {
                     .child(workspace_surface),
             )
             .children(self.render_template_variable_popover(cx))
+            .children(upstream_login_page)
             .children(Root::render_dialog_layer(window, cx))
     }
 }

@@ -1,0 +1,917 @@
+use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage};
+use zeroize::Zeroizing;
+
+use super::*;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) enum UpstreamLoginStatus {
+    #[default]
+    Idle,
+    Authenticating,
+    SecuringSession,
+    Error(String),
+}
+
+impl UpstreamLoginStatus {
+    fn busy(&self) -> bool {
+        matches!(self, Self::Authenticating | Self::SecuringSession)
+    }
+
+    fn label(&self) -> Option<&str> {
+        match self {
+            Self::Idle => None,
+            Self::Authenticating => Some("Signing in…"),
+            Self::SecuringSession => Some("Saving server…"),
+            Self::Error(message) => Some(message),
+        }
+    }
+}
+
+impl ApiTester {
+    pub(super) fn upstream_settings_page(&self, cx: &mut Context<Self>) -> SettingPage {
+        SettingPage::new("Servers")
+            .description("Connect to self-hosted Resolved servers and switch between them.")
+            .default_open(true)
+            .resettable(false)
+            .group(SettingGroup::new().title("Connections").items([
+                self.active_upstream_setting_item(cx),
+                self.connected_upstreams_setting_item(cx),
+            ]))
+    }
+
+    pub(super) fn render_upstream_navigation_control(
+        &self,
+        item_width: Pixels,
+        item_height: Pixels,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let has_servers = !self.settings.upstreams.servers.is_empty();
+        let active = self.settings.upstreams.active();
+        let label = match active {
+            Some(server) if compact => compact_label(&server.display_label(), 10),
+            Some(server) => compact_label(&server.display_label(), 14),
+            None if has_servers => "Local".to_owned(),
+            None => "Login".to_owned(),
+        };
+        let tooltip = match active {
+            Some(server) => format!("Active server: {} · Manage servers", server.display_label()),
+            None if has_servers => "Using Local · Manage servers".to_owned(),
+            None => "Log in to a self-hosted Resolved server".to_owned(),
+        };
+
+        v_flex()
+            .id("rail-upstreams")
+            .debug_selector(|| "rail-upstreams".to_owned())
+            .w(item_width)
+            .h(item_height)
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .rounded_lg()
+            .cursor_pointer()
+            .text_color(cx.theme().muted_foreground)
+            .hover(|style| style.bg(cx.theme().sidebar_accent))
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if has_servers {
+                    this.open_workspace_tool_tab(WorkspaceToolTab::Settings, window, cx);
+                } else {
+                    this.open_upstream_login(None, window, cx);
+                }
+            }))
+            .child(gpui_component::Icon::new(IconName::Globe).with_size(px(18.)))
+            .when(!compact, |this| {
+                this.child(
+                    div()
+                        .max_w(item_width - px(8.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(10.5))
+                        .font_semibold()
+                        .child(label),
+                )
+            })
+            .into_any_element()
+    }
+
+    pub(super) fn render_upstream_login_page(&self, cx: &mut Context<Self>) -> AnyElement {
+        let busy = self.upstream_login_status.busy();
+        let securing = self.upstream_login_status == UpstreamLoginStatus::SecuringSession;
+        let status = self.upstream_login_status.label().map(ToOwned::to_owned);
+        let status_is_error = matches!(self.upstream_login_status, UpstreamLoginStatus::Error(_));
+        let can_submit = self.settings_writable && !busy;
+
+        v_flex()
+            .absolute()
+            .top_0()
+            .right_0()
+            .bottom_0()
+            .left_0()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .debug_selector(|| "upstream-login-page".to_owned())
+            .child(
+                h_flex()
+                    .h(px(APP_TITLE_BAR_HEIGHT))
+                    .flex_shrink_0()
+                    .pl(px(92.))
+                    .pr_6()
+                    .border_b_1()
+                    .border_color(cx.theme().title_bar_border)
+                    .bg(cx.theme().title_bar)
+                    .justify_between()
+                    .child(
+                        h_flex()
+                            .gap_6()
+                            .child(resolved_brand_lockup(cx))
+                            .child(
+                                h_flex()
+                                    .h_full()
+                                    .items_center()
+                                    .border_b_2()
+                                    .border_color(cx.theme().primary)
+                                    .px_1()
+                                    .text_sm()
+                                    .font_semibold()
+                                    .child("Connect to server"),
+                            ),
+                    )
+                    .child(
+                        Button::new("close-upstream-login")
+                            .icon(IconName::Close)
+                            .ghost()
+                            .rounded_full()
+                            .disabled(securing)
+                            .tooltip(if securing {
+                                "Please wait while the server is saved"
+                            } else {
+                                "Close"
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_upstream_login(window, cx);
+                            })),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .items_center()
+                    .justify_center()
+                    .p_8()
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .max_w(px(520.))
+                            .gap_6()
+                            .p_8()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(cx.api_outline_variant())
+                            .bg(cx.api_surface())
+                            .shadow_lg()
+                            .child(
+                                v_flex()
+                                    .gap_2()
+                                    .child(div().text_2xl().font_semibold().child("Add a server"))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(
+                                                "Resolved verifies these credentials directly with your server. The password is never stored.",
+                                            ),
+                                    ),
+                            )
+                            .child(login_field(
+                                "SERVER URL",
+                                Input::new(&self.upstream_login_url).large(),
+                            ))
+                            .child(login_field(
+                                "EMAIL",
+                                Input::new(&self.upstream_login_email).large(),
+                            ))
+                            .child(login_field(
+                                "PASSWORD",
+                                Input::new(&self.upstream_login_password)
+                                    .large()
+                                    .mask_toggle(),
+                            ))
+                            .when_some(status, |this, status| {
+                                this.child(
+                                    div()
+                                        .p_3()
+                                        .rounded_md()
+                                        .bg(if status_is_error {
+                                            cx.theme().danger.opacity(0.1)
+                                        } else {
+                                            cx.theme().info.opacity(0.1)
+                                        })
+                                        .text_sm()
+                                        .text_color(if status_is_error {
+                                            cx.theme().danger
+                                        } else {
+                                            cx.theme().info
+                                        })
+                                        .child(status),
+                                )
+                            })
+                            .child(
+                                v_flex().w_full().pb_6().child(
+                                    Button::new("submit-upstream-login")
+                                        .label(match &self.upstream_login_status {
+                                            UpstreamLoginStatus::Authenticating => "Signing in…",
+                                            UpstreamLoginStatus::SecuringSession => "Saving server…",
+                                            UpstreamLoginStatus::Idle
+                                            | UpstreamLoginStatus::Error(_) => {
+                                                "Login and add server"
+                                            }
+                                        })
+                                        .large()
+                                        .primary()
+                                        .w_full()
+                                        .disabled(!can_submit)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.submit_upstream_login(window, cx);
+                                        })),
+                                ),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    pub(super) fn open_upstream_login(
+        &mut self,
+        upstream_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.upstream_login_status == UpstreamLoginStatus::SecuringSession {
+            return;
+        }
+        if let Some(abort_handle) = self.upstream_login_abort_handle.take() {
+            abort_handle.abort();
+        }
+        self.upstream_login_generation = self.upstream_login_generation.wrapping_add(1);
+        self.upstream_login_status = UpstreamLoginStatus::Idle;
+
+        let profile = upstream_id
+            .as_deref()
+            .and_then(|id| self.settings.upstreams.server(id));
+        let base_url = profile
+            .map(|profile| profile.base_url.clone())
+            .unwrap_or_default();
+        let email = profile
+            .map(|profile| profile.email.clone())
+            .unwrap_or_default();
+        self.upstream_login_url.update(cx, |input, cx| {
+            input.set_value(base_url, window, cx);
+        });
+        self.upstream_login_email.update(cx, |input, cx| {
+            input.set_value(email, window, cx);
+        });
+        self.upstream_login_password.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.set_masked(true, window, cx);
+        });
+        self.upstream_login_open = true;
+        if profile.is_some() {
+            self.upstream_login_password
+                .read(cx)
+                .focus_handle(cx)
+                .focus(window);
+        } else {
+            self.upstream_login_url
+                .read(cx)
+                .focus_handle(cx)
+                .focus(window);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn close_upstream_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.upstream_login_status == UpstreamLoginStatus::SecuringSession {
+            return;
+        }
+        if let Some(abort_handle) = self.upstream_login_abort_handle.take() {
+            abort_handle.abort();
+        }
+        self.upstream_login_generation = self.upstream_login_generation.wrapping_add(1);
+        self.upstream_login_open = false;
+        self.upstream_login_status = UpstreamLoginStatus::Idle;
+        self.upstream_login_password.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.set_masked(true, window, cx);
+        });
+        cx.notify();
+    }
+
+    pub(super) fn submit_upstream_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.upstream_login_status.busy() {
+            return;
+        }
+        if !self.settings_writable {
+            self.upstream_login_status = UpstreamLoginStatus::Error(
+                "Settings are read-only, so this server cannot be added.".to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+
+        let base_url =
+            match normalize_upstream_url(self.upstream_login_url.read(cx).value().as_ref()) {
+                Ok(url) => url,
+                Err(error) => {
+                    self.upstream_login_status = UpstreamLoginStatus::Error(error.to_string());
+                    cx.notify();
+                    return;
+                }
+            };
+        let email = self.upstream_login_email.read(cx).value().trim().to_owned();
+        if email.is_empty() || email.len() > 254 || !email.contains('@') {
+            self.upstream_login_status =
+                UpstreamLoginStatus::Error("Enter a valid email address.".to_owned());
+            cx.notify();
+            return;
+        }
+        let password = Zeroizing::new(self.upstream_login_password.read(cx).value().to_string());
+        if password.is_empty() {
+            self.upstream_login_status =
+                UpstreamLoginStatus::Error("Enter your password.".to_owned());
+            cx.notify();
+            return;
+        }
+        // Remove the password from retained GPUI state before any await point.
+        self.upstream_login_password.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+        });
+
+        self.upstream_login_generation = self.upstream_login_generation.wrapping_add(1);
+        let generation = self.upstream_login_generation;
+        self.upstream_login_status = UpstreamLoginStatus::Authenticating;
+        let client = self.upstream_client.clone();
+        let task = self
+            .runtime
+            .spawn(async move { login_upstream(&client, base_url, email, password).await });
+        self.upstream_login_abort_handle = Some(task.abort_handle());
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.upstream_login_generation != generation {
+                    return;
+                }
+                this.upstream_login_abort_handle = None;
+                match result {
+                    Ok(Ok(login)) => this.secure_upstream_login(login, generation, window, cx),
+                    Ok(Err(error)) => {
+                        this.upstream_login_status = UpstreamLoginStatus::Error(error.to_string());
+                        cx.notify();
+                    }
+                    Err(error) if error.is_cancelled() => {}
+                    Err(error) => {
+                        this.upstream_login_status =
+                            UpstreamLoginStatus::Error(format!("Login failed: {error}"));
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn secure_upstream_login(
+        &mut self,
+        login: crate::core::UpstreamLoginResult,
+        generation: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let crate::core::UpstreamLoginResult {
+            base_url,
+            token,
+            expires_at,
+            user,
+        } = login;
+        let existing_id = self
+            .settings
+            .upstreams
+            .server_for_url(&base_url)
+            .map(|profile| profile.id.clone());
+        let profile = UpstreamProfile::from_login(existing_id, &base_url, &user, expires_at);
+        let profile_label = profile.display_label();
+        let upstream_id = profile.id.clone();
+        let credential = UpstreamCredential::new(token, expires_at);
+        let mut candidate = self.settings.clone();
+        candidate.upstreams.upsert_and_select(profile);
+        let vault = self.credential_vault.clone();
+        let persisted_candidate = candidate.clone();
+        self.upstream_login_status = UpstreamLoginStatus::SecuringSession;
+        let task = self.runtime.spawn_blocking(move || {
+            vault.store_upstream_with_settings(&persisted_candidate, &upstream_id, &credential)
+        });
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.upstream_login_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(Ok(())) => {
+                        if let Err(error) =
+                            this.apply_persisted_settings(candidate.clone(), false, cx)
+                        {
+                            this.upstream_login_status = UpstreamLoginStatus::Error(error);
+                            cx.notify();
+                            return;
+                        }
+                        this.settings_notice = Some(format!("Connected to {profile_label}."));
+                        this.upstream_login_status = UpstreamLoginStatus::Idle;
+                        this.upstream_login_open = false;
+                        this.upstream_login_password.update(cx, |input, cx| {
+                            input.set_value("", window, cx);
+                            input.set_masked(true, window, cx);
+                        });
+                        cx.notify();
+                    }
+                    Ok(Err(error)) => {
+                        this.upstream_login_status = UpstreamLoginStatus::Error(error.to_string());
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        this.upstream_login_status = UpstreamLoginStatus::Error(format!(
+                            "Could not save this server: {error}"
+                        ));
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn select_upstream(&mut self, upstream_id: Option<String>, cx: &mut Context<Self>) {
+        if let Some(profile) = upstream_id
+            .as_deref()
+            .and_then(|id| self.settings.upstreams.server(id))
+            && profile.session_expired(Utc::now())
+        {
+            self.settings_notice = Some(format!(
+                "Log in to {} again before selecting it.",
+                profile.display_label()
+            ));
+            cx.notify();
+            return;
+        }
+        let mut candidate = self.settings.clone();
+        let selected = match upstream_id.as_deref() {
+            Some(id) => candidate.upstreams.select(id),
+            None => {
+                candidate.upstreams.select_local();
+                true
+            }
+        };
+        if !selected {
+            self.settings_notice = Some("That server is no longer configured.".to_owned());
+            cx.notify();
+            return;
+        }
+        match self.commit_settings(candidate, false, cx) {
+            Ok(()) => {
+                self.settings_notice = Some(match self.settings.upstreams.active() {
+                    Some(server) => format!("{} is now active.", server.display_label()),
+                    None => "Local is now active.".to_owned(),
+                });
+            }
+            Err(error) => self.settings_notice = Some(error),
+        }
+        cx.notify();
+    }
+
+    fn open_forget_upstream_dialog(
+        &mut self,
+        upstream_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self.settings.upstreams.server(&upstream_id) else {
+            return;
+        };
+        let label = profile.display_label();
+        let this = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let forget_this = this.clone();
+            let forget_id = upstream_id.clone();
+            dialog
+                .title(format!("Forget {label}?"))
+                .w(px(440.))
+                .confirm()
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Forget server".to_owned())
+                        .ok_variant(ButtonVariant::Danger),
+                )
+                .on_ok(move |_, _, cx| {
+                    if let Some(this) = forget_this.upgrade() {
+                        this.update(cx, |this, cx| {
+                            this.forget_upstream(&forget_id, cx);
+                        });
+                    }
+                    true
+                })
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(
+                            "This removes the server from Resolved on this Mac. It does not delete your server account or local workspace.",
+                        ),
+                )
+        });
+    }
+
+    fn forget_upstream(&mut self, upstream_id: &str, cx: &mut Context<Self>) {
+        let mut candidate = self.settings.clone();
+        let Some(profile) = candidate.upstreams.remove(upstream_id) else {
+            return;
+        };
+        match self
+            .credential_vault
+            .delete_upstream_with_settings(&candidate, upstream_id)
+        {
+            Ok(()) => {
+                if let Err(error) = self.apply_persisted_settings(candidate, false, cx) {
+                    self.settings_notice = Some(error);
+                } else {
+                    self.settings_notice =
+                        Some(format!("Forgot {} on this Mac.", profile.display_label()));
+                }
+            }
+            Err(error) => {
+                self.settings_notice = Some(format!("The server could not be forgotten: {error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    fn active_upstream_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Active connection",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let selected_id = state.settings.upstreams.active_upstream_id.clone();
+                let selected_label = state
+                    .settings
+                    .upstreams
+                    .active()
+                    .map(UpstreamProfile::display_label)
+                    .unwrap_or_else(|| "Local".to_owned());
+                let servers = state.settings.upstreams.servers.clone();
+                let writable = state.settings_writable && !state.upstream_login_status.busy();
+                let menu_this = this.clone();
+
+                Button::new("active-upstream-picker")
+                    .label(selected_label)
+                    .dropdown_caret(true)
+                    .outline()
+                    .w(px(300.))
+                    .disabled(!writable)
+                    .dropdown_menu(move |menu, _, _| {
+                        let local_this = menu_this.clone();
+                        let mut menu = menu.min_w(px(300.)).item(
+                            PopupMenuItem::new("Local")
+                                .checked(selected_id.is_none())
+                                .on_click(move |_, _, cx| {
+                                    if let Some(this) = local_this.upgrade() {
+                                        this.update(cx, |this, cx| {
+                                            this.select_upstream(None, cx);
+                                        });
+                                    }
+                                }),
+                        );
+                        for server in &servers {
+                            let server_this = menu_this.clone();
+                            let server_id = server.id.clone();
+                            let checked = selected_id.as_deref() == Some(server.id.as_str());
+                            let expired = server.session_expired(Utc::now());
+                            menu = menu.item(
+                                PopupMenuItem::new(if expired {
+                                    format!("{} (login required)", server.display_label())
+                                } else {
+                                    server.display_label()
+                                })
+                                .checked(checked)
+                                .disabled(expired)
+                                .on_click(move |_, _, cx| {
+                                    if let Some(this) = server_this.upgrade() {
+                                        this.update(cx, |this, cx| {
+                                            this.select_upstream(Some(server_id.clone()), cx);
+                                        });
+                                    }
+                                }),
+                            );
+                        }
+                        let add_this = menu_this.clone();
+                        menu.separator()
+                            .item(PopupMenuItem::new("Add server…").on_click(
+                                move |_, window, cx| {
+                                    if let Some(this) = add_this.upgrade() {
+                                        this.update(cx, |this, cx| {
+                                            this.open_upstream_login(None, window, cx);
+                                        });
+                                    }
+                                },
+                            ))
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description("Choose Local or a connected server.")
+    }
+
+    fn connected_upstreams_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        let mut search_text = "servers upstream login local switch connection".to_owned();
+        for server in &self.settings.upstreams.servers {
+            search_text.push(' ');
+            search_text.push_str(&server.base_url);
+            search_text.push(' ');
+            search_text.push_str(&server.email);
+        }
+
+        SettingItem::render_searchable(search_text, move |_, _, cx| {
+            let Some(entity) = this.upgrade() else {
+                return div().into_any_element();
+            };
+            let state = entity.read(cx);
+            let servers = state.settings.upstreams.servers.clone();
+            let active_id = state.settings.upstreams.active_upstream_id.clone();
+            let writable = state.settings_writable && !state.upstream_login_status.busy();
+            let mut rows = Vec::with_capacity(servers.len() + 1);
+
+            for server in servers {
+                let relogin_this = this.clone();
+                let forget_this = this.clone();
+                let relogin_id = server.id.clone();
+                let forget_id = server.id.clone();
+                let active = active_id.as_deref() == Some(server.id.as_str());
+                let expired = server.session_expired(Utc::now());
+                let expires = server
+                    .session_expires_at
+                    .with_timezone(&Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string();
+                rows.push(
+                    h_flex()
+                        .id(SharedString::from(format!("upstream-row-{}", server.id)))
+                        .w_full()
+                        .min_h(px(64.))
+                        .gap_3()
+                        .px_3()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(cx.api_outline_variant())
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .flex_1()
+                                .gap_1()
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_sm()
+                                                .font_semibold()
+                                                .child(server.display_label()),
+                                        )
+                                        .when(active, |this| {
+                                            this.child(connection_badge(
+                                                "Active",
+                                                cx.theme().success,
+                                            ))
+                                        })
+                                        .when(expired, |this| {
+                                            this.child(connection_badge(
+                                                "Login required",
+                                                cx.theme().warning,
+                                            ))
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!(
+                                            "{} · {} · session expires {expires}",
+                                            server.display_name, server.email
+                                        )),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .flex_shrink_0()
+                                .gap_1()
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "relogin-upstream-{}",
+                                        server.id
+                                    )))
+                                    .label("Log in again")
+                                    .small()
+                                    .outline()
+                                    .disabled(!writable)
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            if let Some(this) = relogin_this.upgrade() {
+                                                this.update(cx, |this, cx| {
+                                                    this.open_upstream_login(
+                                                        Some(relogin_id.clone()),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                });
+                                            }
+                                        },
+                                    ),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "forget-upstream-{}",
+                                        server.id
+                                    )))
+                                    .label("Forget")
+                                    .small()
+                                    .ghost()
+                                    .disabled(!writable)
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            if let Some(this) = forget_this.upgrade() {
+                                                this.update(cx, |this, cx| {
+                                                    this.open_forget_upstream_dialog(
+                                                        forget_id.clone(),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                });
+                                            }
+                                        },
+                                    ),
+                                ),
+                        )
+                        .into_any_element(),
+                );
+            }
+
+            let add_this = this.clone();
+            let has_connected_servers = !rows.is_empty();
+            rows.push(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_3()
+                    .pt_3()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(if has_connected_servers {
+                                "Manage your connected servers."
+                            } else {
+                                "No servers have been added."
+                            }),
+                    )
+                    .child(
+                        Button::new("add-upstream-server")
+                            .icon(IconName::Plus)
+                            .label("Add server")
+                            .small()
+                            .primary()
+                            .disabled(!writable)
+                            .on_click(move |_, window, cx| {
+                                if let Some(this) = add_this.upgrade() {
+                                    this.update(cx, |this, cx| {
+                                        this.open_upstream_login(None, window, cx);
+                                    });
+                                }
+                            }),
+                    )
+                    .into_any_element(),
+            );
+
+            v_flex()
+                .w_full()
+                .min_w(px(480.))
+                .debug_selector(|| "upstream-settings-list".to_owned())
+                .children(rows)
+                .into_any_element()
+        })
+    }
+}
+
+fn login_field(label: &'static str, input: Input) -> AnyElement {
+    v_flex()
+        .gap_2()
+        .child(div().text_xs().font_semibold().child(label))
+        .child(input)
+        .into_any_element()
+}
+
+fn connection_badge(label: &'static str, color: Hsla) -> AnyElement {
+    div()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .bg(color.opacity(0.12))
+        .text_xs()
+        .font_semibold()
+        .text_color(color)
+        .child(label)
+        .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Modifiers, TestAppContext, VisualTestContext, px, size};
+
+    use super::*;
+
+    fn mount_app(
+        cx: &mut TestAppContext,
+    ) -> (Entity<ApiTester>, &mut VisualTestContext, tempfile::TempDir) {
+        let directory = tempfile::tempdir().expect("create temporary database directory");
+        let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+        store.initialize().expect("initialize test database");
+
+        let mut app = None;
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            let base_key_bindings = shortcuts::capture_base_key_bindings(cx);
+            crate::theme::configure(cx);
+            let view = cx
+                .new(|cx| ApiTester::new_with_database_store(base_key_bindings, store, window, cx));
+            crate::register_app_action_handlers(&view, cx);
+            app = Some(view.clone());
+            gpui_component::Root::new(view, window, cx)
+        });
+        visual.update(|window, _| window.activate_window());
+        visual.simulate_resize(size(px(1_200.), px(800.)));
+        (app.expect("capture app entity"), visual, directory)
+    }
+
+    #[gpui::test]
+    fn login_navigation_opens_a_page_and_closing_clears_the_password(cx: &mut TestAppContext) {
+        let (app, cx, _directory) = mount_app(cx);
+        cx.run_until_parked();
+
+        let login = cx
+            .debug_bounds("rail-upstreams")
+            .expect("fresh navigation must expose Login");
+        cx.simulate_click(login.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("upstream-login-page").is_some());
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.upstream_login_password.update(cx, |input, cx| {
+                    input.set_value("never-persist-me", window, cx);
+                });
+                app.close_upstream_login(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let app = app.read(cx);
+            assert!(!app.upstream_login_open);
+            assert!(app.upstream_login_password.read(cx).value().is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn servers_is_the_default_settings_page(cx: &mut TestAppContext) {
+        let (app, cx, _directory) = mount_app(cx);
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.open_workspace_tool_tab(WorkspaceToolTab::Settings, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("upstream-settings-list").is_some(),
+            "Settings must open directly to the switchable Servers page"
+        );
+    }
+}

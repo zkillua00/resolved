@@ -181,6 +181,7 @@ impl ApiTester {
                     }),
             )
             .child(div().flex_1())
+            .child(self.render_upstream_navigation_control(item_width, item_height, compact, cx))
             .child(
                 h_flex()
                     .id("rail-compact-toggle")

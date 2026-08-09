@@ -43,20 +43,22 @@ use crate::{
         CodeEditorEvent, CodeLanguage, apply_template_pair_edit,
     },
     core::{
-        AppSettings, BodyField, BodyFieldKind, BodyMode, Collection, DEFAULT_REQUEST_TAB_TITLE,
-        DatabaseStore, Environment, EnvironmentMutation, HeaderEntry, HistoryEntry, ImportBundle,
-        InterchangeFormat, MAX_INTERCHANGE_BYTES, MAX_SNIPPET_NAME_BYTES, PostResponseResult,
-        PreRequestResult, REDACTED_VALUE, RawBodyLanguage, RequestDraft, RequestError,
-        RequestHistory, RequestScripts, RequestTabAssociation, RequestTabCloseScope,
-        RequestTabGroup, RequestTabGroupColor, RequestTabGroupId, RequestTabId, RequestTabRecord,
-        RequestTabs, RequestTask, RequestTemplate, ResponseData, STANDARD_HTTP_METHODS,
-        SavedRequest, SavedTheme, ScriptCancellation, ScriptDiagnostic, ScriptEnvironment,
-        ScriptError, ScriptErrorKind, ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope,
-        ShortcutOverride, Snippet, SnippetCancellation, SnippetCategory, SnippetKind, SnippetLog,
-        SnippetRequirement, SnippetSelection, SnippetSelectionArea, SnippetSelectionSource,
-        SnippetTextRange, Workspace, build_client, execute_post_response, execute_pre_request,
-        export_request, format_body, generate_snippet, import_requests, is_probably_text,
-        resolve_request, spawn_request,
+        AppSettings, BodyField, BodyFieldKind, BodyMode, Collection, CredentialVault,
+        DEFAULT_REQUEST_TAB_TITLE, DatabaseStore, Environment, EnvironmentMutation, HeaderEntry,
+        HistoryEntry, ImportBundle, InterchangeFormat, MAX_INTERCHANGE_BYTES,
+        MAX_SNIPPET_NAME_BYTES, PostResponseResult, PreRequestResult, REDACTED_VALUE,
+        RawBodyLanguage, RequestDraft, RequestError, RequestHistory, RequestScripts,
+        RequestTabAssociation, RequestTabCloseScope, RequestTabGroup, RequestTabGroupColor,
+        RequestTabGroupId, RequestTabId, RequestTabRecord, RequestTabs, RequestTask,
+        RequestTemplate, ResponseData, STANDARD_HTTP_METHODS, SavedRequest, SavedTheme,
+        ScriptCancellation, ScriptDiagnostic, ScriptEnvironment, ScriptError, ScriptErrorKind,
+        ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope, ShortcutOverride, Snippet,
+        SnippetCancellation, SnippetCategory, SnippetKind, SnippetLog, SnippetRequirement,
+        SnippetSelection, SnippetSelectionArea, SnippetSelectionSource, SnippetTextRange,
+        UpstreamCredential, UpstreamProfile, Workspace, WorkspaceProviderRegistry, build_client,
+        build_upstream_client, execute_post_response, execute_pre_request, export_request,
+        format_body, generate_snippet, import_requests, is_probably_text, login_upstream,
+        normalize_upstream_url, resolve_request, spawn_request,
     },
     debug_overlay::DebugOverlay,
     request_dirty::{RequestDirtyPart, RequestDirtyState},
@@ -129,10 +131,11 @@ mod theme_css_actions;
 mod theme_css_editor;
 mod title_bar;
 mod ui_utils;
+mod upstream_connections;
 mod welcome_page;
+mod workspace_panes;
 mod workspace_tab;
 mod workspace_tab_actions;
-mod workspace_panes;
 
 use environment_variable_grid::EnvironmentVariableRow;
 use execution_stage::*;
@@ -150,6 +153,7 @@ use snippets::*;
 use template_variable_popover_model::*;
 use template_variables::*;
 use ui_utils::*;
+use upstream_connections::*;
 use workspace_tab::*;
 
 const TEMPLATE_HIGHLIGHT_DEBOUNCE: Duration = Duration::from_millis(90);
@@ -243,6 +247,8 @@ pub struct ApiTester {
     history_writable: bool,
     workspace: Workspace,
     database_store: DatabaseStore,
+    workspace_providers: WorkspaceProviderRegistry,
+    credential_vault: CredentialVault,
     workspace_warning: Option<String>,
     workspace_writable: bool,
     sidebar_tab: SidebarTab,
@@ -271,6 +277,14 @@ pub struct ApiTester {
     base_key_bindings: Vec<gpui::KeyBinding>,
     recording_shortcut_id: Option<ShortcutId>,
     settings_notice: Option<String>,
+    upstream_client: Client,
+    upstream_login_open: bool,
+    upstream_login_url: Entity<InputState>,
+    upstream_login_email: Entity<InputState>,
+    upstream_login_password: Entity<InputState>,
+    upstream_login_status: UpstreamLoginStatus,
+    upstream_login_generation: u64,
+    upstream_login_abort_handle: Option<AbortHandle>,
     theme_editors: HashMap<String, ThemeEditorSession>,
     snippet_editor: SnippetEditorSession,
     snippet_apply_generation: u64,

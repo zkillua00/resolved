@@ -39,6 +39,8 @@ WKWebView through `gpui-wry` only when the Preview tab is selected.
 - Nested collection folders with search-preserved ancestry, request moves, and
   safe folder reparenting
 - Persistent collections, saved requests, environments, and secret variables
+- Multiple switchable self-hosted server profiles with direct login; session
+  tokens are authenticated-encrypted locally with a device-only Keychain key
 - Persistent, live-configurable keyboard shortcuts, organized into five
   task-focused sections with macOS-native defaults
 - A persistent CSS theme library mapped into GPUI controls and editor syntax
@@ -51,6 +53,22 @@ WKWebView through `gpui-wry` only when the Preview tab is selected.
 - Restricted captured-HTML preview
 - Newest-first, persisted request history capped at 100 entries
 - Sanitized history snapshots with URL, body, header, error, and secret redaction
+
+## Self-hosted servers
+
+The Login control in the navigation rail connects directly to a self-hosted
+Resolved server. A server is added only after `POST /api/v1/auth/login`
+succeeds. Resolved accepts HTTPS endpoints and loopback HTTP endpoints, refuses
+credential-bearing URLs and redirects, and never persists the submitted
+password. Settings → Servers lists every authenticated server and switches the
+active connection between them or Local.
+
+Server selection does not move the local workspace in this stage. Collections,
+environments, and requests still use the local SQLite provider. Their ownership
+now sits behind a provider registry so the later remote-workspace protocol can
+register an upstream provider without coupling collection operations to server
+configuration. See [`docs/upstreams.md`](docs/upstreams.md) for the boundary and
+credential-vault design.
 
 ## Code editors
 
@@ -199,8 +217,10 @@ methods, headers, and body forms without executing the code.
 
 ## Settings, shortcuts, and themes
 
-Open Settings from the navigation rail or with `⌘,`. The Editor page's Editing
-section controls tab width, spaces versus hard tabs, soft wrapping, line
+Open Settings from the navigation rail or with `⌘,`. The Servers page switches
+between Local and authenticated self-hosted upstreams, adds another server, or
+forgets an encrypted local session. The Editor page's Editing section controls
+tab width, spaces versus hard tabs, soft wrapping, line
 numbers, indent guides, and automatic pair insertion. Its Formatting section
 controls indentation, tabs, line width, quote style, semicolons, and trailing
 commas for the embedded JSON/JavaScript/TypeScript formatter. Changes persist

@@ -124,9 +124,11 @@ dependencies = [
  "libc",
  "lsp-types",
  "reqwest",
+ "ring",
  "rquickjs",
  "rquickjs-serde",
  "rusqlite",
+ "security-framework",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -143,6 +145,7 @@ dependencies = [
  "tree-sitter-powershell",
  "url",
  "wry",
+ "zeroize",
 ]
 
 [[package]]
@@ -6225,6 +6228,8 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
+ "serde",
+ "serde_json",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",

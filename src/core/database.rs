@@ -33,7 +33,7 @@ use super::{
 #[cfg(test)]
 use super::request_tabs::RequestTabGroupColor;
 
-const CURRENT_SCHEMA_VERSION: i64 = 6;
+const CURRENT_SCHEMA_VERSION: i64 = 7;
 const LEGACY_HISTORY_FILE_VERSION: u32 = 1;
 const LEGACY_HISTORY_IMPORT_MARKER: &str = "history-json-v1";
 const LEGACY_WORKSPACE_IMPORT_MARKER: &str = "workspace-json-v1";
@@ -295,12 +295,37 @@ CREATE TABLE snippet_requirements (
 );
 "#;
 
+const MIGRATION_7: &str = r#"
+CREATE TABLE secure_values (
+    namespace   TEXT NOT NULL CHECK (length(trim(namespace)) > 0),
+    name        TEXT NOT NULL CHECK (length(trim(name)) > 0),
+    algorithm   TEXT NOT NULL CHECK (algorithm = 'aes-256-gcm'),
+    key_version INTEGER NOT NULL CHECK (key_version >= 1),
+    nonce       BLOB NOT NULL CHECK (length(nonce) = 12),
+    ciphertext  BLOB NOT NULL CHECK (length(ciphertext) >= 16),
+    updated_at  INTEGER NOT NULL,
+    PRIMARY KEY(namespace, name)
+);
+"#;
+
 /// The application aggregates persisted in one consistent SQLite snapshot.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct DatabaseState {
     pub workspace: Workspace,
     pub history: RequestHistory,
+}
+
+/// Opaque authenticated ciphertext stored by the local secure vault.
+///
+/// Cryptography remains outside the database layer; this record exists so
+/// settings metadata and its corresponding secret can share one transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EncryptedValueRecord {
+    pub algorithm: String,
+    pub key_version: u32,
+    pub nonce: Vec<u8>,
+    pub ciphertext: Vec<u8>,
 }
 
 /// Result of checking for and importing the former JSON persistence files.
@@ -566,6 +591,91 @@ impl DatabaseStore {
         let mut connection = self.open_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         save_app_settings_tx(&transaction, &state_json)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn load_secure_value(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Option<EncryptedValueRecord>, DatabaseError> {
+        let connection = self.open_connection()?;
+        connection
+            .query_row(
+                "SELECT algorithm, key_version, nonce, ciphertext
+                 FROM secure_values
+                 WHERE namespace = ?1 AND name = ?2",
+                params![namespace, name],
+                |row| {
+                    Ok(EncryptedValueRecord {
+                        algorithm: row.get(0)?,
+                        key_version: row.get(1)?,
+                        nonce: row.get(2)?,
+                        ciphertext: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(DatabaseError::from)
+    }
+
+    pub(crate) fn save_secure_value(
+        &self,
+        namespace: &str,
+        name: &str,
+        value: &EncryptedValueRecord,
+    ) -> Result<(), DatabaseError> {
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        save_secure_value_tx(&transaction, namespace, name, value)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn delete_secure_value(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<(), DatabaseError> {
+        let connection = self.open_connection()?;
+        connection.execute(
+            "DELETE FROM secure_values WHERE namespace = ?1 AND name = ?2",
+            params![namespace, name],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn save_app_settings_and_secure_value(
+        &self,
+        settings: &AppSettings,
+        namespace: &str,
+        name: &str,
+        value: &EncryptedValueRecord,
+    ) -> Result<(), DatabaseError> {
+        let state_json = serialize_app_settings(settings)?;
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        save_app_settings_tx(&transaction, &state_json)?;
+        save_secure_value_tx(&transaction, namespace, name, value)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn save_app_settings_and_delete_secure_value(
+        &self,
+        settings: &AppSettings,
+        namespace: &str,
+        name: &str,
+    ) -> Result<(), DatabaseError> {
+        let state_json = serialize_app_settings(settings)?;
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        save_app_settings_tx(&transaction, &state_json)?;
+        transaction.execute(
+            "DELETE FROM secure_values WHERE namespace = ?1 AND name = ?2",
+            params![namespace, name],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -878,6 +988,7 @@ fn migrate(connection: &mut Connection) -> Result<(), DatabaseError> {
             4 => transaction.execute_batch(MIGRATION_4)?,
             5 => transaction.execute_batch(MIGRATION_5)?,
             6 => transaction.execute_batch(MIGRATION_6)?,
+            7 => transaction.execute_batch(MIGRATION_7)?,
             _ => {
                 return Err(DatabaseError::UnsupportedSchemaVersion {
                     found: next,
@@ -1220,6 +1331,35 @@ fn save_app_settings_tx(
             updated_at = excluded.updated_at,
             version = app_settings.version + 1",
         params![state_json, now_micros()],
+    )?;
+    Ok(())
+}
+
+fn save_secure_value_tx(
+    transaction: &Transaction<'_>,
+    namespace: &str,
+    name: &str,
+    value: &EncryptedValueRecord,
+) -> Result<(), DatabaseError> {
+    transaction.execute(
+        "INSERT INTO secure_values(
+            namespace, name, algorithm, key_version, nonce, ciphertext, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(namespace, name) DO UPDATE SET
+            algorithm = excluded.algorithm,
+            key_version = excluded.key_version,
+            nonce = excluded.nonce,
+            ciphertext = excluded.ciphertext,
+            updated_at = excluded.updated_at",
+        params![
+            namespace,
+            name,
+            value.algorithm,
+            value.key_version,
+            value.nonce,
+            value.ciphertext,
+            now_micros(),
+        ],
     )?;
     Ok(())
 }
@@ -2931,7 +3071,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(schema_version, CURRENT_SCHEMA_VERSION);
-        for table in ["snippets", "snippet_requirements"] {
+        for table in ["snippets", "snippet_requirements", "secure_values"] {
             let count: i64 = connection
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master

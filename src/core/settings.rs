@@ -7,6 +7,8 @@ use std::{
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use super::UpstreamSettings;
+
 static NEXT_THEME_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Persisted application preferences that are independent from request data.
@@ -22,6 +24,7 @@ pub struct AppSettings {
     pub formatter: FormatterSettings,
     pub navigation_compact: bool,
     pub metrics_position: MetricsPosition,
+    pub upstreams: UpstreamSettings,
     /// Preserve fields written by a newer application version when an older
     /// build changes a setting it understands.
     #[serde(flatten)]
@@ -583,6 +586,7 @@ mod tests {
         assert_eq!(settings.theme, ThemeSettings::default());
         assert_eq!(settings.editor, EditorSettings::default());
         assert_eq!(settings.formatter, FormatterSettings::default());
+        assert_eq!(settings.upstreams, UpstreamSettings::default());
         assert!(!settings.navigation_compact);
         assert_eq!(settings.metrics_position, MetricsPosition::BottomRight);
     }

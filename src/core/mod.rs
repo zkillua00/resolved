@@ -5,10 +5,13 @@ mod interchange;
 mod request;
 mod request_tabs;
 mod script;
+mod secure_store;
 mod settings;
 mod snippet;
 mod template;
+mod upstream;
 mod workspace;
+mod workspace_provider;
 
 #[cfg(test)]
 mod mvp_smoke_test;
@@ -36,6 +39,8 @@ pub use script::{
 #[cfg(test)]
 pub use script::{ScriptLog, ScriptTestResult};
 #[allow(unused_imports)]
+pub use secure_store::{CredentialVault, CredentialVaultError, UpstreamCredential};
+#[allow(unused_imports)]
 pub use settings::{
     AppSettings, EditorSettings, FormatterQuoteStyle, FormatterSemicolons, FormatterSettings,
     FormatterTrailingCommas, MetricsPosition, SavedTheme, ShortcutOverride, ThemeSettings,
@@ -48,6 +53,17 @@ pub use snippet::{
     generate_snippet,
 };
 pub use template::{RequestTemplate, ResolvedRequest, resolve_request};
+#[allow(unused_imports)]
+pub use upstream::{
+    LoginUser, UpstreamLoginError, UpstreamLoginResult, UpstreamProfile, UpstreamSettings,
+    UpstreamUrlError, build_upstream_client, login_upstream, normalize_upstream_url,
+    upstream_url_label,
+};
 pub use workspace::{
     Collection, Environment, RequestScripts, SavedRequest, Workspace, WorkspaceMutationError,
+};
+#[allow(unused_imports)]
+pub use workspace_provider::{
+    LocalWorkspaceProvider, WorkspaceProvider, WorkspaceProviderError, WorkspaceProviderId,
+    WorkspaceProviderRegistry,
 };

@@ -30,6 +30,8 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let workspace_providers = WorkspaceProviderRegistry::local(database_store.clone());
+        let credential_vault = CredentialVault::new(database_store.clone());
         let snippet_menu_owner = cx.entity().downgrade();
         let script_variable_catalog = ScriptVariableCatalog::default().shared();
         let typescript_service = embedded_typescript_service();
@@ -192,7 +194,7 @@ impl ApiTester {
                         ),
                     };
                 let (workspace, workspace_load_warning, workspace_writable) =
-                    match database_store.load_workspace() {
+                    match workspace_providers.active().load_workspace() {
                         Ok(workspace) => (workspace, None, true),
                         Err(error) => (
                             Workspace::default(),
@@ -425,8 +427,19 @@ impl ApiTester {
             window,
             cx,
         );
+        let upstream_login_url =
+            cx.new(|cx| InputState::new(window, cx).placeholder("https://resolved.example.com"));
+        let upstream_login_email =
+            cx.new(|cx| InputState::new(window, cx).placeholder("owner@example.com"));
+        let upstream_login_password = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Password")
+                .masked(true)
+        });
 
         let client = build_client().expect("failed to create the HTTP client");
+        let upstream_client =
+            build_upstream_client().expect("failed to create the upstream login client");
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
@@ -525,6 +538,15 @@ impl ApiTester {
                     this.update_active_request_tab_title(cx);
                 }
             });
+        let upstream_login_password_subscription = cx.subscribe_in(
+            &upstream_login_password,
+            window,
+            |this, _, event, window, cx| {
+                if matches!(event, InputEvent::PressEnter { secondary: false }) {
+                    this.submit_upstream_login(window, cx);
+                }
+            },
+        );
         let quit_subscription = cx.on_app_quit(|this, cx| {
             this.flush_local_state(cx);
             async {}
@@ -581,6 +603,8 @@ impl ApiTester {
             history_writable,
             workspace,
             database_store,
+            workspace_providers,
+            credential_vault,
             workspace_warning,
             workspace_writable,
             sidebar_tab: SidebarTab::Collections,
@@ -609,6 +633,14 @@ impl ApiTester {
             base_key_bindings,
             recording_shortcut_id: None,
             settings_notice: None,
+            upstream_client,
+            upstream_login_open: false,
+            upstream_login_url,
+            upstream_login_email,
+            upstream_login_password,
+            upstream_login_status: UpstreamLoginStatus::Idle,
+            upstream_login_generation: 0,
+            upstream_login_abort_handle: None,
             theme_editors: HashMap::new(),
             snippet_editor,
             snippet_apply_generation: 0,
@@ -654,6 +686,7 @@ impl ApiTester {
                 request_interchange_subscription,
                 quit_subscription,
                 shortcut_capture_subscription,
+                upstream_login_password_subscription,
             ],
         };
         this.apply_code_editor_settings(window, cx);

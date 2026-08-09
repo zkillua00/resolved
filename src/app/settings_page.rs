@@ -34,11 +34,11 @@ impl ApiTester {
     }
 
     pub(super) fn render_settings_workspace(&self, cx: &mut Context<Self>) -> AnyElement {
+        let servers_page = self.upstream_settings_page(cx);
         let editor_page = SettingPage::new("Editor")
             .description(
                 "Tune every code editor and the built-in JSON, JavaScript, and TypeScript formatters.",
             )
-            .default_open(true)
             .resettable(false)
             .group(
                 SettingGroup::new()
@@ -124,7 +124,13 @@ impl ApiTester {
                     SettingsView::new("api-tester-settings")
                         .sidebar_width(px(220.))
                         .with_group_variant(GroupBoxVariant::Outline)
-                        .pages([editor_page, keyboard_page, appearance_page, developer_page]),
+                        .pages([
+                            servers_page,
+                            editor_page,
+                            keyboard_page,
+                            appearance_page,
+                            developer_page,
+                        ]),
                 ),
             )
             .into_any_element()
