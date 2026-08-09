@@ -43,7 +43,7 @@ func TestIdentityManagementAndDynamicPermissions(t *testing.T) {
 	defer closeDatabase()
 
 	owner, err := usersService.BootstrapOwner(t.Context(), users.CreateInput{
-		Email:       "owner@example.com",
+		Email:       "owner",
 		DisplayName: "Owner",
 		Password:    ownerPassword,
 	})
@@ -51,7 +51,7 @@ func TestIdentityManagementAndDynamicPermissions(t *testing.T) {
 		t.Fatalf("bootstrap owner: %v", err)
 	}
 	if _, err := usersService.BootstrapOwner(t.Context(), users.CreateInput{
-		Email:       "second-owner@example.com",
+		Email:       "second-owner",
 		DisplayName: "Second owner",
 		Password:    ownerPassword,
 	}); err == nil {
@@ -78,7 +78,7 @@ func TestIdentityManagementAndDynamicPermissions(t *testing.T) {
 		"password":     "short",
 		"role_ids":     []string{},
 	}, fiber.StatusUnprocessableEntity)
-	if invalidUser.Error.Code != "validation_failed" || invalidUser.Error.Fields["email"] == "" || invalidUser.Error.Fields["password"] == "" {
+	if invalidUser.Error.Code != "validation_failed" || invalidUser.Error.Fields["email"] != "" || invalidUser.Error.Fields["password"] == "" {
 		t.Fatalf("unexpected validation response: %+v", invalidUser.Error)
 	}
 
@@ -92,7 +92,7 @@ func TestIdentityManagementAndDynamicPermissions(t *testing.T) {
 	}
 
 	userResponse := request[identity.UserView](t, app, http.MethodPost, "/api/v1/users", ownerLogin.Token, map[string]any{
-		"email":        "collaborator@example.com",
+		"email":        "collaborator",
 		"display_name": "Collaborator",
 		"password":     collaboratorPassword,
 		"role_ids":     []string{roleResponse.Data.ID},
@@ -101,7 +101,7 @@ func TestIdentityManagementAndDynamicPermissions(t *testing.T) {
 
 	request[[]identity.UserView](t, app, http.MethodGet, "/api/v1/users", collaboratorLogin.Token, nil, fiber.StatusOK)
 	forbidden := request[identity.UserView](t, app, http.MethodPost, "/api/v1/users", collaboratorLogin.Token, map[string]any{
-		"email":        "before-permission@example.com",
+		"email":        "before-permission",
 		"display_name": "Before permission",
 		"password":     collaboratorPassword,
 		"role_ids":     []string{},
@@ -115,12 +115,12 @@ func TestIdentityManagementAndDynamicPermissions(t *testing.T) {
 	}, fiber.StatusOK)
 
 	createdAfterPermission := request[identity.UserView](t, app, http.MethodPost, "/api/v1/users", collaboratorLogin.Token, map[string]any{
-		"email":        "after-permission@example.com",
+		"email":        "after-permission",
 		"display_name": "After permission",
 		"password":     collaboratorPassword,
 		"role_ids":     []string{},
 	}, fiber.StatusCreated)
-	if createdAfterPermission.Data.Email != "after-permission@example.com" {
+	if createdAfterPermission.Data.Email != "after-permission" {
 		t.Fatalf("created email = %q", createdAfterPermission.Data.Email)
 	}
 

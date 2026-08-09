@@ -13,7 +13,7 @@ type Handler struct {
 }
 
 type CreateRequest struct {
-	Email       string   `json:"email" validate:"required,email,max=254"`
+	Email       string   `json:"email" validate:"required,max=254"`
 	DisplayName string   `json:"display_name" validate:"required,max=120"`
 	Password    string   `json:"password" validate:"required,min=12,max=128"`
 	RoleIDs     []string `json:"role_ids" validate:"dive,required"`
@@ -29,7 +29,7 @@ type GetPayload GetRequest
 
 type UpdateRequest struct {
 	ID          string  `json:"-" validate:"required"`
-	Email       *string `json:"email" validate:"omitempty,email,max=254"`
+	Email       *string `json:"email" validate:"omitempty,max=254"`
 	DisplayName *string `json:"display_name" validate:"omitempty,max=120"`
 	Password    *string `json:"password" validate:"omitempty,min=12,max=128"`
 	Active      *bool   `json:"active"`

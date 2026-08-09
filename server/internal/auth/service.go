@@ -51,9 +51,9 @@ func NewService(
 	}, nil
 }
 
-func (s *Service) Login(ctx context.Context, email, password string) (LoginResult, error) {
-	email = normalizeEmail(email)
-	user, err := s.repository.FindUserByEmail(ctx, email)
+func (s *Service) Login(ctx context.Context, login, password string) (LoginResult, error) {
+	login = normalizeLogin(login)
+	user, err := s.repository.FindUserByEmail(ctx, login)
 	if err != nil {
 		if errors.Is(err, identity.ErrUserNotFound) {
 			_, _ = s.hasher.Verify(s.dummyHash, password)
@@ -135,12 +135,12 @@ func (p *Principal) HasPermission(permission string) bool {
 	return ok
 }
 
-func normalizeEmail(email string) string {
-	return strings.ToLower(strings.TrimSpace(email))
+func normalizeLogin(login string) string {
+	return strings.ToLower(strings.TrimSpace(login))
 }
 
 func invalidCredentials() error {
-	return problem.New(problem.KindUnauthorized, "invalid_credentials", "email or password is incorrect")
+	return problem.New(problem.KindUnauthorized, "invalid_credentials", "login or password is incorrect")
 }
 
 func unauthorized() error {

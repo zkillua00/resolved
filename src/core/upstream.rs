@@ -275,7 +275,7 @@ pub fn build_upstream_client() -> Result<Client, UpstreamLoginError> {
             "/",
             env!("CARGO_PKG_VERSION")
         ))
-        // Never replay an email/password body to a redirect target.
+        // Never replay a login/password body to a redirect target.
         .redirect(Policy::none())
         .timeout(LOGIN_TIMEOUT)
         .build()
@@ -285,7 +285,7 @@ pub fn build_upstream_client() -> Result<Client, UpstreamLoginError> {
 pub async fn login_upstream(
     client: &Client,
     base_url: Url,
-    email: String,
+    login: String,
     password: Zeroizing<String>,
 ) -> Result<UpstreamLoginResult, UpstreamLoginError> {
     let endpoint = base_url
@@ -294,7 +294,7 @@ pub async fn login_upstream(
     let mut response = client
         .post(endpoint)
         .json(&LoginRequest {
-            email: email.trim(),
+            email: login.trim(),
             password: password.as_str(),
         })
         .send()
@@ -485,7 +485,7 @@ mod tests {
         let base_b = normalize_upstream_url("https://two.example.com").unwrap();
         let user = LoginUser {
             id: "user-1".to_owned(),
-            email: "owner@example.com".to_owned(),
+            email: "owner".to_owned(),
             display_name: "Owner".to_owned(),
             active: true,
         };
@@ -520,7 +520,7 @@ mod tests {
             expires_at: Utc::now(),
             user: LoginUser {
                 id: "user-1".to_owned(),
-                email: "owner@example.com".to_owned(),
+                email: "owner".to_owned(),
                 display_name: "Owner".to_owned(),
                 active: true,
             },
@@ -543,7 +543,7 @@ mod tests {
                 "expires_at": expires_at,
                 "user": {
                     "id": "user-1",
-                    "email": "owner@example.com",
+                    "email": "owner",
                     "display_name": "Owner",
                     "active": true,
                     "roles": []
@@ -560,7 +560,7 @@ mod tests {
 
         assert_eq!(result.base_url, base_url);
         assert_eq!(result.token.as_str(), "server-session-token");
-        assert_eq!(result.user.email, "owner@example.com");
+        assert_eq!(result.user.email, "owner");
         assert_eq!(result.expires_at, expires_at);
     }
 
@@ -569,7 +569,7 @@ mod tests {
         let base_url = normalize_upstream_url("https://resolved.example.com").unwrap();
         let body = br#"{
             "success": false,
-            "error": {"code": "invalid_credentials", "message": "email or password is incorrect"}
+            "error": {"code": "invalid_credentials", "message": "login or password is incorrect"}
         }"#;
 
         let error = parse_login_response(StatusCode::UNAUTHORIZED, body, base_url).unwrap_err();
@@ -579,7 +579,7 @@ mod tests {
             UpstreamLoginError::Rejected {
                 status: StatusCode::UNAUTHORIZED,
                 ref message,
-            } if message == "email or password is incorrect"
+            } if message == "login or password is incorrect"
         ));
     }
 
@@ -588,7 +588,7 @@ mod tests {
         let base_url = normalize_upstream_url("https://resolved.example.com").unwrap();
         let user = LoginUser {
             id: "user-1".to_owned(),
-            email: "owner@example.com".to_owned(),
+            email: "owner".to_owned(),
             display_name: "Owner".to_owned(),
             active: true,
         };

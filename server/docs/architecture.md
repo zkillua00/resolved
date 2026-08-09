@@ -26,7 +26,9 @@ waiting for the session to expire. Password changes and account deactivation
 also revoke that user's active sessions.
 
 Passwords are hashed with Argon2id and a unique cryptographically random salt.
-The login response is deliberately generic when an email or password is wrong.
+The login response is deliberately generic when a login identifier or password
+is wrong. Login identifiers are opaque, case-insensitive strings; deployments
+do not require them to be email addresses.
 The public login route has a per-process sliding-window rate limit.
 
 ## Bootstrap and built-in data

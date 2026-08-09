@@ -3,7 +3,6 @@ package users
 import (
 	"context"
 	"errors"
-	"net/mail"
 	"strings"
 
 	"resolved-server/internal/identity"
@@ -88,11 +87,15 @@ func (s *Service) Update(ctx context.Context, id string, input UpdateInput) (ide
 	}
 	changes := identity.UserChanges{Active: input.Active}
 	if input.Email != nil {
-		email := normalizeEmail(*input.Email)
-		if err := validateEmail(email); err != nil {
-			return identity.User{}, err
+		login := normalizeLogin(*input.Email)
+		if login == "" {
+			return identity.User{}, problem.WithFields(
+				"validation_failed",
+				"request validation failed",
+				map[string]string{"email": "is required"},
+			)
 		}
-		changes.Email = &email
+		changes.Email = &login
 	}
 	if input.DisplayName != nil {
 		displayName := strings.TrimSpace(*input.DisplayName)
@@ -135,9 +138,13 @@ func (s *Service) ReplaceRoles(ctx context.Context, id string, roleIDs []string)
 }
 
 func (s *Service) newUser(input CreateInput) (identity.User, error) {
-	email := normalizeEmail(input.Email)
-	if err := validateEmail(email); err != nil {
-		return identity.User{}, err
+	login := normalizeLogin(input.Email)
+	if login == "" {
+		return identity.User{}, problem.WithFields(
+			"validation_failed",
+			"request validation failed",
+			map[string]string{"email": "is required"},
+		)
 	}
 	displayName := strings.TrimSpace(input.DisplayName)
 	if displayName == "" {
@@ -153,7 +160,7 @@ func (s *Service) newUser(input CreateInput) (identity.User, error) {
 	}
 	return identity.User{
 		ID:           uuid.NewString(),
-		Email:        email,
+		Email:        login,
 		DisplayName:  displayName,
 		PasswordHash: passwordHash,
 		Active:       true,
@@ -172,20 +179,8 @@ func (s *Service) hashPassword(password string) (string, error) {
 	return passwordHash, nil
 }
 
-func normalizeEmail(email string) string {
-	return strings.ToLower(strings.TrimSpace(email))
-}
-
-func validateEmail(email string) error {
-	address, err := mail.ParseAddress(email)
-	if err != nil || address.Address != email || len(email) > 254 {
-		return problem.WithFields(
-			"validation_failed",
-			"request validation failed",
-			map[string]string{"email": "must be a valid email address"},
-		)
-	}
-	return nil
+func normalizeLogin(login string) string {
+	return strings.ToLower(strings.TrimSpace(login))
 }
 
 func validateID(field, value string) error {
@@ -213,7 +208,7 @@ func mapRepositoryError(err error) error {
 	case errors.Is(err, identity.ErrUserNotFound):
 		return problem.New(problem.KindNotFound, "user_not_found", "user was not found")
 	case errors.Is(err, identity.ErrEmailExists):
-		return problem.New(problem.KindConflict, "email_exists", "a user with this email already exists")
+		return problem.New(problem.KindConflict, "email_exists", "a user with this login already exists")
 	case errors.Is(err, identity.ErrUnknownRole):
 		return problem.WithFields(
 			"validation_failed",

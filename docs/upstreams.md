@@ -10,7 +10,7 @@ settings record:
 
 - a stable upstream identifier;
 - the normalized base URL;
-- the authenticated user's ID, email, and display name;
+- the authenticated user's ID, login identifier, and display name;
 - the session expiry and connection time.
 
 `active_upstream_id = null` selects Local. Any configured upstream can be
@@ -20,7 +20,7 @@ of producing ambiguous duplicate entries.
 
 The login client appends `api/v1/auth/login` to the configured base URL. It
 allows HTTPS everywhere and plain HTTP only for loopback hosts. It rejects URL
-credentials, query strings, fragments, and redirects so an email/password body
+credentials, query strings, fragments, and redirects so a login/password body
 cannot be replayed to another origin. Login responses are capped at 64 KiB.
 
 ## Credential vault

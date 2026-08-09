@@ -429,8 +429,7 @@ impl ApiTester {
         );
         let upstream_login_url =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://resolved.example.com"));
-        let upstream_login_email =
-            cx.new(|cx| InputState::new(window, cx).placeholder("owner@example.com"));
+        let upstream_login_email = cx.new(|cx| InputState::new(window, cx).placeholder("owner"));
         let upstream_login_password = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Password")

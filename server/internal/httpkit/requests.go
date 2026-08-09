@@ -70,8 +70,6 @@ func validationMessage(field validator.FieldError) string {
 	switch field.Tag() {
 	case "required":
 		return "is required"
-	case "email":
-		return "must be a valid email address"
 	case "min":
 		return fmt.Sprintf("must contain at least %s characters", field.Param())
 	case "max":

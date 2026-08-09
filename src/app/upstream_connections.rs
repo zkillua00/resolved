@@ -189,7 +189,7 @@ impl ApiTester {
                                 Input::new(&self.upstream_login_url).large(),
                             ))
                             .child(login_field(
-                                "EMAIL",
+                                "LOGIN",
                                 Input::new(&self.upstream_login_email).large(),
                             ))
                             .child(login_field(
@@ -329,10 +329,9 @@ impl ApiTester {
                     return;
                 }
             };
-        let email = self.upstream_login_email.read(cx).value().trim().to_owned();
-        if email.is_empty() || email.len() > 254 || !email.contains('@') {
-            self.upstream_login_status =
-                UpstreamLoginStatus::Error("Enter a valid email address.".to_owned());
+        let login = self.upstream_login_email.read(cx).value().trim().to_owned();
+        if login.is_empty() {
+            self.upstream_login_status = UpstreamLoginStatus::Error("Enter your login.".to_owned());
             cx.notify();
             return;
         }
@@ -354,7 +353,7 @@ impl ApiTester {
         let client = self.upstream_client.clone();
         let task = self
             .runtime
-            .spawn(async move { login_upstream(&client, base_url, email, password).await });
+            .spawn(async move { login_upstream(&client, base_url, login, password).await });
         self.upstream_login_abort_handle = Some(task.abort_handle());
         cx.notify();
 

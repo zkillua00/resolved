@@ -87,13 +87,13 @@ func bootstrapAdmin(
 ) error {
 	flags := flag.NewFlagSet("bootstrap-admin", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	email := flags.String("email", "", "email address for the initial owner")
+	email := flags.String("email", "", "login identifier for the initial owner")
 	name := flags.String("name", "Owner", "display name for the initial owner")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 || strings.TrimSpace(*email) == "" {
-		return errors.New("bootstrap-admin requires --email and accepts no positional arguments")
+		return errors.New("bootstrap-admin requires an --email login identifier and accepts no positional arguments")
 	}
 
 	password, err := readPassword(stdin, stderr)

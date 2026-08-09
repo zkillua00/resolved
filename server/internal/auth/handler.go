@@ -14,7 +14,7 @@ type Handler struct {
 }
 
 type LoginRequest struct {
-	Email    string `json:"email" validate:"required,email,max=254"`
+	Email    string `json:"email" validate:"required,max=254"`
 	Password string `json:"password" validate:"required,max=128"`
 }
 

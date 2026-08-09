@@ -27,7 +27,7 @@ without echoing it when run in a terminal.
 
 ```sh
 go run ./cmd/resolved-server bootstrap-admin \
-  --email owner@example.com \
+  --email owner \
   --name "Deployment owner"
 ```
 
@@ -71,8 +71,11 @@ permission.
 ```sh
 curl -sS http://127.0.0.1:8787/api/v1/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"email":"owner@example.com","password":"your password"}'
+  -d '{"email":"owner","password":"your password"}'
 ```
+
+The `email` field is an opaque login identifier. It does not need to contain an
+email address.
 
 The returned token is shown once. The database stores only its SHA-256 digest.
 Send it as `Authorization: Bearer <token>`.
