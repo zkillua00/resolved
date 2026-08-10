@@ -42,8 +42,8 @@ WKWebView through `gpui-wry` only when the Preview tab is selected.
 - Named local workspaces with isolated collections, environments, snippets, and
   request-tab drafts
 - Multiple switchable self-hosted server profiles with direct login; session
-  tokens are authenticated-encrypted locally with a device-only Keychain key
-  that supports biometric unlock in provisioned builds
+  tokens are authenticated-encrypted locally, with biometric Keychain
+  protection available to provisioned builds
 - Persistent, live-configurable keyboard shortcuts, organized into five
   task-focused sections with macOS-native defaults
 - A persistent CSS theme library mapped into GPUI controls and editor syntax
@@ -67,6 +67,18 @@ password. The workspace control lists named local workspaces and the workspaces
 available from every authenticated server. Each server group can create another
 workspace when the signed-in user has permission. Settings → Servers can also
 switch between Local and a connected server.
+
+> [!WARNING]
+> Builds without an Apple-authorized Keychain entitlement—including ad-hoc and
+> self-signed alpha builds—persist server sessions using an owner-only local
+> master-key file beside the SQLite database. This avoids repeated Keychain
+> prompts and keeps logins across restarts, but it is not equivalent to
+> Keychain protection: a process or person that can read the macOS account's
+> application-data directory can recover both the encrypted sessions and their
+> key. Provisioned builds move the key into the Data Protection Keychain and
+> remove the local key file. A session saved by an earlier unprovisioned build
+> may require one new login after upgrading because the new alpha path does not
+> read its legacy Keychain item.
 
 Each local workspace has independent collections, environments, snippets,
 saved requests, and request-tab drafts in SQLite. Selecting a server fetches its
@@ -516,6 +528,10 @@ The project uses Rust edition 2024 and targets macOS first.
 ```sh
 scripts/cargo.sh run
 ```
+
+On macOS, this command builds and opens `target/debug/Resolved.app`. The bare
+Cargo executable is not a supported launch target because it has no application
+bundle identity for Keychain and system-service access.
 
 GPUI's `runtime_shaders` feature is enabled, so the normal build works with Apple
 Command Line Tools and does not require the full Xcode Metal command-line

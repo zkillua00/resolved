@@ -32,11 +32,13 @@ and token strings use zeroizing wrappers.
 
 Successful login stores only the server-issued bearer token and expiry:
 
-1. a provisioned macOS build keeps one random 256-bit master key in the Data
+1. provisioned macOS builds keep one random 256-bit master key in the Data
    Protection Keychain under `dev.apitester.desktop.secure-vault` /
-   `master-key-v2`;
-2. the item requires user presence, allowing macOS to unlock it with Touch ID,
-   Face ID, or the device password, and is explicitly non-synchronizing;
+   `master-key-v2`; the item requires user presence, allows biometric or device
+   password unlock, and is explicitly non-synchronizing;
+2. builds without the provisioned access-group entitlement never query the
+   Keychain and instead keep the same random key in an owner-only file beside
+   the SQLite database so alpha sessions survive restarts;
 3. SQLite stores an AES-256-GCM nonce and ciphertext in the generic
    `secure_values` table;
 4. associated data binds the ciphertext to its namespace, upstream ID, key
@@ -44,25 +46,29 @@ Successful login stores only the server-issued bearer token and expiry:
 5. upstream metadata and encrypted session ciphertext commit in one SQLite
    transaction.
 
-The database, WAL, and SHM files retain their existing owner-only permissions.
-If the Keychain key is lost, encrypted sessions fail closed and the user signs
-in again. The generic secure-value table stores upstream sessions without
-placing their plaintext bearer tokens in SQLite.
+The database, WAL, SHM, and local alpha-key files retain owner-only permissions.
+If the active master key is lost, encrypted sessions fail closed and the user
+signs in again. The generic secure-value table stores upstream sessions without
+placing their plaintext bearer tokens in SQLite. The local alpha key prevents
+casual database inspection, but it does not protect sessions from another
+process or person that can read the account's application-data directory.
 
 After the first successful vault unlock, Resolved keeps one process-wide,
 zeroizing copy of the master key in memory. Login, save, update, workspace, and
 additional app-window operations reuse that key without asking macOS to
-authenticate again. The cached key is discarded and wiped when the app exits,
-so the next launch requires a fresh vault unlock. Builds without a provisioned
-Keychain access-group entitlement skip the Data Protection Keychain query and
-use the legacy fallback directly.
+authenticate again. The cached key is discarded and wiped when the app exits. A
+provisioned build therefore requires a fresh vault unlock on its next launch;
+an unprovisioned build reloads its restricted local key without showing a
+Keychain prompt.
 
-The first provisioned build migrates the existing `master-key-v1` item after
-one successful legacy Keychain unlock and removes the old item. Authentication
-failure or cancellation never falls through to the legacy key. Ad-hoc and
-unprovisioned development builds cannot access Apple's Data Protection
-Keychain, so they retain the non-synchronizing file-based Keychain item rather
-than making existing encrypted sessions unreadable.
+The first provisioned build moves an existing local alpha key into the Data
+Protection Keychain and removes the local file without re-encrypting saved
+sessions. It can also migrate the older `master-key-v1` Keychain item after one
+successful legacy unlock. Authentication failure or cancellation never falls
+through to a less protected key source. Ad-hoc, self-signed, and otherwise
+unprovisioned builds use only the local key file. A session encrypted by an
+earlier unprovisioned build's legacy Keychain key therefore requires one new
+login when it is first opened through the local-file path.
 
 To package biometric access, sign with a valid identity and provisioning
 profile that authorize the bundle's application identifier and Keychain access

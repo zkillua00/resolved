@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, path::Path};
 
 use gpui::{
     App, AppContext as _, Application, AssetSource, Bounds, Entity, Menu, MenuItem, SharedString,
@@ -165,7 +165,42 @@ impl AssetSource for AppAssets {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn containing_app_bundle(executable: &Path) -> Option<&Path> {
+    let macos = executable.parent()?;
+    if macos.file_name()? != "MacOS" {
+        return None;
+    }
+    let contents = macos.parent()?;
+    if contents.file_name()? != "Contents" {
+        return None;
+    }
+    let bundle = contents.parent()?;
+    (bundle.extension()? == "app").then_some(bundle)
+}
+
+#[cfg(target_os = "macos")]
+fn require_app_bundle() -> Result<(), String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("could not resolve the executable path: {error}"))?;
+    containing_app_bundle(&executable).map_or_else(
+        || {
+            Err(
+                "Resolved must run from its macOS application bundle. Use scripts/cargo.sh run."
+                    .to_owned(),
+            )
+        },
+        |_| Ok(()),
+    )
+}
+
 fn main() {
+    #[cfg(target_os = "macos")]
+    if let Err(error) = require_app_bundle() {
+        eprintln!("{error}");
+        return;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -239,4 +274,22 @@ fn main() {
 
             cx.activate(true);
         });
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod launch_tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_only_executables_inside_macos_app_bundles() {
+        let bundled = Path::new("/tmp/Resolved.app/Contents/MacOS/api-tester");
+        assert_eq!(
+            containing_app_bundle(bundled),
+            Some(Path::new("/tmp/Resolved.app"))
+        );
+        assert!(containing_app_bundle(Path::new("/tmp/target/debug/api-tester")).is_none());
+        assert!(
+            containing_app_bundle(Path::new("/tmp/Resolved/Contents/MacOS/api-tester")).is_none()
+        );
+    }
 }

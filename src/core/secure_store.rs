@@ -1,5 +1,9 @@
 use std::{
+    collections::HashMap,
     fmt,
+    fs::{self, File, OpenOptions},
+    io::{self, Read as _, Write as _},
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -19,6 +23,7 @@ const KEY_VERSION: u32 = 1;
 const KEY_LENGTH: usize = 32;
 const NONCE_LENGTH: usize = 12;
 const UPSTREAM_SESSION_NAMESPACE: &str = "upstream-session";
+const LOCAL_MASTER_KEY_EXTENSION: &str = "secure-vault.key";
 
 /// A decrypted upstream session. Its token is zeroed when dropped and is
 /// intentionally omitted from debug output.
@@ -52,6 +57,12 @@ impl fmt::Debug for UpstreamCredential {
 pub enum CredentialVaultError {
     #[error("secure storage is unavailable: {0}")]
     Keychain(String),
+    #[error("could not access the local credential key at {path}: {source}")]
+    LocalKey {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("the secure-storage master key has an invalid length")]
     InvalidMasterKey,
     #[error("could not generate secure random data")]
@@ -104,8 +115,9 @@ impl MasterKeyProvider for CachedMasterKeyProvider {
     }
 }
 
-/// Encrypted credential storage backed by SQLite, with only the master key in
-/// the operating-system keychain.
+/// Encrypted credential storage backed by SQLite. Provisioned builds keep the
+/// master key in the operating-system keychain; other builds use a restricted
+/// local key file so sessions still survive application restarts.
 #[derive(Clone)]
 pub struct CredentialVault {
     database: DatabaseStore,
@@ -114,9 +126,10 @@ pub struct CredentialVault {
 
 impl CredentialVault {
     pub fn new(database: DatabaseStore) -> Self {
+        let key_provider = process_master_key_provider(&database);
         Self {
             database,
-            key_provider: process_master_key_provider(),
+            key_provider,
         }
     }
 
@@ -245,14 +258,224 @@ impl CredentialVault {
     }
 }
 
-fn process_master_key_provider() -> Arc<dyn MasterKeyProvider> {
-    static PROVIDER: OnceLock<Arc<dyn MasterKeyProvider>> = OnceLock::new();
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum MasterKeySource {
+    LocalFile,
+    #[cfg(target_os = "macos")]
+    DataProtectionKeychain,
+}
 
-    Arc::clone(PROVIDER.get_or_init(|| {
-        Arc::new(CachedMasterKeyProvider::new(Arc::new(
-            OsKeychainMasterKeyProvider,
-        )))
-    }))
+fn process_master_key_provider(database: &DatabaseStore) -> Arc<dyn MasterKeyProvider> {
+    type ProviderKey = (MasterKeySource, PathBuf);
+    static PROVIDERS: OnceLock<Mutex<HashMap<ProviderKey, Arc<dyn MasterKeyProvider>>>> =
+        OnceLock::new();
+
+    let source = selected_master_key_source();
+    let local_key_path = local_master_key_path(database.path());
+    let provider_key = (source, local_key_path.clone());
+    let providers = PROVIDERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut providers = providers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(provider) = providers.get(&provider_key) {
+        return Arc::clone(provider);
+    }
+
+    let local_provider = FileMasterKeyProvider::new(local_key_path);
+    let delegate: Arc<dyn MasterKeyProvider> = match source {
+        MasterKeySource::LocalFile => Arc::new(local_provider),
+        #[cfg(target_os = "macos")]
+        MasterKeySource::DataProtectionKeychain => {
+            Arc::new(OsKeychainMasterKeyProvider { local_provider })
+        }
+    };
+    let provider: Arc<dyn MasterKeyProvider> = Arc::new(CachedMasterKeyProvider::new(delegate));
+    providers.insert(provider_key, Arc::clone(&provider));
+    provider
+}
+
+#[cfg(target_os = "macos")]
+fn selected_master_key_source() -> MasterKeySource {
+    master_key_source_for_entitlement(has_data_protection_keychain_entitlement())
+}
+
+#[cfg(target_os = "macos")]
+fn master_key_source_for_entitlement(has_entitlement: bool) -> MasterKeySource {
+    if has_entitlement {
+        MasterKeySource::DataProtectionKeychain
+    } else {
+        MasterKeySource::LocalFile
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn selected_master_key_source() -> MasterKeySource {
+    MasterKeySource::LocalFile
+}
+
+fn local_master_key_path(database_path: &Path) -> PathBuf {
+    let mut path = database_path.to_owned();
+    path.set_extension(LOCAL_MASTER_KEY_EXTENSION);
+    path
+}
+
+#[derive(Clone)]
+struct FileMasterKeyProvider {
+    path: PathBuf,
+}
+
+impl FileMasterKeyProvider {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn load_existing(&self) -> Result<Option<Zeroizing<Vec<u8>>>, CredentialVaultError> {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = match options.open(&self.path) {
+            Ok(file) => file,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(self.error(source)),
+        };
+        if !file
+            .metadata()
+            .map_err(|source| self.error(source))?
+            .is_file()
+        {
+            return Err(self.error(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "credential key path is not a regular file",
+            )));
+        }
+        restrict_local_key_permissions(&file, &self.path)?;
+
+        let mut key = Vec::with_capacity(KEY_LENGTH + 1);
+        file.read_to_end(&mut key)
+            .map_err(|source| self.error(source))?;
+        validate_master_key(key).map(Some)
+    }
+
+    fn persist_if_absent(&self, key: &[u8]) -> Result<Zeroizing<Vec<u8>>, CredentialVaultError> {
+        let key = validate_master_key(key.to_vec())?;
+        prepare_local_key_parent(&self.path)?;
+
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = match options.open(&self.path) {
+            Ok(file) => file,
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+                return self.load_existing()?.ok_or_else(|| {
+                    self.error(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "credential key disappeared while it was being opened",
+                    ))
+                });
+            }
+            Err(source) => return Err(self.error(source)),
+        };
+        restrict_local_key_permissions(&file, &self.path)?;
+        if let Err(source) = file.write_all(&key).and_then(|()| file.sync_all()) {
+            drop(file);
+            let _ = fs::remove_file(&self.path);
+            return Err(self.error(source));
+        }
+        Ok(key)
+    }
+
+    fn remove(&self) -> Result<(), CredentialVaultError> {
+        match fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(self.error(source)),
+        }
+    }
+
+    fn error(&self, source: io::Error) -> CredentialVaultError {
+        CredentialVaultError::LocalKey {
+            path: self.path.clone(),
+            source,
+        }
+    }
+}
+
+impl MasterKeyProvider for FileMasterKeyProvider {
+    fn load_or_create(&self) -> Result<Zeroizing<Vec<u8>>, CredentialVaultError> {
+        if let Some(key) = self.load_existing()? {
+            return Ok(key);
+        }
+        let key = generate_master_key()?;
+        self.persist_if_absent(&key)
+    }
+}
+
+fn prepare_local_key_parent(path: &Path) -> Result<(), CredentialVaultError> {
+    let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Ok(());
+    };
+    fs::create_dir_all(parent).map_err(|source| CredentialVaultError::LocalKey {
+        path: parent.to_owned(),
+        source,
+    })?;
+    restrict_local_key_directory_permissions(parent)
+}
+
+#[cfg(unix)]
+fn restrict_local_key_directory_permissions(path: &Path) -> Result<(), CredentialVaultError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut permissions = fs::metadata(path)
+        .map_err(|source| CredentialVaultError::LocalKey {
+            path: path.to_owned(),
+            source,
+        })?
+        .permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(path, permissions).map_err(|source| CredentialVaultError::LocalKey {
+        path: path.to_owned(),
+        source,
+    })
+}
+
+#[cfg(not(unix))]
+fn restrict_local_key_directory_permissions(_: &Path) -> Result<(), CredentialVaultError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_local_key_permissions(file: &File, path: &Path) -> Result<(), CredentialVaultError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut permissions = file
+        .metadata()
+        .map_err(|source| CredentialVaultError::LocalKey {
+            path: path.to_owned(),
+            source,
+        })?
+        .permissions();
+    permissions.set_mode(0o600);
+    file.set_permissions(permissions)
+        .map_err(|source| CredentialVaultError::LocalKey {
+            path: path.to_owned(),
+            source,
+        })
+}
+
+#[cfg(not(unix))]
+fn restrict_local_key_permissions(_: &File, _: &Path) -> Result<(), CredentialVaultError> {
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -281,7 +504,10 @@ fn aad(namespace: &str, name: &str) -> String {
     format!("resolved-secure-value:{KEY_VERSION}:{namespace}:{name}")
 }
 
-struct OsKeychainMasterKeyProvider;
+#[cfg(target_os = "macos")]
+struct OsKeychainMasterKeyProvider {
+    local_provider: FileMasterKeyProvider,
+}
 
 #[cfg(target_os = "macos")]
 impl MasterKeyProvider for OsKeychainMasterKeyProvider {
@@ -289,16 +515,16 @@ impl MasterKeyProvider for OsKeychainMasterKeyProvider {
         use security_framework::passwords::generic_password;
 
         if !has_data_protection_keychain_entitlement() {
-            return load_or_create_legacy_master_key();
+            return self.local_provider.load_or_create();
         }
 
         match generic_password(biometric_keychain_lookup_options()) {
             Ok(key) => validate_master_key(key),
             Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => {
-                migrate_or_create_biometric_master_key()
+                migrate_or_create_biometric_master_key(&self.local_provider)
             }
             Err(error) if biometric_keychain_unavailable(error.code()) => {
-                load_or_create_legacy_master_key()
+                self.local_provider.load_or_create()
             }
             Err(error) => Err(CredentialVaultError::Keychain(error.to_string())),
         }
@@ -410,31 +636,49 @@ fn legacy_keychain_options() -> security_framework::passwords::PasswordOptions {
 }
 
 #[cfg(target_os = "macos")]
-fn migrate_or_create_biometric_master_key() -> Result<Zeroizing<Vec<u8>>, CredentialVaultError> {
+fn migrate_or_create_biometric_master_key(
+    local_provider: &FileMasterKeyProvider,
+) -> Result<Zeroizing<Vec<u8>>, CredentialVaultError> {
     use security_framework::passwords::{
         delete_generic_password_options, generic_password, set_generic_password_options,
     };
 
-    let (key, migrated_legacy_key) = match generic_password(legacy_keychain_options()) {
-        Ok(key) => (validate_master_key(key)?, true),
-        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => (generate_master_key()?, false),
-        Err(error) => return Err(CredentialVaultError::Keychain(error.to_string())),
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum KeyOrigin {
+        LocalFile,
+        LegacyKeychain,
+        Generated,
+    }
+
+    let (key, origin) = if let Some(key) = local_provider.load_existing()? {
+        (key, KeyOrigin::LocalFile)
+    } else {
+        match generic_password(legacy_keychain_options()) {
+            Ok(key) => (validate_master_key(key)?, KeyOrigin::LegacyKeychain),
+            Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => {
+                (generate_master_key()?, KeyOrigin::Generated)
+            }
+            Err(error) => return Err(CredentialVaultError::Keychain(error.to_string())),
+        }
     };
 
     match set_generic_password_options(&key, biometric_keychain_create_options()?) {
         Ok(()) => {}
         Err(error) if biometric_keychain_unavailable(error.code()) => {
-            if migrated_legacy_key {
+            if origin == KeyOrigin::LocalFile {
                 return Ok(key);
             }
-            set_generic_password_options(&key, legacy_keychain_options())
-                .map_err(|error| CredentialVaultError::Keychain(error.to_string()))?;
-            return Ok(key);
+            return local_provider.persist_if_absent(&key);
         }
         Err(error) => return Err(CredentialVaultError::Keychain(error.to_string())),
     }
 
-    if migrated_legacy_key {
+    if origin == KeyOrigin::LocalFile
+        && let Err(error) = local_provider.remove()
+    {
+        tracing::warn!(error = %error, "could not remove the migrated local secure-vault key");
+    }
+    if origin == KeyOrigin::LegacyKeychain {
         match delete_generic_password_options(legacy_keychain_options()) {
             Ok(()) => {}
             Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => {}
@@ -447,23 +691,6 @@ fn migrate_or_create_biometric_master_key() -> Result<Zeroizing<Vec<u8>>, Creden
     Ok(key)
 }
 
-#[cfg(target_os = "macos")]
-fn load_or_create_legacy_master_key() -> Result<Zeroizing<Vec<u8>>, CredentialVaultError> {
-    use security_framework::passwords::{generic_password, set_generic_password_options};
-
-    match generic_password(legacy_keychain_options()) {
-        Ok(key) => validate_master_key(key),
-        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => {
-            let key = generate_master_key()?;
-            set_generic_password_options(&key, legacy_keychain_options())
-                .map_err(|error| CredentialVaultError::Keychain(error.to_string()))?;
-            Ok(key)
-        }
-        Err(error) => Err(CredentialVaultError::Keychain(error.to_string())),
-    }
-}
-
-#[cfg(target_os = "macos")]
 fn generate_master_key() -> Result<Zeroizing<Vec<u8>>, CredentialVaultError> {
     let mut key = Zeroizing::new(vec![0_u8; KEY_LENGTH]);
     SystemRandom::new()
@@ -472,20 +699,12 @@ fn generate_master_key() -> Result<Zeroizing<Vec<u8>>, CredentialVaultError> {
     Ok(key)
 }
 
-#[cfg(not(target_os = "macos"))]
-impl MasterKeyProvider for OsKeychainMasterKeyProvider {
-    fn load_or_create(&self) -> Result<Zeroizing<Vec<u8>>, CredentialVaultError> {
-        Err(CredentialVaultError::Keychain(
-            "this build has no supported OS keychain integration".to_owned(),
-        ))
-    }
-}
-
 fn validate_master_key(key: Vec<u8>) -> Result<Zeroizing<Vec<u8>>, CredentialVaultError> {
+    let key = Zeroizing::new(key);
     if key.len() != KEY_LENGTH {
         return Err(CredentialVaultError::InvalidMasterKey);
     }
-    Ok(Zeroizing::new(key))
+    Ok(key)
 }
 
 #[cfg(test)]
@@ -581,12 +800,61 @@ mod tests {
     #[test]
     fn default_vaults_share_the_process_master_key_provider() {
         let directory = tempfile::tempdir().unwrap();
-        let first =
-            CredentialVault::new(DatabaseStore::new(directory.path().join("first.sqlite3")));
-        let second =
-            CredentialVault::new(DatabaseStore::new(directory.path().join("second.sqlite3")));
+        let database = DatabaseStore::new(directory.path().join("vault.sqlite3"));
+        let first = CredentialVault::new(database.clone());
+        let second = CredentialVault::new(database);
 
         assert!(Arc::ptr_eq(&first.key_provider, &second.key_provider));
+    }
+
+    #[test]
+    fn local_master_key_survives_provider_recreation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault.secure-vault.key");
+        let first = FileMasterKeyProvider::new(path.clone())
+            .load_or_create()
+            .unwrap();
+        let second = FileMasterKeyProvider::new(path.clone())
+            .load_or_create()
+            .unwrap();
+
+        assert_eq!(first.as_slice(), second.as_slice());
+        assert_eq!(first.len(), KEY_LENGTH);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(directory.path()).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+    }
+
+    #[test]
+    fn local_master_key_path_is_specific_to_the_database() {
+        assert_eq!(
+            local_master_key_path(Path::new("/tmp/api-tester.sqlite3")),
+            PathBuf::from("/tmp/api-tester.secure-vault.key")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unprovisioned_builds_select_the_local_key_file() {
+        assert_eq!(
+            master_key_source_for_entitlement(false),
+            MasterKeySource::LocalFile
+        );
+        assert_eq!(
+            master_key_source_for_entitlement(true),
+            MasterKeySource::DataProtectionKeychain
+        );
     }
 
     #[test]
