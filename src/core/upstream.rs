@@ -13,7 +13,10 @@ use thiserror::Error;
 use url::{Host, Url};
 use zeroize::Zeroizing;
 
+use super::{Collection, Workspace, workspace::CollectionFolder};
+
 const LOGIN_RESPONSE_LIMIT_BYTES: usize = 64 * 1024;
+const WORKSPACE_RESPONSE_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(20);
 static NEXT_UPSTREAM_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -61,8 +64,7 @@ impl UpstreamSettings {
         true
     }
 
-    pub fn upsert_and_select(&mut self, profile: UpstreamProfile) {
-        let id = profile.id.clone();
+    pub fn upsert(&mut self, profile: UpstreamProfile) {
         if let Some(existing) = self
             .servers
             .iter_mut()
@@ -78,7 +80,6 @@ impl UpstreamSettings {
                 .cmp(&right.display_label().to_lowercase())
                 .then_with(|| left.id.cmp(&right.id))
         });
-        self.active_upstream_id = Some(id);
     }
 
     pub fn remove(&mut self, id: &str) -> Option<UpstreamProfile> {
@@ -127,6 +128,16 @@ impl UpstreamSettings {
                         .to_owned(),
                 );
             }
+            if server
+                .active_workspace_id
+                .as_deref()
+                .is_some_and(|id| !server.workspaces.iter().any(|workspace| workspace.id == id))
+            {
+                return Some(
+                    "A connected server references a workspace that is no longer available."
+                        .to_owned(),
+                );
+            }
         }
         None
     }
@@ -141,6 +152,10 @@ pub struct UpstreamProfile {
     pub display_name: String,
     pub session_expires_at: DateTime<Utc>,
     pub connected_at: DateTime<Utc>,
+    #[serde(default)]
+    pub workspaces: Vec<UpstreamWorkspaceSummary>,
+    #[serde(default)]
+    pub active_workspace_id: Option<String>,
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -160,6 +175,8 @@ impl UpstreamProfile {
             display_name: user.display_name.clone(),
             session_expires_at: expires_at,
             connected_at: Utc::now(),
+            workspaces: Vec::new(),
+            active_workspace_id: None,
             extra: BTreeMap::new(),
         }
     }
@@ -177,6 +194,88 @@ impl UpstreamProfile {
     pub fn session_expired(&self, now: DateTime<Utc>) -> bool {
         self.session_expires_at <= now
     }
+
+    pub fn active_workspace(&self) -> Option<&UpstreamWorkspaceSummary> {
+        self.active_workspace_id
+            .as_deref()
+            .and_then(|id| self.workspaces.iter().find(|workspace| workspace.id == id))
+    }
+
+    pub fn replace_workspaces(
+        &mut self,
+        workspaces: impl IntoIterator<Item = UpstreamWorkspaceSummary>,
+        active_workspace_id: Option<String>,
+    ) {
+        self.workspaces = workspaces.into_iter().collect();
+        self.workspaces.sort_by(|left, right| {
+            left.name
+                .to_lowercase()
+                .cmp(&right.name.to_lowercase())
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        self.active_workspace_id = active_workspace_id
+            .filter(|id| self.workspaces.iter().any(|workspace| workspace.id == *id));
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct UpstreamWorkspaceSummary {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct UpstreamWorkspaceView {
+    pub id: String,
+    pub name: String,
+    pub user_ids: Vec<String>,
+    pub collections: Vec<UpstreamCollectionView>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl UpstreamWorkspaceView {
+    pub fn summary(&self) -> UpstreamWorkspaceSummary {
+        UpstreamWorkspaceSummary {
+            id: self.id.clone(),
+            name: self.name.clone(),
+        }
+    }
+
+    pub fn into_local_workspace(self) -> Workspace {
+        let collections = self
+            .collections
+            .into_iter()
+            .map(|root| {
+                let mut folders = Vec::new();
+                flatten_remote_collections(root.sub_collections, None, &mut folders);
+                Collection {
+                    id: root.id,
+                    name: root.name,
+                    folders,
+                    requests: Vec::new(),
+                }
+            })
+            .collect();
+        Workspace {
+            collections,
+            environments: Vec::new(),
+            snippets: Vec::new(),
+            active_environment_id: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct UpstreamCollectionView {
+    pub id: String,
+    pub workspace_id: String,
+    pub parent_collection_id: Option<String>,
+    pub name: String,
+    pub user_ids: Vec<String>,
+    pub sub_collections: Vec<UpstreamCollectionView>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -242,6 +341,20 @@ pub enum UpstreamLoginError {
     Rejected { status: StatusCode, message: String },
 }
 
+#[derive(Debug, Error)]
+pub enum UpstreamWorkspaceError {
+    #[error("could not reach the server: {0}")]
+    Transport(reqwest::Error),
+    #[error("the server redirected the workspace request")]
+    Redirected,
+    #[error("the server returned more than {limit_bytes} bytes")]
+    ResponseTooLarge { limit_bytes: usize },
+    #[error("the server returned an invalid workspace response: {0}")]
+    InvalidResponse(String),
+    #[error("{message}")]
+    Rejected { status: StatusCode, message: String },
+}
+
 #[derive(Serialize)]
 struct LoginRequest<'a> {
     email: &'a str,
@@ -266,6 +379,13 @@ struct LoginData {
 #[derive(Deserialize)]
 struct LoginErrorBody {
     message: String,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceEnvelope<T> {
+    success: bool,
+    data: Option<T>,
+    error: Option<LoginErrorBody>,
 }
 
 pub fn build_upstream_client() -> Result<Client, UpstreamLoginError> {
@@ -330,6 +450,84 @@ pub async fn login_upstream(
     }
 
     parse_login_response(status, &body, base_url)
+}
+
+pub async fn list_upstream_workspaces(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+) -> Result<Vec<UpstreamWorkspaceView>, UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join("api/v1/workspaces")
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .get(endpoint)
+        .bearer_auth(bearer_token)
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response(response).await
+}
+
+async fn parse_workspace_response<T: for<'de> Deserialize<'de>>(
+    mut response: reqwest::Response,
+) -> Result<T, UpstreamWorkspaceError> {
+    if response.status().is_redirection() {
+        return Err(UpstreamWorkspaceError::Redirected);
+    }
+    let status = response.status();
+    if response
+        .content_length()
+        .is_some_and(|length| length > WORKSPACE_RESPONSE_LIMIT_BYTES as u64)
+    {
+        return Err(UpstreamWorkspaceError::ResponseTooLarge {
+            limit_bytes: WORKSPACE_RESPONSE_LIMIT_BYTES,
+        });
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?
+    {
+        if body.len().saturating_add(chunk.len()) > WORKSPACE_RESPONSE_LIMIT_BYTES {
+            return Err(UpstreamWorkspaceError::ResponseTooLarge {
+                limit_bytes: WORKSPACE_RESPONSE_LIMIT_BYTES,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let envelope: WorkspaceEnvelope<T> = serde_json::from_slice(&body)
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    if !status.is_success() || !envelope.success {
+        let message = envelope
+            .error
+            .map(|error| error.message)
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or_else(|| format!("workspace request failed with HTTP {status}"));
+        return Err(UpstreamWorkspaceError::Rejected { status, message });
+    }
+    envelope.data.ok_or_else(|| {
+        UpstreamWorkspaceError::InvalidResponse(
+            "the response did not include workspace data".to_owned(),
+        )
+    })
+}
+
+fn flatten_remote_collections(
+    collections: Vec<UpstreamCollectionView>,
+    parent_folder_id: Option<String>,
+    folders: &mut Vec<CollectionFolder>,
+) {
+    for collection in collections {
+        let id = collection.id;
+        folders.push(CollectionFolder {
+            id: id.clone(),
+            name: collection.name,
+            parent_folder_id: parent_folder_id.clone(),
+        });
+        flatten_remote_collections(collection.sub_collections, Some(id), folders);
+    }
 }
 
 fn parse_login_response(
@@ -433,6 +631,12 @@ fn new_upstream_id() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{Read as _, Write as _},
+        net::TcpListener,
+        thread,
+    };
+
     use super::*;
 
     #[test]
@@ -496,8 +700,9 @@ mod tests {
         let second_id = second.id.clone();
         let mut settings = UpstreamSettings::default();
 
-        settings.upsert_and_select(first);
-        settings.upsert_and_select(second);
+        settings.upsert(first);
+        settings.upsert(second);
+        assert!(settings.select(&second_id));
         assert_eq!(
             settings.active().map(|server| server.id.as_str()),
             Some(second_id.as_str())
@@ -604,5 +809,126 @@ mod tests {
         settings.servers.pop();
         settings.servers[0].base_url = "http://resolved.example.com/".to_owned();
         assert!(settings.validation_warning().is_some());
+    }
+
+    #[test]
+    fn maps_recursive_server_collections_to_the_local_tree_shape() {
+        let now = Utc::now();
+        let view = UpstreamWorkspaceView {
+            id: "workspace-1".to_owned(),
+            name: "Team API".to_owned(),
+            user_ids: vec!["user-1".to_owned()],
+            collections: vec![UpstreamCollectionView {
+                id: "root".to_owned(),
+                workspace_id: "workspace-1".to_owned(),
+                parent_collection_id: None,
+                name: "Root".to_owned(),
+                user_ids: Vec::new(),
+                sub_collections: vec![UpstreamCollectionView {
+                    id: "child".to_owned(),
+                    workspace_id: "workspace-1".to_owned(),
+                    parent_collection_id: Some("root".to_owned()),
+                    name: "Child".to_owned(),
+                    user_ids: Vec::new(),
+                    sub_collections: vec![UpstreamCollectionView {
+                        id: "grandchild".to_owned(),
+                        workspace_id: "workspace-1".to_owned(),
+                        parent_collection_id: Some("child".to_owned()),
+                        name: "Grandchild".to_owned(),
+                        user_ids: Vec::new(),
+                        sub_collections: Vec::new(),
+                        created_at: now,
+                        updated_at: now,
+                    }],
+                    created_at: now,
+                    updated_at: now,
+                }],
+                created_at: now,
+                updated_at: now,
+            }],
+            created_at: now,
+            updated_at: now,
+        };
+
+        let workspace = view.into_local_workspace();
+
+        assert_eq!(workspace.collections.len(), 1);
+        assert_eq!(workspace.collections[0].id, "root");
+        assert_eq!(workspace.collections[0].folders.len(), 2);
+        assert_eq!(workspace.collections[0].folders[0].id, "child");
+        assert_eq!(workspace.collections[0].folders[0].parent_folder_id, None);
+        assert_eq!(workspace.collections[0].folders[1].id, "grandchild");
+        assert_eq!(
+            workspace.collections[0].folders[1]
+                .parent_folder_id
+                .as_deref(),
+            Some("child")
+        );
+        workspace.validate().unwrap();
+    }
+
+    #[test]
+    fn lists_server_workspaces_with_the_saved_bearer_session() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 2048];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut buffer).unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+            }
+            let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+            assert!(request.starts_with("get /api/v1/workspaces http/1.1\r\n"));
+            assert!(request.contains("authorization: bearer saved-session-token\r\n"));
+
+            let now = Utc::now();
+            let body = serde_json::to_vec(&serde_json::json!({
+                "request_id": "request-1",
+                "success": true,
+                "data": [{
+                    "id": "workspace-1",
+                    "name": "Team API",
+                    "user_ids": ["user-1"],
+                    "collections": [],
+                    "created_at": now,
+                    "updated_at": now
+                }]
+            }))
+            .unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = build_upstream_client().unwrap();
+        let base_url = Url::parse(&format!("http://{address}/")).unwrap();
+        let workspaces = runtime
+            .block_on(list_upstream_workspaces(
+                &client,
+                &base_url,
+                "saved-session-token",
+            ))
+            .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].id, "workspace-1");
+        assert_eq!(workspaces[0].name, "Team API");
     }
 }

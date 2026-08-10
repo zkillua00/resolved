@@ -128,7 +128,7 @@ impl CredentialVault {
         settings: &AppSettings,
         upstream_id: &str,
     ) -> Result<(), CredentialVaultError> {
-        self.database.save_app_settings_and_delete_secure_value(
+        self.database.save_app_settings_and_delete_upstream(
             settings,
             UPSTREAM_SESSION_NAMESPACE,
             upstream_id,
@@ -375,6 +375,11 @@ mod tests {
         vault
             .store_upstream_with_settings(&AppSettings::default(), "server-a", &credential)
             .unwrap();
+        let mut request_tabs = crate::core::RequestTabs::new();
+        request_tabs.active_mut().set_title("Server draft");
+        database
+            .save_upstream_request_tabs("server-a", "workspace-a", &request_tabs)
+            .unwrap();
         let settings = AppSettings::default();
 
         vault
@@ -388,5 +393,9 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        let restored = database
+            .load_upstream_request_tabs("server-a", "workspace-a")
+            .unwrap();
+        assert_eq!(restored.active().display_title(), "Untitled Request");
     }
 }

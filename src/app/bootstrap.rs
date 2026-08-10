@@ -30,7 +30,55 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let workspace_providers = WorkspaceProviderRegistry::local(database_store.clone());
+        let database_initialization = database_store.initialize();
+        let (local_workspaces, active_local_workspace_id, local_catalog_warning) =
+            match &database_initialization {
+                Ok(()) => match (
+                    database_store.list_local_workspaces(),
+                    database_store.active_local_workspace_id(),
+                ) {
+                    (Ok(workspaces), Ok(active_id)) if !workspaces.is_empty() => {
+                        (workspaces, active_id, None)
+                    }
+                    (Err(error), _) | (_, Err(error)) => (
+                        vec![LocalWorkspace {
+                            id: "local-default".to_owned(),
+                            name: "My Workspace".to_owned(),
+                        }],
+                        "local-default".to_owned(),
+                        Some(format!("Local workspaces could not be loaded: {error}")),
+                    ),
+                    _ => (
+                        vec![LocalWorkspace {
+                            id: "local-default".to_owned(),
+                            name: "My Workspace".to_owned(),
+                        }],
+                        "local-default".to_owned(),
+                        Some("No local workspace is available.".to_owned()),
+                    ),
+                },
+                Err(_) => (
+                    vec![LocalWorkspace {
+                        id: "local-default".to_owned(),
+                        name: "My Workspace".to_owned(),
+                    }],
+                    "local-default".to_owned(),
+                    None,
+                ),
+            };
+        let mut workspace_providers = WorkspaceProviderRegistry::local(
+            database_store.clone(),
+            active_local_workspace_id.clone(),
+        );
+        for workspace in &local_workspaces {
+            let provider_id = WorkspaceProviderId::Local(workspace.id.clone());
+            if !workspace_providers.contains(&provider_id) {
+                workspace_providers.register(Arc::new(LocalWorkspaceProvider::new(
+                    database_store.clone(),
+                    workspace.id.clone(),
+                )));
+            }
+        }
         let credential_vault = CredentialVault::new(database_store.clone());
         let snippet_menu_owner = cx.entity().downgrade();
         let script_variable_catalog = ScriptVariableCatalog::default().shared();
@@ -176,7 +224,7 @@ impl ApiTester {
             mut settings,
             mut settings_warning,
             settings_writable,
-        ) = match database_store.initialize() {
+        ) = match database_initialization {
             Ok(()) => {
                 let import_warning = database_store
                     .import_legacy_if_needed()
@@ -205,7 +253,7 @@ impl ApiTester {
                         ),
                     };
                 let (request_tabs, request_tabs_warning, request_tabs_writable) =
-                    match database_store.load_request_tabs() {
+                    match workspace_providers.active().load_request_tabs() {
                         Ok(request_tabs) => (request_tabs, None, true),
                         Err(error) => (
                             RequestTabs::default(),
@@ -226,12 +274,17 @@ impl ApiTester {
                             false,
                         ),
                     };
-                let workspace_warning = match (workspace_load_warning, import_warning) {
-                    (Some(load), Some(import)) => Some(format!("{load}\n{import}")),
-                    (Some(load), None) => Some(load),
-                    (None, Some(import)) => Some(import),
-                    (None, None) => None,
-                };
+                let workspace_warning = [
+                    workspace_load_warning,
+                    import_warning,
+                    local_catalog_warning,
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("\n");
+                let workspace_warning =
+                    (!workspace_warning.is_empty()).then_some(workspace_warning);
                 (
                     history,
                     workspace,
@@ -323,7 +376,10 @@ impl ApiTester {
         let request_tabs_changed =
             reconcile_restored_request_tabs(&mut request_tabs, &workspace, workspace_writable);
         if request_tabs_changed && request_tabs_writable {
-            match database_store.save_request_tabs(&request_tabs) {
+            match workspace_providers
+                .active()
+                .save_request_tabs(&request_tabs)
+            {
                 Ok(()) => last_persisted_request_tabs = request_tabs.clone(),
                 Err(error) => {
                     request_tabs_warning =
@@ -427,6 +483,8 @@ impl ApiTester {
             window,
             cx,
         );
+        let local_workspace_name =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Workspace name"));
         let upstream_login_url =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://resolved.example.com"));
         let upstream_login_email = cx.new(|cx| InputState::new(window, cx).placeholder("owner"));
@@ -603,9 +661,14 @@ impl ApiTester {
             workspace,
             database_store,
             workspace_providers,
+            local_workspaces,
             credential_vault,
             workspace_warning,
             workspace_writable,
+            workspace_switch_status: WorkspaceSwitchStatus::Idle,
+            workspace_switch_generation: 0,
+            workspace_switch_abort_handle: None,
+            local_workspace_name,
             sidebar_tab: SidebarTab::Collections,
             navigation_compact,
             selected_collection_id,
@@ -694,6 +757,7 @@ impl ApiTester {
         this.loaded_request_baseline = this.request_template(cx);
         this.request_dirty.clear();
         this.restore_active_request_tab(window, cx);
+        this.restore_selected_upstream(window, cx);
         this
     }
 }

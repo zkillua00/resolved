@@ -46,51 +46,138 @@ impl ApiTester {
         compact: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let has_servers = !self.settings.upstreams.servers.is_empty();
-        let active = self.settings.upstreams.active();
-        let label = match active {
-            Some(server) if compact => compact_label(&server.display_label(), 10),
-            Some(server) => compact_label(&server.display_label(), 14),
-            None if has_servers => "Local".to_owned(),
-            None => "Login".to_owned(),
-        };
-        let tooltip = match active {
-            Some(server) => format!("Active server: {} · Manage servers", server.display_label()),
-            None if has_servers => "Using Local · Manage servers".to_owned(),
-            None => "Log in to a self-hosted Resolved server".to_owned(),
-        };
+        let label = compact_label(&self.active_workspace_name(), if compact { 10 } else { 14 });
+        let tooltip = format!("Workspace: {}", self.active_workspace_name());
+        let local_workspaces = self.local_workspaces.clone();
+        let servers = self.settings.upstreams.servers.clone();
+        let active_provider_id = self.workspace_providers.active_id().clone();
+        let disabled = self.sending || self.workspace_switch_status.busy();
+        let this = cx.entity().downgrade();
 
-        v_flex()
-            .id("rail-upstreams")
-            .debug_selector(|| "rail-upstreams".to_owned())
+        Button::new("rail-workspaces")
+            .debug_selector(|| "rail-workspaces".to_owned())
             .w(item_width)
             .h(item_height)
-            .items_center()
-            .justify_center()
-            .gap_1()
-            .rounded_lg()
-            .cursor_pointer()
-            .text_color(cx.theme().muted_foreground)
-            .hover(|style| style.bg(cx.theme().sidebar_accent))
-            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                if has_servers {
-                    this.open_workspace_tool_tab(WorkspaceToolTab::Settings, window, cx);
-                } else {
-                    this.open_upstream_login(None, window, cx);
+            .ghost()
+            .disabled(disabled)
+            .tooltip(tooltip)
+            .child(
+                v_flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .child(Icon::new(IconName::Globe).with_size(px(18.)))
+                    .when(!compact, |this| {
+                        this.child(
+                            div()
+                                .max_w(item_width - px(8.))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(px(10.5))
+                                .font_semibold()
+                                .child(label),
+                        )
+                    }),
+            )
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu.min_w(px(280.));
+                menu = menu.item(PopupMenuItem::new("Local").disabled(true));
+                for workspace in &local_workspaces {
+                    let workspace_this = this.clone();
+                    let workspace_id = workspace.id.clone();
+                    let checked =
+                        active_provider_id == WorkspaceProviderId::Local(workspace.id.clone());
+                    menu = menu.item(
+                        PopupMenuItem::new(workspace.name.clone())
+                            .checked(checked)
+                            .on_click(move |_, window, cx| {
+                                if let Some(this) = workspace_this.upgrade() {
+                                    this.update(cx, |this, cx| {
+                                        this.switch_to_local_workspace(
+                                            workspace_id.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                }
+                            }),
+                    );
                 }
-            }))
-            .child(gpui_component::Icon::new(IconName::Globe).with_size(px(18.)))
-            .when(!compact, |this| {
-                this.child(
-                    div()
-                        .max_w(item_width - px(8.))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_size(px(10.5))
-                        .font_semibold()
-                        .child(label),
-                )
+                let create_this = this.clone();
+                menu = menu.item(PopupMenuItem::new("New workspace…").on_click(
+                    move |_, window, cx| {
+                        if let Some(this) = create_this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.open_create_local_workspace_dialog(window, cx);
+                            });
+                        }
+                    },
+                ));
+
+                for server in &servers {
+                    menu = menu
+                        .separator()
+                        .item(PopupMenuItem::new(server.display_label()).disabled(true));
+                    if server.workspaces.is_empty() {
+                        let server_this = this.clone();
+                        let server_id = server.id.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new("Load workspaces…")
+                                .disabled(server.session_expired(Utc::now()))
+                                .on_click(move |_, window, cx| {
+                                    if let Some(this) = server_this.upgrade() {
+                                        this.update(cx, |this, cx| {
+                                            this.switch_to_upstream(
+                                                server_id.clone(),
+                                                None,
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                }),
+                        );
+                        continue;
+                    }
+                    for workspace in &server.workspaces {
+                        let workspace_this = this.clone();
+                        let server_id = server.id.clone();
+                        let workspace_id = workspace.id.clone();
+                        let checked = active_provider_id
+                            == WorkspaceProviderId::Upstream {
+                                upstream_id: server.id.clone(),
+                                workspace_id: workspace.id.clone(),
+                            };
+                        menu = menu.item(
+                            PopupMenuItem::new(workspace.name.clone())
+                                .checked(checked)
+                                .disabled(server.session_expired(Utc::now()))
+                                .on_click(move |_, window, cx| {
+                                    if let Some(this) = workspace_this.upgrade() {
+                                        this.update(cx, |this, cx| {
+                                            this.switch_to_upstream(
+                                                server_id.clone(),
+                                                Some(workspace_id.clone()),
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                }),
+                        );
+                    }
+                }
+                let add_server_this = this.clone();
+                menu.separator()
+                    .item(
+                        PopupMenuItem::new("Add server…").on_click(move |_, window, cx| {
+                            if let Some(this) = add_server_this.upgrade() {
+                                this.update(cx, |this, cx| {
+                                    this.open_upstream_login(None, window, cx);
+                                });
+                            }
+                        }),
+                    )
             })
             .into_any_element()
     }
@@ -400,17 +487,27 @@ impl ApiTester {
             .upstreams
             .server_for_url(&base_url)
             .map(|profile| profile.id.clone());
-        let profile = UpstreamProfile::from_login(existing_id, &base_url, &user, expires_at);
+        let mut profile = UpstreamProfile::from_login(existing_id, &base_url, &user, expires_at);
+        if let Some(existing) = self.settings.upstreams.server(&profile.id) {
+            profile.workspaces = existing.workspaces.clone();
+            profile.active_workspace_id = existing.active_workspace_id.clone();
+        }
         let profile_label = profile.display_label();
         let upstream_id = profile.id.clone();
         let credential = UpstreamCredential::new(token, expires_at);
         let mut candidate = self.settings.clone();
-        candidate.upstreams.upsert_and_select(profile);
+        let preferred_workspace_id = profile.active_workspace_id.clone();
+        candidate.upstreams.upsert(profile);
         let vault = self.credential_vault.clone();
         let persisted_candidate = candidate.clone();
+        let stored_upstream_id = upstream_id.clone();
         self.upstream_login_status = UpstreamLoginStatus::SecuringSession;
         let task = self.runtime.spawn_blocking(move || {
-            vault.store_upstream_with_settings(&persisted_candidate, &upstream_id, &credential)
+            vault.store_upstream_with_settings(
+                &persisted_candidate,
+                &stored_upstream_id,
+                &credential,
+            )
         });
         cx.notify();
 
@@ -436,6 +533,12 @@ impl ApiTester {
                             input.set_value("", window, cx);
                             input.set_masked(true, window, cx);
                         });
+                        this.switch_to_upstream(
+                            upstream_id.clone(),
+                            preferred_workspace_id.clone(),
+                            window,
+                            cx,
+                        );
                         cx.notify();
                     }
                     Ok(Err(error)) => {
@@ -454,7 +557,12 @@ impl ApiTester {
         .detach();
     }
 
-    fn select_upstream(&mut self, upstream_id: Option<String>, cx: &mut Context<Self>) {
+    fn select_upstream(
+        &mut self,
+        upstream_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(profile) = upstream_id
             .as_deref()
             .and_then(|id| self.settings.upstreams.server(id))
@@ -467,27 +575,24 @@ impl ApiTester {
             cx.notify();
             return;
         }
-        let mut candidate = self.settings.clone();
-        let selected = match upstream_id.as_deref() {
-            Some(id) => candidate.upstreams.select(id),
+        match upstream_id {
+            Some(upstream_id) => self.switch_to_upstream(upstream_id, None, window, cx),
             None => {
-                candidate.upstreams.select_local();
-                true
+                let workspace_id = self
+                    .database_store
+                    .active_local_workspace_id()
+                    .ok()
+                    .or_else(|| {
+                        self.local_workspaces
+                            .first()
+                            .map(|workspace| workspace.id.clone())
+                    });
+                if let Some(workspace_id) = workspace_id {
+                    self.switch_to_local_workspace(workspace_id, window, cx);
+                } else {
+                    self.settings_notice = Some("No local workspace is available.".to_owned());
+                }
             }
-        };
-        if !selected {
-            self.settings_notice = Some("That server is no longer configured.".to_owned());
-            cx.notify();
-            return;
-        }
-        match self.commit_settings(candidate, false, cx) {
-            Ok(()) => {
-                self.settings_notice = Some(match self.settings.upstreams.active() {
-                    Some(server) => format!("{} is now active.", server.display_label()),
-                    None => "Local is now active.".to_owned(),
-                });
-            }
-            Err(error) => self.settings_notice = Some(error),
         }
         cx.notify();
     }
@@ -515,10 +620,10 @@ impl ApiTester {
                         .ok_text("Forget server".to_owned())
                         .ok_variant(ButtonVariant::Danger),
                 )
-                .on_ok(move |_, _, cx| {
+                .on_ok(move |_, window, cx| {
                     if let Some(this) = forget_this.upgrade() {
                         this.update(cx, |this, cx| {
-                            this.forget_upstream(&forget_id, cx);
+                            this.forget_upstream(&forget_id, window, cx);
                         });
                     }
                     true
@@ -534,7 +639,41 @@ impl ApiTester {
         });
     }
 
-    fn forget_upstream(&mut self, upstream_id: &str, cx: &mut Context<Self>) {
+    fn forget_upstream(&mut self, upstream_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let active_on_server = matches!(
+            self.workspace_providers.active_id(),
+            WorkspaceProviderId::Upstream {
+                upstream_id: active_id,
+                ..
+            } if active_id == upstream_id
+        );
+        if active_on_server {
+            let Some(local_workspace_id) = self
+                .database_store
+                .active_local_workspace_id()
+                .ok()
+                .or_else(|| {
+                    self.local_workspaces
+                        .first()
+                        .map(|workspace| workspace.id.clone())
+                })
+            else {
+                self.settings_notice =
+                    Some("No local workspace is available for switching.".to_owned());
+                cx.notify();
+                return;
+            };
+            self.switch_to_local_workspace(local_workspace_id, window, cx);
+            if matches!(
+                self.workspace_providers.active_id(),
+                WorkspaceProviderId::Upstream {
+                    upstream_id: active_id,
+                    ..
+                } if active_id == upstream_id
+            ) {
+                return;
+            }
+        }
         let mut candidate = self.settings.clone();
         let Some(profile) = candidate.upstreams.remove(upstream_id) else {
             return;
@@ -544,6 +683,7 @@ impl ApiTester {
             .delete_upstream_with_settings(&candidate, upstream_id)
         {
             Ok(()) => {
+                self.workspace_providers.remove_upstream(upstream_id);
                 if let Err(error) = self.apply_persisted_settings(candidate, false, cx) {
                     self.settings_notice = Some(error);
                 } else {
@@ -575,7 +715,9 @@ impl ApiTester {
                     .map(UpstreamProfile::display_label)
                     .unwrap_or_else(|| "Local".to_owned());
                 let servers = state.settings.upstreams.servers.clone();
-                let writable = state.settings_writable && !state.upstream_login_status.busy();
+                let writable = state.settings_writable
+                    && !state.upstream_login_status.busy()
+                    && !state.workspace_switch_status.busy();
                 let menu_this = this.clone();
 
                 Button::new("active-upstream-picker")
@@ -589,10 +731,10 @@ impl ApiTester {
                         let mut menu = menu.min_w(px(300.)).item(
                             PopupMenuItem::new("Local")
                                 .checked(selected_id.is_none())
-                                .on_click(move |_, _, cx| {
+                                .on_click(move |_, window, cx| {
                                     if let Some(this) = local_this.upgrade() {
                                         this.update(cx, |this, cx| {
-                                            this.select_upstream(None, cx);
+                                            this.select_upstream(None, window, cx);
                                         });
                                     }
                                 }),
@@ -610,10 +752,14 @@ impl ApiTester {
                                 })
                                 .checked(checked)
                                 .disabled(expired)
-                                .on_click(move |_, _, cx| {
+                                .on_click(move |_, window, cx| {
                                     if let Some(this) = server_this.upgrade() {
                                         this.update(cx, |this, cx| {
-                                            this.select_upstream(Some(server_id.clone()), cx);
+                                            this.select_upstream(
+                                                Some(server_id.clone()),
+                                                window,
+                                                cx,
+                                            );
                                         });
                                     }
                                 }),
@@ -654,7 +800,9 @@ impl ApiTester {
             let state = entity.read(cx);
             let servers = state.settings.upstreams.servers.clone();
             let active_id = state.settings.upstreams.active_upstream_id.clone();
-            let writable = state.settings_writable && !state.upstream_login_status.busy();
+            let writable = state.settings_writable
+                && !state.upstream_login_status.busy()
+                && !state.workspace_switch_status.busy();
             let mut rows = Vec::with_capacity(servers.len() + 1);
 
             for server in servers {
@@ -843,7 +991,7 @@ fn connection_badge(label: &'static str, color: Hsla) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Modifiers, TestAppContext, VisualTestContext, px, size};
+    use gpui::{TestAppContext, VisualTestContext, px, size};
 
     use super::*;
 
@@ -871,14 +1019,16 @@ mod tests {
     }
 
     #[gpui::test]
-    fn login_navigation_opens_a_page_and_closing_clears_the_password(cx: &mut TestAppContext) {
+    fn login_page_closing_clears_the_password(cx: &mut TestAppContext) {
         let (app, cx, _directory) = mount_app(cx);
         cx.run_until_parked();
 
-        let login = cx
-            .debug_bounds("rail-upstreams")
-            .expect("fresh navigation must expose Login");
-        cx.simulate_click(login.center(), Modifiers::none());
+        assert!(cx.debug_bounds("rail-workspaces").is_some());
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.open_upstream_login(None, window, cx);
+            });
+        });
         cx.run_until_parked();
         assert!(cx.debug_bounds("upstream-login-page").is_some());
 
@@ -912,5 +1062,70 @@ mod tests {
             cx.debug_bounds("upstream-settings-list").is_some(),
             "Settings must open directly to the switchable Servers page"
         );
+    }
+
+    #[gpui::test]
+    fn local_workspace_switch_replaces_the_active_workspace(cx: &mut TestAppContext) {
+        let (app, cx, _directory) = mount_app(cx);
+        let (default_id, second_id) = cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                let default_id = app.database_store.active_local_workspace_id().unwrap();
+                let mut default_workspace = app.workspace.clone();
+                default_workspace
+                    .create_collection("Default collection")
+                    .unwrap();
+                app.commit_workspace(default_workspace).unwrap();
+
+                let second = app.database_store.create_local_workspace("Second").unwrap();
+                let mut second_workspace = Workspace::default();
+                second_workspace
+                    .create_collection("Second collection")
+                    .unwrap();
+                app.database_store
+                    .save_workspace_for(&second.id, &second_workspace)
+                    .unwrap();
+                app.local_workspaces.push(second.clone());
+                app.switch_to_local_workspace(second.id.clone(), window, cx);
+                (default_id, second.id)
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let app = app.read(cx);
+            assert_eq!(app.active_workspace_name(), "Second");
+            assert_eq!(app.workspace.collections[0].name, "Second collection");
+        });
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.switch_to_local_workspace(default_id.clone(), window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let app = app.read(cx);
+            assert_eq!(
+                app.workspace_providers.active_id(),
+                &WorkspaceProviderId::Local(default_id)
+            );
+            assert_eq!(app.workspace.collections[0].name, "Default collection");
+            assert_ne!(
+                second_id,
+                app.database_store.active_local_workspace_id().unwrap()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn local_workspace_creation_dialog_mounts(cx: &mut TestAppContext) {
+        let (app, cx, _directory) = mount_app(cx);
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.open_create_local_workspace_dialog(window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("local-workspace-create-dialog").is_some());
     }
 }

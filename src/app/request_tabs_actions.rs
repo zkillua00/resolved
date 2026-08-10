@@ -141,7 +141,10 @@ impl ApiTester {
                 Err(message)
             }
             RequestTabsPersistenceAction::Write => {
-                let result = self.database_store.save_request_tabs(&self.request_tabs);
+                let result = self
+                    .workspace_providers
+                    .active()
+                    .save_request_tabs(&self.request_tabs);
                 durable.record_write_result(&self.request_tabs, &result);
                 match result {
                     Ok(()) => {

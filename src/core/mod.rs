@@ -16,7 +16,7 @@ mod workspace_provider;
 #[cfg(test)]
 mod mvp_smoke_test;
 
-pub use database::DatabaseStore;
+pub use database::{DatabaseStore, LocalWorkspace};
 pub use format::{format_body, format_raw_source, format_script_source, is_probably_text};
 pub use history::{HistoryEntry, REDACTED_VALUE, RequestHistory};
 pub use interchange::{
@@ -56,7 +56,8 @@ pub use template::{RequestTemplate, ResolvedRequest, resolve_request};
 #[allow(unused_imports)]
 pub use upstream::{
     LoginUser, UpstreamLoginError, UpstreamLoginResult, UpstreamProfile, UpstreamSettings,
-    UpstreamUrlError, build_upstream_client, login_upstream, normalize_upstream_url,
+    UpstreamUrlError, UpstreamWorkspaceError, UpstreamWorkspaceSummary, UpstreamWorkspaceView,
+    build_upstream_client, list_upstream_workspaces, login_upstream, normalize_upstream_url,
     upstream_url_label,
 };
 pub use workspace::{
@@ -64,6 +65,6 @@ pub use workspace::{
 };
 #[allow(unused_imports)]
 pub use workspace_provider::{
-    LocalWorkspaceProvider, WorkspaceProvider, WorkspaceProviderError, WorkspaceProviderId,
-    WorkspaceProviderRegistry,
+    LocalWorkspaceProvider, RemoteWorkspaceProvider, WorkspaceProvider, WorkspaceProviderError,
+    WorkspaceProviderId, WorkspaceProviderRegistry,
 };

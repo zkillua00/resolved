@@ -9,6 +9,7 @@ use std::{
     collections::HashSet,
     fs, io,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -33,7 +34,8 @@ use super::{
 #[cfg(test)]
 use super::request_tabs::RequestTabGroupColor;
 
-const CURRENT_SCHEMA_VERSION: i64 = 7;
+const CURRENT_SCHEMA_VERSION: i64 = 8;
+static NEXT_LOCAL_WORKSPACE_ID: AtomicU64 = AtomicU64::new(0);
 const LEGACY_HISTORY_FILE_VERSION: u32 = 1;
 const LEGACY_HISTORY_IMPORT_MARKER: &str = "history-json-v1";
 const LEGACY_WORKSPACE_IMPORT_MARKER: &str = "workspace-json-v1";
@@ -308,6 +310,84 @@ CREATE TABLE secure_values (
 );
 "#;
 
+const MIGRATION_8: &str = r#"
+CREATE TABLE local_workspaces (
+    id          TEXT PRIMARY KEY NOT NULL,
+    name        TEXT NOT NULL CHECK (length(trim(name)) > 0),
+    position    INTEGER NOT NULL CHECK (position >= 0),
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL,
+    version     INTEGER NOT NULL CHECK (version >= 1)
+);
+
+CREATE INDEX local_workspaces_position_idx
+    ON local_workspaces(position, id);
+
+INSERT INTO local_workspaces(id, name, position, created_at, updated_at, version)
+VALUES ('local-default', 'My Workspace', 0, 0, 0, 1);
+
+CREATE TABLE local_workspace_state (
+    singleton              INTEGER PRIMARY KEY CHECK (singleton = 1),
+    active_workspace_id    TEXT NOT NULL REFERENCES local_workspaces(id) ON DELETE RESTRICT,
+    updated_at             INTEGER NOT NULL,
+    version                INTEGER NOT NULL CHECK (version >= 1)
+);
+
+INSERT INTO local_workspace_state(singleton, active_workspace_id, updated_at, version)
+VALUES (1, 'local-default', 0, 1);
+
+ALTER TABLE collections ADD COLUMN workspace_id TEXT REFERENCES local_workspaces(id) ON DELETE CASCADE;
+UPDATE collections SET workspace_id = 'local-default';
+CREATE INDEX collections_workspace_position_idx ON collections(workspace_id, position, id);
+
+ALTER TABLE environments ADD COLUMN workspace_id TEXT REFERENCES local_workspaces(id) ON DELETE CASCADE;
+UPDATE environments SET workspace_id = 'local-default';
+CREATE INDEX environments_workspace_position_idx ON environments(workspace_id, position, id);
+
+ALTER TABLE snippets ADD COLUMN workspace_id TEXT REFERENCES local_workspaces(id) ON DELETE CASCADE;
+UPDATE snippets SET workspace_id = 'local-default';
+CREATE INDEX snippets_workspace_position_idx ON snippets(workspace_id, position, id);
+
+ALTER TABLE metadata RENAME TO metadata_v7;
+CREATE TABLE metadata (
+    workspace_id            TEXT PRIMARY KEY NOT NULL REFERENCES local_workspaces(id) ON DELETE CASCADE,
+    singleton               INTEGER NOT NULL DEFAULT 1 CHECK (singleton = 1),
+    active_environment_id   TEXT REFERENCES environments(id) ON DELETE SET NULL,
+    updated_at              INTEGER NOT NULL,
+    version                 INTEGER NOT NULL CHECK (version >= 1)
+);
+INSERT INTO metadata(workspace_id, singleton, active_environment_id, updated_at, version)
+SELECT 'local-default', 1, active_environment_id, updated_at, version FROM metadata_v7;
+DROP TABLE metadata_v7;
+
+ALTER TABLE request_tab_state RENAME TO request_tab_state_v7;
+CREATE TABLE request_tab_state (
+    workspace_id    TEXT PRIMARY KEY NOT NULL REFERENCES local_workspaces(id) ON DELETE CASCADE,
+    singleton       INTEGER NOT NULL DEFAULT 1 CHECK (singleton = 1),
+    state_json      TEXT NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    version         INTEGER NOT NULL CHECK (version >= 1)
+);
+INSERT INTO request_tab_state(workspace_id, singleton, state_json, updated_at, version)
+SELECT 'local-default', 1, state_json, updated_at, version FROM request_tab_state_v7;
+DROP TABLE request_tab_state_v7;
+
+CREATE TABLE upstream_request_tab_state (
+    upstream_id    TEXT NOT NULL,
+    workspace_id   TEXT NOT NULL,
+    state_json     TEXT NOT NULL,
+    updated_at     INTEGER NOT NULL,
+    version        INTEGER NOT NULL CHECK (version >= 1),
+    PRIMARY KEY(upstream_id, workspace_id)
+);
+"#;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalWorkspace {
+    pub id: String,
+    pub name: String,
+}
+
 /// The application aggregates persisted in one consistent SQLite snapshot.
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -416,6 +496,12 @@ pub enum DatabaseError {
     #[error("database contains invalid {field}: {value}")]
     CorruptData { field: &'static str, value: String },
 
+    #[error("workspace name cannot be empty")]
+    EmptyWorkspaceName,
+
+    #[error("local workspace {0} does not exist")]
+    LocalWorkspaceNotFound(String),
+
     #[error("SQLite quick_check failed: {details}")]
     IntegrityCheckFailed { details: String },
 
@@ -484,7 +570,8 @@ impl DatabaseStore {
     pub fn load_state(&self) -> Result<DatabaseState, DatabaseError> {
         let mut connection = self.open_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let workspace = load_workspace_tx(&transaction)?;
+        let workspace_id = active_local_workspace_id_tx(&transaction)?;
+        let workspace = load_workspace_tx(&transaction, &workspace_id)?;
         let history = load_history_tx(&transaction, self.history_limit)?;
         transaction.commit()?;
         Ok(DatabaseState { workspace, history })
@@ -499,25 +586,42 @@ impl DatabaseStore {
         workspace.validate()?;
         let mut connection = self.open_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        save_workspace_tx(&transaction, workspace)?;
+        let workspace_id = active_local_workspace_id_tx(&transaction)?;
+        save_workspace_tx(&transaction, &workspace_id, workspace)?;
         save_history_tx(&transaction, history, self.history_limit)?;
         transaction.commit()?;
         Ok(())
     }
 
     pub fn load_workspace(&self) -> Result<Workspace, DatabaseError> {
+        let workspace_id = self.active_local_workspace_id()?;
+        self.load_workspace_for(&workspace_id)
+    }
+
+    pub fn load_workspace_for(&self, workspace_id: &str) -> Result<Workspace, DatabaseError> {
         let mut connection = self.open_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let workspace = load_workspace_tx(&transaction)?;
+        ensure_local_workspace_exists(&transaction, workspace_id)?;
+        let workspace = load_workspace_tx(&transaction, workspace_id)?;
         transaction.commit()?;
         Ok(workspace)
     }
 
     pub fn save_workspace(&self, workspace: &Workspace) -> Result<(), DatabaseError> {
+        let workspace_id = self.active_local_workspace_id()?;
+        self.save_workspace_for(&workspace_id, workspace)
+    }
+
+    pub fn save_workspace_for(
+        &self,
+        workspace_id: &str,
+        workspace: &Workspace,
+    ) -> Result<(), DatabaseError> {
         workspace.validate()?;
         let mut connection = self.open_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        save_workspace_tx(&transaction, workspace)?;
+        ensure_local_workspace_exists(&transaction, workspace_id)?;
+        save_workspace_tx(&transaction, workspace_id, workspace)?;
         transaction.commit()?;
         Ok(())
     }
@@ -527,43 +631,187 @@ impl DatabaseStore {
         workspace: &Workspace,
         request_tabs: &RequestTabs,
     ) -> Result<(), DatabaseError> {
+        let workspace_id = self.active_local_workspace_id()?;
+        self.save_workspace_and_request_tabs_for(&workspace_id, workspace, request_tabs)
+    }
+
+    pub fn save_workspace_and_request_tabs_for(
+        &self,
+        workspace_id: &str,
+        workspace: &Workspace,
+        request_tabs: &RequestTabs,
+    ) -> Result<(), DatabaseError> {
         workspace.validate()?;
         let state_json = serialize_request_tabs(request_tabs)?;
         let mut connection = self.open_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        save_workspace_tx(&transaction, workspace)?;
-        save_request_tabs_tx(&transaction, &state_json)?;
+        ensure_local_workspace_exists(&transaction, workspace_id)?;
+        save_workspace_tx(&transaction, workspace_id, workspace)?;
+        save_request_tabs_tx(&transaction, workspace_id, &state_json)?;
         transaction.commit()?;
         Ok(())
     }
 
     pub fn load_request_tabs(&self) -> Result<RequestTabs, DatabaseError> {
+        let workspace_id = self.active_local_workspace_id()?;
+        self.load_request_tabs_for(&workspace_id)
+    }
+
+    pub fn load_request_tabs_for(&self, workspace_id: &str) -> Result<RequestTabs, DatabaseError> {
         let connection = self.open_connection()?;
+        ensure_local_workspace_exists(&connection, workspace_id)?;
         let state_json = connection
             .query_row(
-                "SELECT state_json FROM request_tab_state WHERE singleton = 1",
-                [],
+                "SELECT state_json FROM request_tab_state WHERE workspace_id = ?1",
+                params![workspace_id],
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
-        match state_json {
-            Some(state_json) => {
-                serde_json::from_str(&state_json).map_err(|error| DatabaseError::CorruptData {
-                    field: "request tab state",
-                    value: error.to_string(),
-                })
-            }
-            None => Ok(RequestTabs::default()),
-        }
+        deserialize_request_tabs(state_json)
     }
 
     pub fn save_request_tabs(&self, request_tabs: &RequestTabs) -> Result<(), DatabaseError> {
+        let workspace_id = self.active_local_workspace_id()?;
+        self.save_request_tabs_for(&workspace_id, request_tabs)
+    }
+
+    pub fn save_request_tabs_for(
+        &self,
+        workspace_id: &str,
+        request_tabs: &RequestTabs,
+    ) -> Result<(), DatabaseError> {
         let state_json = serialize_request_tabs(request_tabs)?;
         let mut connection = self.open_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        save_request_tabs_tx(&transaction, &state_json)?;
+        ensure_local_workspace_exists(&transaction, workspace_id)?;
+        save_request_tabs_tx(&transaction, workspace_id, &state_json)?;
         transaction.commit()?;
         Ok(())
+    }
+
+    pub fn load_upstream_request_tabs(
+        &self,
+        upstream_id: &str,
+        workspace_id: &str,
+    ) -> Result<RequestTabs, DatabaseError> {
+        let connection = self.open_connection()?;
+        let state_json = connection
+            .query_row(
+                "SELECT state_json
+                 FROM upstream_request_tab_state
+                 WHERE upstream_id = ?1 AND workspace_id = ?2",
+                params![upstream_id, workspace_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        deserialize_request_tabs(state_json)
+    }
+
+    pub fn save_upstream_request_tabs(
+        &self,
+        upstream_id: &str,
+        workspace_id: &str,
+        request_tabs: &RequestTabs,
+    ) -> Result<(), DatabaseError> {
+        let state_json = serialize_request_tabs(request_tabs)?;
+        let connection = self.open_connection()?;
+        connection.execute(
+            "INSERT INTO upstream_request_tab_state(
+                upstream_id, workspace_id, state_json, updated_at, version
+             ) VALUES (?1, ?2, ?3, ?4, 1)
+             ON CONFLICT(upstream_id, workspace_id) DO UPDATE SET
+                state_json = excluded.state_json,
+                updated_at = excluded.updated_at,
+                version = upstream_request_tab_state.version + 1",
+            params![upstream_id, workspace_id, state_json, now_micros()],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_local_workspaces(&self) -> Result<Vec<LocalWorkspace>, DatabaseError> {
+        let connection = self.open_connection()?;
+        let mut statement = connection
+            .prepare("SELECT id, name FROM local_workspaces ORDER BY position ASC, id ASC")?;
+        statement
+            .query_map([], |row| {
+                Ok(LocalWorkspace {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DatabaseError::from)
+    }
+
+    pub fn active_local_workspace_id(&self) -> Result<String, DatabaseError> {
+        let connection = self.open_connection()?;
+        active_local_workspace_id_tx(&connection)
+    }
+
+    pub fn select_local_workspace(&self, workspace_id: &str) -> Result<(), DatabaseError> {
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_local_workspace_exists(&transaction, workspace_id)?;
+        transaction.execute(
+            "UPDATE local_workspace_state
+             SET active_workspace_id = ?1, updated_at = ?2, version = version + 1
+             WHERE singleton = 1",
+            params![workspace_id, now_micros()],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn select_local_workspace_and_save_settings(
+        &self,
+        workspace_id: &str,
+        settings: &AppSettings,
+    ) -> Result<(), DatabaseError> {
+        let state_json = serialize_app_settings(settings)?;
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_local_workspace_exists(&transaction, workspace_id)?;
+        transaction.execute(
+            "UPDATE local_workspace_state
+             SET active_workspace_id = ?1, updated_at = ?2, version = version + 1
+             WHERE singleton = 1",
+            params![workspace_id, now_micros()],
+        )?;
+        save_app_settings_tx(&transaction, &state_json)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn create_local_workspace(&self, name: &str) -> Result<LocalWorkspace, DatabaseError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(DatabaseError::EmptyWorkspaceName);
+        }
+        let workspace = LocalWorkspace {
+            id: new_local_workspace_id(),
+            name: name.to_owned(),
+        };
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let position: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM local_workspaces",
+            [],
+            |row| row.get(0),
+        )?;
+        let now = now_micros();
+        transaction.execute(
+            "INSERT INTO local_workspaces(id, name, position, created_at, updated_at, version)
+             VALUES (?1, ?2, ?3, ?4, ?4, 1)",
+            params![&workspace.id, &workspace.name, position, now],
+        )?;
+        transaction.execute(
+            "INSERT INTO metadata(
+                workspace_id, singleton, active_environment_id, updated_at, version
+             ) VALUES (?1, 1, NULL, ?2, 1)",
+            params![&workspace.id, now],
+        )?;
+        transaction.commit()?;
+        Ok(workspace)
     }
 
     pub fn load_app_settings(&self) -> Result<AppSettings, DatabaseError> {
@@ -662,11 +910,11 @@ impl DatabaseStore {
         Ok(())
     }
 
-    pub(crate) fn save_app_settings_and_delete_secure_value(
+    pub(crate) fn save_app_settings_and_delete_upstream(
         &self,
         settings: &AppSettings,
         namespace: &str,
-        name: &str,
+        upstream_id: &str,
     ) -> Result<(), DatabaseError> {
         let state_json = serialize_app_settings(settings)?;
         let mut connection = self.open_connection()?;
@@ -674,7 +922,11 @@ impl DatabaseStore {
         save_app_settings_tx(&transaction, &state_json)?;
         transaction.execute(
             "DELETE FROM secure_values WHERE namespace = ?1 AND name = ?2",
-            params![namespace, name],
+            params![namespace, upstream_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM upstream_request_tab_state WHERE upstream_id = ?1",
+            params![upstream_id],
         )?;
         transaction.commit()?;
         Ok(())
@@ -807,7 +1059,8 @@ impl DatabaseStore {
             )",
         )?;
         if imported {
-            save_workspace_tx(&transaction, &workspace)?;
+            let workspace_id = active_local_workspace_id_tx(&transaction)?;
+            save_workspace_tx(&transaction, &workspace_id, &workspace)?;
         }
         write_legacy_import_marker(&transaction, LEGACY_WORKSPACE_IMPORT_MARKER)?;
         transaction.commit()?;
@@ -989,6 +1242,7 @@ fn migrate(connection: &mut Connection) -> Result<(), DatabaseError> {
             5 => transaction.execute_batch(MIGRATION_5)?,
             6 => transaction.execute_batch(MIGRATION_6)?,
             7 => transaction.execute_batch(MIGRATION_7)?,
+            8 => transaction.execute_batch(MIGRATION_8)?,
             _ => {
                 return Err(DatabaseError::UnsupportedSchemaVersion {
                     found: next,
@@ -1009,6 +1263,7 @@ fn migrate(connection: &mut Connection) -> Result<(), DatabaseError> {
 
 fn save_workspace_tx(
     transaction: &Transaction<'_>,
+    workspace_id: &str,
     workspace: &Workspace,
 ) -> Result<(), DatabaseError> {
     workspace.validate()?;
@@ -1021,11 +1276,12 @@ fn save_workspace_tx(
         collection_ids.insert(collection.id.clone());
         transaction.execute(
             "INSERT INTO collections(
-                id, name, position, created_at, updated_at, version
-             ) VALUES (?1, ?2, ?3, ?4, ?4, 1)
+                id, name, position, created_at, updated_at, version, workspace_id
+             ) VALUES (?1, ?2, ?3, ?4, ?4, 1, ?5)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 position = excluded.position,
+                workspace_id = excluded.workspace_id,
                 updated_at = excluded.updated_at,
                 version = collections.version + 1",
             params![
@@ -1033,6 +1289,7 @@ fn save_workspace_tx(
                 &collection.name,
                 to_i64(collection_position, "collection position")?,
                 saved_at,
+                workspace_id,
             ],
         )?;
 
@@ -1150,20 +1407,29 @@ fn save_workspace_tx(
 
     delete_missing_ids(
         transaction,
-        "SELECT id FROM saved_requests",
+        "SELECT saved_requests.id
+         FROM saved_requests
+         JOIN collections ON collections.id = saved_requests.collection_id
+         WHERE collections.workspace_id = ?1",
         "DELETE FROM saved_requests WHERE id = ?1",
+        Some(workspace_id),
         &saved_request_ids,
     )?;
     delete_missing_ids(
         transaction,
-        "SELECT id FROM collection_folders",
+        "SELECT collection_folders.id
+         FROM collection_folders
+         JOIN collections ON collections.id = collection_folders.collection_id
+         WHERE collections.workspace_id = ?1",
         "DELETE FROM collection_folders WHERE id = ?1",
+        Some(workspace_id),
         &folder_ids,
     )?;
     delete_missing_ids(
         transaction,
-        "SELECT id FROM collections",
+        "SELECT id FROM collections WHERE workspace_id = ?1",
         "DELETE FROM collections WHERE id = ?1",
+        Some(workspace_id),
         &collection_ids,
     )?;
 
@@ -1173,11 +1439,12 @@ fn save_workspace_tx(
         environment_ids.insert(environment.id.clone());
         transaction.execute(
             "INSERT INTO environments(
-                id, name, position, created_at, updated_at, version
-             ) VALUES (?1, ?2, ?3, ?4, ?4, 1)
+                id, name, position, created_at, updated_at, version, workspace_id
+             ) VALUES (?1, ?2, ?3, ?4, ?4, 1, ?5)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 position = excluded.position,
+                workspace_id = excluded.workspace_id,
                 updated_at = excluded.updated_at,
                 version = environments.version + 1",
             params![
@@ -1185,6 +1452,7 @@ fn save_workspace_tx(
                 &environment.name,
                 to_i64(environment_position, "environment position")?,
                 saved_at,
+                workspace_id,
             ],
         )?;
 
@@ -1220,14 +1488,19 @@ fn save_workspace_tx(
 
     delete_missing_ids(
         transaction,
-        "SELECT id FROM environment_variables",
+        "SELECT environment_variables.id
+         FROM environment_variables
+         JOIN environments ON environments.id = environment_variables.environment_id
+         WHERE environments.workspace_id = ?1",
         "DELETE FROM environment_variables WHERE id = ?1",
+        Some(workspace_id),
         &variable_ids,
     )?;
     delete_missing_ids(
         transaction,
-        "SELECT id FROM environments",
+        "SELECT id FROM environments WHERE workspace_id = ?1",
         "DELETE FROM environments WHERE id = ?1",
+        Some(workspace_id),
         &environment_ids,
     )?;
 
@@ -1237,8 +1510,8 @@ fn save_workspace_tx(
         transaction.execute(
             "INSERT INTO snippets(
                 id, name, description, category, kind, output_language, source,
-                generator_api_version, position, created_at, updated_at, version
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1)
+                generator_api_version, position, created_at, updated_at, version, workspace_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
@@ -1248,6 +1521,7 @@ fn save_workspace_tx(
                 source = excluded.source,
                 generator_api_version = excluded.generator_api_version,
                 position = excluded.position,
+                workspace_id = excluded.workspace_id,
                 created_at = excluded.created_at,
                 updated_at = excluded.updated_at,
                 version = snippets.version + 1",
@@ -1266,25 +1540,32 @@ fn save_workspace_tx(
                 to_i64(snippet_position, "snippet position")?,
                 snippet.created_at.timestamp_micros(),
                 snippet.updated_at.timestamp_micros(),
+                workspace_id,
             ],
         )?;
         sync_snippet_requirements(transaction, snippet)?;
     }
     delete_missing_ids(
         transaction,
-        "SELECT id FROM snippets",
+        "SELECT id FROM snippets WHERE workspace_id = ?1",
         "DELETE FROM snippets WHERE id = ?1",
+        Some(workspace_id),
         &snippet_ids,
     )?;
 
     transaction.execute(
-        "INSERT INTO metadata(singleton, active_environment_id, updated_at, version)
-         VALUES (1, ?1, ?2, 1)
-         ON CONFLICT(singleton) DO UPDATE SET
+        "INSERT INTO metadata(
+            workspace_id, singleton, active_environment_id, updated_at, version
+         ) VALUES (?1, 1, ?2, ?3, 1)
+         ON CONFLICT(workspace_id) DO UPDATE SET
             active_environment_id = excluded.active_environment_id,
             updated_at = excluded.updated_at,
             version = metadata.version + 1",
-        params![workspace.active_environment_id.as_deref(), saved_at],
+        params![
+            workspace_id,
+            workspace.active_environment_id.as_deref(),
+            saved_at
+        ],
     )?;
     Ok(())
 }
@@ -1296,18 +1577,32 @@ fn serialize_request_tabs(request_tabs: &RequestTabs) -> Result<String, Database
     })
 }
 
+fn deserialize_request_tabs(state_json: Option<String>) -> Result<RequestTabs, DatabaseError> {
+    match state_json {
+        Some(state_json) => {
+            serde_json::from_str(&state_json).map_err(|error| DatabaseError::CorruptData {
+                field: "request tab state",
+                value: error.to_string(),
+            })
+        }
+        None => Ok(RequestTabs::default()),
+    }
+}
+
 fn save_request_tabs_tx(
     transaction: &Transaction<'_>,
+    workspace_id: &str,
     state_json: &str,
 ) -> Result<(), DatabaseError> {
     transaction.execute(
-        "INSERT INTO request_tab_state(singleton, state_json, updated_at, version)
-         VALUES (1, ?1, ?2, 1)
-         ON CONFLICT(singleton) DO UPDATE SET
+        "INSERT INTO request_tab_state(
+            workspace_id, singleton, state_json, updated_at, version
+         ) VALUES (?1, 1, ?2, ?3, 1)
+         ON CONFLICT(workspace_id) DO UPDATE SET
             state_json = excluded.state_json,
             updated_at = excluded.updated_at,
             version = request_tab_state.version + 1",
-        params![state_json, now_micros()],
+        params![workspace_id, state_json, now_micros()],
     )?;
     Ok(())
 }
@@ -1468,15 +1763,19 @@ fn sync_snippet_requirements(
     Ok(())
 }
 
-fn load_workspace_tx(transaction: &Transaction<'_>) -> Result<Workspace, DatabaseError> {
+fn load_workspace_tx(
+    transaction: &Transaction<'_>,
+    workspace_id: &str,
+) -> Result<Workspace, DatabaseError> {
     let collection_rows = {
         let mut statement = transaction.prepare(
             "SELECT id, name
              FROM collections
+             WHERE workspace_id = ?1
              ORDER BY position ASC, id ASC",
         )?;
         statement
-            .query_map([], |row| {
+            .query_map(params![workspace_id], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -1606,10 +1905,11 @@ fn load_workspace_tx(transaction: &Transaction<'_>) -> Result<Workspace, Databas
         let mut statement = transaction.prepare(
             "SELECT id, name
              FROM environments
+             WHERE workspace_id = ?1
              ORDER BY position ASC, id ASC",
         )?;
         statement
-            .query_map([], |row| {
+            .query_map(params![workspace_id], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -1660,10 +1960,11 @@ fn load_workspace_tx(transaction: &Transaction<'_>) -> Result<Workspace, Databas
                 id, name, description, category, kind, output_language, source,
                 generator_api_version, created_at, updated_at
              FROM snippets
+             WHERE workspace_id = ?1
              ORDER BY position ASC, id ASC",
         )?;
         statement
-            .query_map([], |row| {
+            .query_map(params![workspace_id], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -1729,8 +2030,8 @@ fn load_workspace_tx(transaction: &Transaction<'_>) -> Result<Workspace, Databas
 
     let active_environment_id = transaction
         .query_row(
-            "SELECT active_environment_id FROM metadata WHERE singleton = 1",
-            [],
+            "SELECT active_environment_id FROM metadata WHERE workspace_id = ?1",
+            params![workspace_id],
             |row| row.get::<_, Option<String>>(0),
         )
         .optional()?
@@ -1825,6 +2126,7 @@ fn save_history_tx(
         transaction,
         "SELECT id FROM history_entries",
         "DELETE FROM history_entries WHERE id = ?1",
+        None,
         &history_ids,
     )?;
     Ok(())
@@ -2156,13 +2458,19 @@ fn delete_missing_ids(
     transaction: &Transaction<'_>,
     select_sql: &str,
     delete_sql: &str,
+    scope: Option<&str>,
     retained_ids: &HashSet<String>,
 ) -> Result<(), DatabaseError> {
     let existing_ids = {
         let mut statement = transaction.prepare(select_sql)?;
-        statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?
+        match scope {
+            Some(scope) => statement
+                .query_map(params![scope], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?,
+            None => statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?,
+        }
     };
     for id in existing_ids {
         if !retained_ids.contains(&id) {
@@ -2170,6 +2478,42 @@ fn delete_missing_ids(
         }
     }
     Ok(())
+}
+
+fn active_local_workspace_id_tx(connection: &Connection) -> Result<String, DatabaseError> {
+    connection
+        .query_row(
+            "SELECT active_workspace_id FROM local_workspace_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(DatabaseError::from)
+}
+
+fn ensure_local_workspace_exists(
+    connection: &Connection,
+    workspace_id: &str,
+) -> Result<(), DatabaseError> {
+    let exists = connection
+        .query_row(
+            "SELECT 1 FROM local_workspaces WHERE id = ?1",
+            params![workspace_id],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if exists {
+        Ok(())
+    } else {
+        Err(DatabaseError::LocalWorkspaceNotFound(
+            workspace_id.to_owned(),
+        ))
+    }
+}
+
+fn new_local_workspace_id() -> String {
+    let sequence = NEXT_LOCAL_WORKSPACE_ID.fetch_add(1, Ordering::Relaxed);
+    format!("local-{}-{sequence}", Utc::now().timestamp_micros())
 }
 
 fn legacy_import_completed(connection: &Connection, marker: &str) -> Result<bool, DatabaseError> {
@@ -2633,6 +2977,8 @@ mod tests {
             "history_body_fields",
             "history_entries",
             "history_headers",
+            "local_workspace_state",
+            "local_workspaces",
             "metadata",
             "migration_markers",
             "request_tab_state",
@@ -2642,6 +2988,7 @@ mod tests {
             "schema_version",
             "snippet_requirements",
             "snippets",
+            "upstream_request_tab_state",
         ] {
             assert!(tables.contains(table), "missing table {table}");
         }
@@ -2673,6 +3020,10 @@ mod tests {
             );
         };
         assert_cascade("saved_requests", "collection_id", "collections");
+        assert_cascade("collections", "workspace_id", "local_workspaces");
+        assert_cascade("environments", "workspace_id", "local_workspaces");
+        assert_cascade("snippets", "workspace_id", "local_workspaces");
+        assert_cascade("request_tab_state", "workspace_id", "local_workspaces");
         assert_cascade("saved_requests", "folder_id", "collection_folders");
         assert_cascade("collection_folders", "collection_id", "collections");
         assert_cascade(
@@ -3329,6 +3680,63 @@ mod tests {
             .optional()
             .unwrap();
         assert_eq!(foreign_key_violation, None);
+    }
+
+    #[test]
+    fn local_workspaces_isolate_content_and_request_tabs() {
+        let (_directory, store) = database();
+        store.initialize().unwrap();
+        let default_id = store.active_local_workspace_id().unwrap();
+        let mut default_workspace = Workspace::default();
+        default_workspace
+            .create_collection("Default collection")
+            .unwrap();
+        let mut default_tabs = RequestTabs::new();
+        default_tabs.active_mut().set_title("Default draft");
+        store
+            .save_workspace_and_request_tabs_for(&default_id, &default_workspace, &default_tabs)
+            .unwrap();
+
+        let second = store.create_local_workspace("Second").unwrap();
+        let mut second_workspace = Workspace::default();
+        second_workspace
+            .create_collection("Second collection")
+            .unwrap();
+        let mut second_tabs = RequestTabs::new();
+        second_tabs.active_mut().set_title("Second draft");
+        store
+            .save_workspace_and_request_tabs_for(&second.id, &second_workspace, &second_tabs)
+            .unwrap();
+
+        assert_eq!(
+            store.load_workspace_for(&default_id).unwrap(),
+            default_workspace
+        );
+        assert_eq!(
+            store.load_request_tabs_for(&default_id).unwrap(),
+            default_tabs
+        );
+        assert_eq!(
+            store.load_workspace_for(&second.id).unwrap(),
+            second_workspace
+        );
+        assert_eq!(
+            store.load_request_tabs_for(&second.id).unwrap(),
+            second_tabs
+        );
+
+        store.select_local_workspace(&second.id).unwrap();
+        assert_eq!(store.load_workspace().unwrap(), second_workspace);
+        assert_eq!(store.load_request_tabs().unwrap(), second_tabs);
+        assert_eq!(
+            store
+                .list_local_workspaces()
+                .unwrap()
+                .into_iter()
+                .map(|workspace| workspace.name)
+                .collect::<Vec<_>>(),
+            vec!["My Workspace", "Second"]
+        );
     }
 
     #[test]

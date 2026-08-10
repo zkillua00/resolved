@@ -39,6 +39,8 @@ WKWebView through `gpui-wry` only when the Preview tab is selected.
 - Nested collection folders with search-preserved ancestry, request moves, and
   safe folder reparenting
 - Persistent collections, saved requests, environments, and secret variables
+- Named local workspaces with isolated collections, environments, snippets, and
+  request-tab drafts
 - Multiple switchable self-hosted server profiles with direct login; session
   tokens are authenticated-encrypted locally with a device-only Keychain key
 - Persistent, live-configurable keyboard shortcuts, organized into five
@@ -60,15 +62,18 @@ The Login control in the navigation rail connects directly to a self-hosted
 Resolved server. A server is added only after `POST /api/v1/auth/login`
 succeeds. Resolved accepts HTTPS endpoints and loopback HTTP endpoints, refuses
 credential-bearing URLs and redirects, and never persists the submitted
-password. Settings → Servers lists every authenticated server and switches the
-active connection between them or Local.
+password. The workspace control lists named local workspaces and the workspaces
+available from every authenticated server. Settings → Servers can also switch
+between Local and a connected server.
 
-Server selection does not move the local workspace in this stage. Collections,
-environments, and requests still use the local SQLite provider. Their ownership
-now sits behind a provider registry so the later remote-workspace protocol can
-register an upstream provider without coupling collection operations to server
-configuration. See [`docs/upstreams.md`](docs/upstreams.md) for the boundary and
-credential-vault design.
+Each local workspace has independent collections, environments, snippets,
+saved requests, and request-tab drafts in SQLite. Selecting a server fetches its
+workspace list directly with the encrypted local session and loads its recursive
+collection tree. Server-owned collection content is read-only in the desktop
+app; request-tab drafts remain local and are isolated by server and workspace.
+Switching never uploads or exposes a local workspace. See
+[`docs/upstreams.md`](docs/upstreams.md) for the provider and credential-vault
+design.
 
 ## Code editors
 
@@ -219,8 +224,10 @@ methods, headers, and body forms without executing the code.
 
 Open Settings from the navigation rail or with `⌘,`. The Servers page switches
 between Local and authenticated self-hosted upstreams, adds another server, or
-forgets an encrypted local session. The Editor page's Editing section controls
-tab width, spaces versus hard tabs, soft wrapping, line
+forgets an encrypted local session and its cached request-tab drafts. The
+workspace control in the navigation rail creates and switches named local
+workspaces or opens a workspace from any connected server. The Editor page's
+Editing section controls tab width, spaces versus hard tabs, soft wrapping, line
 numbers, indent guides, and automatic pair insertion. Its Formatting section
 controls indentation, tabs, line width, quote style, semicolons, and trailing
 commas for the embedded JSON/JavaScript/TypeScript formatter. Changes persist
@@ -468,10 +475,11 @@ State is stored in the macOS local application-data directory under the legacy
 so existing history, workspaces, request tabs, settings, and themes continue to
 load after the product rename:
 
-- `api-tester.sqlite3`: the versioned SQLite database for history, collections,
-  saved requests and scripts, snippets and their applicability rules,
-  environments, variables, request tabs, shortcut overrides, the CSS theme
-  snapshot, and other app settings
+- `api-tester.sqlite3`: the versioned SQLite database for history, named local
+  workspaces, collections, saved requests and scripts, snippets and their
+  applicability rules, environments, variables, local and upstream request-tab
+  drafts, encrypted server sessions, shortcut overrides, the CSS theme snapshot,
+  and other app settings
 
 The database uses foreign keys, WAL mode, a short bounded busy timeout, explicit
 forward-only schema migrations, normalized body-field tables, transactional
@@ -480,10 +488,12 @@ metadata, schema v3 adds nested collection folders, and schema v4 adds
 persistent request-tab state. Schema v5 adds application settings, including
 shortcuts, theme selection, and navigation density; earlier rows migrate
 without losing request content. Schema v6 adds ordered snippets and normalized
-applicability rules. It is embedded behind a storage interface;
-there is no localhost database server or open port. A process-level workspace
-lock rejects a second app instance so stale in-memory aggregates cannot
-overwrite each other.
+applicability rules. Schema v7 adds the encrypted-value vault, and schema v8
+adds named local workspaces plus per-upstream request-tab state. Existing local
+content is migrated into `My Workspace`. It is embedded behind a storage
+interface; there is no localhost database server or open port. A process-level
+workspace lock rejects a second app instance so stale in-memory aggregates
+cannot overwrite each other.
 
 Existing `history.json` and `workspace.json` files from earlier builds are
 imported independently once and retained as untouched backups. Loading a

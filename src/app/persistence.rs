@@ -17,7 +17,7 @@ impl ApiTester {
 
     pub(super) fn commit_workspace(&mut self, candidate: Workspace) -> Result<(), String> {
         if !self.workspace_writable {
-            return Err("Database is read-only for this session.".to_owned());
+            return Err("This workspace is read-only.".to_owned());
         }
         match self.workspace_providers.active().save_workspace(&candidate) {
             Ok(()) => {
@@ -39,7 +39,7 @@ impl ApiTester {
         candidate_request_tabs: RequestTabs,
     ) -> Result<(), String> {
         if !self.workspace_writable {
-            return Err("Database is read-only for this session.".to_owned());
+            return Err("This workspace is read-only.".to_owned());
         }
         if !self.request_tabs_writable {
             self.commit_workspace(candidate_workspace)?;

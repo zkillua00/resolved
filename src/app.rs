@@ -45,20 +45,22 @@ use crate::{
     core::{
         AppSettings, BodyField, BodyFieldKind, BodyMode, Collection, CredentialVault,
         DEFAULT_REQUEST_TAB_TITLE, DatabaseStore, Environment, EnvironmentMutation, HeaderEntry,
-        HistoryEntry, ImportBundle, InterchangeFormat, MAX_INTERCHANGE_BYTES,
-        MAX_SNIPPET_NAME_BYTES, PostResponseResult, PreRequestResult, REDACTED_VALUE,
-        RawBodyLanguage, RequestDraft, RequestError, RequestHistory, RequestScripts,
-        RequestTabAssociation, RequestTabCloseScope, RequestTabGroup, RequestTabGroupColor,
-        RequestTabGroupId, RequestTabId, RequestTabRecord, RequestTabs, RequestTask,
-        RequestTemplate, ResponseData, STANDARD_HTTP_METHODS, SavedRequest, SavedTheme,
-        ScriptCancellation, ScriptDiagnostic, ScriptEnvironment, ScriptError, ScriptErrorKind,
-        ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope, ShortcutOverride, Snippet,
-        SnippetCancellation, SnippetCategory, SnippetKind, SnippetLog, SnippetRequirement,
-        SnippetSelection, SnippetSelectionArea, SnippetSelectionSource, SnippetTextRange,
-        UpstreamCredential, UpstreamProfile, Workspace, WorkspaceProviderRegistry, build_client,
-        build_upstream_client, execute_post_response, execute_pre_request, export_request,
-        format_body, generate_snippet, import_requests, is_probably_text, login_upstream,
-        normalize_upstream_url, resolve_request, spawn_request,
+        HistoryEntry, ImportBundle, InterchangeFormat, LocalWorkspace, LocalWorkspaceProvider,
+        MAX_INTERCHANGE_BYTES, MAX_SNIPPET_NAME_BYTES, PostResponseResult, PreRequestResult,
+        REDACTED_VALUE, RawBodyLanguage, RemoteWorkspaceProvider, RequestDraft, RequestError,
+        RequestHistory, RequestScripts, RequestTabAssociation, RequestTabCloseScope,
+        RequestTabGroup, RequestTabGroupColor, RequestTabGroupId, RequestTabId, RequestTabRecord,
+        RequestTabs, RequestTask, RequestTemplate, ResponseData, STANDARD_HTTP_METHODS,
+        SavedRequest, SavedTheme, ScriptCancellation, ScriptDiagnostic, ScriptEnvironment,
+        ScriptError, ScriptErrorKind, ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope,
+        ShortcutOverride, Snippet, SnippetCancellation, SnippetCategory, SnippetKind, SnippetLog,
+        SnippetRequirement, SnippetSelection, SnippetSelectionArea, SnippetSelectionSource,
+        SnippetTextRange, UpstreamCredential, UpstreamProfile, UpstreamWorkspaceSummary,
+        UpstreamWorkspaceView, Workspace, WorkspaceProvider, WorkspaceProviderId,
+        WorkspaceProviderRegistry, build_client, build_upstream_client, execute_post_response,
+        execute_pre_request, export_request, format_body, generate_snippet, import_requests,
+        is_probably_text, list_upstream_workspaces, login_upstream, normalize_upstream_url,
+        resolve_request, spawn_request,
     },
     debug_overlay::DebugOverlay,
     request_dirty::{RequestDirtyPart, RequestDirtyState},
@@ -133,6 +135,7 @@ mod title_bar;
 mod ui_utils;
 mod upstream_connections;
 mod welcome_page;
+mod workspace_connections;
 mod workspace_panes;
 mod workspace_tab;
 mod workspace_tab_actions;
@@ -154,6 +157,7 @@ use template_variable_popover_model::*;
 use template_variables::*;
 use ui_utils::*;
 use upstream_connections::*;
+use workspace_connections::*;
 use workspace_tab::*;
 
 const TEMPLATE_HIGHLIGHT_DEBOUNCE: Duration = Duration::from_millis(90);
@@ -248,9 +252,14 @@ pub struct ApiTester {
     workspace: Workspace,
     database_store: DatabaseStore,
     workspace_providers: WorkspaceProviderRegistry,
+    local_workspaces: Vec<LocalWorkspace>,
     credential_vault: CredentialVault,
     workspace_warning: Option<String>,
     workspace_writable: bool,
+    workspace_switch_status: WorkspaceSwitchStatus,
+    workspace_switch_generation: u64,
+    workspace_switch_abort_handle: Option<AbortHandle>,
+    local_workspace_name: Entity<InputState>,
     sidebar_tab: SidebarTab,
     navigation_compact: bool,
     selected_collection_id: Option<String>,
