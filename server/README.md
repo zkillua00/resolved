@@ -1,18 +1,19 @@
 # Resolved collaboration server
 
-This directory is a standalone, self-hostable identity server for Resolved. It
-does not import the desktop application and the desktop application does not
-depend on it yet.
+This directory is the standalone, self-hostable collaboration server for
+Resolved. It does not import the desktop application, require a hosted control
+plane, or contact other Resolved deployments.
 
-The initial scope is deliberately limited to:
+The server currently provides:
 
 - password login and revocable bearer sessions;
 - user creation and account updates;
 - role creation and updates;
-- assigning roles to users and permissions to roles.
+- assigning roles to users and permissions to roles;
+- workspaces with direct user grants;
+- recursive collection trees with inheritable user grants.
 
-There is no hosted control plane, telemetry, deployment registration, or
-collaboration-resource API.
+There is no hosted control plane, telemetry, or deployment registration.
 
 ## Requirements
 
@@ -65,8 +66,9 @@ Driver-specific DSN examples and the security model are documented in
 ## API
 
 All routes use the `/api/v1` prefix. `POST /auth/login` is the only public
-route. Every management route requires a bearer token and a matching RBAC
-permission.
+route. Every management and collaboration route requires a bearer token and a
+matching RBAC permission. Workspace and collection routes additionally enforce
+the authenticated user's resource scope.
 
 ```sh
 curl -sS http://127.0.0.1:8787/api/v1/auth/login \
@@ -79,6 +81,15 @@ email address.
 
 The returned token is shown once. The database stores only its SHA-256 digest.
 Send it as `Authorization: Bearer <token>`.
+
+`GET /api/v1/workspaces` returns the workspaces visible to the authenticated
+user. A direct workspace grant exposes its complete collection tree. A direct
+collection grant exposes that collection and its descendants, plus only the
+ancestor nodes required to represent the path to it. User IDs in API responses
+are direct grants; inherited access is not duplicated into descendant lists.
+
+The complete route and permission table is in
+[`docs/architecture.md`](docs/architecture.md).
 
 ## Verify
 

@@ -17,6 +17,7 @@ import (
 	"resolved-server/internal/security"
 	"resolved-server/internal/server"
 	"resolved-server/internal/users"
+	"resolved-server/internal/workspaces"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
@@ -142,6 +143,317 @@ func TestIdentityManagementAndDynamicPermissions(t *testing.T) {
 	request[any](t, app, http.MethodGet, "/api/v1/users", collaboratorLogin.Token, nil, fiber.StatusUnauthorized)
 }
 
+func TestWorkspaceAndRecursiveCollectionScopes(t *testing.T) {
+	app, usersService, closeDatabase := newTestServer(t)
+	defer closeDatabase()
+
+	owner, err := usersService.BootstrapOwner(t.Context(), users.CreateInput{
+		Email:       "owner",
+		DisplayName: "Owner",
+		Password:    ownerPassword,
+	})
+	if err != nil {
+		t.Fatalf("bootstrap owner: %v", err)
+	}
+	ownerLogin := login(t, app, owner.Email, ownerPassword)
+
+	resourcePermissions := []string{
+		identity.PermissionWorkspacesRead,
+		identity.PermissionWorkspacesCreate,
+		identity.PermissionWorkspacesUpdate,
+		identity.PermissionWorkspacesDelete,
+		identity.PermissionWorkspacesAssignUsers,
+		identity.PermissionCollectionsRead,
+		identity.PermissionCollectionsCreate,
+		identity.PermissionCollectionsUpdate,
+		identity.PermissionCollectionsDelete,
+		identity.PermissionCollectionsAssignUsers,
+	}
+	role := request[identity.RoleView](t, app, http.MethodPost, "/api/v1/roles", ownerLogin.Token, map[string]any{
+		"name":            "Workspace collaborator",
+		"description":     "Exercises resource scopes",
+		"permission_keys": resourcePermissions,
+	}, fiber.StatusCreated).Data
+
+	createCollaborator := func(login string) identity.UserView {
+		t.Helper()
+		return request[identity.UserView](t, app, http.MethodPost, "/api/v1/users", ownerLogin.Token, map[string]any{
+			"email":        login,
+			"display_name": login,
+			"password":     collaboratorPassword,
+			"role_ids":     []string{role.ID},
+		}, fiber.StatusCreated).Data
+	}
+	broadUser := createCollaborator("broad")
+	nestedUser := createCollaborator("nested")
+	outsiderUser := createCollaborator("outsider")
+	broadLogin := login(t, app, broadUser.Email, collaboratorPassword)
+	nestedLogin := login(t, app, nestedUser.Email, collaboratorPassword)
+	outsiderLogin := login(t, app, outsiderUser.Email, collaboratorPassword)
+
+	workspace := request[workspaces.WorkspaceView](t, app, http.MethodPost, "/api/v1/workspaces", ownerLogin.Token, map[string]any{
+		"name": "Team API",
+	}, fiber.StatusCreated).Data
+	if len(workspace.UserIDs) != 1 || workspace.UserIDs[0] != owner.ID {
+		t.Fatalf("workspace creator grants = %v, want [%s]", workspace.UserIDs, owner.ID)
+	}
+
+	createCollection := func(name string, parentID *string) workspaces.CollectionView {
+		t.Helper()
+		body := map[string]any{"name": name}
+		if parentID != nil {
+			body["parent_collection_id"] = *parentID
+		}
+		return request[workspaces.CollectionView](
+			t,
+			app,
+			http.MethodPost,
+			"/api/v1/workspaces/"+workspace.ID+"/collections",
+			ownerLogin.Token,
+			body,
+			fiber.StatusCreated,
+		).Data
+	}
+	product := createCollection("Product", nil)
+	admin := createCollection("Admin", &product.ID)
+	secrets := createCollection("Secrets", &admin.ID)
+	public := createCollection("Public", &product.ID)
+	other := createCollection("Other", nil)
+
+	workspace = request[workspaces.WorkspaceView](
+		t,
+		app,
+		http.MethodPut,
+		"/api/v1/workspaces/"+workspace.ID+"/users",
+		ownerLogin.Token,
+		map[string]any{"user_ids": []string{owner.ID, broadUser.ID}},
+		fiber.StatusOK,
+	).Data
+	if !containsString(workspace.UserIDs, broadUser.ID) {
+		t.Fatalf("workspace grants = %v, missing broad user", workspace.UserIDs)
+	}
+
+	admin = request[workspaces.CollectionView](
+		t,
+		app,
+		http.MethodPut,
+		"/api/v1/workspaces/"+workspace.ID+"/collections/"+admin.ID+"/users",
+		ownerLogin.Token,
+		map[string]any{"user_ids": []string{nestedUser.ID}},
+		fiber.StatusOK,
+	).Data
+	if len(admin.UserIDs) != 1 || admin.UserIDs[0] != nestedUser.ID {
+		t.Fatalf("admin grants = %v, want nested user", admin.UserIDs)
+	}
+
+	outsiderWorkspaces := request[[]workspaces.WorkspaceView](
+		t, app, http.MethodGet, "/api/v1/workspaces", outsiderLogin.Token, nil, fiber.StatusOK,
+	).Data
+	if len(outsiderWorkspaces) != 0 {
+		t.Fatalf("outsider workspaces = %v, want none", outsiderWorkspaces)
+	}
+
+	nestedWorkspaces := request[[]workspaces.WorkspaceView](
+		t, app, http.MethodGet, "/api/v1/workspaces", nestedLogin.Token, nil, fiber.StatusOK,
+	).Data
+	if len(nestedWorkspaces) != 1 {
+		t.Fatalf("nested workspace count = %d, want 1", len(nestedWorkspaces))
+	}
+	nestedWorkspace := nestedWorkspaces[0]
+	if len(nestedWorkspace.UserIDs) != 0 {
+		t.Fatalf("collection-scoped workspace users = %v, want hidden", nestedWorkspace.UserIDs)
+	}
+	if len(nestedWorkspace.Collections) != 1 || nestedWorkspace.Collections[0].ID != product.ID {
+		t.Fatalf("nested roots = %+v, want Product ancestor shell", nestedWorkspace.Collections)
+	}
+	productShell := nestedWorkspace.Collections[0]
+	if len(productShell.UserIDs) != 0 {
+		t.Fatalf("ancestor shell users = %v, want hidden", productShell.UserIDs)
+	}
+	if len(productShell.SubCollections) != 1 || productShell.SubCollections[0].ID != admin.ID {
+		t.Fatalf("visible Product children = %+v, want only Admin", productShell.SubCollections)
+	}
+	visibleAdmin := productShell.SubCollections[0]
+	if len(visibleAdmin.SubCollections) != 1 || visibleAdmin.SubCollections[0].ID != secrets.ID {
+		t.Fatalf("Admin descendants = %+v, want Secrets", visibleAdmin.SubCollections)
+	}
+	if visibleAdmin.SubCollections[0].ID == public.ID || productShell.ID == other.ID {
+		t.Fatal("collection-scoped tree exposed an inaccessible sibling")
+	}
+
+	ancestorDenied := request[workspaces.CollectionView](
+		t,
+		app,
+		http.MethodGet,
+		"/api/v1/workspaces/"+workspace.ID+"/collections/"+product.ID,
+		nestedLogin.Token,
+		nil,
+		fiber.StatusForbidden,
+	)
+	if ancestorDenied.Error.Code != "collection_access_denied" {
+		t.Fatalf("ancestor access code = %q", ancestorDenied.Error.Code)
+	}
+	request[workspaces.CollectionView](
+		t,
+		app,
+		http.MethodGet,
+		"/api/v1/workspaces/"+workspace.ID+"/collections/"+secrets.ID,
+		nestedLogin.Token,
+		nil,
+		fiber.StatusOK,
+	)
+
+	nestedChild := request[workspaces.CollectionView](
+		t,
+		app,
+		http.MethodPost,
+		"/api/v1/workspaces/"+workspace.ID+"/collections",
+		nestedLogin.Token,
+		map[string]any{"name": "Nested child", "parent_collection_id": admin.ID},
+		fiber.StatusCreated,
+	).Data
+	if nestedChild.ParentCollectionID == nil || *nestedChild.ParentCollectionID != admin.ID {
+		t.Fatalf("nested child parent = %v, want %s", nestedChild.ParentCollectionID, admin.ID)
+	}
+
+	rootDenied := request[workspaces.CollectionView](
+		t,
+		app,
+		http.MethodPost,
+		"/api/v1/workspaces/"+workspace.ID+"/collections",
+		nestedLogin.Token,
+		map[string]any{"name": "Unauthorized root"},
+		fiber.StatusForbidden,
+	)
+	if rootDenied.Error.Code != "workspace_access_denied" {
+		t.Fatalf("root creation code = %q", rootDenied.Error.Code)
+	}
+
+	workspaceUpdateDenied := request[workspaces.WorkspaceView](
+		t,
+		app,
+		http.MethodPatch,
+		"/api/v1/workspaces/"+workspace.ID,
+		nestedLogin.Token,
+		map[string]any{"name": "Unauthorized rename"},
+		fiber.StatusForbidden,
+	)
+	if workspaceUpdateDenied.Error.Code != "workspace_access_denied" {
+		t.Fatalf("workspace update code = %q", workspaceUpdateDenied.Error.Code)
+	}
+
+	request[workspaces.CollectionView](
+		t,
+		app,
+		http.MethodPost,
+		"/api/v1/workspaces/"+workspace.ID+"/collections",
+		broadLogin.Token,
+		map[string]any{"name": "Broad root"},
+		fiber.StatusCreated,
+	)
+
+	cycle := request[workspaces.CollectionView](
+		t,
+		app,
+		http.MethodPut,
+		"/api/v1/workspaces/"+workspace.ID+"/collections/"+product.ID+"/parent",
+		ownerLogin.Token,
+		map[string]any{"parent_collection_id": secrets.ID},
+		fiber.StatusConflict,
+	)
+	if cycle.Error.Code != "collection_cycle" {
+		t.Fatalf("cycle code = %q, want collection_cycle", cycle.Error.Code)
+	}
+
+	movedToRoot := request[workspaces.CollectionView](
+		t,
+		app,
+		http.MethodPut,
+		"/api/v1/workspaces/"+workspace.ID+"/collections/"+public.ID+"/parent",
+		ownerLogin.Token,
+		map[string]any{"parent_collection_id": nil},
+		fiber.StatusOK,
+	).Data
+	if movedToRoot.ParentCollectionID != nil {
+		t.Fatalf("moved root parent = %v, want nil", movedToRoot.ParentCollectionID)
+	}
+	movedBack := request[workspaces.CollectionView](
+		t,
+		app,
+		http.MethodPut,
+		"/api/v1/workspaces/"+workspace.ID+"/collections/"+public.ID+"/parent",
+		ownerLogin.Token,
+		map[string]any{"parent_collection_id": product.ID},
+		fiber.StatusOK,
+	).Data
+	if movedBack.ParentCollectionID == nil || *movedBack.ParentCollectionID != product.ID {
+		t.Fatalf("moved child parent = %v, want %s", movedBack.ParentCollectionID, product.ID)
+	}
+
+	moveToRootDenied := request[workspaces.CollectionView](
+		t,
+		app,
+		http.MethodPut,
+		"/api/v1/workspaces/"+workspace.ID+"/collections/"+admin.ID+"/parent",
+		nestedLogin.Token,
+		map[string]any{"parent_collection_id": nil},
+		fiber.StatusForbidden,
+	)
+	if moveToRootDenied.Error.Code != "workspace_access_denied" {
+		t.Fatalf("move-to-root code = %q", moveToRootDenied.Error.Code)
+	}
+
+	unknownUser := request[workspaces.CollectionView](
+		t,
+		app,
+		http.MethodPut,
+		"/api/v1/workspaces/"+workspace.ID+"/collections/"+admin.ID+"/users",
+		ownerLogin.Token,
+		map[string]any{"user_ids": []string{uuid.NewString()}},
+		fiber.StatusUnprocessableEntity,
+	)
+	if unknownUser.Error.Fields["user_ids"] == "" {
+		t.Fatalf("unknown-user response = %+v", unknownUser.Error)
+	}
+
+	request[struct{}](
+		t,
+		app,
+		http.MethodDelete,
+		"/api/v1/workspaces/"+workspace.ID+"/collections/"+admin.ID,
+		ownerLogin.Token,
+		nil,
+		fiber.StatusOK,
+	)
+	request[workspaces.CollectionView](
+		t,
+		app,
+		http.MethodGet,
+		"/api/v1/workspaces/"+workspace.ID+"/collections/"+secrets.ID,
+		ownerLogin.Token,
+		nil,
+		fiber.StatusNotFound,
+	)
+	request[struct{}](
+		t,
+		app,
+		http.MethodDelete,
+		"/api/v1/workspaces/"+workspace.ID,
+		ownerLogin.Token,
+		nil,
+		fiber.StatusOK,
+	)
+	request[workspaces.WorkspaceView](
+		t,
+		app,
+		http.MethodGet,
+		"/api/v1/workspaces/"+workspace.ID,
+		ownerLogin.Token,
+		nil,
+		fiber.StatusNotFound,
+	)
+}
+
 func newTestServer(t *testing.T) (*fiber.App, *users.Service, func()) {
 	t.Helper()
 	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared&_foreign_keys=on", uuid.NewString())
@@ -173,6 +485,8 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, func()) {
 	}
 	usersService := users.NewService(repository, hasher)
 	rolesService := roles.NewService(repository)
+	workspaceRepository := workspaces.NewRepository(db)
+	workspacesService := workspaces.NewService(workspaceRepository)
 	httpServer := server.New(
 		"127.0.0.1:0",
 		io.Discard,
@@ -182,8 +496,18 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, func()) {
 			users.NewHandler(usersService),
 			roles.NewHandler(rolesService),
 		),
+		server.WithWorkspaces(authService, workspaces.NewHandler(workspacesService)),
 	)
 	return httpServer.App, usersService, func() { _ = sqlDatabase.Close() }
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func login(t *testing.T, app *fiber.App, email, password string) auth.LoginResponse {

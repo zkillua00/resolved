@@ -13,6 +13,7 @@ import (
 	"resolved-server/internal/security"
 	"resolved-server/internal/server"
 	"resolved-server/internal/users"
+	"resolved-server/internal/workspaces"
 )
 
 type Application struct {
@@ -48,14 +49,18 @@ func New(cfg config.Config, accessLog io.Writer) (*Application, error) {
 	}
 	usersService := users.NewService(repository, hasher)
 	rolesService := roles.NewService(repository)
+	workspaceRepository := workspaces.NewRepository(db)
+	workspacesService := workspaces.NewService(workspaceRepository)
 
 	authHandler := auth.NewHandler(authService)
 	usersHandler := users.NewHandler(usersService)
 	rolesHandler := roles.NewHandler(rolesService)
+	workspacesHandler := workspaces.NewHandler(workspacesService)
 	httpServer := server.New(
 		cfg.Address,
 		accessLog,
 		server.WithIdentity(authService, authHandler, usersHandler, rolesHandler),
+		server.WithWorkspaces(authService, workspacesHandler),
 	)
 
 	return &Application{

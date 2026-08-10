@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"resolved-server/internal/identity"
+	"resolved-server/internal/workspaces"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -16,8 +17,12 @@ func MigrateAndSeed(db *gorm.DB) error {
 		&identity.User{},
 		&identity.Session{},
 		&identity.BootstrapState{},
+		&workspaces.Workspace{},
+		&workspaces.Collection{},
+		&workspaces.WorkspaceUser{},
+		&workspaces.CollectionUser{},
 	); err != nil {
-		return fmt.Errorf("migrate identity schema: %w", err)
+		return fmt.Errorf("migrate server schema: %w", err)
 	}
 
 	return db.Transaction(func(tx *gorm.DB) error {

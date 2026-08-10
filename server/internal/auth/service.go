@@ -135,6 +135,15 @@ func (p *Principal) HasPermission(permission string) bool {
 	return ok
 }
 
+func (p *Principal) HasRole(roleID string) bool {
+	for _, role := range p.User.Roles {
+		if role.ID == roleID {
+			return true
+		}
+	}
+	return false
+}
+
 func normalizeLogin(login string) string {
 	return strings.ToLower(strings.TrimSpace(login))
 }

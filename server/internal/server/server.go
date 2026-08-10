@@ -13,6 +13,7 @@ import (
 	"resolved-server/internal/problem"
 	"resolved-server/internal/roles"
 	"resolved-server/internal/users"
+	"resolved-server/internal/workspaces"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/helmet"
@@ -27,6 +28,36 @@ type Modifier func(app *fiber.App)
 type Server struct {
 	App     *fiber.App
 	Address string
+}
+
+func WithWorkspaces(authService *auth.Service, handler *workspaces.Handler) Modifier {
+	return func(app *fiber.App) {
+		protected := app.Group("/api/v1", authService.Middleware())
+
+		protected.Get(
+			"/workspaces",
+			auth.RequirePermission(identity.PermissionWorkspacesRead),
+			auth.RequirePermission(identity.PermissionCollectionsRead),
+			handler.ListController(),
+		)
+		protected.Post("/workspaces", auth.RequirePermission(identity.PermissionWorkspacesCreate), handler.CreateController())
+		protected.Get(
+			"/workspaces/:workspace_id",
+			auth.RequirePermission(identity.PermissionWorkspacesRead),
+			auth.RequirePermission(identity.PermissionCollectionsRead),
+			handler.GetController(),
+		)
+		protected.Patch("/workspaces/:workspace_id", auth.RequirePermission(identity.PermissionWorkspacesUpdate), handler.UpdateController())
+		protected.Delete("/workspaces/:workspace_id", auth.RequirePermission(identity.PermissionWorkspacesDelete), handler.DeleteController())
+		protected.Put("/workspaces/:workspace_id/users", auth.RequirePermission(identity.PermissionWorkspacesAssignUsers), handler.ReplaceUsersController())
+
+		protected.Post("/workspaces/:workspace_id/collections", auth.RequirePermission(identity.PermissionCollectionsCreate), handler.CreateCollectionController())
+		protected.Get("/workspaces/:workspace_id/collections/:collection_id", auth.RequirePermission(identity.PermissionCollectionsRead), handler.GetCollectionController())
+		protected.Patch("/workspaces/:workspace_id/collections/:collection_id", auth.RequirePermission(identity.PermissionCollectionsUpdate), handler.UpdateCollectionController())
+		protected.Delete("/workspaces/:workspace_id/collections/:collection_id", auth.RequirePermission(identity.PermissionCollectionsDelete), handler.DeleteCollectionController())
+		protected.Put("/workspaces/:workspace_id/collections/:collection_id/parent", auth.RequirePermission(identity.PermissionCollectionsUpdate), handler.MoveCollectionController())
+		protected.Put("/workspaces/:workspace_id/collections/:collection_id/users", auth.RequirePermission(identity.PermissionCollectionsAssignUsers), handler.ReplaceCollectionUsersController())
+	}
 }
 
 func New(address string, accessLog io.Writer, modifiers ...Modifier) *Server {

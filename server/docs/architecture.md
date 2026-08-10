@@ -1,15 +1,15 @@
-# Identity server architecture
+# Collaboration server architecture
 
 ## Deployment boundary
 
 Each Resolved collaboration server is an independent security boundary. It has
-its own users, roles, sessions, permission assignments, and database. The
-server neither discovers nor contacts other deployments, and no central
-service is required to start or administer it.
+its own users, roles, sessions, permission assignments, workspaces, collection
+trees, and database. The server neither discovers nor contacts other
+deployments, and no central service is required to start or administer it.
 
 The server lives in a separate Go module under `server/`. Nothing in the Rust
-desktop application imports it, and this first slice contains no desktop
-client, synchronization, workspace, collection, or request-sharing behavior.
+desktop application imports it, and the server does not read or modify the
+desktop application's local database.
 
 ## Request flow
 
@@ -31,6 +31,38 @@ is wrong. Login identifiers are opaque, case-insensitive strings; deployments
 do not require them to be email addresses.
 The public login route has a per-process sliding-window rate limit.
 
+## Workspace and collection access
+
+Deployment-wide RBAC and resource access are separate checks. A role permission
+answers what an account may do. Direct workspace and collection grants answer
+where it may do it. Both checks must pass.
+
+A workspace is the top-level resource and contains root collections. Every
+collection is the same recursive node type and may contain sub-collections. A
+collection row stores `parent_collection_id`; a null parent places it at the
+workspace root. API responses assemble those rows into recursive
+`sub_collections` arrays.
+
+The `user_ids` arrays contain direct grants only:
+
+- a workspace grant applies to every collection in that workspace;
+- a collection grant applies to that collection and all of its descendants;
+- grants are additive and there are no deny entries;
+- the built-in Owner role bypasses resource grants so a deployment can always
+  be recovered by an active owner.
+
+Collection-scoped users receive only accessible subtrees. Ancestors needed to
+represent a path are included as navigation shells, but inaccessible siblings
+and the ancestor's direct user list are omitted. A navigation shell does not
+authorize collection mutation.
+
+Creating a workspace gives its creator a direct workspace grant. Creating a
+root collection requires workspace access. Creating a child requires access to
+its parent. Moving a collection requires access to both its current scope and
+its destination; moving to the root requires workspace access. Moves are
+transactional and reject self/descendant cycles. Deleting a collection deletes
+its complete subtree.
+
 ## Bootstrap and built-in data
 
 Migrations seed a fixed permission catalog and an immutable `Owner` system
@@ -44,6 +76,10 @@ Permissions in the initial catalog are:
 - `users.read`, `users.create`, `users.update`, `users.roles.assign`
 - `roles.read`, `roles.create`, `roles.update`, `roles.permissions.assign`
 - `permissions.read`
+- `workspaces.read`, `workspaces.create`, `workspaces.update`,
+  `workspaces.delete`, `workspaces.users.assign`
+- `collections.read`, `collections.create`, `collections.update`,
+  `collections.delete`, `collections.users.assign`
 
 ## HTTP surface
 
@@ -63,10 +99,25 @@ Permissions in the initial catalog are:
 | `PATCH` | `/api/v1/roles/:id` | `roles.update` |
 | `PUT` | `/api/v1/roles/:id/permissions` | `roles.permissions.assign` |
 | `GET` | `/api/v1/permissions` | `permissions.read` |
+| `GET` | `/api/v1/workspaces` | `workspaces.read`, `collections.read` |
+| `POST` | `/api/v1/workspaces` | `workspaces.create` |
+| `GET` | `/api/v1/workspaces/:workspace_id` | `workspaces.read`, `collections.read` |
+| `PATCH` | `/api/v1/workspaces/:workspace_id` | `workspaces.update` |
+| `DELETE` | `/api/v1/workspaces/:workspace_id` | `workspaces.delete` |
+| `PUT` | `/api/v1/workspaces/:workspace_id/users` | `workspaces.users.assign` |
+| `POST` | `/api/v1/workspaces/:workspace_id/collections` | `collections.create` |
+| `GET` | `/api/v1/workspaces/:workspace_id/collections/:collection_id` | `collections.read` |
+| `PATCH` | `/api/v1/workspaces/:workspace_id/collections/:collection_id` | `collections.update` |
+| `DELETE` | `/api/v1/workspaces/:workspace_id/collections/:collection_id` | `collections.delete` |
+| `PUT` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/parent` | `collections.update` |
+| `PUT` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/users` | `collections.users.assign` |
 
 Role and permission assignment endpoints use replacement semantics: the sent
 set becomes the complete set. That makes administration deterministic and
-avoids hidden incremental state.
+avoids hidden incremental state. Workspace and collection user endpoints use
+the same replacement rule. Sending an empty `user_ids` array removes every
+direct grant at that exact resource; inherited and descendant grants are not
+changed.
 
 ## Database portability
 
@@ -79,14 +130,16 @@ GORM selects one of its maintained dialects at startup.
 | MySQL | `resolved:secret@tcp(db:3306)/resolved?charset=utf8mb4&parseTime=True&loc=UTC` |
 | SQL Server | `sqlserver://resolved:secret@db:1433?database=resolved&encrypt=true` |
 
-The schema uses UUID strings and portable association tables. SQLite is opened
-with foreign keys, a busy timeout, and WAL in the default DSN. Remote database
-TLS is controlled by its DSN and should not be disabled outside a trusted local
-network.
+The schema uses UUID strings, portable grant tables, and an adjacency list for
+the collection tree. Tree assembly and access inheritance are handled without
+dialect-specific recursive SQL, so the same behavior is used with every
+supported database. SQLite is opened with foreign keys, a busy timeout, and WAL
+in the default DSN. Remote database TLS is controlled by its DSN and should not
+be disabled outside a trusted local network.
 
 ## Explicitly deferred
 
-- collaboration resources and synchronization;
+- saved requests and workspace synchronization protocols;
 - invitations, email delivery, password recovery, and external identity/SSO;
 - desktop-application integration;
 - central discovery, hosted administration, or telemetry;
