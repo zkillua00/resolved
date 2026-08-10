@@ -80,104 +80,42 @@ impl ApiTester {
                     }),
             )
             .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu.min_w(px(280.));
-                menu = menu.item(PopupMenuItem::new("Local").disabled(true));
-                for workspace in &local_workspaces {
-                    let workspace_this = this.clone();
-                    let workspace_id = workspace.id.clone();
-                    let checked =
-                        active_provider_id == WorkspaceProviderId::Local(workspace.id.clone());
-                    menu = menu.item(
-                        PopupMenuItem::new(workspace.name.clone())
-                            .checked(checked)
-                            .on_click(move |_, window, cx| {
-                                if let Some(this) = workspace_this.upgrade() {
-                                    this.update(cx, |this, cx| {
-                                        this.switch_to_local_workspace(
-                                            workspace_id.clone(),
-                                            window,
-                                            cx,
-                                        );
-                                    });
-                                }
-                            }),
-                    );
-                }
-                let create_this = this.clone();
-                menu = menu.item(PopupMenuItem::new("New workspace…").on_click(
-                    move |_, window, cx| {
-                        if let Some(this) = create_this.upgrade() {
-                            this.update(cx, |this, cx| {
-                                this.open_create_local_workspace_dialog(window, cx);
-                            });
-                        }
-                    },
-                ));
+                build_workspace_picker_menu(
+                    menu,
+                    &local_workspaces,
+                    &servers,
+                    &active_provider_id,
+                    &this,
+                )
+            })
+            .into_any_element()
+    }
 
-                for server in &servers {
-                    menu = menu
-                        .separator()
-                        .item(PopupMenuItem::new(server.display_label()).disabled(true));
-                    if server.workspaces.is_empty() {
-                        let server_this = this.clone();
-                        let server_id = server.id.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new("Load workspaces…")
-                                .disabled(server.session_expired(Utc::now()))
-                                .on_click(move |_, window, cx| {
-                                    if let Some(this) = server_this.upgrade() {
-                                        this.update(cx, |this, cx| {
-                                            this.switch_to_upstream(
-                                                server_id.clone(),
-                                                None,
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    }
-                                }),
-                        );
-                        continue;
-                    }
-                    for workspace in &server.workspaces {
-                        let workspace_this = this.clone();
-                        let server_id = server.id.clone();
-                        let workspace_id = workspace.id.clone();
-                        let checked = active_provider_id
-                            == WorkspaceProviderId::Upstream {
-                                upstream_id: server.id.clone(),
-                                workspace_id: workspace.id.clone(),
-                            };
-                        menu = menu.item(
-                            PopupMenuItem::new(workspace.name.clone())
-                                .checked(checked)
-                                .disabled(server.session_expired(Utc::now()))
-                                .on_click(move |_, window, cx| {
-                                    if let Some(this) = workspace_this.upgrade() {
-                                        this.update(cx, |this, cx| {
-                                            this.switch_to_upstream(
-                                                server_id.clone(),
-                                                Some(workspace_id.clone()),
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    }
-                                }),
-                        );
-                    }
-                }
-                let add_server_this = this.clone();
-                menu.separator()
-                    .item(
-                        PopupMenuItem::new("Add server…").on_click(move |_, window, cx| {
-                            if let Some(this) = add_server_this.upgrade() {
-                                this.update(cx, |this, cx| {
-                                    this.open_upstream_login(None, window, cx);
-                                });
-                            }
-                        }),
-                    )
+    pub(super) fn render_title_workspace_control(&self, cx: &mut Context<Self>) -> AnyElement {
+        let local_workspaces = self.local_workspaces.clone();
+        let servers = self.settings.upstreams.servers.clone();
+        let active_provider_id = self.workspace_providers.active_id().clone();
+        let disabled = self.sending || self.workspace_switch_status.busy();
+        let tooltip = format!("Workspace: {}", self.active_workspace_name());
+        let this = cx.entity().downgrade();
+
+        Button::new("title-workspaces")
+            .debug_selector(|| "title-workspaces".to_owned())
+            .label("Workspace")
+            .dropdown_caret(true)
+            .ghost()
+            .compact()
+            .font_semibold()
+            .disabled(disabled)
+            .tooltip(tooltip)
+            .dropdown_menu(move |menu, _, _| {
+                build_workspace_picker_menu(
+                    menu,
+                    &local_workspaces,
+                    &servers,
+                    &active_provider_id,
+                    &this,
+                )
             })
             .into_any_element()
     }
@@ -968,6 +906,106 @@ impl ApiTester {
     }
 }
 
+fn build_workspace_picker_menu(
+    mut menu: PopupMenu,
+    local_workspaces: &[LocalWorkspace],
+    servers: &[UpstreamProfile],
+    active_provider_id: &WorkspaceProviderId,
+    this: &WeakEntity<ApiTester>,
+) -> PopupMenu {
+    menu = menu
+        .min_w(px(280.))
+        .item(PopupMenuItem::new("Local").disabled(true));
+    for workspace in local_workspaces {
+        let workspace_this = this.clone();
+        let workspace_id = workspace.id.clone();
+        let checked = active_provider_id == &WorkspaceProviderId::Local(workspace.id.clone());
+        menu = menu.item(
+            PopupMenuItem::new(workspace.name.clone())
+                .checked(checked)
+                .on_click(move |_, window, cx| {
+                    if let Some(this) = workspace_this.upgrade() {
+                        this.update(cx, |this, cx| {
+                            this.switch_to_local_workspace(workspace_id.clone(), window, cx);
+                        });
+                    }
+                }),
+        );
+    }
+
+    let create_this = this.clone();
+    menu = menu.item(
+        PopupMenuItem::new("New workspace…").on_click(move |_, window, cx| {
+            if let Some(this) = create_this.upgrade() {
+                this.update(cx, |this, cx| {
+                    this.open_create_local_workspace_dialog(window, cx);
+                });
+            }
+        }),
+    );
+
+    for server in servers {
+        menu = menu
+            .separator()
+            .item(PopupMenuItem::new(server.display_label()).disabled(true));
+        if server.workspaces.is_empty() {
+            let server_this = this.clone();
+            let server_id = server.id.clone();
+            menu = menu.item(
+                PopupMenuItem::new("Load workspaces…")
+                    .disabled(server.session_expired(Utc::now()))
+                    .on_click(move |_, window, cx| {
+                        if let Some(this) = server_this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.switch_to_upstream(server_id.clone(), None, window, cx);
+                            });
+                        }
+                    }),
+            );
+            continue;
+        }
+
+        for workspace in &server.workspaces {
+            let workspace_this = this.clone();
+            let server_id = server.id.clone();
+            let workspace_id = workspace.id.clone();
+            let checked = active_provider_id
+                == &WorkspaceProviderId::Upstream {
+                    upstream_id: server.id.clone(),
+                    workspace_id: workspace.id.clone(),
+                };
+            menu = menu.item(
+                PopupMenuItem::new(workspace.name.clone())
+                    .checked(checked)
+                    .disabled(server.session_expired(Utc::now()))
+                    .on_click(move |_, window, cx| {
+                        if let Some(this) = workspace_this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.switch_to_upstream(
+                                    server_id.clone(),
+                                    Some(workspace_id.clone()),
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }
+                    }),
+            );
+        }
+    }
+
+    let add_server_this = this.clone();
+    menu.separator().item(
+        PopupMenuItem::new("Add server…").on_click(move |_, window, cx| {
+            if let Some(this) = add_server_this.upgrade() {
+                this.update(cx, |this, cx| {
+                    this.open_upstream_login(None, window, cx);
+                });
+            }
+        }),
+    )
+}
+
 fn login_field(label: &'static str, input: Input) -> AnyElement {
     v_flex()
         .gap_2()
@@ -1016,6 +1054,14 @@ mod tests {
         visual.update(|window, _| window.activate_window());
         visual.simulate_resize(size(px(1_200.), px(800.)));
         (app.expect("capture app entity"), visual, directory)
+    }
+
+    #[gpui::test]
+    fn title_bar_workspace_picker_mounts(cx: &mut TestAppContext) {
+        let (_app, cx, _directory) = mount_app(cx);
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("title-workspaces").is_some());
     }
 
     #[gpui::test]

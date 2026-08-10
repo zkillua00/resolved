@@ -13,8 +13,8 @@ use gpui::{
     EntityInputHandler, ExternalPaths, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _,
     PathPromptOptions, Pixels, Point, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, Timer, Window, anchored, deferred, div, img, point,
-    prelude::FluentBuilder as _, px,
+    Styled as _, Subscription, Task, Timer, WeakEntity, Window, anchored, deferred, div, img,
+    point, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Root, RopeExt as _, Selectable as _,

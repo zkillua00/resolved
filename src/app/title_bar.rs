@@ -93,17 +93,7 @@ impl ApiTester {
                     .flex_1()
                     .gap_6()
                     .child(resolved_brand_lockup(cx))
-                    .child(
-                        h_flex()
-                            .h_full()
-                            .items_center()
-                            .border_b_2()
-                            .border_color(cx.theme().primary)
-                            .px_1()
-                            .text_sm()
-                            .font_semibold()
-                            .child("Workspace"),
-                    )
+                    .child(self.render_title_workspace_control(cx))
                     .child(
                         h_flex()
                             .min_w_0()
