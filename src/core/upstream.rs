@@ -13,10 +13,14 @@ use thiserror::Error;
 use url::{Host, Url};
 use zeroize::Zeroizing;
 
-use super::{Collection, Workspace, workspace::CollectionFolder};
+use super::{
+    Collection, Workspace,
+    template::RequestTemplate,
+    workspace::{CollectionFolder, SavedRequest},
+};
 
 const LOGIN_RESPONSE_LIMIT_BYTES: usize = 64 * 1024;
-const WORKSPACE_RESPONSE_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+const WORKSPACE_RESPONSE_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(20);
 static NEXT_UPSTREAM_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -248,12 +252,17 @@ impl UpstreamWorkspaceView {
             .into_iter()
             .map(|root| {
                 let mut folders = Vec::new();
-                flatten_remote_collections(root.sub_collections, None, &mut folders);
+                let mut requests = root
+                    .requests
+                    .into_iter()
+                    .map(|request| request.into_local(None))
+                    .collect();
+                flatten_remote_collections(root.sub_collections, None, &mut folders, &mut requests);
                 Collection {
                     id: root.id,
                     name: root.name,
                     folders,
-                    requests: Vec::new(),
+                    requests,
                 }
             })
             .collect();
@@ -274,8 +283,33 @@ pub struct UpstreamCollectionView {
     pub name: String,
     pub user_ids: Vec<String>,
     pub sub_collections: Vec<UpstreamCollectionView>,
+    #[serde(default)]
+    pub requests: Vec<UpstreamSavedRequestView>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct UpstreamSavedRequestView {
+    pub id: String,
+    pub collection_id: String,
+    pub name: String,
+    pub definition: RequestTemplate,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl UpstreamSavedRequestView {
+    pub fn into_local(self, folder_id: Option<String>) -> SavedRequest {
+        SavedRequest {
+            id: self.id,
+            name: self.name,
+            folder_id,
+            definition: self.definition,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -364,6 +398,18 @@ struct LoginRequest<'a> {
 #[derive(Serialize)]
 struct CreateWorkspaceRequest<'a> {
     name: &'a str,
+}
+
+#[derive(Serialize)]
+struct CreateCollectionRequest<'a> {
+    name: &'a str,
+    parent_collection_id: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct SaveRequestRequest<'a> {
+    name: &'a str,
+    definition: &'a RequestTemplate,
 }
 
 #[derive(Deserialize)]
@@ -493,6 +539,80 @@ pub async fn create_upstream_workspace(
     parse_workspace_response(response).await
 }
 
+pub async fn create_upstream_collection(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    name: &str,
+    parent_collection_id: Option<&str>,
+) -> Result<UpstreamCollectionView, UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join(&format!("api/v1/workspaces/{workspace_id}/collections"))
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .post(endpoint)
+        .bearer_auth(bearer_token)
+        .json(&CreateCollectionRequest {
+            name,
+            parent_collection_id,
+        })
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response(response).await
+}
+
+pub async fn create_upstream_saved_request(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    collection_id: &str,
+    name: &str,
+    definition: &RequestTemplate,
+) -> Result<UpstreamSavedRequestView, UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join(&format!(
+            "api/v1/workspaces/{workspace_id}/collections/{collection_id}/requests"
+        ))
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .post(endpoint)
+        .bearer_auth(bearer_token)
+        .json(&SaveRequestRequest { name, definition })
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response(response).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_upstream_saved_request(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    collection_id: &str,
+    request_id: &str,
+    name: &str,
+    definition: &RequestTemplate,
+) -> Result<UpstreamSavedRequestView, UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join(&format!(
+            "api/v1/workspaces/{workspace_id}/collections/{collection_id}/requests/{request_id}"
+        ))
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .patch(endpoint)
+        .bearer_auth(bearer_token)
+        .json(&SaveRequestRequest { name, definition })
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response(response).await
+}
+
 async fn parse_workspace_response<T: for<'de> Deserialize<'de>>(
     mut response: reqwest::Response,
 ) -> Result<T, UpstreamWorkspaceError> {
@@ -542,6 +662,7 @@ fn flatten_remote_collections(
     collections: Vec<UpstreamCollectionView>,
     parent_folder_id: Option<String>,
     folders: &mut Vec<CollectionFolder>,
+    requests: &mut Vec<SavedRequest>,
 ) {
     for collection in collections {
         let id = collection.id;
@@ -550,7 +671,13 @@ fn flatten_remote_collections(
             name: collection.name,
             parent_folder_id: parent_folder_id.clone(),
         });
-        flatten_remote_collections(collection.sub_collections, Some(id), folders);
+        requests.extend(
+            collection
+                .requests
+                .into_iter()
+                .map(|request| request.into_local(Some(id.clone()))),
+        );
+        flatten_remote_collections(collection.sub_collections, Some(id), folders, requests);
     }
 }
 
@@ -848,18 +975,35 @@ mod tests {
                 parent_collection_id: None,
                 name: "Root".to_owned(),
                 user_ids: Vec::new(),
+                requests: vec![UpstreamSavedRequestView {
+                    id: "root-request".to_owned(),
+                    collection_id: "root".to_owned(),
+                    name: "Root request".to_owned(),
+                    definition: RequestTemplate::default(),
+                    created_at: now,
+                    updated_at: now,
+                }],
                 sub_collections: vec![UpstreamCollectionView {
                     id: "child".to_owned(),
                     workspace_id: "workspace-1".to_owned(),
                     parent_collection_id: Some("root".to_owned()),
                     name: "Child".to_owned(),
                     user_ids: Vec::new(),
+                    requests: vec![UpstreamSavedRequestView {
+                        id: "child-request".to_owned(),
+                        collection_id: "child".to_owned(),
+                        name: "Child request".to_owned(),
+                        definition: RequestTemplate::default(),
+                        created_at: now,
+                        updated_at: now,
+                    }],
                     sub_collections: vec![UpstreamCollectionView {
                         id: "grandchild".to_owned(),
                         workspace_id: "workspace-1".to_owned(),
                         parent_collection_id: Some("child".to_owned()),
                         name: "Grandchild".to_owned(),
                         user_ids: Vec::new(),
+                        requests: Vec::new(),
                         sub_collections: Vec::new(),
                         created_at: now,
                         updated_at: now,
@@ -886,6 +1030,14 @@ mod tests {
             workspace.collections[0].folders[1]
                 .parent_folder_id
                 .as_deref(),
+            Some("child")
+        );
+        assert_eq!(workspace.collections[0].requests.len(), 2);
+        assert_eq!(workspace.collections[0].requests[0].id, "root-request");
+        assert_eq!(workspace.collections[0].requests[0].folder_id, None);
+        assert_eq!(workspace.collections[0].requests[1].id, "child-request");
+        assert_eq!(
+            workspace.collections[0].requests[1].folder_id.as_deref(),
             Some("child")
         );
         workspace.validate().unwrap();
@@ -1020,6 +1172,189 @@ mod tests {
         server.join().unwrap();
         assert_eq!(workspace.id, "workspace-1");
         assert_eq!(workspace.name, "Team API");
+    }
+
+    #[test]
+    fn creates_a_server_collection_with_the_saved_bearer_session() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let request = read_http_request(&mut stream);
+            let header_end = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .unwrap();
+            let headers = String::from_utf8(request[..header_end].to_vec())
+                .unwrap()
+                .to_ascii_lowercase();
+            assert!(
+                headers.starts_with("post /api/v1/workspaces/workspace-1/collections http/1.1\r\n")
+            );
+            assert!(headers.contains("authorization: bearer saved-session-token\r\n"));
+            let body: serde_json::Value =
+                serde_json::from_slice(&request[header_end + 4..]).unwrap();
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "name": "Accounts",
+                    "parent_collection_id": "collection-root"
+                })
+            );
+
+            let now = Utc::now();
+            let body = serde_json::to_vec(&serde_json::json!({
+                "request_id": "request-1",
+                "success": true,
+                "data": {
+                    "id": "collection-child",
+                    "workspace_id": "workspace-1",
+                    "parent_collection_id": "collection-root",
+                    "name": "Accounts",
+                    "user_ids": [],
+                    "sub_collections": [],
+                    "requests": [],
+                    "created_at": now,
+                    "updated_at": now
+                }
+            }))
+            .unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = build_upstream_client().unwrap();
+        let base_url = Url::parse(&format!("http://{address}/")).unwrap();
+        let collection = runtime
+            .block_on(create_upstream_collection(
+                &client,
+                &base_url,
+                "saved-session-token",
+                "workspace-1",
+                "Accounts",
+                Some("collection-root"),
+            ))
+            .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(collection.id, "collection-child");
+        assert_eq!(
+            collection.parent_collection_id.as_deref(),
+            Some("collection-root")
+        );
+    }
+
+    #[test]
+    fn creates_and_updates_a_server_saved_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let definition = RequestTemplate::default();
+        let response_definition = serde_json::to_value(&definition).unwrap();
+        let server = thread::spawn(move || {
+            for expected_method in ["post", "patch"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .unwrap();
+                let request = read_http_request(&mut stream);
+                let header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .unwrap();
+                let headers = String::from_utf8(request[..header_end].to_vec())
+                    .unwrap()
+                    .to_ascii_lowercase();
+                let expected_path = if expected_method == "post" {
+                    "post /api/v1/workspaces/workspace-1/collections/collection-1/requests http/1.1\r\n"
+                } else {
+                    "patch /api/v1/workspaces/workspace-1/collections/collection-1/requests/request-1 http/1.1\r\n"
+                };
+                assert!(headers.starts_with(expected_path));
+                assert!(headers.contains("authorization: bearer saved-session-token\r\n"));
+                let request_body: serde_json::Value =
+                    serde_json::from_slice(&request[header_end + 4..]).unwrap();
+                let expected_name = if expected_method == "post" {
+                    "List users"
+                } else {
+                    "List all users"
+                };
+                assert_eq!(request_body["name"], expected_name);
+                assert_eq!(request_body["definition"], response_definition);
+
+                let now = Utc::now();
+                let body = serde_json::to_vec(&serde_json::json!({
+                    "request_id": "response-1",
+                    "success": true,
+                    "data": {
+                        "id": "request-1",
+                        "collection_id": "collection-1",
+                        "name": expected_name,
+                        "definition": response_definition,
+                        "created_at": now,
+                        "updated_at": now
+                    }
+                }))
+                .unwrap();
+                let status = if expected_method == "post" {
+                    "201 Created"
+                } else {
+                    "200 OK"
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = build_upstream_client().unwrap();
+        let base_url = Url::parse(&format!("http://{address}/")).unwrap();
+        let created = runtime
+            .block_on(create_upstream_saved_request(
+                &client,
+                &base_url,
+                "saved-session-token",
+                "workspace-1",
+                "collection-1",
+                "List users",
+                &definition,
+            ))
+            .unwrap();
+        let updated = runtime
+            .block_on(update_upstream_saved_request(
+                &client,
+                &base_url,
+                "saved-session-token",
+                "workspace-1",
+                "collection-1",
+                "request-1",
+                "List all users",
+                &definition,
+            ))
+            .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(created.id, "request-1");
+        assert_eq!(updated.name, "List all users");
     }
 
     fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {

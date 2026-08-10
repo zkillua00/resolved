@@ -90,6 +90,33 @@ type ReplaceCollectionUsersRequest struct {
 
 type ReplaceCollectionUsersPayload ReplaceCollectionUsersRequest
 
+type CreateSavedRequestRequest struct {
+	WorkspaceID  string          `json:"-" validate:"required"`
+	CollectionID string          `json:"-" validate:"required"`
+	Name         string          `json:"name" validate:"required,max=120"`
+	Definition   json.RawMessage `json:"definition" validate:"required"`
+}
+
+type CreateSavedRequestPayload CreateSavedRequestRequest
+
+type SavedRequestRequest struct {
+	WorkspaceID  string `json:"-" validate:"required"`
+	CollectionID string `json:"-" validate:"required"`
+	RequestID    string `json:"-" validate:"required"`
+}
+
+type SavedRequestPayload SavedRequestRequest
+
+type UpdateSavedRequestRequest struct {
+	WorkspaceID  string          `json:"-" validate:"required"`
+	CollectionID string          `json:"-" validate:"required"`
+	RequestID    string          `json:"-" validate:"required"`
+	Name         string          `json:"name" validate:"required,max=120"`
+	Definition   json.RawMessage `json:"definition" validate:"required"`
+}
+
+type UpdateSavedRequestPayload UpdateSavedRequestRequest
+
 func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
 }
@@ -236,6 +263,50 @@ func (request *ReplaceCollectionUsersRequest) ToPayload(*httpkit.ProcessingConte
 }
 
 func (request *ReplaceCollectionUsersRequest) Validate() httpkit.ValidationErrors {
+	return httpkit.DefaultValidation(request)
+}
+
+func (request *CreateSavedRequestRequest) BindFiber(c fiber.Ctx) error {
+	request.WorkspaceID = c.Params("workspace_id")
+	request.CollectionID = c.Params("collection_id")
+	return c.Bind().Body(request)
+}
+
+func (request *CreateSavedRequestRequest) ToPayload(*httpkit.ProcessingContext) (CreateSavedRequestPayload, error) {
+	return CreateSavedRequestPayload(*request), nil
+}
+
+func (request *CreateSavedRequestRequest) Validate() httpkit.ValidationErrors {
+	return httpkit.DefaultValidation(request)
+}
+
+func (request *SavedRequestRequest) BindFiber(c fiber.Ctx) error {
+	request.WorkspaceID = c.Params("workspace_id")
+	request.CollectionID = c.Params("collection_id")
+	request.RequestID = c.Params("request_id")
+	return nil
+}
+
+func (request *SavedRequestRequest) ToPayload(*httpkit.ProcessingContext) (SavedRequestPayload, error) {
+	return SavedRequestPayload(*request), nil
+}
+
+func (request *SavedRequestRequest) Validate() httpkit.ValidationErrors {
+	return httpkit.DefaultValidation(request)
+}
+
+func (request *UpdateSavedRequestRequest) BindFiber(c fiber.Ctx) error {
+	request.WorkspaceID = c.Params("workspace_id")
+	request.CollectionID = c.Params("collection_id")
+	request.RequestID = c.Params("request_id")
+	return c.Bind().Body(request)
+}
+
+func (request *UpdateSavedRequestRequest) ToPayload(*httpkit.ProcessingContext) (UpdateSavedRequestPayload, error) {
+	return UpdateSavedRequestPayload(*request), nil
+}
+
+func (request *UpdateSavedRequestRequest) Validate() httpkit.ValidationErrors {
 	return httpkit.DefaultValidation(request)
 }
 
@@ -461,6 +532,86 @@ func (h *Handler) DeleteCollectionController() fiber.Handler {
 		func(c fiber.Ctx, payload CollectionPayload) httpkit.Response[struct{}] {
 			if err := h.service.DeleteCollection(
 				c.Context(), actorFromContext(c), payload.WorkspaceID, payload.CollectionID,
+			); err != nil {
+				return httpkit.NewErrorResponse[struct{}](err)
+			}
+			return httpkit.NewSuccessResponse(fiber.StatusOK, struct{}{})
+		},
+	)
+}
+
+func (h *Handler) CreateSavedRequestController() fiber.Handler {
+	return httpkit.WithProcessedPayload[
+		SavedRequestView,
+		CreateSavedRequestPayload,
+		CreateSavedRequestRequest,
+	](
+		func(c fiber.Ctx, payload CreateSavedRequestPayload) httpkit.Response[SavedRequestView] {
+			result, err := h.service.CreateSavedRequest(
+				c.Context(),
+				actorFromContext(c),
+				payload.WorkspaceID,
+				payload.CollectionID,
+				CreateSavedRequestInput{Name: payload.Name, Definition: payload.Definition},
+			)
+			if err != nil {
+				return httpkit.NewErrorResponse[SavedRequestView](err)
+			}
+			return httpkit.NewSuccessResponse(fiber.StatusCreated, ViewSavedRequest(result))
+		},
+	)
+}
+
+func (h *Handler) GetSavedRequestController() fiber.Handler {
+	return httpkit.WithProcessedPayload[
+		SavedRequestView,
+		SavedRequestPayload,
+		SavedRequestRequest,
+	](
+		func(c fiber.Ctx, payload SavedRequestPayload) httpkit.Response[SavedRequestView] {
+			result, err := h.service.GetSavedRequest(
+				c.Context(), actorFromContext(c), payload.WorkspaceID, payload.CollectionID, payload.RequestID,
+			)
+			if err != nil {
+				return httpkit.NewErrorResponse[SavedRequestView](err)
+			}
+			return httpkit.NewSuccessResponse(fiber.StatusOK, ViewSavedRequest(result))
+		},
+	)
+}
+
+func (h *Handler) UpdateSavedRequestController() fiber.Handler {
+	return httpkit.WithProcessedPayload[
+		SavedRequestView,
+		UpdateSavedRequestPayload,
+		UpdateSavedRequestRequest,
+	](
+		func(c fiber.Ctx, payload UpdateSavedRequestPayload) httpkit.Response[SavedRequestView] {
+			result, err := h.service.UpdateSavedRequest(
+				c.Context(),
+				actorFromContext(c),
+				payload.WorkspaceID,
+				payload.CollectionID,
+				payload.RequestID,
+				UpdateSavedRequestInput{Name: payload.Name, Definition: payload.Definition},
+			)
+			if err != nil {
+				return httpkit.NewErrorResponse[SavedRequestView](err)
+			}
+			return httpkit.NewSuccessResponse(fiber.StatusOK, ViewSavedRequest(result))
+		},
+	)
+}
+
+func (h *Handler) DeleteSavedRequestController() fiber.Handler {
+	return httpkit.WithProcessedPayload[
+		struct{},
+		SavedRequestPayload,
+		SavedRequestRequest,
+	](
+		func(c fiber.Ctx, payload SavedRequestPayload) httpkit.Response[struct{}] {
+			if err := h.service.DeleteSavedRequest(
+				c.Context(), actorFromContext(c), payload.WorkspaceID, payload.CollectionID, payload.RequestID,
 			); err != nil {
 				return httpkit.NewErrorResponse[struct{}](err)
 			}

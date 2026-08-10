@@ -72,9 +72,13 @@ The workspace picker creates a server workspace through
 `POST /api/v1/workspaces`, using the same saved bearer session. A successful
 response is added to that server's workspace list and opened immediately.
 
-Server-owned workspace content is read-only because the collaboration API
-exposes collection metadata and grants rather than desktop request payloads.
-Request-tab drafts for a remote workspace are persisted locally under its
+For a selected server workspace, Resolved can create root collections, nested
+folders, and saved requests through the collaboration API. Save and Update send
+the complete portable request template to the collection node represented by
+the selected collection or folder. Server responses are applied to the active
+workspace only after the authenticated write succeeds.
+
+Request-tab drafts remain device-local and are persisted under their
 server/workspace identity. Forgetting a server removes its encrypted session,
 profile, providers, and cached drafts. No local workspace content is uploaded
 or shared by switching providers.

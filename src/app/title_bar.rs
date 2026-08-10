@@ -72,7 +72,7 @@ impl ApiTester {
             .saved_request_id()
             .is_some();
         let can_save = !self.sending
-            && self.workspace_writable
+            && self.can_save_request_content()
             && (active_request_tab.association().collection_id().is_some()
                 || self.selected_collection_id.is_some());
         let can_switch_environment = self.workspace_writable && !self.sending;

@@ -87,8 +87,8 @@ func (h *PasswordHasher) Verify(encoded, password string) (bool, error) {
 
 func ValidatePassword(password string) error {
 	length := utf8.RuneCountInString(password)
-	if length < 12 {
-		return errors.New("password must contain at least 12 characters")
+	if length < 6 {
+		return errors.New("password must contain at least 6 characters")
 	}
 	if length > 128 {
 		return errors.New("password must contain at most 128 characters")

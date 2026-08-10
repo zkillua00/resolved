@@ -1,7 +1,9 @@
 package workspaces
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"unicode/utf8"
@@ -35,6 +37,16 @@ type CreateCollectionInput struct {
 
 type UpdateCollectionInput struct {
 	Name string
+}
+
+type CreateSavedRequestInput struct {
+	Name       string
+	Definition json.RawMessage
+}
+
+type UpdateSavedRequestInput struct {
+	Name       string
+	Definition json.RawMessage
 }
 
 func NewService(repository *Repository) *Service {
@@ -348,6 +360,130 @@ func (s *Service) DeleteCollection(
 	return nil
 }
 
+func (s *Service) GetSavedRequest(
+	ctx context.Context,
+	actor Actor,
+	workspaceID, collectionID, requestID string,
+) (SavedRequest, error) {
+	if err := validateWorkspaceCollectionRequestIDs(workspaceID, collectionID, requestID); err != nil {
+		return SavedRequest{}, err
+	}
+	workspace, err := s.repository.GetWorkspace(ctx, workspaceID)
+	if err != nil {
+		return SavedRequest{}, mapRepositoryError(err)
+	}
+	if _, exists := findCollection(workspace.Collections, collectionID); !exists {
+		return SavedRequest{}, mapRepositoryError(ErrCollectionNotFound)
+	}
+	if !hasCollectionGrant(workspace, collectionID, actor) {
+		return SavedRequest{}, collectionAccessDenied()
+	}
+	request, err := s.repository.GetSavedRequest(ctx, workspaceID, collectionID, requestID)
+	if err != nil {
+		return SavedRequest{}, mapRepositoryError(err)
+	}
+	return request, nil
+}
+
+func (s *Service) CreateSavedRequest(
+	ctx context.Context,
+	actor Actor,
+	workspaceID, collectionID string,
+	input CreateSavedRequestInput,
+) (SavedRequest, error) {
+	if err := validateWorkspaceAndCollectionIDs(workspaceID, collectionID); err != nil {
+		return SavedRequest{}, err
+	}
+	name, err := normalizeName(input.Name)
+	if err != nil {
+		return SavedRequest{}, err
+	}
+	definition, err := normalizeRequestDefinition(input.Definition)
+	if err != nil {
+		return SavedRequest{}, err
+	}
+	workspace, err := s.repository.GetWorkspace(ctx, workspaceID)
+	if err != nil {
+		return SavedRequest{}, mapRepositoryError(err)
+	}
+	if _, exists := findCollection(workspace.Collections, collectionID); !exists {
+		return SavedRequest{}, mapRepositoryError(ErrCollectionNotFound)
+	}
+	if !hasCollectionGrant(workspace, collectionID, actor) {
+		return SavedRequest{}, collectionAccessDenied()
+	}
+	created, err := s.repository.CreateSavedRequest(ctx, workspaceID, SavedRequest{
+		ID:           uuid.NewString(),
+		CollectionID: collectionID,
+		Name:         name,
+		Definition:   definition,
+	})
+	if err != nil {
+		return SavedRequest{}, mapRepositoryError(err)
+	}
+	return created, nil
+}
+
+func (s *Service) UpdateSavedRequest(
+	ctx context.Context,
+	actor Actor,
+	workspaceID, collectionID, requestID string,
+	input UpdateSavedRequestInput,
+) (SavedRequest, error) {
+	if err := validateWorkspaceCollectionRequestIDs(workspaceID, collectionID, requestID); err != nil {
+		return SavedRequest{}, err
+	}
+	name, err := normalizeName(input.Name)
+	if err != nil {
+		return SavedRequest{}, err
+	}
+	definition, err := normalizeRequestDefinition(input.Definition)
+	if err != nil {
+		return SavedRequest{}, err
+	}
+	workspace, err := s.repository.GetWorkspace(ctx, workspaceID)
+	if err != nil {
+		return SavedRequest{}, mapRepositoryError(err)
+	}
+	if _, exists := findCollection(workspace.Collections, collectionID); !exists {
+		return SavedRequest{}, mapRepositoryError(ErrCollectionNotFound)
+	}
+	if !hasCollectionGrant(workspace, collectionID, actor) {
+		return SavedRequest{}, collectionAccessDenied()
+	}
+	updated, err := s.repository.UpdateSavedRequest(
+		ctx, workspaceID, collectionID, requestID, name, definition,
+	)
+	if err != nil {
+		return SavedRequest{}, mapRepositoryError(err)
+	}
+	return updated, nil
+}
+
+func (s *Service) DeleteSavedRequest(
+	ctx context.Context,
+	actor Actor,
+	workspaceID, collectionID, requestID string,
+) error {
+	if err := validateWorkspaceCollectionRequestIDs(workspaceID, collectionID, requestID); err != nil {
+		return err
+	}
+	workspace, err := s.repository.GetWorkspace(ctx, workspaceID)
+	if err != nil {
+		return mapRepositoryError(err)
+	}
+	if _, exists := findCollection(workspace.Collections, collectionID); !exists {
+		return mapRepositoryError(ErrCollectionNotFound)
+	}
+	if !hasCollectionGrant(workspace, collectionID, actor) {
+		return collectionAccessDenied()
+	}
+	if err := s.repository.DeleteSavedRequest(ctx, workspaceID, collectionID, requestID); err != nil {
+		return mapRepositoryError(err)
+	}
+	return nil
+}
+
 func scopeWorkspace(workspace Workspace, actor Actor) (Workspace, bool) {
 	if hasWorkspaceGrant(workspace, actor) {
 		return workspace, true
@@ -430,6 +566,7 @@ func filterCollections(
 		copy := collection
 		if _, ok := effective[collection.ID]; !ok {
 			copy.UserIDs = []string{}
+			copy.Requests = []SavedRequest{}
 		}
 		copy.SubCollections = filterCollections(collection.SubCollections, visible, effective)
 		filtered = append(filtered, copy)
@@ -466,6 +603,27 @@ func validateWorkspaceAndCollectionIDs(workspaceID, collectionID string) error {
 	return validateID("collection_id", collectionID)
 }
 
+func validateWorkspaceCollectionRequestIDs(workspaceID, collectionID, requestID string) error {
+	if err := validateWorkspaceAndCollectionIDs(workspaceID, collectionID); err != nil {
+		return err
+	}
+	return validateID("request_id", requestID)
+}
+
+func normalizeRequestDefinition(value json.RawMessage) (string, error) {
+	const maxDefinitionBytes = 1024 * 1024
+	definition := bytes.TrimSpace(value)
+	var object map[string]json.RawMessage
+	if len(definition) == 0 || len(definition) > maxDefinitionBytes || json.Unmarshal(definition, &object) != nil || object == nil {
+		return "", problem.WithFields(
+			"validation_failed",
+			"request validation failed",
+			map[string]string{"definition": "must be a JSON object no larger than 1 MiB"},
+		)
+	}
+	return string(definition), nil
+}
+
 func validateID(field, value string) error {
 	if _, err := uuid.Parse(value); err != nil {
 		return problem.WithFields(
@@ -492,6 +650,8 @@ func mapRepositoryError(err error) error {
 		return problem.New(problem.KindNotFound, "workspace_not_found", "workspace was not found")
 	case errors.Is(err, ErrCollectionNotFound):
 		return problem.New(problem.KindNotFound, "collection_not_found", "collection was not found")
+	case errors.Is(err, ErrSavedRequestNotFound):
+		return problem.New(problem.KindNotFound, "request_not_found", "saved request was not found")
 	case errors.Is(err, ErrParentCollectionMissing):
 		return problem.New(problem.KindNotFound, "parent_collection_not_found", "parent collection was not found in the workspace")
 	case errors.Is(err, ErrUnknownUser):

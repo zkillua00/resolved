@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"reflect"
 	"strings"
 	"syscall"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"resolved-server/internal/bootstrap"
 	"resolved-server/internal/config"
 	"resolved-server/internal/identity"
+	"resolved-server/internal/problem"
 	"resolved-server/internal/users"
 
 	"golang.org/x/term"
@@ -24,7 +26,7 @@ import (
 
 func main() {
 	if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
-		log.Printf("resolved-server: %v", err)
+		log.Printf("resolved-server: %v, type: %s", err.(*problem.Error).Fields, reflect.TypeOf(err))
 		os.Exit(1)
 	}
 }

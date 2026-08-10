@@ -11,7 +11,8 @@ The server currently provides:
 - role creation and updates;
 - assigning roles to users and permissions to roles;
 - workspaces with direct user grants;
-- recursive collection trees with inheritable user grants.
+- recursive collection trees with inheritable user grants;
+- saved request templates inside collection nodes.
 
 There is no hosted control plane, telemetry, or deployment registration.
 
@@ -68,8 +69,8 @@ Driver-specific DSN examples and the security model are documented in
 
 All routes use the `/api/v1` prefix. `POST /auth/login` is the only public
 route. Every management and collaboration route requires a bearer token and a
-matching RBAC permission. Workspace and collection routes additionally enforce
-the authenticated user's resource scope.
+matching RBAC permission. Workspace, collection, and saved-request routes
+additionally enforce the authenticated user's resource scope.
 
 ```sh
 curl -sS http://127.0.0.1:8787/api/v1/auth/login \
@@ -88,6 +89,8 @@ user. A direct workspace grant exposes its complete collection tree. A direct
 collection grant exposes that collection and its descendants, plus only the
 ancestor nodes required to represent the path to it. User IDs in API responses
 are direct grants; inherited access is not duplicated into descendant lists.
+Saved requests are returned with their owning collection node and are omitted
+from ancestor-only navigation shells.
 Authenticated users with `workspaces.create` can create another workspace with
 `POST /api/v1/workspaces`; the creator receives its initial direct grant.
 

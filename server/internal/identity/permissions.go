@@ -24,6 +24,11 @@ const (
 	PermissionCollectionsUpdate      = "collections.update"
 	PermissionCollectionsDelete      = "collections.delete"
 	PermissionCollectionsAssignUsers = "collections.users.assign"
+
+	PermissionRequestsRead   = "requests.read"
+	PermissionRequestsCreate = "requests.create"
+	PermissionRequestsUpdate = "requests.update"
+	PermissionRequestsDelete = "requests.delete"
 )
 
 var permissionCatalog = []Permission{
@@ -46,6 +51,10 @@ var permissionCatalog = []Permission{
 	{Key: PermissionCollectionsUpdate, Description: "Rename and move collections within the account's access scope"},
 	{Key: PermissionCollectionsDelete, Description: "Delete collection subtrees within the account's access scope"},
 	{Key: PermissionCollectionsAssignUsers, Description: "Replace direct collection user grants"},
+	{Key: PermissionRequestsRead, Description: "View saved requests within accessible collections"},
+	{Key: PermissionRequestsCreate, Description: "Create saved requests within accessible collections"},
+	{Key: PermissionRequestsUpdate, Description: "Update saved requests within accessible collections"},
+	{Key: PermissionRequestsDelete, Description: "Delete saved requests within accessible collections"},
 }
 
 func PermissionCatalog() []Permission {

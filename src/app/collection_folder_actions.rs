@@ -9,6 +9,14 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) {
         if !self.workspace_writable || self.sending {
+            if !self.sending && self.can_create_collection_content() {
+                self.open_create_upstream_collection_dialog(
+                    Some(collection_id),
+                    parent_folder_id,
+                    window,
+                    cx,
+                );
+            }
             return;
         }
         let Some(collection) = self.workspace.collection(&collection_id) else {

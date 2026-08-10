@@ -38,10 +38,12 @@ answers what an account may do. Direct workspace and collection grants answer
 where it may do it. Both checks must pass.
 
 A workspace is the top-level resource and contains root collections. Every
-collection is the same recursive node type and may contain sub-collections. A
-collection row stores `parent_collection_id`; a null parent places it at the
-workspace root. API responses assemble those rows into recursive
-`sub_collections` arrays.
+collection is the same recursive node type and may contain sub-collections and
+saved request templates. A collection row stores `parent_collection_id`; a
+null parent places it at the workspace root. API responses assemble those rows
+into recursive `sub_collections` arrays. Saved request definitions are stored
+as portable JSON documents so adding desktop request fields does not require a
+server schema migration.
 
 The `user_ids` arrays contain direct grants only:
 
@@ -53,8 +55,8 @@ The `user_ids` arrays contain direct grants only:
 
 Collection-scoped users receive only accessible subtrees. Ancestors needed to
 represent a path are included as navigation shells, but inaccessible siblings
-and the ancestor's direct user list are omitted. A navigation shell does not
-authorize collection mutation.
+and the ancestor's direct user list and saved requests are omitted. A
+navigation shell does not authorize collection or saved-request mutation.
 
 Creating a workspace gives its creator a direct workspace grant. Creating a
 root collection requires workspace access. Creating a child requires access to
@@ -83,6 +85,7 @@ Permissions in the initial catalog are:
   `workspaces.delete`, `workspaces.users.assign`
 - `collections.read`, `collections.create`, `collections.update`,
   `collections.delete`, `collections.users.assign`
+- `requests.read`, `requests.create`, `requests.update`, `requests.delete`
 
 ## HTTP surface
 
@@ -102,18 +105,22 @@ Permissions in the initial catalog are:
 | `PATCH` | `/api/v1/roles/:id` | `roles.update` |
 | `PUT` | `/api/v1/roles/:id/permissions` | `roles.permissions.assign` |
 | `GET` | `/api/v1/permissions` | `permissions.read` |
-| `GET` | `/api/v1/workspaces` | `workspaces.read`, `collections.read` |
+| `GET` | `/api/v1/workspaces` | `workspaces.read`, `collections.read`, `requests.read` |
 | `POST` | `/api/v1/workspaces` | `workspaces.create` |
-| `GET` | `/api/v1/workspaces/:workspace_id` | `workspaces.read`, `collections.read` |
-| `PATCH` | `/api/v1/workspaces/:workspace_id` | `workspaces.update` |
+| `GET` | `/api/v1/workspaces/:workspace_id` | `workspaces.read`, `collections.read`, `requests.read` |
+| `PATCH` | `/api/v1/workspaces/:workspace_id` | `workspaces.update`, `collections.read`, `requests.read` |
 | `DELETE` | `/api/v1/workspaces/:workspace_id` | `workspaces.delete` |
-| `PUT` | `/api/v1/workspaces/:workspace_id/users` | `workspaces.users.assign` |
+| `PUT` | `/api/v1/workspaces/:workspace_id/users` | `workspaces.users.assign`, `collections.read`, `requests.read` |
 | `POST` | `/api/v1/workspaces/:workspace_id/collections` | `collections.create` |
-| `GET` | `/api/v1/workspaces/:workspace_id/collections/:collection_id` | `collections.read` |
-| `PATCH` | `/api/v1/workspaces/:workspace_id/collections/:collection_id` | `collections.update` |
+| `GET` | `/api/v1/workspaces/:workspace_id/collections/:collection_id` | `collections.read`, `requests.read` |
+| `PATCH` | `/api/v1/workspaces/:workspace_id/collections/:collection_id` | `collections.update`, `requests.read` |
 | `DELETE` | `/api/v1/workspaces/:workspace_id/collections/:collection_id` | `collections.delete` |
-| `PUT` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/parent` | `collections.update` |
-| `PUT` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/users` | `collections.users.assign` |
+| `PUT` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/parent` | `collections.update`, `requests.read` |
+| `PUT` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/users` | `collections.users.assign`, `requests.read` |
+| `POST` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/requests` | `requests.create` |
+| `GET` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/requests/:request_id` | `requests.read` |
+| `PATCH` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/requests/:request_id` | `requests.update` |
+| `DELETE` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/requests/:request_id` | `requests.delete` |
 
 Role and permission assignment endpoints use replacement semantics: the sent
 set becomes the complete set. That makes administration deterministic and
@@ -140,10 +147,8 @@ supported database. SQLite is opened with foreign keys, a busy timeout, and WAL
 in the default DSN. Remote database TLS is controlled by its DSN and should not
 be disabled outside a trusted local network.
 
-## Explicitly deferred
+## Not provided
 
-- saved requests and workspace synchronization protocols;
 - invitations, email delivery, password recovery, and external identity/SSO;
-- desktop-application integration;
 - central discovery, hosted administration, or telemetry;
 - TLS termination and multi-process rate-limit storage.

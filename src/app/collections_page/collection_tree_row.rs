@@ -21,6 +21,7 @@ impl ApiTester {
         let actions_this = cx.entity().downgrade();
         let context_this = actions_this.clone();
         let can_mutate = !self.sending && self.workspace_writable;
+        let can_create_folder = !self.sending && self.can_create_collection_content();
         let tree_drag =
             CollectionTreeDrag::collection(collection.id.clone(), collection.name.clone());
         let drop_target = CollectionTreeDropTarget::Collection(collection.id.clone());
@@ -128,12 +129,13 @@ impl ApiTester {
                         .xsmall()
                         .ghost()
                         .rounded_full()
-                        .disabled(!can_mutate)
+                        .disabled(!can_mutate && !can_create_folder)
                         .dropdown_menu(move |menu, _, _| {
                             build_collection_actions_menu(
                                 menu,
                                 actions_this.clone(),
                                 actions_id.clone(),
+                                can_create_folder,
                                 can_mutate,
                             )
                         }),
@@ -167,6 +169,7 @@ impl ApiTester {
                     menu,
                     context_this.clone(),
                     context_id.clone(),
+                    can_create_folder,
                     can_mutate && !renaming,
                 )
             });
@@ -184,12 +187,9 @@ fn build_collection_actions_menu(
     menu: PopupMenu,
     owner: gpui::WeakEntity<ApiTester>,
     collection_id: String,
+    can_create_folder: bool,
     can_mutate: bool,
 ) -> PopupMenu {
-    if !can_mutate {
-        return menu;
-    }
-
     let new_folder_this = owner.clone();
     let new_folder_id = collection_id.clone();
     let rename_this = owner.clone();
@@ -197,34 +197,43 @@ fn build_collection_actions_menu(
     let delete_this = owner;
     let delete_id = collection_id;
 
-    menu.item(
-        PopupMenuItem::new("New folder").on_click(move |_, window, cx| {
-            if let Some(this) = new_folder_this.upgrade() {
-                this.update(cx, |this, cx| {
-                    this.create_collection_folder(new_folder_id.clone(), None, window, cx);
-                });
-            }
-        }),
-    )
-    .separator()
-    .item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
-        if let Some(this) = rename_this.upgrade() {
-            this.update(cx, |this, cx| {
-                this.begin_collection_rename(rename_id.clone(), window, cx);
-            });
-        }
-    }))
-    .item(
-        PopupMenuItem::new("Delete…").on_click(move |_, window, cx| {
-            let delete_this = delete_this.clone();
-            let delete_id = delete_id.clone();
-            window.defer(cx, move |window, cx| {
-                if let Some(this) = delete_this.upgrade() {
+    let mut menu = menu;
+    if can_create_folder {
+        menu = menu.item(
+            PopupMenuItem::new("New folder").on_click(move |_, window, cx| {
+                if let Some(this) = new_folder_this.upgrade() {
                     this.update(cx, |this, cx| {
-                        this.open_collection_delete_dialog(delete_id, window, cx);
+                        this.create_collection_folder(new_folder_id.clone(), None, window, cx);
                     });
                 }
-            });
-        }),
-    )
+            }),
+        );
+    }
+    if can_mutate {
+        if can_create_folder {
+            menu = menu.separator();
+        }
+        menu = menu
+            .item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
+                if let Some(this) = rename_this.upgrade() {
+                    this.update(cx, |this, cx| {
+                        this.begin_collection_rename(rename_id.clone(), window, cx);
+                    });
+                }
+            }))
+            .item(
+                PopupMenuItem::new("Delete…").on_click(move |_, window, cx| {
+                    let delete_this = delete_this.clone();
+                    let delete_id = delete_id.clone();
+                    window.defer(cx, move |window, cx| {
+                        if let Some(this) = delete_this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.open_collection_delete_dialog(delete_id, window, cx);
+                            });
+                        }
+                    });
+                }),
+            );
+    }
+    menu
 }

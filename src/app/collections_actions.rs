@@ -3,6 +3,9 @@ use super::*;
 impl ApiTester {
     pub(super) fn create_collection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.workspace_writable {
+            if self.can_create_collection_content() {
+                self.open_create_upstream_collection_dialog(None, None, window, cx);
+            }
             return;
         }
         let name = unique_name(
@@ -92,7 +95,7 @@ impl ApiTester {
     }
 
     pub(super) fn rename_collection(&mut self, cx: &mut Context<Self>) {
-        if !self.workspace_writable {
+        if !self.can_save_request_content() {
             return;
         }
         let Some(id) = self.selected_collection_id.clone() else {
@@ -302,6 +305,19 @@ impl ApiTester {
         } else {
             entered_name
         };
+
+        if !self.workspace_writable {
+            self.save_request_on_upstream(
+                collection_id,
+                folder_id,
+                update_id,
+                name,
+                definition,
+                window,
+                cx,
+            );
+            return;
+        }
 
         let mut candidate = self.workspace.clone();
         let result = if let Some(id) = update_id {

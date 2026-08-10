@@ -55,13 +55,16 @@ pub use snippet::{
 pub use template::{RequestTemplate, ResolvedRequest, resolve_request};
 #[allow(unused_imports)]
 pub use upstream::{
-    LoginUser, UpstreamLoginError, UpstreamLoginResult, UpstreamProfile, UpstreamSettings,
-    UpstreamUrlError, UpstreamWorkspaceError, UpstreamWorkspaceSummary, UpstreamWorkspaceView,
-    build_upstream_client, create_upstream_workspace, list_upstream_workspaces, login_upstream,
-    normalize_upstream_url, upstream_url_label,
+    LoginUser, UpstreamCollectionView, UpstreamLoginError, UpstreamLoginResult, UpstreamProfile,
+    UpstreamSavedRequestView, UpstreamSettings, UpstreamUrlError, UpstreamWorkspaceError,
+    UpstreamWorkspaceSummary, UpstreamWorkspaceView, build_upstream_client,
+    create_upstream_collection, create_upstream_saved_request, create_upstream_workspace,
+    list_upstream_workspaces, login_upstream, normalize_upstream_url,
+    update_upstream_saved_request, upstream_url_label,
 };
 pub use workspace::{
-    Collection, Environment, RequestScripts, SavedRequest, Workspace, WorkspaceMutationError,
+    Collection, CollectionFolder, Environment, RequestScripts, SavedRequest, Workspace,
+    WorkspaceMutationError,
 };
 #[allow(unused_imports)]
 pub use workspace_provider::{

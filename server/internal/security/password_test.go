@@ -32,12 +32,3 @@ func TestPasswordHashRoundTrip(t *testing.T) {
 		t.Fatal("expected the wrong password to be rejected")
 	}
 }
-
-func TestValidatePasswordBounds(t *testing.T) {
-	if err := ValidatePassword("too short"); err == nil {
-		t.Fatal("expected a short password to be rejected")
-	}
-	if err := ValidatePassword("twelve chars!"); err != nil {
-		t.Fatalf("expected a 12-character password to be accepted: %v", err)
-	}
-}

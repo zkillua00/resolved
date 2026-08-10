@@ -177,6 +177,10 @@ func TestWorkspaceAndRecursiveCollectionScopes(t *testing.T) {
 		identity.PermissionCollectionsUpdate,
 		identity.PermissionCollectionsDelete,
 		identity.PermissionCollectionsAssignUsers,
+		identity.PermissionRequestsRead,
+		identity.PermissionRequestsCreate,
+		identity.PermissionRequestsUpdate,
+		identity.PermissionRequestsDelete,
 	}
 	role := request[identity.RoleView](t, app, http.MethodPost, "/api/v1/roles", ownerLogin.Token, map[string]any{
 		"name":            "Workspace collaborator",
@@ -228,6 +232,28 @@ func TestWorkspaceAndRecursiveCollectionScopes(t *testing.T) {
 	secrets := createCollection("Secrets", &admin.ID)
 	public := createCollection("Public", &product.ID)
 	other := createCollection("Other", nil)
+	createSavedRequest := func(collectionID, name, url string) workspaces.SavedRequestView {
+		t.Helper()
+		return request[workspaces.SavedRequestView](
+			t,
+			app,
+			http.MethodPost,
+			"/api/v1/workspaces/"+workspace.ID+"/collections/"+collectionID+"/requests",
+			ownerLogin.Token,
+			map[string]any{
+				"name": name,
+				"definition": map[string]any{
+					"request": map[string]any{"method": "GET", "url": url},
+					"scripts": map[string]any{},
+				},
+			},
+			fiber.StatusCreated,
+		).Data
+	}
+	productRequest := createSavedRequest(product.ID, "Product request", "https://example.com/product")
+	adminRequest := createSavedRequest(admin.ID, "Admin request", "https://example.com/admin")
+	secretsRequest := createSavedRequest(secrets.ID, "Secrets request", "https://example.com/secrets")
+	createSavedRequest(public.ID, "Public request", "https://example.com/public")
 
 	workspace = request[workspaces.WorkspaceView](
 		t,
@@ -279,12 +305,21 @@ func TestWorkspaceAndRecursiveCollectionScopes(t *testing.T) {
 	if len(productShell.UserIDs) != 0 {
 		t.Fatalf("ancestor shell users = %v, want hidden", productShell.UserIDs)
 	}
+	if len(productShell.Requests) != 0 {
+		t.Fatalf("ancestor shell requests = %+v, want hidden", productShell.Requests)
+	}
 	if len(productShell.SubCollections) != 1 || productShell.SubCollections[0].ID != admin.ID {
 		t.Fatalf("visible Product children = %+v, want only Admin", productShell.SubCollections)
 	}
 	visibleAdmin := productShell.SubCollections[0]
+	if len(visibleAdmin.Requests) != 1 || visibleAdmin.Requests[0].ID != adminRequest.ID {
+		t.Fatalf("visible admin requests = %+v, want Admin request", visibleAdmin.Requests)
+	}
 	if len(visibleAdmin.SubCollections) != 1 || visibleAdmin.SubCollections[0].ID != secrets.ID {
 		t.Fatalf("Admin descendants = %+v, want Secrets", visibleAdmin.SubCollections)
+	}
+	if len(visibleAdmin.SubCollections[0].Requests) != 1 || visibleAdmin.SubCollections[0].Requests[0].ID != secretsRequest.ID {
+		t.Fatalf("visible secret requests = %+v, want Secrets request", visibleAdmin.SubCollections[0].Requests)
 	}
 	if visibleAdmin.SubCollections[0].ID == public.ID || productShell.ID == other.ID {
 		t.Fatal("collection-scoped tree exposed an inaccessible sibling")
@@ -301,6 +336,33 @@ func TestWorkspaceAndRecursiveCollectionScopes(t *testing.T) {
 	)
 	if ancestorDenied.Error.Code != "collection_access_denied" {
 		t.Fatalf("ancestor access code = %q", ancestorDenied.Error.Code)
+	}
+	request[workspaces.SavedRequestView](
+		t,
+		app,
+		http.MethodGet,
+		"/api/v1/workspaces/"+workspace.ID+"/collections/"+product.ID+"/requests/"+productRequest.ID,
+		nestedLogin.Token,
+		nil,
+		fiber.StatusForbidden,
+	)
+	updatedRequest := request[workspaces.SavedRequestView](
+		t,
+		app,
+		http.MethodPatch,
+		"/api/v1/workspaces/"+workspace.ID+"/collections/"+admin.ID+"/requests/"+adminRequest.ID,
+		nestedLogin.Token,
+		map[string]any{
+			"name": "Updated admin request",
+			"definition": map[string]any{
+				"request": map[string]any{"method": "POST", "url": "https://example.com/updated"},
+				"scripts": map[string]any{},
+			},
+		},
+		fiber.StatusOK,
+	).Data
+	if updatedRequest.Name != "Updated admin request" || !bytes.Contains(updatedRequest.Definition, []byte(`"method":"POST"`)) {
+		t.Fatalf("updated request = %+v", updatedRequest)
 	}
 	request[workspaces.CollectionView](
 		t,

@@ -106,6 +106,9 @@ func (r *Repository) DeleteWorkspace(ctx context.Context, id string) error {
 			return err
 		}
 		collectionIDs := tx.Model(&Collection{}).Select("id").Where("workspace_id = ?", id)
+		if err := tx.Where("collection_id IN (?)", collectionIDs).Delete(&SavedRequest{}).Error; err != nil {
+			return err
+		}
 		if err := tx.Where("collection_id IN (?)", collectionIDs).Delete(&CollectionUser{}).Error; err != nil {
 			return err
 		}
@@ -272,6 +275,12 @@ func (r *Repository) DeleteCollection(ctx context.Context, workspaceID, id strin
 		}
 		for start := 0; start < len(ids); start += databaseBatchSize {
 			end := min(start+databaseBatchSize, len(ids))
+			if err := tx.Where("collection_id IN ?", ids[start:end]).Delete(&SavedRequest{}).Error; err != nil {
+				return err
+			}
+		}
+		for start := 0; start < len(ids); start += databaseBatchSize {
+			end := min(start+databaseBatchSize, len(ids))
 			if err := tx.Where("collection_id IN ?", ids[start:end]).Delete(&CollectionUser{}).Error; err != nil {
 				return err
 			}
@@ -281,6 +290,93 @@ func (r *Repository) DeleteCollection(ctx context.Context, workspaceID, id strin
 			if err := tx.Where("id IN ?", ids[start:end]).Delete(&Collection{}).Error; err != nil {
 				return err
 			}
+		}
+		return touchWorkspace(tx, workspaceID)
+	})
+}
+
+func (r *Repository) CreateSavedRequest(
+	ctx context.Context,
+	workspaceID string,
+	request SavedRequest,
+) (SavedRequest, error) {
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := ensureCollectionExists(tx, workspaceID, request.CollectionID); err != nil {
+			return err
+		}
+		if err := tx.Create(&request).Error; err != nil {
+			return err
+		}
+		return touchWorkspace(tx, workspaceID)
+	})
+	if err != nil {
+		return SavedRequest{}, err
+	}
+	return r.GetSavedRequest(ctx, workspaceID, request.CollectionID, request.ID)
+}
+
+func (r *Repository) GetSavedRequest(
+	ctx context.Context,
+	workspaceID, collectionID, requestID string,
+) (SavedRequest, error) {
+	var request SavedRequest
+	err := r.db.WithContext(ctx).
+		Model(&SavedRequest{}).
+		Joins("JOIN collections ON collections.id = saved_requests.collection_id").
+		Where(
+			"collections.workspace_id = ? AND saved_requests.collection_id = ? AND saved_requests.id = ?",
+			workspaceID,
+			collectionID,
+			requestID,
+		).
+		Select("saved_requests.*").
+		First(&request).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return SavedRequest{}, ErrSavedRequestNotFound
+	}
+	return request, err
+}
+
+func (r *Repository) UpdateSavedRequest(
+	ctx context.Context,
+	workspaceID, collectionID, requestID, name, definition string,
+) (SavedRequest, error) {
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&SavedRequest{}).
+			Where("collection_id = ? AND id = ?", collectionID, requestID).
+			Updates(map[string]any{"name": name, "definition": definition})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrSavedRequestNotFound
+		}
+		if err := ensureCollectionExists(tx, workspaceID, collectionID); err != nil {
+			return err
+		}
+		return touchWorkspace(tx, workspaceID)
+	})
+	if err != nil {
+		return SavedRequest{}, err
+	}
+	return r.GetSavedRequest(ctx, workspaceID, collectionID, requestID)
+}
+
+func (r *Repository) DeleteSavedRequest(
+	ctx context.Context,
+	workspaceID, collectionID, requestID string,
+) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := ensureCollectionExists(tx, workspaceID, collectionID); err != nil {
+			return err
+		}
+		result := tx.Where("collection_id = ? AND id = ?", collectionID, requestID).
+			Delete(&SavedRequest{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrSavedRequestNotFound
 		}
 		return touchWorkspace(tx, workspaceID)
 	})
@@ -332,6 +428,21 @@ func hydrateWorkspace(db *gorm.DB, workspace *Workspace) error {
 	for index := range collections {
 		collections[index].UserIDs = cloneStrings(usersByCollection[collections[index].ID])
 		collections[index].SubCollections = []Collection{}
+		collections[index].Requests = []SavedRequest{}
+	}
+	requests, err := loadSavedRequests(db, workspace.ID)
+	if err != nil {
+		return err
+	}
+	requestsByCollection := make(map[string][]SavedRequest)
+	for _, request := range requests {
+		requestsByCollection[request.CollectionID] = append(requestsByCollection[request.CollectionID], request)
+	}
+	for index := range collections {
+		collections[index].Requests = append(
+			collections[index].Requests,
+			requestsByCollection[collections[index].ID]...,
+		)
 	}
 	tree, err := buildCollectionTree(collections)
 	if err != nil {
@@ -339,6 +450,18 @@ func hydrateWorkspace(db *gorm.DB, workspace *Workspace) error {
 	}
 	workspace.Collections = tree
 	return nil
+}
+
+func loadSavedRequests(db *gorm.DB, workspaceID string) ([]SavedRequest, error) {
+	var requests []SavedRequest
+	err := db.Model(&SavedRequest{}).
+		Select("saved_requests.*").
+		Joins("JOIN collections ON collections.id = saved_requests.collection_id").
+		Where("collections.workspace_id = ?", workspaceID).
+		Order("saved_requests.created_at ASC").
+		Order("saved_requests.id ASC").
+		Find(&requests).Error
+	return requests, err
 }
 
 func loadFlatCollections(db *gorm.DB, workspaceID string) ([]Collection, error) {

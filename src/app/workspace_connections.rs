@@ -20,7 +20,537 @@ struct LoadedUpstreamWorkspace {
     summaries: Vec<UpstreamWorkspaceSummary>,
 }
 
+#[derive(Clone)]
+struct ActiveUpstreamWorkspace {
+    upstream_id: String,
+    workspace_id: String,
+    base_url: url::Url,
+}
+
 impl ApiTester {
+    pub(super) fn can_create_collection_content(&self) -> bool {
+        self.workspace_writable
+            || (!self.workspace_switch_status.busy() && self.active_upstream_workspace().is_ok())
+    }
+
+    pub(super) fn can_save_request_content(&self) -> bool {
+        self.workspace_writable
+            || (!self.workspace_switch_status.busy() && self.active_upstream_workspace().is_ok())
+    }
+
+    fn active_upstream_workspace(&self) -> Result<ActiveUpstreamWorkspace, String> {
+        let WorkspaceProviderId::Upstream {
+            upstream_id,
+            workspace_id,
+        } = self.workspace_providers.active_id()
+        else {
+            return Err("No server workspace is selected.".to_owned());
+        };
+        let profile = self
+            .settings
+            .upstreams
+            .server(upstream_id)
+            .ok_or_else(|| "That server is no longer configured.".to_owned())?;
+        if profile.session_expired(Utc::now()) {
+            return Err(format!("Log in to {} again.", profile.display_label()));
+        }
+        let base_url = profile
+            .parsed_base_url()
+            .ok_or_else(|| "That server URL is invalid.".to_owned())?;
+        Ok(ActiveUpstreamWorkspace {
+            upstream_id: upstream_id.clone(),
+            workspace_id: workspace_id.clone(),
+            base_url,
+        })
+    }
+
+    pub(super) fn open_create_upstream_collection_dialog(
+        &mut self,
+        collection_id: Option<String>,
+        parent_folder_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sending || !self.can_create_collection_content() {
+            return;
+        }
+        let creating_folder = collection_id.is_some();
+        let title = if creating_folder {
+            "New folder"
+        } else {
+            "New collection"
+        };
+        let placeholder = if creating_folder {
+            "Folder name"
+        } else {
+            "Collection name"
+        };
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        let this = cx.entity().downgrade();
+        let dialog_input = input.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let create_this = this.clone();
+            let create_input = dialog_input.clone();
+            let create_collection_id = collection_id.clone();
+            let create_parent_folder_id = parent_folder_id.clone();
+            dialog
+                .title(title)
+                .w(px(440.))
+                .confirm()
+                .button_props(DialogButtonProps::default().ok_text("Create"))
+                .on_ok(move |_, window, cx| {
+                    let name = create_input.read(cx).value().trim().to_owned();
+                    if name.is_empty() {
+                        return false;
+                    }
+                    if let Some(this) = create_this.upgrade() {
+                        this.update(cx, |this, cx| {
+                            this.create_collection_on_upstream(
+                                create_collection_id.clone(),
+                                create_parent_folder_id.clone(),
+                                name.clone(),
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                    true
+                })
+                .child(Input::new(&dialog_input))
+        });
+        input.read(cx).focus_handle(cx).focus(window);
+    }
+
+    fn create_collection_on_upstream(
+        &mut self,
+        collection_id: Option<String>,
+        parent_folder_id: Option<String>,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = match self.active_upstream_workspace() {
+            Ok(target) => target,
+            Err(error) => {
+                self.workspace_warning = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let parent_collection_id = collection_id.as_ref().map(|collection_id| {
+            parent_folder_id
+                .clone()
+                .unwrap_or_else(|| collection_id.clone())
+        });
+        self.workspace_switch_generation = self.workspace_switch_generation.wrapping_add(1);
+        let generation = self.workspace_switch_generation;
+        self.workspace_switch_status = WorkspaceSwitchStatus::Loading;
+        let vault = self.credential_vault.clone();
+        let client = self.upstream_client.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let credential_upstream_id = target.upstream_id.clone();
+        let task_target = target.clone();
+        let task_name = name.clone();
+        let task_parent_collection_id = parent_collection_id.clone();
+        let task = self.runtime.spawn(async move {
+            let credential = runtime
+                .spawn_blocking(move || vault.load_upstream(&credential_upstream_id))
+                .await
+                .map_err(|error| format!("Could not open the saved session: {error}"))?
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Log in to this server again.".to_owned())?;
+            if credential.expires_at <= Utc::now() {
+                return Err("Log in to this server again.".to_owned());
+            }
+            create_upstream_collection(
+                &client,
+                &task_target.base_url,
+                credential.bearer_token(),
+                &task_target.workspace_id,
+                &task_name,
+                task_parent_collection_id.as_deref(),
+            )
+            .await
+            .map_err(|error| error.to_string())
+        });
+        self.workspace_switch_abort_handle = Some(task.abort_handle());
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.workspace_switch_generation != generation {
+                    return;
+                }
+                this.workspace_switch_abort_handle = None;
+                match result {
+                    Ok(Ok(created)) => this.finish_upstream_collection_create(
+                        target,
+                        collection_id,
+                        parent_folder_id,
+                        created,
+                        window,
+                        cx,
+                    ),
+                    Ok(Err(error)) => this.fail_remote_workspace_write(
+                        format!("The collection could not be created: {error}"),
+                        cx,
+                    ),
+                    Err(error) if error.is_cancelled() => {}
+                    Err(error) => this.fail_remote_workspace_write(
+                        format!("The collection could not be created: {error}"),
+                        cx,
+                    ),
+                }
+            });
+        })
+        .detach();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_upstream_collection_create(
+        &mut self,
+        target: ActiveUpstreamWorkspace,
+        collection_id: Option<String>,
+        parent_folder_id: Option<String>,
+        created: UpstreamCollectionView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let expected_provider = WorkspaceProviderId::Upstream {
+            upstream_id: target.upstream_id.clone(),
+            workspace_id: target.workspace_id.clone(),
+        };
+        if self.workspace_providers.active_id() != &expected_provider {
+            self.workspace_switch_status = WorkspaceSwitchStatus::Idle;
+            return;
+        }
+
+        let mut candidate = self.workspace.clone();
+        let created_id = created.id.clone();
+        let created_name = created.name.clone();
+        if let Some(collection_id) = collection_id {
+            let expected_parent_id = parent_folder_id
+                .clone()
+                .unwrap_or_else(|| collection_id.clone());
+            if created.parent_collection_id.as_deref() != Some(expected_parent_id.as_str()) {
+                self.fail_remote_workspace_write(
+                    "The server returned the new folder in an unexpected location.".to_owned(),
+                    cx,
+                );
+                return;
+            }
+            let Some(collection) = candidate
+                .collections
+                .iter_mut()
+                .find(|collection| collection.id == collection_id)
+            else {
+                self.fail_remote_workspace_write(
+                    "The selected collection is no longer available.".to_owned(),
+                    cx,
+                );
+                return;
+            };
+            collection.folders.push(CollectionFolder {
+                id: created_id.clone(),
+                name: created_name.clone(),
+                parent_folder_id: parent_folder_id.clone(),
+            });
+            self.selected_collection_id = Some(collection_id.clone());
+            self.selected_folder_id = Some(created_id.clone());
+            self.expanded_collection_ids.insert(collection_id);
+            if let Some(parent_folder_id) = parent_folder_id {
+                self.expanded_folder_ids.insert(parent_folder_id);
+            }
+            self.folder_name
+                .update(cx, |input, cx| input.set_value(created_name, window, cx));
+        } else {
+            if created.parent_collection_id.is_some() {
+                self.fail_remote_workspace_write(
+                    "The server returned the new collection in an unexpected location.".to_owned(),
+                    cx,
+                );
+                return;
+            }
+            candidate.collections.push(Collection {
+                id: created_id.clone(),
+                name: created_name.clone(),
+                folders: Vec::new(),
+                requests: Vec::new(),
+            });
+            self.selected_collection_id = Some(created_id.clone());
+            self.selected_folder_id = None;
+            self.expanded_collection_ids.insert(created_id.clone());
+            self.collection_name
+                .update(cx, |input, cx| input.set_value(created_name, window, cx));
+        }
+        if let Err(error) = candidate.validate() {
+            self.fail_remote_workspace_write(
+                format!("The server returned an invalid collection: {error}"),
+                cx,
+            );
+            return;
+        }
+        self.workspace = candidate.clone();
+        self.workspace_providers
+            .register(Arc::new(RemoteWorkspaceProvider::new(
+                self.database_store.clone(),
+                target.upstream_id,
+                target.workspace_id,
+                candidate,
+            )));
+        self.workspace_switch_status = WorkspaceSwitchStatus::Idle;
+        self.workspace_warning = None;
+        self.request_notice = Some(if self.selected_folder_id.is_some() {
+            "Folder created.".to_owned()
+        } else {
+            "Collection created.".to_owned()
+        });
+        self.update_active_unsaved_request_tab_location(
+            self.selected_collection_id.clone(),
+            self.selected_folder_id.clone(),
+            cx,
+        );
+        cx.notify();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn save_request_on_upstream(
+        &mut self,
+        collection_id: String,
+        folder_id: Option<String>,
+        update_id: Option<String>,
+        name: String,
+        definition: RequestTemplate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = match self.active_upstream_workspace() {
+            Ok(target) => target,
+            Err(error) => {
+                self.workspace_warning = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let target_collection_id = folder_id.clone().unwrap_or_else(|| collection_id.clone());
+        let request_tab_id = self.request_tabs.active_tab_id().clone();
+        let request_tab_title = self.request_tabs.active().title().to_owned();
+        self.workspace_switch_generation = self.workspace_switch_generation.wrapping_add(1);
+        let generation = self.workspace_switch_generation;
+        self.workspace_switch_status = WorkspaceSwitchStatus::Loading;
+        let vault = self.credential_vault.clone();
+        let client = self.upstream_client.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let credential_upstream_id = target.upstream_id.clone();
+        let task_target = target.clone();
+        let task_collection_id = target_collection_id.clone();
+        let task_update_id = update_id.clone();
+        let task_name = name.clone();
+        let task_definition = definition.clone();
+        let task = self.runtime.spawn(async move {
+            let credential = runtime
+                .spawn_blocking(move || vault.load_upstream(&credential_upstream_id))
+                .await
+                .map_err(|error| format!("Could not open the saved session: {error}"))?
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Log in to this server again.".to_owned())?;
+            if credential.expires_at <= Utc::now() {
+                return Err("Log in to this server again.".to_owned());
+            }
+            let saved = if let Some(request_id) = task_update_id.as_deref() {
+                update_upstream_saved_request(
+                    &client,
+                    &task_target.base_url,
+                    credential.bearer_token(),
+                    &task_target.workspace_id,
+                    &task_collection_id,
+                    request_id,
+                    &task_name,
+                    &task_definition,
+                )
+                .await
+            } else {
+                create_upstream_saved_request(
+                    &client,
+                    &task_target.base_url,
+                    credential.bearer_token(),
+                    &task_target.workspace_id,
+                    &task_collection_id,
+                    &task_name,
+                    &task_definition,
+                )
+                .await
+            };
+            saved.map_err(|error| error.to_string())
+        });
+        self.workspace_switch_abort_handle = Some(task.abort_handle());
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.workspace_switch_generation != generation {
+                    return;
+                }
+                this.workspace_switch_abort_handle = None;
+                match result {
+                    Ok(Ok(saved)) => this.finish_upstream_request_save(
+                        target,
+                        collection_id,
+                        folder_id,
+                        target_collection_id,
+                        update_id,
+                        request_tab_id,
+                        request_tab_title,
+                        saved,
+                        window,
+                        cx,
+                    ),
+                    Ok(Err(error)) => this.fail_remote_workspace_write(
+                        format!("The request could not be saved: {error}"),
+                        cx,
+                    ),
+                    Err(error) if error.is_cancelled() => {}
+                    Err(error) => this.fail_remote_workspace_write(
+                        format!("The request could not be saved: {error}"),
+                        cx,
+                    ),
+                }
+            });
+        })
+        .detach();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_upstream_request_save(
+        &mut self,
+        target: ActiveUpstreamWorkspace,
+        collection_id: String,
+        folder_id: Option<String>,
+        target_collection_id: String,
+        update_id: Option<String>,
+        request_tab_id: RequestTabId,
+        request_tab_title: String,
+        saved: UpstreamSavedRequestView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let expected_provider = WorkspaceProviderId::Upstream {
+            upstream_id: target.upstream_id.clone(),
+            workspace_id: target.workspace_id.clone(),
+        };
+        if self.workspace_providers.active_id() != &expected_provider {
+            self.workspace_switch_status = WorkspaceSwitchStatus::Idle;
+            return;
+        }
+        if saved.collection_id != target_collection_id
+            || update_id
+                .as_deref()
+                .is_some_and(|request_id| request_id != saved.id)
+        {
+            self.fail_remote_workspace_write(
+                "The server returned the saved request in an unexpected location.".to_owned(),
+                cx,
+            );
+            return;
+        }
+
+        let mut candidate = self.workspace.clone();
+        let Some(collection) = candidate
+            .collections
+            .iter_mut()
+            .find(|collection| collection.id == collection_id)
+        else {
+            self.fail_remote_workspace_write(
+                "The selected collection is no longer available.".to_owned(),
+                cx,
+            );
+            return;
+        };
+        let persisted_template = saved.definition.clone();
+        let local_saved = saved.into_local(folder_id.clone());
+        let request_id = local_saved.id.clone();
+        let saved_name = local_saved.name.clone();
+        if let Some(update_id) = update_id {
+            let Some(existing) = collection
+                .requests
+                .iter_mut()
+                .find(|request| request.id == update_id)
+            else {
+                self.fail_remote_workspace_write(
+                    "The saved request is no longer available.".to_owned(),
+                    cx,
+                );
+                return;
+            };
+            *existing = local_saved;
+        } else {
+            collection.requests.push(local_saved);
+        }
+        if let Err(error) = candidate.validate() {
+            self.fail_remote_workspace_write(
+                format!("The server returned an invalid saved request: {error}"),
+                cx,
+            );
+            return;
+        }
+
+        self.snapshot_active_request_tab(cx);
+        let mut candidate_request_tabs = self.request_tabs.clone();
+        let tab_was_saved = candidate_request_tabs.mark_tab_saved(
+            &request_tab_id,
+            &request_tab_title,
+            saved_name.clone(),
+            RequestTabAssociation::new(folder_id, Some(collection_id), Some(request_id.clone())),
+            persisted_template.clone(),
+        );
+        let saved_tab_is_active =
+            tab_was_saved && candidate_request_tabs.active_tab_id() == &request_tab_id;
+        let saved_tab_title = candidate_request_tabs
+            .get(&request_tab_id)
+            .map(|tab| tab.title().to_owned());
+        let request_tabs_error = self
+            .workspace_providers
+            .active()
+            .save_request_tabs(&candidate_request_tabs)
+            .err();
+        self.workspace = candidate.clone();
+        self.request_tabs = candidate_request_tabs;
+        self.last_persisted_request_tabs = self.request_tabs.clone();
+        self.workspace_providers
+            .register(Arc::new(RemoteWorkspaceProvider::new(
+                self.database_store.clone(),
+                target.upstream_id,
+                target.workspace_id,
+                candidate,
+            )));
+        self.workspace_switch_status = WorkspaceSwitchStatus::Idle;
+        self.workspace_warning = None;
+        self.request_tabs_warning = request_tabs_error
+            .map(|error| format!("The request tab could not be remembered: {error}"));
+        if saved_tab_is_active {
+            self.request_dirty.begin_hydration();
+            self.saved_request_name.update(cx, |input, cx| {
+                input.set_value(saved_tab_title.unwrap_or(saved_name), window, cx)
+            });
+            self.request_dirty.end_hydration();
+            self.loaded_request_baseline = persisted_template;
+            self.detached_request_dirty = false;
+            self.request_dirty.clear();
+            self.refresh_all_request_dirty_parts(cx);
+        }
+        self.sync_active_request_tab_identity();
+        self.request_notice = None;
+        cx.notify();
+    }
+
+    fn fail_remote_workspace_write(&mut self, message: String, cx: &mut Context<Self>) {
+        self.workspace_switch_status = WorkspaceSwitchStatus::Error(message.clone());
+        self.workspace_warning = Some(message);
+        cx.notify();
+    }
+
     pub(super) fn active_workspace_name(&self) -> String {
         match self.workspace_providers.active_id() {
             WorkspaceProviderId::Local(workspace_id) => self

@@ -718,6 +718,28 @@ impl RequestTabs {
         changed
     }
 
+    pub fn mark_tab_saved(
+        &mut self,
+        id: &RequestTabId,
+        title_when_saved: &str,
+        saved_title: impl Into<String>,
+        association: RequestTabAssociation,
+        persisted_template: RequestTemplate,
+    ) -> bool {
+        let Some(tab) = self.get_mut(id) else {
+            return false;
+        };
+        let saved_title = saved_title.into();
+        if tab.title == title_when_saved {
+            tab.title = saved_title.clone();
+        }
+        tab.association = association;
+        tab.baseline_title = saved_title;
+        tab.baseline_template = canonical_request_template(persisted_template);
+        tab.detached = false;
+        true
+    }
+
     pub fn activate(&mut self, id: &RequestTabId) -> bool {
         if self.get(id).is_none() {
             return false;
@@ -1354,6 +1376,36 @@ mod tests {
         assert_eq!(tab.baseline_title(), "All users");
         assert_eq!(tab.association().folder_id(), Some("folder-a"));
         assert!(!tab.is_dirty());
+    }
+
+    #[test]
+    fn marking_an_inactive_save_preserves_edits_made_after_the_saved_snapshot() {
+        let mut tabs = RequestTabs::default();
+        let tab_id = tabs.active_tab_id().clone();
+        let title_when_saved = tabs.active().title().to_owned();
+        let persisted = template("https://example.com/saved");
+        tabs.active_mut()
+            .set_template(template("https://example.com/newer-edit"));
+        tabs.active_mut().set_title("Newer title edit");
+
+        assert!(tabs.mark_tab_saved(
+            &tab_id,
+            &title_when_saved,
+            "Saved request",
+            RequestTabAssociation::new(
+                None,
+                Some("collection-1".to_owned()),
+                Some("request-1".to_owned()),
+            ),
+            persisted.clone(),
+        ));
+
+        let tab = tabs.active();
+        assert_eq!(tab.baseline_template(), &persisted);
+        assert_eq!(tab.template().request.url, "https://example.com/newer-edit");
+        assert_eq!(tab.title(), "Newer title edit");
+        assert!(tab.is_dirty());
+        assert_eq!(tab.association().saved_request_id(), Some("request-1"));
     }
 
     #[test]

@@ -340,7 +340,7 @@ impl ApiTester {
                             .ghost()
                             .rounded_full()
                             .tooltip("New collection")
-                            .disabled(self.sending || !self.workspace_writable)
+                            .disabled(self.sending || !self.can_create_collection_content())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.create_collection(window, cx);
                             })),

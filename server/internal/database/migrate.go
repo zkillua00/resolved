@@ -19,6 +19,7 @@ func MigrateAndSeed(db *gorm.DB) error {
 		&identity.BootstrapState{},
 		&workspaces.Workspace{},
 		&workspaces.Collection{},
+		&workspaces.SavedRequest{},
 		&workspaces.WorkspaceUser{},
 		&workspaces.CollectionUser{},
 	); err != nil {

@@ -38,6 +38,7 @@ func WithWorkspaces(authService *auth.Service, handler *workspaces.Handler) Modi
 			"/workspaces",
 			auth.RequirePermission(identity.PermissionWorkspacesRead),
 			auth.RequirePermission(identity.PermissionCollectionsRead),
+			auth.RequirePermission(identity.PermissionRequestsRead),
 			handler.ListController(),
 		)
 		protected.Post("/workspaces", auth.RequirePermission(identity.PermissionWorkspacesCreate), handler.CreateController())
@@ -45,18 +46,56 @@ func WithWorkspaces(authService *auth.Service, handler *workspaces.Handler) Modi
 			"/workspaces/:workspace_id",
 			auth.RequirePermission(identity.PermissionWorkspacesRead),
 			auth.RequirePermission(identity.PermissionCollectionsRead),
+			auth.RequirePermission(identity.PermissionRequestsRead),
 			handler.GetController(),
 		)
-		protected.Patch("/workspaces/:workspace_id", auth.RequirePermission(identity.PermissionWorkspacesUpdate), handler.UpdateController())
+		protected.Patch(
+			"/workspaces/:workspace_id",
+			auth.RequirePermission(identity.PermissionWorkspacesUpdate),
+			auth.RequirePermission(identity.PermissionCollectionsRead),
+			auth.RequirePermission(identity.PermissionRequestsRead),
+			handler.UpdateController(),
+		)
 		protected.Delete("/workspaces/:workspace_id", auth.RequirePermission(identity.PermissionWorkspacesDelete), handler.DeleteController())
-		protected.Put("/workspaces/:workspace_id/users", auth.RequirePermission(identity.PermissionWorkspacesAssignUsers), handler.ReplaceUsersController())
+		protected.Put(
+			"/workspaces/:workspace_id/users",
+			auth.RequirePermission(identity.PermissionWorkspacesAssignUsers),
+			auth.RequirePermission(identity.PermissionCollectionsRead),
+			auth.RequirePermission(identity.PermissionRequestsRead),
+			handler.ReplaceUsersController(),
+		)
 
 		protected.Post("/workspaces/:workspace_id/collections", auth.RequirePermission(identity.PermissionCollectionsCreate), handler.CreateCollectionController())
-		protected.Get("/workspaces/:workspace_id/collections/:collection_id", auth.RequirePermission(identity.PermissionCollectionsRead), handler.GetCollectionController())
-		protected.Patch("/workspaces/:workspace_id/collections/:collection_id", auth.RequirePermission(identity.PermissionCollectionsUpdate), handler.UpdateCollectionController())
+		protected.Get(
+			"/workspaces/:workspace_id/collections/:collection_id",
+			auth.RequirePermission(identity.PermissionCollectionsRead),
+			auth.RequirePermission(identity.PermissionRequestsRead),
+			handler.GetCollectionController(),
+		)
+		protected.Patch(
+			"/workspaces/:workspace_id/collections/:collection_id",
+			auth.RequirePermission(identity.PermissionCollectionsUpdate),
+			auth.RequirePermission(identity.PermissionRequestsRead),
+			handler.UpdateCollectionController(),
+		)
 		protected.Delete("/workspaces/:workspace_id/collections/:collection_id", auth.RequirePermission(identity.PermissionCollectionsDelete), handler.DeleteCollectionController())
-		protected.Put("/workspaces/:workspace_id/collections/:collection_id/parent", auth.RequirePermission(identity.PermissionCollectionsUpdate), handler.MoveCollectionController())
-		protected.Put("/workspaces/:workspace_id/collections/:collection_id/users", auth.RequirePermission(identity.PermissionCollectionsAssignUsers), handler.ReplaceCollectionUsersController())
+		protected.Put(
+			"/workspaces/:workspace_id/collections/:collection_id/parent",
+			auth.RequirePermission(identity.PermissionCollectionsUpdate),
+			auth.RequirePermission(identity.PermissionRequestsRead),
+			handler.MoveCollectionController(),
+		)
+		protected.Put(
+			"/workspaces/:workspace_id/collections/:collection_id/users",
+			auth.RequirePermission(identity.PermissionCollectionsAssignUsers),
+			auth.RequirePermission(identity.PermissionRequestsRead),
+			handler.ReplaceCollectionUsersController(),
+		)
+
+		protected.Post("/workspaces/:workspace_id/collections/:collection_id/requests", auth.RequirePermission(identity.PermissionRequestsCreate), handler.CreateSavedRequestController())
+		protected.Get("/workspaces/:workspace_id/collections/:collection_id/requests/:request_id", auth.RequirePermission(identity.PermissionRequestsRead), handler.GetSavedRequestController())
+		protected.Patch("/workspaces/:workspace_id/collections/:collection_id/requests/:request_id", auth.RequirePermission(identity.PermissionRequestsUpdate), handler.UpdateSavedRequestController())
+		protected.Delete("/workspaces/:workspace_id/collections/:collection_id/requests/:request_id", auth.RequirePermission(identity.PermissionRequestsDelete), handler.DeleteSavedRequestController())
 	}
 }
 
