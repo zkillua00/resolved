@@ -483,8 +483,7 @@ impl ApiTester {
             window,
             cx,
         );
-        let local_workspace_name =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Workspace name"));
+        let workspace_name = cx.new(|cx| InputState::new(window, cx).placeholder("Workspace name"));
         let upstream_login_url =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://resolved.example.com"));
         let upstream_login_email = cx.new(|cx| InputState::new(window, cx).placeholder("owner"));
@@ -668,7 +667,7 @@ impl ApiTester {
             workspace_switch_status: WorkspaceSwitchStatus::Idle,
             workspace_switch_generation: 0,
             workspace_switch_abort_handle: None,
-            local_workspace_name,
+            workspace_name,
             sidebar_tab: SidebarTab::Collections,
             navigation_compact,
             selected_collection_id,

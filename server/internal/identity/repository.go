@@ -15,6 +15,8 @@ type Repository struct {
 	db *gorm.DB
 }
 
+type FirstOwnerSetup func(context.Context, *gorm.DB, User) error
+
 type UserChanges struct {
 	Email        *string
 	DisplayName  *string
@@ -81,7 +83,11 @@ func (r *Repository) CreateUser(ctx context.Context, user User, roleIDs []string
 	return r.GetUser(ctx, user.ID)
 }
 
-func (r *Repository) CreateFirstOwner(ctx context.Context, user User) (User, error) {
+func (r *Repository) CreateFirstOwner(
+	ctx context.Context,
+	user User,
+	setups ...FirstOwnerSetup,
+) (User, error) {
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		marker := BootstrapState{Key: "initial-owner"}
 		if err := tx.Create(&marker).Error; err != nil {
@@ -111,6 +117,14 @@ func (r *Repository) CreateFirstOwner(ctx context.Context, user User) (User, err
 		}
 		if err := tx.Model(&user).Association("Roles").Append(&owner); err != nil {
 			return err
+		}
+		for _, setup := range setups {
+			if setup == nil {
+				continue
+			}
+			if err := setup(ctx, tx, user); err != nil {
+				return fmt.Errorf("set up first owner: %w", err)
+			}
 		}
 		return nil
 	})

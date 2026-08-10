@@ -57,8 +57,8 @@ pub use template::{RequestTemplate, ResolvedRequest, resolve_request};
 pub use upstream::{
     LoginUser, UpstreamLoginError, UpstreamLoginResult, UpstreamProfile, UpstreamSettings,
     UpstreamUrlError, UpstreamWorkspaceError, UpstreamWorkspaceSummary, UpstreamWorkspaceView,
-    build_upstream_client, list_upstream_workspaces, login_upstream, normalize_upstream_url,
-    upstream_url_label,
+    build_upstream_client, create_upstream_workspace, list_upstream_workspaces, login_upstream,
+    normalize_upstream_url, upstream_url_label,
 };
 pub use workspace::{
     Collection, Environment, RequestScripts, SavedRequest, Workspace, WorkspaceMutationError,

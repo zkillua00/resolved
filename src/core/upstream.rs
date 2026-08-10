@@ -361,6 +361,11 @@ struct LoginRequest<'a> {
     password: &'a str,
 }
 
+#[derive(Serialize)]
+struct CreateWorkspaceRequest<'a> {
+    name: &'a str,
+}
+
 #[derive(Deserialize)]
 struct LoginEnvelope {
     success: bool,
@@ -463,6 +468,25 @@ pub async fn list_upstream_workspaces(
     let response = client
         .get(endpoint)
         .bearer_auth(bearer_token)
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response(response).await
+}
+
+pub async fn create_upstream_workspace(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    name: &str,
+) -> Result<UpstreamWorkspaceView, UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join("api/v1/workspaces")
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .post(endpoint)
+        .bearer_auth(bearer_token)
+        .json(&CreateWorkspaceRequest { name })
         .send()
         .await
         .map_err(UpstreamWorkspaceError::Transport)?;
@@ -633,7 +657,7 @@ fn new_upstream_id() -> String {
 mod tests {
     use std::{
         io::{Read as _, Write as _},
-        net::TcpListener,
+        net::{TcpListener, TcpStream},
         thread,
     };
 
@@ -930,5 +954,107 @@ mod tests {
         assert_eq!(workspaces.len(), 1);
         assert_eq!(workspaces[0].id, "workspace-1");
         assert_eq!(workspaces[0].name, "Team API");
+    }
+
+    #[test]
+    fn creates_a_server_workspace_with_the_saved_bearer_session() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let request = read_http_request(&mut stream);
+            let header_end = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .unwrap();
+            let headers = String::from_utf8(request[..header_end].to_vec())
+                .unwrap()
+                .to_ascii_lowercase();
+            assert!(headers.starts_with("post /api/v1/workspaces http/1.1\r\n"));
+            assert!(headers.contains("authorization: bearer saved-session-token\r\n"));
+            let body: serde_json::Value =
+                serde_json::from_slice(&request[header_end + 4..]).unwrap();
+            assert_eq!(body, serde_json::json!({"name": "Team API"}));
+
+            let now = Utc::now();
+            let body = serde_json::to_vec(&serde_json::json!({
+                "request_id": "request-1",
+                "success": true,
+                "data": {
+                    "id": "workspace-1",
+                    "name": "Team API",
+                    "user_ids": ["user-1"],
+                    "collections": [],
+                    "created_at": now,
+                    "updated_at": now
+                }
+            }))
+            .unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = build_upstream_client().unwrap();
+        let base_url = Url::parse(&format!("http://{address}/")).unwrap();
+        let workspace = runtime
+            .block_on(create_upstream_workspace(
+                &client,
+                &base_url,
+                "saved-session-token",
+                "Team API",
+            ))
+            .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(workspace.id, "workspace-1");
+        assert_eq!(workspace.name, "Team API");
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 2048];
+        let (header_end, content_length) = loop {
+            let count = stream.read(&mut buffer).unwrap();
+            if count == 0 {
+                panic!("connection closed before request headers were complete");
+            }
+            request.extend_from_slice(&buffer[..count]);
+            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            break (header_end, content_length);
+        };
+        let expected_length = header_end + 4 + content_length;
+        while request.len() < expected_length {
+            let count = stream.read(&mut buffer).unwrap();
+            if count == 0 {
+                panic!("connection closed before request body was complete");
+            }
+            request.extend_from_slice(&buffer[..count]);
+        }
+        request.truncate(expected_length);
+        request
     }
 }

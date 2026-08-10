@@ -962,36 +962,53 @@ fn build_workspace_picker_menu(
                         }
                     }),
             );
-            continue;
+        } else {
+            for workspace in &server.workspaces {
+                let workspace_this = this.clone();
+                let server_id = server.id.clone();
+                let workspace_id = workspace.id.clone();
+                let checked = active_provider_id
+                    == &WorkspaceProviderId::Upstream {
+                        upstream_id: server.id.clone(),
+                        workspace_id: workspace.id.clone(),
+                    };
+                menu = menu.item(
+                    PopupMenuItem::new(workspace.name.clone())
+                        .checked(checked)
+                        .disabled(server.session_expired(Utc::now()))
+                        .on_click(move |_, window, cx| {
+                            if let Some(this) = workspace_this.upgrade() {
+                                this.update(cx, |this, cx| {
+                                    this.switch_to_upstream(
+                                        server_id.clone(),
+                                        Some(workspace_id.clone()),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                        }),
+                );
+            }
         }
 
-        for workspace in &server.workspaces {
-            let workspace_this = this.clone();
-            let server_id = server.id.clone();
-            let workspace_id = workspace.id.clone();
-            let checked = active_provider_id
-                == &WorkspaceProviderId::Upstream {
-                    upstream_id: server.id.clone(),
-                    workspace_id: workspace.id.clone(),
-                };
-            menu = menu.item(
-                PopupMenuItem::new(workspace.name.clone())
-                    .checked(checked)
-                    .disabled(server.session_expired(Utc::now()))
-                    .on_click(move |_, window, cx| {
-                        if let Some(this) = workspace_this.upgrade() {
-                            this.update(cx, |this, cx| {
-                                this.switch_to_upstream(
-                                    server_id.clone(),
-                                    Some(workspace_id.clone()),
-                                    window,
-                                    cx,
-                                );
-                            });
-                        }
-                    }),
-            );
-        }
+        let create_this = this.clone();
+        let create_server_id = server.id.clone();
+        menu = menu.item(
+            PopupMenuItem::new("New workspace…")
+                .disabled(server.session_expired(Utc::now()))
+                .on_click(move |_, window, cx| {
+                    if let Some(this) = create_this.upgrade() {
+                        this.update(cx, |this, cx| {
+                            this.open_create_upstream_workspace_dialog(
+                                create_server_id.clone(),
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                }),
+        );
     }
 
     let add_server_this = this.clone();
@@ -1173,5 +1190,35 @@ mod tests {
         cx.run_until_parked();
 
         assert!(cx.debug_bounds("local-workspace-create-dialog").is_some());
+    }
+
+    #[gpui::test]
+    fn server_workspace_creation_dialog_mounts(cx: &mut TestAppContext) {
+        let (app, cx, _directory) = mount_app(cx);
+        let base_url = normalize_upstream_url("https://resolved.example.com").unwrap();
+        let profile = UpstreamProfile::from_login(
+            None,
+            &base_url,
+            &crate::core::LoginUser {
+                id: "user-1".to_owned(),
+                email: "owner".to_owned(),
+                display_name: "Owner".to_owned(),
+                active: true,
+            },
+            Utc::now() + chrono::Duration::hours(1),
+        );
+        let upstream_id = profile.id.clone();
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.settings.upstreams.upsert(profile.clone());
+                app.open_create_upstream_workspace_dialog(upstream_id.clone(), window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("upstream-workspace-create-dialog")
+                .is_some()
+        );
     }
 }

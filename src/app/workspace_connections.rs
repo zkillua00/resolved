@@ -60,10 +60,10 @@ impl ApiTester {
         if !self.settings_writable || self.workspace_switch_status.busy() || self.sending {
             return;
         }
-        self.local_workspace_name.update(cx, |input, cx| {
+        self.workspace_name.update(cx, |input, cx| {
             input.set_value("", window, cx);
         });
-        let input = self.local_workspace_name.clone();
+        let input = self.workspace_name.clone();
         let this = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, _| {
             let create_this = this.clone();
@@ -93,10 +93,73 @@ impl ApiTester {
                         .child(Input::new(&input)),
                 )
         });
-        self.local_workspace_name
-            .read(cx)
-            .focus_handle(cx)
-            .focus(window);
+        self.workspace_name.read(cx).focus_handle(cx).focus(window);
+    }
+
+    pub(super) fn open_create_upstream_workspace_dialog(
+        &mut self,
+        upstream_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.settings_writable || self.workspace_switch_status.busy() || self.sending {
+            return;
+        }
+        let Some(profile) = self.settings.upstreams.server(&upstream_id) else {
+            self.settings_notice = Some("That server is no longer configured.".to_owned());
+            cx.notify();
+            return;
+        };
+        if profile.session_expired(Utc::now()) {
+            self.settings_notice = Some(format!(
+                "Log in to {} again before creating a workspace.",
+                profile.display_label()
+            ));
+            cx.notify();
+            return;
+        }
+
+        let title = format!("New workspace on {}", profile.display_label());
+        self.workspace_name.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+        });
+        let input = self.workspace_name.clone();
+        let this = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let create_this = this.clone();
+            let create_input = input.clone();
+            let create_upstream_id = upstream_id.clone();
+            dialog
+                .title(title.clone())
+                .w(px(440.))
+                .confirm()
+                .button_props(DialogButtonProps::default().ok_text("Create workspace"))
+                .on_ok(move |_, window, cx| {
+                    let name = create_input.read(cx).value().trim().to_owned();
+                    if name.is_empty() {
+                        return false;
+                    }
+                    if let Some(this) = create_this.upgrade() {
+                        this.update(cx, |this, cx| {
+                            this.create_workspace_on_upstream(
+                                create_upstream_id.clone(),
+                                name.clone(),
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                    true
+                })
+                .child(
+                    v_flex()
+                        .debug_selector(|| "upstream-workspace-create-dialog".to_owned())
+                        .gap_2()
+                        .child(div().text_sm().child("Workspace name"))
+                        .child(Input::new(&input)),
+                )
+        });
+        self.workspace_name.read(cx).focus_handle(cx).focus(window);
     }
 
     fn create_local_workspace(
@@ -327,6 +390,95 @@ impl ApiTester {
                         this.settings_notice = Some(message);
                         cx.notify();
                     }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn create_workspace_on_upstream(
+        &mut self,
+        upstream_id: String,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.prepare_for_workspace_switch(cx) {
+            return;
+        }
+        let Some(profile) = self.settings.upstreams.server(&upstream_id).cloned() else {
+            self.settings_notice = Some("That server is no longer configured.".to_owned());
+            cx.notify();
+            return;
+        };
+        if profile.session_expired(Utc::now()) {
+            self.settings_notice = Some(format!(
+                "Log in to {} again before creating a workspace.",
+                profile.display_label()
+            ));
+            cx.notify();
+            return;
+        }
+        let Some(base_url) = profile.parsed_base_url() else {
+            self.settings_notice = Some("That server URL is invalid.".to_owned());
+            cx.notify();
+            return;
+        };
+
+        self.workspace_switch_generation = self.workspace_switch_generation.wrapping_add(1);
+        let generation = self.workspace_switch_generation;
+        self.workspace_switch_status = WorkspaceSwitchStatus::Loading;
+        let vault = self.credential_vault.clone();
+        let client = self.upstream_client.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let task_upstream_id = upstream_id.clone();
+        let mut summaries = profile.workspaces;
+        let task = self.runtime.spawn(async move {
+            let credential = runtime
+                .spawn_blocking(move || vault.load_upstream(&task_upstream_id))
+                .await
+                .map_err(|error| format!("Could not open the saved session: {error}"))?
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Log in to this server again.".to_owned())?;
+            if credential.expires_at <= Utc::now() {
+                return Err("Log in to this server again.".to_owned());
+            }
+            let created =
+                create_upstream_workspace(&client, &base_url, credential.bearer_token(), &name)
+                    .await
+                    .map_err(|error| format!("The workspace could not be created: {error}"))?;
+            let created_summary = created.summary();
+            if let Some(existing) = summaries
+                .iter_mut()
+                .find(|workspace| workspace.id == created_summary.id)
+            {
+                *existing = created_summary;
+            } else {
+                summaries.push(created_summary);
+            }
+            Ok(LoadedUpstreamWorkspace {
+                selected: Some(created),
+                summaries,
+            })
+        });
+        self.workspace_switch_abort_handle = Some(task.abort_handle());
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.workspace_switch_generation != generation {
+                    return;
+                }
+                this.workspace_switch_abort_handle = None;
+                match result {
+                    Ok(Ok(loaded)) => this.finish_upstream_switch(upstream_id, loaded, window, cx),
+                    Ok(Err(error)) => this.fail_workspace_switch(error, cx),
+                    Err(error) if error.is_cancelled() => {}
+                    Err(error) => this.fail_workspace_switch(
+                        format!("The workspace could not be created: {error}"),
+                        cx,
+                    ),
                 }
             });
         })

@@ -13,9 +13,12 @@ import (
 )
 
 type Service struct {
-	repository *identity.Repository
-	hasher     *security.PasswordHasher
+	repository      *identity.Repository
+	hasher          *security.PasswordHasher
+	firstOwnerSetup identity.FirstOwnerSetup
 }
+
+type ServiceOption func(*Service)
 
 type CreateInput struct {
 	Email       string
@@ -31,8 +34,22 @@ type UpdateInput struct {
 	Active      *bool
 }
 
-func NewService(repository *identity.Repository, hasher *security.PasswordHasher) *Service {
-	return &Service{repository: repository, hasher: hasher}
+func WithFirstOwnerSetup(setup identity.FirstOwnerSetup) ServiceOption {
+	return func(service *Service) {
+		service.firstOwnerSetup = setup
+	}
+}
+
+func NewService(
+	repository *identity.Repository,
+	hasher *security.PasswordHasher,
+	options ...ServiceOption,
+) *Service {
+	service := &Service{repository: repository, hasher: hasher}
+	for _, option := range options {
+		option(service)
+	}
+	return service
 }
 
 func (s *Service) BootstrapOwner(ctx context.Context, input CreateInput) (identity.User, error) {
@@ -40,7 +57,7 @@ func (s *Service) BootstrapOwner(ctx context.Context, input CreateInput) (identi
 	if err != nil {
 		return identity.User{}, err
 	}
-	created, err := s.repository.CreateFirstOwner(ctx, user)
+	created, err := s.repository.CreateFirstOwner(ctx, user, s.firstOwnerSetup)
 	if err != nil {
 		return identity.User{}, mapRepositoryError(err)
 	}

@@ -73,6 +73,15 @@ func TestIdentityManagementAndDynamicPermissions(t *testing.T) {
 	}
 
 	ownerLogin := login(t, app, owner.Email, ownerPassword)
+	initialWorkspaces := request[[]workspaces.WorkspaceView](
+		t, app, http.MethodGet, "/api/v1/workspaces", ownerLogin.Token, nil, fiber.StatusOK,
+	).Data
+	if len(initialWorkspaces) != 1 || initialWorkspaces[0].Name != workspaces.DefaultWorkspaceName {
+		t.Fatalf("initial workspaces = %+v, want one %q workspace", initialWorkspaces, workspaces.DefaultWorkspaceName)
+	}
+	if len(initialWorkspaces[0].UserIDs) != 1 || initialWorkspaces[0].UserIDs[0] != owner.ID {
+		t.Fatalf("initial workspace users = %v, want [%s]", initialWorkspaces[0].UserIDs, owner.ID)
+	}
 	invalidUser := request[identity.UserView](t, app, http.MethodPost, "/api/v1/users", ownerLogin.Token, map[string]any{
 		"email":        "not-an-email",
 		"display_name": "Invalid",
@@ -483,7 +492,11 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, func()) {
 		_ = sqlDatabase.Close()
 		t.Fatalf("create auth service: %v", err)
 	}
-	usersService := users.NewService(repository, hasher)
+	usersService := users.NewService(
+		repository,
+		hasher,
+		users.WithFirstOwnerSetup(workspaces.SetupFirstOwnerWorkspace),
+	)
 	rolesService := roles.NewService(repository)
 	workspaceRepository := workspaces.NewRepository(db)
 	workspacesService := workspaces.NewService(workspaceRepository)

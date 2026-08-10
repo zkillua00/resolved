@@ -68,6 +68,10 @@ models. The provider registers and becomes active only after the response,
 workspace validation, request-tab restoration, and selection persistence all
 succeed, so a failed switch leaves the current workspace active.
 
+The workspace picker creates a server workspace through
+`POST /api/v1/workspaces`, using the same saved bearer session. A successful
+response is added to that server's workspace list and opened immediately.
+
 Server-owned workspace content is read-only because the collaboration API
 exposes collection metadata and grants rather than desktop request payloads.
 Request-tab drafts for a remote workspace are persisted locally under its

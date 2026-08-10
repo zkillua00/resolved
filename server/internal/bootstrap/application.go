@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -39,6 +40,10 @@ func New(cfg config.Config, accessLog io.Writer) (*Application, error) {
 		closeOnError()
 		return nil, err
 	}
+	if err := workspaces.EnsureInitialWorkspace(context.Background(), db); err != nil {
+		closeOnError()
+		return nil, fmt.Errorf("initialize default workspace: %w", err)
+	}
 
 	repository := identity.NewRepository(db)
 	hasher := security.NewPasswordHasher(security.DefaultPasswordParams())
@@ -47,7 +52,11 @@ func New(cfg config.Config, accessLog io.Writer) (*Application, error) {
 		closeOnError()
 		return nil, fmt.Errorf("initialize authentication: %w", err)
 	}
-	usersService := users.NewService(repository, hasher)
+	usersService := users.NewService(
+		repository,
+		hasher,
+		users.WithFirstOwnerSetup(workspaces.SetupFirstOwnerWorkspace),
+	)
 	rolesService := roles.NewService(repository)
 	workspaceRepository := workspaces.NewRepository(db)
 	workspacesService := workspaces.NewService(workspaceRepository)

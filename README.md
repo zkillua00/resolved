@@ -63,8 +63,9 @@ Resolved server. A server is added only after `POST /api/v1/auth/login`
 succeeds. Resolved accepts HTTPS endpoints and loopback HTTP endpoints, refuses
 credential-bearing URLs and redirects, and never persists the submitted
 password. The workspace control lists named local workspaces and the workspaces
-available from every authenticated server. Settings → Servers can also switch
-between Local and a connected server.
+available from every authenticated server. Each server group can create another
+workspace when the signed-in user has permission. Settings → Servers can also
+switch between Local and a connected server.
 
 Each local workspace has independent collections, environments, snippets,
 saved requests, and request-tab drafts in SQLite. Selecting a server fetches its
@@ -225,9 +226,9 @@ methods, headers, and body forms without executing the code.
 Open Settings from the navigation rail or with `⌘,`. The Servers page switches
 between Local and authenticated self-hosted upstreams, adds another server, or
 forgets an encrypted local session and its cached request-tab drafts. The
-workspace control in the navigation rail creates and switches named local
-workspaces or opens a workspace from any connected server. The Editor page's
-Editing section controls tab width, spaces versus hard tabs, soft wrapping, line
+workspace controls in the navigation rail and title bar create and switch named
+local or server workspaces. The Editor page's Editing section controls tab
+width, spaces versus hard tabs, soft wrapping, line
 numbers, indent guides, and automatic pair insertion. Its Formatting section
 controls indentation, tabs, line width, quote style, semicolons, and trailing
 commas for the embedded JSON/JavaScript/TypeScript formatter. Changes persist

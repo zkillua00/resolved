@@ -69,7 +69,10 @@ Migrations seed a fixed permission catalog and an immutable `Owner` system
 role. The owner role is reconciled with the complete catalog at startup. The
 `bootstrap-admin` command succeeds only while the deployment has no users, so
 there is no remotely callable first-user race. The final active owner cannot be
-disabled or stripped of the owner role.
+disabled or stripped of the owner role. Owner bootstrap also creates
+`My Workspace` and grants it directly to that owner in the same transaction.
+Startup backfills that workspace once for deployments created before this
+behavior existed.
 
 Permissions in the initial catalog are:
 

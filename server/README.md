@@ -24,7 +24,8 @@ There is no hosted control plane, telemetry, or deployment registration.
 ## Start a local deployment
 
 From this directory, bootstrap the first owner. The command reads the password
-without echoing it when run in a terminal.
+without echoing it when run in a terminal and creates `My Workspace` for that
+owner.
 
 ```sh
 go run ./cmd/resolved-server bootstrap-admin \
@@ -87,6 +88,8 @@ user. A direct workspace grant exposes its complete collection tree. A direct
 collection grant exposes that collection and its descendants, plus only the
 ancestor nodes required to represent the path to it. User IDs in API responses
 are direct grants; inherited access is not duplicated into descendant lists.
+Authenticated users with `workspaces.create` can create another workspace with
+`POST /api/v1/workspaces`; the creator receives its initial direct grant.
 
 The complete route and permission table is in
 [`docs/architecture.md`](docs/architecture.md).
