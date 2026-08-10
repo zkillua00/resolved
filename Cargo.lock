@@ -113,6 +113,7 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
+ "core-foundation 0.10.0",
  "csscolorparser",
  "cssparser 0.37.0",
  "dirs 6.0.0",

@@ -270,9 +270,9 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.workspace_writable {
+        let Some(save_route) = self.request_save_route() else {
             return;
-        }
+        };
         let active_association = self.request_tabs.active().association().clone();
         let update_id = (!save_as)
             .then(|| active_association.saved_request_id().map(ToOwned::to_owned))
@@ -306,7 +306,7 @@ impl ApiTester {
             entered_name
         };
 
-        if !self.workspace_writable {
+        if save_route == RequestSaveRoute::Upstream {
             self.save_request_on_upstream(
                 collection_id,
                 folder_id,

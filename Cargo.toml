@@ -55,7 +55,8 @@ wry = "=0.53.3"
 zeroize = "=1.9.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-security-framework = "=3.7.0"
+core-foundation = "=0.10.0"
+security-framework = { version = "=3.7.0", features = ["OSX_10_15"] }
 
 [dev-dependencies]
 gpui = { version = "=0.2.2", features = ["test-support"] }

@@ -1,4 +1,7 @@
-use std::{fmt, sync::Arc};
+use std::{
+    fmt,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 use chrono::{DateTime, Utc};
 use ring::{
@@ -71,6 +74,36 @@ trait MasterKeyProvider: Send + Sync {
     fn load_or_create(&self) -> Result<Zeroizing<Vec<u8>>, CredentialVaultError>;
 }
 
+struct CachedMasterKeyProvider {
+    delegate: Arc<dyn MasterKeyProvider>,
+    key: Mutex<Option<Zeroizing<Vec<u8>>>>,
+}
+
+impl CachedMasterKeyProvider {
+    fn new(delegate: Arc<dyn MasterKeyProvider>) -> Self {
+        Self {
+            delegate,
+            key: Mutex::new(None),
+        }
+    }
+}
+
+impl MasterKeyProvider for CachedMasterKeyProvider {
+    fn load_or_create(&self) -> Result<Zeroizing<Vec<u8>>, CredentialVaultError> {
+        let mut cached = self
+            .key
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(key) = cached.as_ref() {
+            return Ok(Zeroizing::new(key.as_slice().to_vec()));
+        }
+
+        let key = self.delegate.load_or_create()?;
+        *cached = Some(Zeroizing::new(key.as_slice().to_vec()));
+        Ok(key)
+    }
+}
+
 /// Encrypted credential storage backed by SQLite, with only the master key in
 /// the operating-system keychain.
 #[derive(Clone)]
@@ -83,7 +116,7 @@ impl CredentialVault {
     pub fn new(database: DatabaseStore) -> Self {
         Self {
             database,
-            key_provider: Arc::new(OsKeychainMasterKeyProvider),
+            key_provider: process_master_key_provider(),
         }
     }
 
@@ -212,6 +245,16 @@ impl CredentialVault {
     }
 }
 
+fn process_master_key_provider() -> Arc<dyn MasterKeyProvider> {
+    static PROVIDER: OnceLock<Arc<dyn MasterKeyProvider>> = OnceLock::new();
+
+    Arc::clone(PROVIDER.get_or_init(|| {
+        Arc::new(CachedMasterKeyProvider::new(Arc::new(
+            OsKeychainMasterKeyProvider,
+        )))
+    }))
+}
+
 #[derive(Serialize)]
 struct StoredCredentialRef<'a> {
     token: &'a str,
@@ -243,36 +286,190 @@ struct OsKeychainMasterKeyProvider;
 #[cfg(target_os = "macos")]
 impl MasterKeyProvider for OsKeychainMasterKeyProvider {
     fn load_or_create(&self) -> Result<Zeroizing<Vec<u8>>, CredentialVaultError> {
-        use security_framework::passwords::{
-            PasswordOptions, generic_password, set_generic_password_options,
-        };
+        use security_framework::passwords::generic_password;
 
-        const SERVICE: &str = "dev.apitester.desktop.secure-vault";
-        const ACCOUNT: &str = "master-key-v1";
-        const ERR_SEC_ITEM_NOT_FOUND: i32 = -25_300;
+        if !has_data_protection_keychain_entitlement() {
+            return load_or_create_legacy_master_key();
+        }
 
-        let options = || {
-            let mut options = PasswordOptions::new_generic_password(SERVICE, ACCOUNT);
-            // The database ciphertext is device-local, so the key must not be
-            // synchronized through iCloud Keychain.
-            options.set_access_synchronized(Some(false));
-            options
-        };
-
-        match generic_password(options()) {
+        match generic_password(biometric_keychain_lookup_options()) {
             Ok(key) => validate_master_key(key),
             Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => {
-                let mut key = vec![0_u8; KEY_LENGTH];
-                SystemRandom::new()
-                    .fill(&mut key)
-                    .map_err(|_| CredentialVaultError::Random)?;
-                set_generic_password_options(&key, options())
-                    .map_err(|error| CredentialVaultError::Keychain(error.to_string()))?;
-                Ok(Zeroizing::new(key))
+                migrate_or_create_biometric_master_key()
+            }
+            Err(error) if biometric_keychain_unavailable(error.code()) => {
+                load_or_create_legacy_master_key()
             }
             Err(error) => Err(CredentialVaultError::Keychain(error.to_string())),
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn has_data_protection_keychain_entitlement() -> bool {
+    use std::ffi::c_void;
+
+    use core_foundation::{
+        base::{CFAllocatorRef, CFRelease, CFTypeRef, TCFType},
+        error::CFErrorRef,
+        string::{CFString, CFStringRef},
+    };
+
+    type SecTaskRef = *const c_void;
+
+    #[link(name = "Security", kind = "framework")]
+    unsafe extern "C" {
+        fn SecTaskCreateFromSelf(allocator: CFAllocatorRef) -> SecTaskRef;
+        fn SecTaskCopyValueForEntitlement(
+            task: SecTaskRef,
+            entitlement: CFStringRef,
+            error: *mut CFErrorRef,
+        ) -> CFTypeRef;
+    }
+
+    let entitlement = CFString::new("keychain-access-groups");
+    unsafe {
+        let task = SecTaskCreateFromSelf(std::ptr::null());
+        if task.is_null() {
+            return false;
+        }
+        let value = SecTaskCopyValueForEntitlement(
+            task,
+            entitlement.as_concrete_TypeRef(),
+            std::ptr::null_mut(),
+        );
+        CFRelease(task);
+        if value.is_null() {
+            return false;
+        }
+        CFRelease(value);
+        true
+    }
+}
+
+#[cfg(target_os = "macos")]
+const KEYCHAIN_SERVICE: &str = "dev.apitester.desktop.secure-vault";
+#[cfg(target_os = "macos")]
+const BIOMETRIC_KEYCHAIN_ACCOUNT: &str = "master-key-v2";
+#[cfg(target_os = "macos")]
+const LEGACY_KEYCHAIN_ACCOUNT: &str = "master-key-v1";
+#[cfg(target_os = "macos")]
+const ERR_SEC_ITEM_NOT_FOUND: i32 = -25_300;
+#[cfg(target_os = "macos")]
+const ERR_SEC_NOT_AVAILABLE: i32 = -25_291;
+#[cfg(target_os = "macos")]
+const ERR_SEC_MISSING_ENTITLEMENT: i32 = -34_018;
+
+#[cfg(target_os = "macos")]
+fn biometric_keychain_unavailable(code: i32) -> bool {
+    matches!(code, ERR_SEC_NOT_AVAILABLE | ERR_SEC_MISSING_ENTITLEMENT)
+}
+
+#[cfg(target_os = "macos")]
+fn biometric_keychain_lookup_options() -> security_framework::passwords::PasswordOptions {
+    use security_framework::passwords::PasswordOptions;
+
+    let mut options =
+        PasswordOptions::new_generic_password(KEYCHAIN_SERVICE, BIOMETRIC_KEYCHAIN_ACCOUNT);
+    options.use_protected_keychain();
+    options.set_access_synchronized(Some(false));
+    options
+}
+
+#[cfg(target_os = "macos")]
+fn biometric_keychain_create_options()
+-> Result<security_framework::passwords::PasswordOptions, CredentialVaultError> {
+    use security_framework::{
+        access_control::{ProtectionMode, SecAccessControl},
+        passwords::{AccessControlOptions, PasswordOptions},
+    };
+
+    let access_control = SecAccessControl::create_with_protection(
+        Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
+        AccessControlOptions::USER_PRESENCE.bits(),
+    )
+    .map_err(|error| CredentialVaultError::Keychain(error.to_string()))?;
+    let mut options =
+        PasswordOptions::new_generic_password(KEYCHAIN_SERVICE, BIOMETRIC_KEYCHAIN_ACCOUNT);
+    options.use_protected_keychain();
+    options.set_access_synchronized(Some(false));
+    options.set_access_control(access_control);
+    options.set_label("Resolved secure vault");
+    options.set_description("Master key for saved server sessions");
+    Ok(options)
+}
+
+#[cfg(target_os = "macos")]
+fn legacy_keychain_options() -> security_framework::passwords::PasswordOptions {
+    use security_framework::passwords::PasswordOptions;
+
+    let mut options =
+        PasswordOptions::new_generic_password(KEYCHAIN_SERVICE, LEGACY_KEYCHAIN_ACCOUNT);
+    options.set_access_synchronized(Some(false));
+    options
+}
+
+#[cfg(target_os = "macos")]
+fn migrate_or_create_biometric_master_key() -> Result<Zeroizing<Vec<u8>>, CredentialVaultError> {
+    use security_framework::passwords::{
+        delete_generic_password_options, generic_password, set_generic_password_options,
+    };
+
+    let (key, migrated_legacy_key) = match generic_password(legacy_keychain_options()) {
+        Ok(key) => (validate_master_key(key)?, true),
+        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => (generate_master_key()?, false),
+        Err(error) => return Err(CredentialVaultError::Keychain(error.to_string())),
+    };
+
+    match set_generic_password_options(&key, biometric_keychain_create_options()?) {
+        Ok(()) => {}
+        Err(error) if biometric_keychain_unavailable(error.code()) => {
+            if migrated_legacy_key {
+                return Ok(key);
+            }
+            set_generic_password_options(&key, legacy_keychain_options())
+                .map_err(|error| CredentialVaultError::Keychain(error.to_string()))?;
+            return Ok(key);
+        }
+        Err(error) => return Err(CredentialVaultError::Keychain(error.to_string())),
+    }
+
+    if migrated_legacy_key {
+        match delete_generic_password_options(legacy_keychain_options()) {
+            Ok(()) => {}
+            Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => {}
+            Err(error) => tracing::warn!(
+                error_code = error.code(),
+                "could not remove the migrated legacy secure-vault key"
+            ),
+        }
+    }
+    Ok(key)
+}
+
+#[cfg(target_os = "macos")]
+fn load_or_create_legacy_master_key() -> Result<Zeroizing<Vec<u8>>, CredentialVaultError> {
+    use security_framework::passwords::{generic_password, set_generic_password_options};
+
+    match generic_password(legacy_keychain_options()) {
+        Ok(key) => validate_master_key(key),
+        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => {
+            let key = generate_master_key()?;
+            set_generic_password_options(&key, legacy_keychain_options())
+                .map_err(|error| CredentialVaultError::Keychain(error.to_string()))?;
+            Ok(key)
+        }
+        Err(error) => Err(CredentialVaultError::Keychain(error.to_string())),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn generate_master_key() -> Result<Zeroizing<Vec<u8>>, CredentialVaultError> {
+    let mut key = Zeroizing::new(vec![0_u8; KEY_LENGTH]);
+    SystemRandom::new()
+        .fill(key.as_mut_slice())
+        .map_err(|_| CredentialVaultError::Random)?;
+    Ok(key)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -293,6 +490,8 @@ fn validate_master_key(key: Vec<u8>) -> Result<Zeroizing<Vec<u8>>, CredentialVau
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     struct StaticKeyProvider(Vec<u8>);
@@ -300,6 +499,17 @@ mod tests {
     impl MasterKeyProvider for StaticKeyProvider {
         fn load_or_create(&self) -> Result<Zeroizing<Vec<u8>>, CredentialVaultError> {
             Ok(Zeroizing::new(self.0.clone()))
+        }
+    }
+
+    struct CountingKeyProvider {
+        loads: Arc<AtomicUsize>,
+    }
+
+    impl MasterKeyProvider for CountingKeyProvider {
+        fn load_or_create(&self) -> Result<Zeroizing<Vec<u8>>, CredentialVaultError> {
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            Ok(Zeroizing::new(vec![11_u8; KEY_LENGTH]))
         }
     }
 
@@ -338,6 +548,45 @@ mod tests {
         assert_eq!(loaded.bearer_token(), "plain-session-token");
         assert_eq!(loaded.expires_at, credential.expires_at);
         assert!(!format!("{loaded:?}").contains("plain-session-token"));
+    }
+
+    #[test]
+    fn unlocks_the_master_key_once_across_vault_instances() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = DatabaseStore::new(directory.path().join("vault.sqlite3"));
+        database.initialize().unwrap();
+        let loads = Arc::new(AtomicUsize::new(0));
+        let key_provider: Arc<dyn MasterKeyProvider> = Arc::new(CachedMasterKeyProvider::new(
+            Arc::new(CountingKeyProvider {
+                loads: Arc::clone(&loads),
+            }),
+        ));
+        let first_vault =
+            CredentialVault::with_key_provider(database.clone(), Arc::clone(&key_provider));
+        let second_vault = CredentialVault::with_key_provider(database, key_provider);
+        let credential = UpstreamCredential::new(
+            Zeroizing::new("plain-session-token".to_owned()),
+            Utc::now() + chrono::Duration::hours(1),
+        );
+
+        first_vault
+            .store_upstream_with_settings(&AppSettings::default(), "server-a", &credential)
+            .unwrap();
+        assert!(second_vault.load_upstream("server-a").unwrap().is_some());
+        assert!(first_vault.load_upstream("server-a").unwrap().is_some());
+
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn default_vaults_share_the_process_master_key_provider() {
+        let directory = tempfile::tempdir().unwrap();
+        let first =
+            CredentialVault::new(DatabaseStore::new(directory.path().join("first.sqlite3")));
+        let second =
+            CredentialVault::new(DatabaseStore::new(directory.path().join("second.sqlite3")));
+
+        assert!(Arc::ptr_eq(&first.key_provider, &second.key_provider));
     }
 
     #[test]
@@ -397,5 +646,15 @@ mod tests {
             .load_upstream_request_tabs("server-a", "workspace-a")
             .unwrap();
         assert_eq!(restored.active().display_title(), "Untitled Request");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn biometric_vault_falls_back_only_when_the_platform_is_unavailable() {
+        assert!(biometric_keychain_unavailable(ERR_SEC_NOT_AVAILABLE));
+        assert!(biometric_keychain_unavailable(ERR_SEC_MISSING_ENTITLEMENT));
+        assert!(!biometric_keychain_unavailable(-25_293)); // errSecAuthFailed
+        assert!(!biometric_keychain_unavailable(-25_308)); // errSecInteractionNotAllowed
+        assert!(!biometric_keychain_unavailable(-128)); // errSecUserCanceled
     }
 }

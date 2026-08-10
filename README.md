@@ -43,6 +43,7 @@ WKWebView through `gpui-wry` only when the Preview tab is selected.
   request-tab drafts
 - Multiple switchable self-hosted server profiles with direct login; session
   tokens are authenticated-encrypted locally with a device-only Keychain key
+  that supports biometric unlock in provisioned builds
 - Persistent, live-configurable keyboard shortcuts, organized into five
   task-focused sections with macOS-native defaults
 - A persistent CSS theme library mapped into GPUI controls and editor syntax

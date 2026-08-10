@@ -31,6 +31,28 @@ resources_dir="$contents_dir/Resources"
 typescript_notices_dir="$resources_dir/ThirdPartyLicenses/TypeScript-6.0.2"
 package_version="$("$project_dir/scripts/version.sh" current)"
 build_number="${API_TESTER_BUILD_NUMBER:-}"
+codesign_identity="${API_TESTER_CODESIGN_IDENTITY:--}"
+codesign_entitlements="${API_TESTER_CODESIGN_ENTITLEMENTS:-}"
+provisioning_profile="${API_TESTER_PROVISIONING_PROFILE:-}"
+
+if [ -n "$codesign_entitlements" ] || [ -n "$provisioning_profile" ]; then
+    if [ "$codesign_identity" = "-" ]; then
+        echo "error: biometric Keychain access requires a non-ad-hoc signing identity" >&2
+        exit 2
+    fi
+    if [ -z "$codesign_entitlements" ] || [ -z "$provisioning_profile" ]; then
+        echo "error: biometric Keychain signing requires entitlements and a provisioning profile" >&2
+        exit 2
+    fi
+    if [ ! -f "$codesign_entitlements" ]; then
+        echo "error: API_TESTER_CODESIGN_ENTITLEMENTS does not name a file" >&2
+        exit 2
+    fi
+    if [ ! -f "$provisioning_profile" ]; then
+        echo "error: API_TESTER_PROVISIONING_PROFILE does not name a file" >&2
+        exit 2
+    fi
+fi
 
 if [ -z "$build_number" ]; then
     build_number="$(git -C "$project_dir" rev-list --count HEAD 2>/dev/null || true)"
@@ -59,6 +81,11 @@ install -m 644 \
     "$project_dir/vendor/typescript-service-6.0.2/ThirdPartyNoticeText.txt" \
     "$typescript_notices_dir/ThirdPartyNoticeText.txt"
 install -m 644 "$project_dir/macos/Info.plist" "$contents_dir/Info.plist"
+if [ -n "$provisioning_profile" ]; then
+    install -m 644 "$provisioning_profile" "$contents_dir/embedded.provisionprofile"
+else
+    rm -f "$contents_dir/embedded.provisionprofile"
+fi
 /usr/libexec/PlistBuddy \
     -c "Add :CFBundleShortVersionString string $package_version" \
     "$contents_dir/Info.plist"
@@ -71,7 +98,12 @@ install -m 644 "$project_dir/macos/Info.plist" "$contents_dir/Info.plist"
 # are regenerated locally by macOS and cannot be cleared, so the archive step
 # below also excludes all source extended attributes and ACLs.
 xattr -cr "$bundle_dir"
-codesign --force --deep --sign - "$bundle_dir"
+if [ -n "$codesign_entitlements" ]; then
+    codesign --force --deep --sign "$codesign_identity" \
+        --entitlements "$codesign_entitlements" "$bundle_dir"
+else
+    codesign --force --deep --sign "$codesign_identity" "$bundle_dir"
+fi
 
 echo "$bundle_dir ($package_version, build $build_number)"
 

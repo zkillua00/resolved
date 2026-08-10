@@ -32,9 +32,11 @@ and token strings use zeroizing wrappers.
 
 Successful login stores only the server-issued bearer token and expiry:
 
-1. macOS Keychain contains one random 256-bit master key under
-   `dev.apitester.desktop.secure-vault` / `master-key-v1`;
-2. that key is explicitly non-synchronizing, so it stays on the device;
+1. a provisioned macOS build keeps one random 256-bit master key in the Data
+   Protection Keychain under `dev.apitester.desktop.secure-vault` /
+   `master-key-v2`;
+2. the item requires user presence, allowing macOS to unlock it with Touch ID,
+   Face ID, or the device password, and is explicitly non-synchronizing;
 3. SQLite stores an AES-256-GCM nonce and ciphertext in the generic
    `secure_values` table;
 4. associated data binds the ciphertext to its namespace, upstream ID, key
@@ -46,6 +48,33 @@ The database, WAL, and SHM files retain their existing owner-only permissions.
 If the Keychain key is lost, encrypted sessions fail closed and the user signs
 in again. The generic secure-value table stores upstream sessions without
 placing their plaintext bearer tokens in SQLite.
+
+After the first successful vault unlock, Resolved keeps one process-wide,
+zeroizing copy of the master key in memory. Login, save, update, workspace, and
+additional app-window operations reuse that key without asking macOS to
+authenticate again. The cached key is discarded and wiped when the app exits,
+so the next launch requires a fresh vault unlock. Builds without a provisioned
+Keychain access-group entitlement skip the Data Protection Keychain query and
+use the legacy fallback directly.
+
+The first provisioned build migrates the existing `master-key-v1` item after
+one successful legacy Keychain unlock and removes the old item. Authentication
+failure or cancellation never falls through to the legacy key. Ad-hoc and
+unprovisioned development builds cannot access Apple's Data Protection
+Keychain, so they retain the non-synchronizing file-based Keychain item rather
+than making existing encrypted sessions unreadable.
+
+To package biometric access, sign with a valid identity and provisioning
+profile that authorize the bundle's application identifier and Keychain access
+group. `scripts/bundle-macos.sh` accepts the signing inputs without committing
+deployment-specific credentials:
+
+```sh
+API_TESTER_CODESIGN_IDENTITY="Apple Development: Developer Name (TEAMID)" \
+API_TESTER_CODESIGN_ENTITLEMENTS=/path/to/Resolved.entitlements \
+API_TESTER_PROVISIONING_PROFILE=/path/to/profile.provisionprofile \
+scripts/bundle-macos.sh release
+```
 
 ## Workspace provider boundary
 

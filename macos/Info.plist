@@ -22,6 +22,8 @@
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSFaceIDUsageDescription</key>
+    <string>Unlock saved server sessions.</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
 </dict>

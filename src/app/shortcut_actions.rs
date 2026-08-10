@@ -337,4 +337,72 @@ mod tests {
             "Staging"
         );
     }
+
+    #[gpui::test]
+    fn command_s_saves_request_to_the_selected_collection(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("create temporary database directory");
+        let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+        store.initialize().expect("initialize test database");
+
+        let mut workspace = Workspace::default();
+        let collection_id = workspace
+            .create_collection("Users")
+            .expect("create test collection");
+        store
+            .save_workspace(&workspace)
+            .expect("seed test workspace");
+
+        let mut app = None;
+        let store_for_app = store.clone();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            let base_key_bindings = shortcuts::capture_base_key_bindings(cx);
+            crate::theme::configure(cx);
+            let view = cx.new(|cx| {
+                ApiTester::new_with_database_store(base_key_bindings, store_for_app, window, cx)
+            });
+            crate::register_app_action_handlers(&view, cx);
+            app = Some(view.clone());
+            gpui_component::Root::new(view, window, cx)
+        });
+        let app = app.expect("capture app entity");
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_resize(size(px(1_200.), px(800.)));
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.activate_request_workspace(SidebarTab::Collections, window, cx);
+                app.url.update(cx, |input, cx| {
+                    input.set_value("https://example.com/users", window, cx);
+                });
+                app.saved_request_name.update(cx, |input, cx| {
+                    input.set_value("List users", window, cx);
+                });
+            });
+        });
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("cmd-s");
+
+        let (request_name, request_url) = cx.update(|_, cx| {
+            let app = app.read(cx);
+            let request = &app
+                .workspace
+                .collection(&collection_id)
+                .expect("collection remains in memory")
+                .requests[0];
+            (request.name.clone(), request.definition.request.url.clone())
+        });
+        assert_eq!(request_name, "List users");
+        assert_eq!(request_url, "https://example.com/users");
+
+        let persisted = store.load_workspace().expect("reload saved workspace");
+        let request = &persisted
+            .collection(&collection_id)
+            .expect("collection was persisted")
+            .requests[0];
+        assert_eq!(request.name, "List users");
+        assert_eq!(request.definition.request.url, "https://example.com/users");
+    }
 }

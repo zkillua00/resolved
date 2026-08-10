@@ -1,6 +1,29 @@
 use super::request_tab_reconciliation::reconcile_restored_request_tabs;
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RequestSaveRoute {
+    Local,
+    Upstream,
+}
+
+fn request_save_route_for_state(
+    workspace_writable: bool,
+    upstream_available: bool,
+    switch_busy: bool,
+    sending: bool,
+) -> Option<RequestSaveRoute> {
+    if switch_busy || sending {
+        None
+    } else if workspace_writable {
+        Some(RequestSaveRoute::Local)
+    } else if upstream_available {
+        Some(RequestSaveRoute::Upstream)
+    } else {
+        None
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) enum WorkspaceSwitchStatus {
     #[default]
@@ -33,9 +56,17 @@ impl ApiTester {
             || (!self.workspace_switch_status.busy() && self.active_upstream_workspace().is_ok())
     }
 
+    pub(super) fn request_save_route(&self) -> Option<RequestSaveRoute> {
+        request_save_route_for_state(
+            self.workspace_writable,
+            self.active_upstream_workspace().is_ok(),
+            self.workspace_switch_status.busy(),
+            self.sending,
+        )
+    }
+
     pub(super) fn can_save_request_content(&self) -> bool {
-        self.workspace_writable
-            || (!self.workspace_switch_status.busy() && self.active_upstream_workspace().is_ok())
+        self.request_save_route().is_some()
     }
 
     fn active_upstream_workspace(&self) -> Result<ActiveUpstreamWorkspace, String> {
@@ -1282,5 +1313,28 @@ impl ApiTester {
             .server(&upstream_id)
             .and_then(|profile| profile.active_workspace_id.clone());
         self.switch_to_upstream(upstream_id, workspace_id, window, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_save_route_keeps_local_and_upstream_persistence_reachable() {
+        assert_eq!(
+            request_save_route_for_state(true, false, false, false),
+            Some(RequestSaveRoute::Local)
+        );
+        assert_eq!(
+            request_save_route_for_state(false, true, false, false),
+            Some(RequestSaveRoute::Upstream)
+        );
+        assert_eq!(
+            request_save_route_for_state(false, false, false, false),
+            None
+        );
+        assert_eq!(request_save_route_for_state(false, true, true, false), None);
+        assert_eq!(request_save_route_for_state(false, true, false, true), None);
     }
 }
