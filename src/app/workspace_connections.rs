@@ -38,6 +38,20 @@ impl WorkspaceSwitchStatus {
     }
 }
 
+pub(super) fn unreachable_upstream_message(server_label: &str) -> String {
+    format!(
+        "Can't connect to {server_label}. Check that the server is running and the address is correct."
+    )
+}
+
+fn upstream_switch_error(server_label: &str, error: &str) -> String {
+    if error.starts_with("could not reach the server:") {
+        unreachable_upstream_message(server_label)
+    } else {
+        format!("Could not open {server_label}: {error}")
+    }
+}
+
 pub(super) struct LoadedUpstreamWorkspace {
     pub(super) selected: Option<LoadedUpstreamWorkspaceView>,
     pub(super) summaries: Vec<UpstreamWorkspaceSummary>,
@@ -884,6 +898,14 @@ impl ApiTester {
         if self.workspace_providers.active_id() == &provider_id
             && self.settings.upstreams.active_upstream_id.is_none()
         {
+            if matches!(
+                self.workspace_switch_status,
+                WorkspaceSwitchStatus::Error(_)
+            ) {
+                self.workspace_switch_status = WorkspaceSwitchStatus::Idle;
+                self.settings_notice = None;
+                cx.notify();
+            }
             return;
         }
         if !self.prepare_for_workspace_switch(cx) {
@@ -995,27 +1017,30 @@ impl ApiTester {
             return;
         }
         let Some(profile) = self.settings.upstreams.server(&upstream_id).cloned() else {
-            self.settings_notice = Some("That server is no longer configured.".to_owned());
-            cx.notify();
+            self.fail_workspace_switch("That server is no longer configured.".to_owned(), cx);
             return;
         };
         if profile.session_expired(Utc::now()) {
-            self.settings_notice = Some(format!(
-                "Log in to {} again before opening its workspaces.",
-                profile.display_label()
-            ));
-            cx.notify();
+            self.fail_workspace_switch(
+                format!(
+                    "Log in to {} again before opening its workspaces.",
+                    profile.display_label()
+                ),
+                cx,
+            );
             return;
         }
         let Some(base_url) = profile.parsed_base_url() else {
-            self.settings_notice = Some("That server URL is invalid.".to_owned());
-            cx.notify();
+            self.fail_workspace_switch("That server URL is invalid.".to_owned(), cx);
             return;
         };
+        let profile_label = profile.display_label();
 
         self.workspace_switch_generation = self.workspace_switch_generation.wrapping_add(1);
         let generation = self.workspace_switch_generation;
         self.workspace_switch_status = WorkspaceSwitchStatus::Loading;
+        self.workspace_warning = None;
+        self.settings_notice = None;
         let vault = self.credential_vault.clone();
         let client = self.upstream_client.clone();
         let runtime = Arc::clone(&self.runtime);
@@ -1051,19 +1076,13 @@ impl ApiTester {
                 this.workspace_switch_abort_handle = None;
                 match result {
                     Ok(Ok(loaded)) => this.finish_upstream_switch(upstream_id, loaded, window, cx),
-                    Ok(Err(error)) => {
-                        this.workspace_switch_status = WorkspaceSwitchStatus::Error(error.clone());
-                        this.settings_notice = Some(error);
-                        cx.notify();
-                    }
+                    Ok(Err(error)) => this
+                        .fail_workspace_switch(upstream_switch_error(&profile_label, &error), cx),
                     Err(error) if error.is_cancelled() => {}
-                    Err(error) => {
-                        let message = format!("The workspace could not be opened: {error}");
-                        this.workspace_switch_status =
-                            WorkspaceSwitchStatus::Error(message.clone());
-                        this.settings_notice = Some(message);
-                        cx.notify();
-                    }
+                    Err(error) => this.fail_workspace_switch(
+                        format!("Could not open {profile_label}: {error}"),
+                        cx,
+                    ),
                 }
             });
         })
@@ -1328,8 +1347,8 @@ impl ApiTester {
     }
 
     fn fail_workspace_switch(&mut self, message: String, cx: &mut Context<Self>) {
-        self.workspace_switch_status = WorkspaceSwitchStatus::Error(message.clone());
-        self.settings_notice = Some(message);
+        self.workspace_switch_status = WorkspaceSwitchStatus::Error(message);
+        self.settings_notice = None;
         cx.notify();
     }
 
@@ -1501,5 +1520,20 @@ mod tests {
         );
         assert_eq!(request_save_route_for_state(false, true, true, false), None);
         assert_eq!(request_save_route_for_state(false, true, false, true), None);
+    }
+
+    #[test]
+    fn workspace_switch_errors_hide_transport_details() {
+        assert_eq!(
+            upstream_switch_error(
+                "resolved.example.com",
+                "could not reach the server: connection refused"
+            ),
+            "Can't connect to resolved.example.com. Check that the server is running and the address is correct."
+        );
+        assert_eq!(
+            upstream_switch_error("resolved.example.com", "a valid bearer token is required"),
+            "Could not open resolved.example.com: a valid bearer token is required"
+        );
     }
 }

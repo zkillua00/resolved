@@ -1658,12 +1658,6 @@ impl ApiTester {
             .size_full()
             .min_h_0()
             .bg(cx.theme().background)
-            .when_some(self.workspace_warning.clone(), |this, warning| {
-                this.child(super::settings_page::settings_message(
-                    warning,
-                    cx.theme().danger,
-                ))
-            })
             .when_some(self.snippet_editor.notice.clone(), |this, notice| {
                 this.child(super::settings_page::settings_message(
                     notice,

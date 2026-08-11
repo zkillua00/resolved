@@ -260,18 +260,6 @@ impl ApiTester {
                         )
                     }),
             )
-            .when_some(self.workspace_warning.clone(), |this, warning| {
-                this.child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .border_t_1()
-                        .border_color(cx.theme().warning)
-                        .text_xs()
-                        .text_color(cx.theme().warning)
-                        .child(warning),
-                )
-            })
             .into_any_element()
     }
 }

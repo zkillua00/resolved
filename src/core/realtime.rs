@@ -95,17 +95,20 @@ pub async fn watch_upstream_changes(
             return Ok(());
         }
 
-        match run_connection(&websocket_url, bearer_token, &sender).await {
+        let signal = match run_connection(&websocket_url, bearer_token, &sender).await {
             ConnectionEnd::AuthenticationRequired => {
                 let _ = sender.send(RealtimeSignal::AuthenticationRequired);
                 return Ok(());
             }
             ConnectionEnd::ReceiverClosed => return Ok(()),
-            ConnectionEnd::Disconnected => reconnect_delay = Duration::from_secs(1),
-            ConnectionEnd::Unavailable => {}
-        }
+            ConnectionEnd::Disconnected => {
+                reconnect_delay = Duration::from_secs(1);
+                RealtimeSignal::ConnectionLost
+            }
+            ConnectionEnd::Unavailable => RealtimeSignal::Unavailable,
+        };
 
-        if sender.send(RealtimeSignal::ConnectionLost).is_err() {
+        if sender.send(signal).is_err() {
             return Ok(());
         }
 
@@ -402,5 +405,30 @@ mod tests {
 
         watcher.abort();
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reports_an_unreachable_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let base_url = Url::parse(&format!("http://{address}/")).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let watcher = tokio::spawn(async move {
+            watch_upstream_changes(
+                &base_url,
+                "session-token",
+                Utc::now() + chrono::Duration::minutes(1),
+                sender,
+            )
+            .await
+        });
+
+        assert_eq!(
+            next_signal(&mut receiver).await,
+            RealtimeSignal::Unavailable
+        );
+
+        watcher.abort();
     }
 }

@@ -1,5 +1,48 @@
 use super::*;
 
+fn workspace_error_message(
+    switch_status: &WorkspaceSwitchStatus,
+    workspace_warning: Option<&str>,
+    realtime_status: RealtimeConnectionStatus,
+    upstream_label: Option<&str>,
+) -> Option<String> {
+    if let WorkspaceSwitchStatus::Error(message) = switch_status {
+        return Some(message.clone());
+    }
+    if let Some(message) = workspace_warning {
+        return Some(message.to_owned());
+    }
+    let upstream_label = upstream_label?;
+    match realtime_status {
+        RealtimeConnectionStatus::Reconnecting => Some(format!(
+            "Connection to {upstream_label} was lost. Trying to reconnect…"
+        )),
+        RealtimeConnectionStatus::Unavailable => Some(unreachable_upstream_message(upstream_label)),
+        RealtimeConnectionStatus::Inactive
+        | RealtimeConnectionStatus::Connecting
+        | RealtimeConnectionStatus::Connected => None,
+    }
+}
+
+impl ApiTester {
+    fn visible_workspace_error(&self) -> Option<String> {
+        let upstream_label = match self.workspace_providers.active_id() {
+            WorkspaceProviderId::Upstream { upstream_id, .. } => self
+                .settings
+                .upstreams
+                .server(upstream_id)
+                .map(|profile| profile.display_label()),
+            WorkspaceProviderId::Local(_) => None,
+        };
+        workspace_error_message(
+            &self.workspace_switch_status,
+            self.workspace_warning.as_deref(),
+            self.realtime_status,
+            upstream_label.as_deref(),
+        )
+    }
+}
+
 impl Render for ApiTester {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let visible_tabs = self.workspace_tabs.visible_tabs(&self.request_tabs);
@@ -43,6 +86,7 @@ impl Render for ApiTester {
         let upstream_login_page = self
             .upstream_login_open
             .then(|| self.render_upstream_login_page(cx));
+        let workspace_error = self.visible_workspace_error();
 
         v_flex()
             .size_full()
@@ -62,6 +106,16 @@ impl Render for ApiTester {
             .capture_any_mouse_down(cx.listener(Self::cancel_shortcut_recording_on_pointer))
             .capture_key_down(cx.listener(Self::capture_template_key_down))
             .child(self.render_title_bar(cx))
+            .when_some(workspace_error, |this, message| {
+                this.child(
+                    div()
+                        .debug_selector(|| "workspace-error-banner".to_owned())
+                        .child(super::settings_page::settings_message(
+                            message,
+                            cx.theme().danger,
+                        )),
+                )
+            })
             .child(
                 h_flex()
                     .flex_1()
@@ -83,6 +137,44 @@ mod tests {
     use gpui_component::setting::{SettingGroup, SettingItem, SettingPage, Settings};
 
     use super::*;
+
+    #[test]
+    fn workspace_errors_prioritize_rest_failures_and_report_socket_state() {
+        let switch_error = WorkspaceSwitchStatus::Error(
+            "The workspace could not be opened: could not reach the server".to_owned(),
+        );
+        assert_eq!(
+            workspace_error_message(
+                &switch_error,
+                Some("older warning"),
+                RealtimeConnectionStatus::Unavailable,
+                Some("resolved.example.com"),
+            )
+            .as_deref(),
+            Some("The workspace could not be opened: could not reach the server")
+        );
+        assert_eq!(
+            workspace_error_message(
+                &WorkspaceSwitchStatus::Idle,
+                None,
+                RealtimeConnectionStatus::Unavailable,
+                Some("resolved.example.com"),
+            )
+            .as_deref(),
+            Some(
+                "Can't connect to resolved.example.com. Check that the server is running and the address is correct."
+            )
+        );
+        assert_eq!(
+            workspace_error_message(
+                &WorkspaceSwitchStatus::Idle,
+                None,
+                RealtimeConnectionStatus::Connected,
+                Some("resolved.example.com"),
+            ),
+            None
+        );
+    }
 
     struct RetainedSettingsHarness {
         settings_visible: bool,
