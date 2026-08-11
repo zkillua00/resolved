@@ -6,14 +6,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"testing"
 	"time"
 
+	"resolved-server/eventsystem"
 	"resolved-server/internal/auth"
 	"resolved-server/internal/config"
 	"resolved-server/internal/database"
 	"resolved-server/internal/identity"
+	"resolved-server/internal/realtime"
+	"resolved-server/internal/resourceevents"
 	"resolved-server/internal/roles"
 	"resolved-server/internal/security"
 	"resolved-server/internal/server"
@@ -22,6 +26,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
+	gorillaWebsocket "github.com/gorilla/websocket"
 	"gorm.io/gorm"
 )
 
@@ -155,6 +160,93 @@ func TestIdentityManagementAndDynamicPermissions(t *testing.T) {
 
 	request[struct{}](t, app, http.MethodPost, "/api/v1/auth/logout", collaboratorLogin.Token, nil, fiber.StatusOK)
 	request[any](t, app, http.MethodGet, "/api/v1/users", collaboratorLogin.Token, nil, fiber.StatusUnauthorized)
+}
+
+func TestAuthenticatedWebsocketPublishesResourceChanges(t *testing.T) {
+	app, usersService, _, closeDatabase := newTestServer(t)
+	t.Cleanup(closeDatabase)
+
+	owner, err := usersService.BootstrapOwner(t.Context(), users.CreateInput{
+		Email:       "owner",
+		DisplayName: "Owner",
+		Password:    ownerPassword,
+	})
+	if err != nil {
+		t.Fatalf("bootstrap owner: %v", err)
+	}
+	ownerLogin := login(t, app, owner.Email, ownerPassword)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- app.Listener(listener, fiber.ListenConfig{DisableStartupMessage: true})
+	}()
+	t.Cleanup(func() {
+		if err := app.ShutdownWithTimeout(2 * time.Second); err != nil {
+			t.Errorf("shutdown Fiber app: %v", err)
+		}
+		select {
+		case err := <-serverErr:
+			if err != nil {
+				t.Errorf("serve Fiber app: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("Fiber app did not stop")
+		}
+	})
+
+	websocketURL := fmt.Sprintf("ws://%s/api/v1/ws", listener.Addr().String())
+	unauthorized, response, err := gorillaWebsocket.DefaultDialer.Dial(websocketURL, nil)
+	if unauthorized != nil {
+		_ = unauthorized.Close()
+	}
+	if response != nil {
+		defer response.Body.Close()
+	}
+	if err == nil || response == nil || response.StatusCode != fiber.StatusUnauthorized {
+		t.Fatalf("unauthorized websocket response = %+v, error = %v", response, err)
+	}
+
+	headers := http.Header{"Authorization": []string{"Bearer " + ownerLogin.Token}}
+	client, response, err := gorillaWebsocket.DefaultDialer.Dial(websocketURL, headers)
+	if err != nil {
+		if response != nil {
+			t.Fatalf("dial authenticated websocket: %v (status %s)", err, response.Status)
+		}
+		t.Fatalf("dial authenticated websocket: %v", err)
+	}
+	defer client.Close()
+
+	created := request[workspaces.WorkspaceView](
+		t,
+		app,
+		http.MethodPost,
+		"/api/v1/workspaces",
+		ownerLogin.Token,
+		map[string]any{"name": "Realtime workspace"},
+		fiber.StatusCreated,
+	).Data
+	if err := client.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set websocket deadline: %v", err)
+	}
+	var published struct {
+		Command string                `json:"command"`
+		Data    resourceevents.Change `json:"data"`
+	}
+	if err := client.ReadJSON(&published); err != nil {
+		t.Fatalf("read resource change: %v", err)
+	}
+	if published.Command != resourceevents.EventName {
+		t.Fatalf("command = %q, want %q", published.Command, resourceevents.EventName)
+	}
+	if published.Data.Resource != resourceevents.ResourceWorkspace ||
+		published.Data.Action != resourceevents.ActionCreated ||
+		published.Data.ResourceID != created.ID {
+		t.Fatalf("unexpected resource change: %+v", published.Data)
+	}
 }
 
 func TestWorkspaceAndRecursiveCollectionScopes(t *testing.T) {
@@ -847,6 +939,8 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, *gorm.DB, func()) 
 		_ = sqlDatabase.Close()
 		t.Fatalf("create auth service: %v", err)
 	}
+	events := eventsystem.NewEventListener()
+	events.StartNewEventLoop()
 	usersService := users.NewService(
 		repository,
 		hasher,
@@ -861,10 +955,16 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, *gorm.DB, func()) 
 		) error {
 			return workspaces.RekeyEnvironmentVariableValues(ctx, tx, environmentCipher, userID, oldKey, newKey)
 		}),
+		users.WithEvents(events),
 	)
-	rolesService := roles.NewService(repository)
+	rolesService := roles.NewService(repository, roles.WithEvents(events))
 	workspaceRepository := workspaces.NewRepository(db)
-	workspacesService := workspaces.NewService(workspaceRepository, environmentCipher)
+	workspacesService := workspaces.NewService(
+		workspaceRepository,
+		environmentCipher,
+		workspaces.WithEvents(events),
+	)
+	realtimePublisher := realtime.New(events)
 	httpServer := server.New(
 		"127.0.0.1:0",
 		io.Discard,
@@ -875,8 +975,12 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, *gorm.DB, func()) 
 			roles.NewHandler(rolesService),
 		),
 		server.WithWorkspaces(authService, workspaces.NewHandler(workspacesService)),
+		server.WithRealtime(authService, realtimePublisher),
 	)
-	return httpServer.App, usersService, db, func() { _ = sqlDatabase.Close() }
+	return httpServer.App, usersService, db, func() {
+		events.Stop()
+		_ = sqlDatabase.Close()
+	}
 }
 
 func containsString(values []string, expected string) bool {

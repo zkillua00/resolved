@@ -11,6 +11,7 @@ import (
 	"resolved-server/internal/httpkit"
 	"resolved-server/internal/identity"
 	"resolved-server/internal/problem"
+	"resolved-server/internal/realtime"
 	"resolved-server/internal/roles"
 	"resolved-server/internal/users"
 	"resolved-server/internal/workspaces"
@@ -28,6 +29,12 @@ type Modifier func(app *fiber.App)
 type Server struct {
 	App     *fiber.App
 	Address string
+}
+
+func WithRealtime(authService *auth.Service, publisher *realtime.Publisher) Modifier {
+	return func(app *fiber.App) {
+		app.Get("/api/v1/ws", authService.Middleware(), publisher.Handler())
+	}
 }
 
 func WithWorkspaces(authService *auth.Service, handler *workspaces.Handler) Modifier {

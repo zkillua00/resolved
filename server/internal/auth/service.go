@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -35,6 +36,7 @@ type Principal struct {
 	User           identity.User
 	permissions    map[string]struct{}
 	environmentKey []byte
+	expiresAt      time.Time
 }
 
 func NewService(
@@ -165,6 +167,7 @@ func (s *Service) Authenticate(ctx context.Context, token string) (*Principal, e
 		User:           session.User,
 		permissions:    permissions,
 		environmentKey: environmentKey,
+		expiresAt:      session.ExpiresAt,
 	}, nil
 }
 
@@ -192,6 +195,25 @@ func (p *Principal) HasRole(roleID string) bool {
 		}
 	}
 	return false
+}
+
+func (p *Principal) PermissionKeys() []string {
+	if p == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(p.permissions))
+	for key := range p.permissions {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func (p *Principal) ExpiresAt() time.Time {
+	if p == nil {
+		return time.Time{}
+	}
+	return p.expiresAt
 }
 
 func (p *Principal) EnvironmentKey() []byte {

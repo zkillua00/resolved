@@ -147,6 +147,7 @@ Permissions in the initial catalog are:
 | `POST` | `/api/v1/auth/login` | public |
 | `POST` | `/api/v1/auth/logout` | authenticated |
 | `GET` | `/api/v1/auth/me` | authenticated |
+| `GET` | `/api/v1/ws` | authenticated WebSocket upgrade |
 | `GET` | `/api/v1/users` | `users.read` |
 | `POST` | `/api/v1/users` | `users.create` |
 | `GET` | `/api/v1/users/:id` | `users.read` |
@@ -184,6 +185,13 @@ Permissions in the initial catalog are:
 | `PATCH` | `/api/v1/workspaces/:workspace_id/environments/:environment_id/variables/:variable_id` | `environments.update` |
 | `DELETE` | `/api/v1/workspaces/:workspace_id/environments/:environment_id/variables/:variable_id` | `environments.delete` |
 | `PUT` | `/api/v1/workspaces/:workspace_id/environments/:environment_id/variables/:variable_id/value` | `environment_values.update` |
+
+The WebSocket endpoint and REST API share one Fiber application and listener.
+It publishes access-scoped `resource.changed` invalidations for user, role,
+workspace, collection, request, environment, and environment-variable
+mutations. Each event contains identifiers and scope, while the REST resource
+remains authoritative. User or role mutations close affected connections so a
+reconnect reloads the current account, role, permission, and session state.
 
 Role and permission assignment endpoints use replacement semantics: the sent
 set becomes the complete set. That makes administration deterministic and

@@ -6,6 +6,7 @@ import (
 	"unicode/utf8"
 
 	"resolved-server/internal/problem"
+	"resolved-server/internal/resourceevents"
 	"resolved-server/internal/security"
 
 	"github.com/google/uuid"
@@ -86,7 +87,8 @@ func (s *Service) CreateEnvironment(
 	if err := validateID("workspace_id", workspaceID); err != nil {
 		return Environment{}, err
 	}
-	if _, err := s.environmentWorkspace(ctx, actor, workspaceID, true); err != nil {
+	workspace, err := s.environmentWorkspace(ctx, actor, workspaceID, true)
+	if err != nil {
 		return Environment{}, err
 	}
 	name, err := normalizeName(input.Name)
@@ -103,6 +105,14 @@ func (s *Service) CreateEnvironment(
 	if err != nil {
 		return Environment{}, mapRepositoryError(err)
 	}
+	s.publishChange(resourceevents.Change{
+		Resource:      resourceevents.ResourceEnvironment,
+		Action:        resourceevents.ActionCreated,
+		ResourceID:    environment.ID,
+		WorkspaceID:   workspaceID,
+		EnvironmentID: environment.ID,
+		Audience:      ownerScopedAudience(workspaceAudience(workspace)),
+	})
 	return environment, nil
 }
 
@@ -115,7 +125,8 @@ func (s *Service) UpdateEnvironment(
 	if err := validateWorkspaceEnvironmentIDs(workspaceID, environmentID); err != nil {
 		return Environment{}, err
 	}
-	if _, err := s.environmentWorkspace(ctx, actor, workspaceID, true); err != nil {
+	workspace, err := s.environmentWorkspace(ctx, actor, workspaceID, true)
+	if err != nil {
 		return Environment{}, err
 	}
 	name, err := normalizeName(input.Name)
@@ -130,6 +141,14 @@ func (s *Service) UpdateEnvironment(
 	if err := s.hydrateEnvironmentValues(ctx, actor, workspaceID, environments); err != nil {
 		return Environment{}, err
 	}
+	s.publishChange(resourceevents.Change{
+		Resource:      resourceevents.ResourceEnvironment,
+		Action:        resourceevents.ActionUpdated,
+		ResourceID:    environment.ID,
+		WorkspaceID:   workspaceID,
+		EnvironmentID: environment.ID,
+		Audience:      ownerScopedAudience(workspaceAudience(workspace)),
+	})
 	return environments[0], nil
 }
 
@@ -141,12 +160,21 @@ func (s *Service) DeleteEnvironment(
 	if err := validateWorkspaceEnvironmentIDs(workspaceID, environmentID); err != nil {
 		return err
 	}
-	if _, err := s.environmentWorkspace(ctx, actor, workspaceID, true); err != nil {
+	workspace, err := s.environmentWorkspace(ctx, actor, workspaceID, true)
+	if err != nil {
 		return err
 	}
 	if err := s.repository.DeleteEnvironment(ctx, workspaceID, environmentID); err != nil {
 		return mapRepositoryError(err)
 	}
+	s.publishChange(resourceevents.Change{
+		Resource:      resourceevents.ResourceEnvironment,
+		Action:        resourceevents.ActionDeleted,
+		ResourceID:    environmentID,
+		WorkspaceID:   workspaceID,
+		EnvironmentID: environmentID,
+		Audience:      ownerScopedAudience(workspaceAudience(workspace)),
+	})
 	return nil
 }
 
@@ -159,7 +187,8 @@ func (s *Service) CreateEnvironmentVariable(
 	if err := validateWorkspaceEnvironmentIDs(workspaceID, environmentID); err != nil {
 		return EnvironmentVariable{}, err
 	}
-	if _, err := s.environmentWorkspace(ctx, actor, workspaceID, true); err != nil {
+	workspace, err := s.environmentWorkspace(ctx, actor, workspaceID, true)
+	if err != nil {
 		return EnvironmentVariable{}, err
 	}
 	key, err := normalizeEnvironmentVariableKey(input.Key)
@@ -193,6 +222,14 @@ func (s *Service) CreateEnvironmentVariable(
 		return EnvironmentVariable{}, mapRepositoryError(err)
 	}
 	variable.Value = input.Value
+	s.publishChange(resourceevents.Change{
+		Resource:      resourceevents.ResourceEnvironmentVariable,
+		Action:        resourceevents.ActionCreated,
+		ResourceID:    variable.ID,
+		WorkspaceID:   workspaceID,
+		EnvironmentID: environmentID,
+		Audience:      ownerScopedAudience(workspaceAudience(workspace)),
+	})
 	return variable, nil
 }
 
@@ -205,7 +242,8 @@ func (s *Service) UpdateEnvironmentVariable(
 	if err := validateWorkspaceEnvironmentVariableIDs(workspaceID, environmentID, variableID); err != nil {
 		return EnvironmentVariable{}, err
 	}
-	if _, err := s.environmentWorkspace(ctx, actor, workspaceID, true); err != nil {
+	workspace, err := s.environmentWorkspace(ctx, actor, workspaceID, true)
+	if err != nil {
 		return EnvironmentVariable{}, err
 	}
 	if input.Key == nil && input.Enabled == nil && input.Secret == nil {
@@ -229,7 +267,19 @@ func (s *Service) UpdateEnvironmentVariable(
 	if err != nil {
 		return EnvironmentVariable{}, mapRepositoryError(err)
 	}
-	return s.hydrateEnvironmentVariableValue(ctx, actor, workspaceID, variable)
+	variable, err = s.hydrateEnvironmentVariableValue(ctx, actor, workspaceID, variable)
+	if err != nil {
+		return EnvironmentVariable{}, err
+	}
+	s.publishChange(resourceevents.Change{
+		Resource:      resourceevents.ResourceEnvironmentVariable,
+		Action:        resourceevents.ActionUpdated,
+		ResourceID:    variable.ID,
+		WorkspaceID:   workspaceID,
+		EnvironmentID: environmentID,
+		Audience:      ownerScopedAudience(workspaceAudience(workspace)),
+	})
+	return variable, nil
 }
 
 func (s *Service) PutEnvironmentVariableValue(
@@ -257,6 +307,14 @@ func (s *Service) PutEnvironmentVariableValue(
 		return EnvironmentVariable{}, mapRepositoryError(err)
 	}
 	variable.Value = value
+	s.publishChange(resourceevents.Change{
+		Resource:      resourceevents.ResourceEnvironmentVariable,
+		Action:        resourceevents.ActionUpdated,
+		ResourceID:    variable.ID,
+		WorkspaceID:   workspaceID,
+		EnvironmentID: environmentID,
+		Audience:      resourceevents.Audience{UserIDs: []string{actor.UserID}},
+	})
 	return variable, nil
 }
 
@@ -268,12 +326,21 @@ func (s *Service) DeleteEnvironmentVariable(
 	if err := validateWorkspaceEnvironmentVariableIDs(workspaceID, environmentID, variableID); err != nil {
 		return err
 	}
-	if _, err := s.environmentWorkspace(ctx, actor, workspaceID, true); err != nil {
+	workspace, err := s.environmentWorkspace(ctx, actor, workspaceID, true)
+	if err != nil {
 		return err
 	}
 	if err := s.repository.DeleteEnvironmentVariable(ctx, workspaceID, environmentID, variableID); err != nil {
 		return mapRepositoryError(err)
 	}
+	s.publishChange(resourceevents.Change{
+		Resource:      resourceevents.ResourceEnvironmentVariable,
+		Action:        resourceevents.ActionDeleted,
+		ResourceID:    variableID,
+		WorkspaceID:   workspaceID,
+		EnvironmentID: environmentID,
+		Audience:      ownerScopedAudience(workspaceAudience(workspace)),
+	})
 	return nil
 }
 

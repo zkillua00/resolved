@@ -7,6 +7,7 @@ require (
 	github.com/gofiber/fiber/v3 v3.4.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
+	github.com/puzpuzpuz/xsync/v4 v4.4.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/term v0.45.0
 	gorm.io/driver/mysql v1.6.0

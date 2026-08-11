@@ -38,15 +38,16 @@ impl WorkspaceSwitchStatus {
     }
 }
 
-struct LoadedUpstreamWorkspace {
-    selected: Option<LoadedUpstreamWorkspaceView>,
-    summaries: Vec<UpstreamWorkspaceSummary>,
-    permission_keys: BTreeSet<String>,
+pub(super) struct LoadedUpstreamWorkspace {
+    pub(super) selected: Option<LoadedUpstreamWorkspaceView>,
+    pub(super) summaries: Vec<UpstreamWorkspaceSummary>,
+    pub(super) current_user: crate::core::LoginUser,
+    pub(super) permission_keys: BTreeSet<String>,
 }
 
-struct LoadedUpstreamWorkspaceView {
-    workspace: UpstreamWorkspaceView,
-    environments: Vec<UpstreamEnvironmentView>,
+pub(super) struct LoadedUpstreamWorkspaceView {
+    pub(super) workspace: UpstreamWorkspaceView,
+    pub(super) environments: Vec<UpstreamEnvironmentView>,
 }
 
 #[derive(Clone)]
@@ -54,6 +55,58 @@ pub(super) struct ActiveUpstreamWorkspace {
     pub(super) upstream_id: String,
     pub(super) workspace_id: String,
     pub(super) base_url: url::Url,
+}
+
+pub(super) async fn load_upstream_workspace(
+    client: &Client,
+    base_url: &url::Url,
+    bearer_token: &str,
+    preferred_workspace_id: Option<&str>,
+) -> Result<LoadedUpstreamWorkspace, String> {
+    let current_user = get_upstream_user(client, base_url, bearer_token)
+        .await
+        .map_err(|error| error.to_string())?;
+    let permission_keys = current_user.permission_keys();
+    let workspaces = if permission_keys.contains(crate::core::WORKSPACES_READ) {
+        list_upstream_workspaces(client, base_url, bearer_token)
+            .await
+            .map_err(|error| error.to_string())?
+    } else {
+        Vec::new()
+    };
+    let summaries = workspaces
+        .iter()
+        .map(UpstreamWorkspaceView::summary)
+        .collect::<Vec<_>>();
+    let selected_workspace = preferred_workspace_id
+        .and_then(|workspace_id| {
+            workspaces
+                .iter()
+                .find(|workspace| workspace.id == workspace_id)
+        })
+        .or_else(|| workspaces.first())
+        .cloned();
+    let selected = if let Some(workspace) = selected_workspace {
+        let environments = if permission_keys.contains(ENVIRONMENTS_READ) {
+            list_upstream_environments(client, base_url, bearer_token, &workspace.id)
+                .await
+                .map_err(|error| error.to_string())?
+        } else {
+            Vec::new()
+        };
+        Some(LoadedUpstreamWorkspaceView {
+            workspace,
+            environments,
+        })
+    } else {
+        None
+    };
+    Ok(LoadedUpstreamWorkspace {
+        selected,
+        summaries,
+        current_user,
+        permission_keys,
+    })
 }
 
 impl ApiTester {
@@ -923,6 +976,7 @@ impl ApiTester {
             cx,
         );
         self.workspace_switch_status = WorkspaceSwitchStatus::Idle;
+        self.stop_realtime();
         self.settings_notice = Some(format!("Opened {}.", self.active_workspace_name()));
         if self.workspace_tabs.active() == ActiveWorkspaceTab::Settings {
             self.refresh_server_management(window, cx);
@@ -977,52 +1031,13 @@ impl ApiTester {
             if credential.expires_at <= Utc::now() {
                 return Err("Log in to this server again.".to_owned());
             }
-            let current_user = get_upstream_user(&client, &base_url, credential.bearer_token())
-                .await
-                .map_err(|error| error.to_string())?;
-            let permission_keys = current_user.permission_keys();
-            let workspaces =
-                list_upstream_workspaces(&client, &base_url, credential.bearer_token())
-                    .await
-                    .map_err(|error| error.to_string())?;
-            let summaries = workspaces
-                .iter()
-                .map(UpstreamWorkspaceView::summary)
-                .collect::<Vec<_>>();
-            let selected_workspace = preferred_workspace_id
-                .as_deref()
-                .and_then(|workspace_id| {
-                    workspaces
-                        .iter()
-                        .find(|workspace| workspace.id == workspace_id)
-                })
-                .or_else(|| workspaces.first())
-                .cloned();
-            let selected = if let Some(workspace) = selected_workspace {
-                let environments = if permission_keys.contains(ENVIRONMENTS_READ) {
-                    list_upstream_environments(
-                        &client,
-                        &base_url,
-                        credential.bearer_token(),
-                        &workspace.id,
-                    )
-                    .await
-                    .map_err(|error| error.to_string())?
-                } else {
-                    Vec::new()
-                };
-                Some(LoadedUpstreamWorkspaceView {
-                    workspace,
-                    environments,
-                })
-            } else {
-                None
-            };
-            Ok(LoadedUpstreamWorkspace {
-                selected,
-                summaries,
-                permission_keys,
-            })
+            load_upstream_workspace(
+                &client,
+                &base_url,
+                credential.bearer_token(),
+                preferred_workspace_id.as_deref(),
+            )
+            .await
         });
         self.workspace_switch_abort_handle = Some(task.abort_handle());
         cx.notify();
@@ -1142,6 +1157,7 @@ impl ApiTester {
                     environments,
                 }),
                 summaries,
+                current_user,
                 permission_keys,
             })
         });
@@ -1169,7 +1185,7 @@ impl ApiTester {
         .detach();
     }
 
-    fn finish_upstream_switch(
+    pub(super) fn finish_upstream_switch(
         &mut self,
         upstream_id: String,
         loaded: LoadedUpstreamWorkspace,
@@ -1190,6 +1206,11 @@ impl ApiTester {
             .selected
             .as_ref()
             .map(|loaded| loaded.workspace.id.clone());
+        profile.user_id.clone_from(&loaded.current_user.id);
+        profile.email.clone_from(&loaded.current_user.email);
+        profile
+            .display_name
+            .clone_from(&loaded.current_user.display_name);
         profile.replace_permissions(loaded.permission_keys);
         profile.replace_workspaces(loaded.summaries, selected_workspace_id.clone());
         let Some(selected) = loaded.selected else {
@@ -1286,6 +1307,7 @@ impl ApiTester {
         );
         self.workspace_switch_status = WorkspaceSwitchStatus::Idle;
         self.settings_notice = Some(format!("Opened {workspace_name}."));
+        self.start_realtime_for_active_upstream(window, cx);
         if self.workspace_tabs.active() == ActiveWorkspaceTab::Settings {
             self.refresh_server_management(window, cx);
         }

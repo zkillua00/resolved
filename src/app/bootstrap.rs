@@ -604,6 +604,7 @@ impl ApiTester {
             },
         );
         let quit_subscription = cx.on_app_quit(|this, cx| {
+            this.stop_realtime();
             this.flush_local_state(cx);
             async {}
         });
@@ -667,6 +668,10 @@ impl ApiTester {
             workspace_switch_status: WorkspaceSwitchStatus::Idle,
             workspace_switch_generation: 0,
             workspace_switch_abort_handle: None,
+            realtime_generation: 0,
+            realtime_abort_handle: None,
+            realtime_refresh_generation: 0,
+            realtime_refresh_abort_handle: None,
             workspace_name,
             sidebar_tab: SidebarTab::Collections,
             navigation_compact,

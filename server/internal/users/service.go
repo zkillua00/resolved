@@ -8,6 +8,7 @@ import (
 
 	"resolved-server/internal/identity"
 	"resolved-server/internal/problem"
+	"resolved-server/internal/resourceevents"
 	"resolved-server/internal/security"
 
 	"github.com/google/uuid"
@@ -21,6 +22,7 @@ type Service struct {
 	sessionKeys         *security.SessionEnvironmentKeys
 	firstOwnerSetup     identity.FirstOwnerSetup
 	passwordChangeSetup PasswordChangeSetup
+	events              resourceevents.Emitter
 }
 
 type ServiceOption func(*Service)
@@ -54,6 +56,12 @@ func WithPasswordChangeSetup(setup PasswordChangeSetup) ServiceOption {
 	}
 }
 
+func WithEvents(events resourceevents.Emitter) ServiceOption {
+	return func(service *Service) {
+		service.events = events
+	}
+}
+
 func NewService(
 	repository *identity.Repository,
 	hasher *security.PasswordHasher,
@@ -82,6 +90,7 @@ func (s *Service) BootstrapOwner(ctx context.Context, input CreateInput) (identi
 	if err != nil {
 		return identity.User{}, mapRepositoryError(err)
 	}
+	s.publishUserChange(resourceevents.ActionCreated, created.ID)
 	return created, nil
 }
 
@@ -97,6 +106,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (identity.User,
 	if err != nil {
 		return identity.User{}, mapRepositoryError(err)
 	}
+	s.publishUserChange(resourceevents.ActionCreated, created.ID)
 	return created, nil
 }
 
@@ -186,6 +196,7 @@ func (s *Service) Update(ctx context.Context, id string, input UpdateInput) (ide
 	if input.Password != nil || input.Active != nil && !*input.Active {
 		s.sessionKeys.DeleteUser(id)
 	}
+	s.publishUserChange(resourceevents.ActionUpdated, user.ID)
 	return user, nil
 }
 
@@ -200,7 +211,20 @@ func (s *Service) ReplaceRoles(ctx context.Context, id string, roleIDs []string)
 	if err != nil {
 		return identity.User{}, mapRepositoryError(err)
 	}
+	s.publishUserChange(resourceevents.ActionUpdated, user.ID)
 	return user, nil
+}
+
+func (s *Service) publishUserChange(action resourceevents.Action, userID string) {
+	resourceevents.Emit(s.events, resourceevents.Change{
+		Resource:   resourceevents.ResourceUser,
+		Action:     action,
+		ResourceID: userID,
+		Audience: resourceevents.Audience{
+			UserIDs:        []string{userID},
+			PermissionKeys: []string{identity.PermissionUsersRead, identity.PermissionRolesRead},
+		},
+	})
 }
 
 func (s *Service) newUser(input CreateInput) (identity.User, error) {

@@ -8,13 +8,17 @@ import (
 
 	"resolved-server/internal/identity"
 	"resolved-server/internal/problem"
+	"resolved-server/internal/resourceevents"
 
 	"github.com/google/uuid"
 )
 
 type Service struct {
 	repository *identity.Repository
+	events     resourceevents.Emitter
 }
+
+type ServiceOption func(*Service)
 
 type CreateInput struct {
 	Name            string
@@ -28,8 +32,18 @@ type UpdateInput struct {
 	Description *string
 }
 
-func NewService(repository *identity.Repository) *Service {
-	return &Service{repository: repository}
+func WithEvents(events resourceevents.Emitter) ServiceOption {
+	return func(service *Service) {
+		service.events = events
+	}
+}
+
+func NewService(repository *identity.Repository, options ...ServiceOption) *Service {
+	service := &Service{repository: repository}
+	for _, option := range options {
+		option(service)
+	}
+	return service
 }
 
 func (s *Service) List(ctx context.Context) ([]identity.Role, error) {
@@ -68,6 +82,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (identity.Role,
 	if err != nil {
 		return identity.Role{}, mapRepositoryError(err)
 	}
+	s.publishRoleChange(resourceevents.ActionCreated, created.ID)
 	return created, nil
 }
 
@@ -92,6 +107,7 @@ func (s *Service) Update(ctx context.Context, id string, input UpdateInput) (ide
 	if err != nil {
 		return identity.Role{}, mapRepositoryError(err)
 	}
+	s.publishRoleChange(resourceevents.ActionUpdated, role.ID)
 	return role, nil
 }
 
@@ -103,7 +119,20 @@ func (s *Service) ReplacePermissions(ctx context.Context, id string, keys []stri
 	if err != nil {
 		return identity.Role{}, mapRepositoryError(err)
 	}
+	s.publishRoleChange(resourceevents.ActionUpdated, role.ID)
 	return role, nil
+}
+
+func (s *Service) publishRoleChange(action resourceevents.Action, roleID string) {
+	resourceevents.Emit(s.events, resourceevents.Change{
+		Resource:   resourceevents.ResourceRole,
+		Action:     action,
+		ResourceID: roleID,
+		Audience: resourceevents.Audience{
+			RoleIDs:        []string{roleID},
+			PermissionKeys: []string{identity.PermissionRolesRead},
+		},
+	})
 }
 
 func (s *Service) ListPermissions(ctx context.Context) ([]identity.Permission, error) {

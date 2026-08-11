@@ -92,6 +92,30 @@ email address.
 The returned token is shown once. The database stores only its SHA-256 digest.
 Send it as `Authorization: Bearer <token>`.
 
+Authenticated clients can connect to `GET /api/v1/ws` with the same bearer
+token to receive access-scoped resource changes. Messages identify the changed
+resource and its scope:
+
+```json
+{
+  "command": "resource.changed",
+  "data": {
+    "event_id": "8da3fa87-5ddc-49fe-9708-b00bb3d00818",
+    "resource": "request",
+    "action": "updated",
+    "resource_id": "67322208-ae90-4d43-a182-90183a393086",
+    "workspace_id": "352292f8-7db2-44c6-9828-7e3ab57f2edb",
+    "collection_id": "71ce86da-f204-47a9-bc91-3d16a46613f9",
+    "occurred_at": "2026-08-11T10:00:00Z"
+  }
+}
+```
+
+The message signals that affected state should be fetched again through the
+REST API; it is not a replacement for the resource representation. Events are
+sent only to authenticated connections whose current grants or permissions
+cover the affected resource.
+
 `GET /api/v1/workspaces` returns the workspaces visible to the authenticated
 user. A direct workspace grant exposes its complete collection tree. A direct
 collection grant exposes that collection and its descendants, plus only the

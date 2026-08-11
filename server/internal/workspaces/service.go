@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"resolved-server/internal/problem"
+	"resolved-server/internal/resourceevents"
 	"resolved-server/internal/security"
 
 	"github.com/google/uuid"
@@ -17,7 +18,10 @@ import (
 type Service struct {
 	repository        *Repository
 	environmentCipher *security.EnvironmentCipher
+	events            resourceevents.Emitter
 }
+
+type ServiceOption func(*Service)
 
 type Actor struct {
 	UserID         string
@@ -52,8 +56,22 @@ type UpdateSavedRequestInput struct {
 	Definition json.RawMessage
 }
 
-func NewService(repository *Repository, environmentCipher *security.EnvironmentCipher) *Service {
-	return &Service{repository: repository, environmentCipher: environmentCipher}
+func WithEvents(events resourceevents.Emitter) ServiceOption {
+	return func(service *Service) {
+		service.events = events
+	}
+}
+
+func NewService(
+	repository *Repository,
+	environmentCipher *security.EnvironmentCipher,
+	options ...ServiceOption,
+) *Service {
+	service := &Service{repository: repository, environmentCipher: environmentCipher}
+	for _, option := range options {
+		option(service)
+	}
+	return service
 }
 
 func (s *Service) List(ctx context.Context, actor Actor) ([]Workspace, error) {
@@ -96,6 +114,13 @@ func (s *Service) Create(ctx context.Context, actor Actor, input CreateWorkspace
 	if err != nil {
 		return Workspace{}, mapRepositoryError(err)
 	}
+	s.publishChange(resourceevents.Change{
+		Resource:    resourceevents.ResourceWorkspace,
+		Action:      resourceevents.ActionCreated,
+		ResourceID:  created.ID,
+		WorkspaceID: created.ID,
+		Audience:    ownerScopedAudience(workspaceAudience(created)),
+	})
 	return created, nil
 }
 
@@ -123,6 +148,16 @@ func (s *Service) Update(
 	if err != nil {
 		return Workspace{}, mapRepositoryError(err)
 	}
+	s.publishChange(resourceevents.Change{
+		Resource:    resourceevents.ResourceWorkspace,
+		Action:      resourceevents.ActionUpdated,
+		ResourceID:  updated.ID,
+		WorkspaceID: updated.ID,
+		Audience: ownerScopedAudience(
+			workspaceAudience(workspace),
+			workspaceAudience(updated),
+		),
+	})
 	return updated, nil
 }
 
@@ -149,6 +184,16 @@ func (s *Service) ReplaceWorkspaceUsers(
 	if err != nil {
 		return Workspace{}, mapRepositoryError(err)
 	}
+	s.publishChange(resourceevents.Change{
+		Resource:    resourceevents.ResourceWorkspace,
+		Action:      resourceevents.ActionUpdated,
+		ResourceID:  updated.ID,
+		WorkspaceID: updated.ID,
+		Audience: ownerScopedAudience(
+			workspaceAudience(workspace),
+			workspaceAudience(updated),
+		),
+	})
 	return updated, nil
 }
 
@@ -166,6 +211,13 @@ func (s *Service) Delete(ctx context.Context, actor Actor, id string) error {
 	if err := s.repository.DeleteWorkspace(ctx, id); err != nil {
 		return mapRepositoryError(err)
 	}
+	s.publishChange(resourceevents.Change{
+		Resource:    resourceevents.ResourceWorkspace,
+		Action:      resourceevents.ActionDeleted,
+		ResourceID:  id,
+		WorkspaceID: id,
+		Audience:    ownerScopedAudience(workspaceAudience(workspace)),
+	})
 	return nil
 }
 
@@ -236,6 +288,18 @@ func (s *Service) CreateCollection(
 	if err != nil {
 		return Collection{}, mapRepositoryError(err)
 	}
+	audience := workspaceDirectAudience(workspace)
+	if input.ParentCollectionID != nil {
+		audience = collectionAudience(workspace, *input.ParentCollectionID, false)
+	}
+	s.publishChange(resourceevents.Change{
+		Resource:     resourceevents.ResourceCollection,
+		Action:       resourceevents.ActionCreated,
+		ResourceID:   created.ID,
+		WorkspaceID:  workspaceID,
+		CollectionID: created.ID,
+		Audience:     ownerScopedAudience(audience),
+	})
 	return created, nil
 }
 
@@ -266,6 +330,16 @@ func (s *Service) UpdateCollection(
 	if err != nil {
 		return Collection{}, mapRepositoryError(err)
 	}
+	s.publishChange(resourceevents.Change{
+		Resource:     resourceevents.ResourceCollection,
+		Action:       resourceevents.ActionUpdated,
+		ResourceID:   updated.ID,
+		WorkspaceID:  workspaceID,
+		CollectionID: updated.ID,
+		Audience: ownerScopedAudience(
+			collectionAudience(workspace, collectionID, true),
+		),
+	})
 	return updated, nil
 }
 
@@ -309,6 +383,23 @@ func (s *Service) MoveCollection(
 	if err != nil {
 		return Collection{}, mapRepositoryError(err)
 	}
+	audience := collectionAudience(workspace, collectionID, true)
+	if parentCollectionID == nil {
+		audience = unionUserIDs(audience, workspaceDirectAudience(workspace))
+	} else {
+		audience = unionUserIDs(
+			audience,
+			collectionAudience(workspace, *parentCollectionID, false),
+		)
+	}
+	s.publishChange(resourceevents.Change{
+		Resource:     resourceevents.ResourceCollection,
+		Action:       resourceevents.ActionUpdated,
+		ResourceID:   moved.ID,
+		WorkspaceID:  workspaceID,
+		CollectionID: moved.ID,
+		Audience:     ownerScopedAudience(audience),
+	})
 	return moved, nil
 }
 
@@ -338,6 +429,17 @@ func (s *Service) ReplaceCollectionUsers(
 	if err != nil {
 		return Collection{}, mapRepositoryError(err)
 	}
+	s.publishChange(resourceevents.Change{
+		Resource:     resourceevents.ResourceCollection,
+		Action:       resourceevents.ActionUpdated,
+		ResourceID:   updated.ID,
+		WorkspaceID:  workspaceID,
+		CollectionID: updated.ID,
+		Audience: ownerScopedAudience(
+			collectionAudience(workspace, collectionID, true),
+			userIDs,
+		),
+	})
 	return updated, nil
 }
 
@@ -362,6 +464,16 @@ func (s *Service) DeleteCollection(
 	if err := s.repository.DeleteCollection(ctx, workspaceID, collectionID); err != nil {
 		return mapRepositoryError(err)
 	}
+	s.publishChange(resourceevents.Change{
+		Resource:     resourceevents.ResourceCollection,
+		Action:       resourceevents.ActionDeleted,
+		ResourceID:   collectionID,
+		WorkspaceID:  workspaceID,
+		CollectionID: collectionID,
+		Audience: ownerScopedAudience(
+			collectionAudience(workspace, collectionID, true),
+		),
+	})
 	return nil
 }
 
@@ -427,6 +539,16 @@ func (s *Service) CreateSavedRequest(
 	if err != nil {
 		return SavedRequest{}, mapRepositoryError(err)
 	}
+	s.publishChange(resourceevents.Change{
+		Resource:     resourceevents.ResourceRequest,
+		Action:       resourceevents.ActionCreated,
+		ResourceID:   created.ID,
+		WorkspaceID:  workspaceID,
+		CollectionID: created.CollectionID,
+		Audience: ownerScopedAudience(
+			collectionAudience(workspace, collectionID, false),
+		),
+	})
 	return created, nil
 }
 
@@ -463,6 +585,16 @@ func (s *Service) UpdateSavedRequest(
 	if err != nil {
 		return SavedRequest{}, mapRepositoryError(err)
 	}
+	s.publishChange(resourceevents.Change{
+		Resource:     resourceevents.ResourceRequest,
+		Action:       resourceevents.ActionUpdated,
+		ResourceID:   updated.ID,
+		WorkspaceID:  workspaceID,
+		CollectionID: updated.CollectionID,
+		Audience: ownerScopedAudience(
+			collectionAudience(workspace, collectionID, false),
+		),
+	})
 	return updated, nil
 }
 
@@ -497,6 +629,17 @@ func (s *Service) MoveSavedRequest(
 	if err != nil {
 		return SavedRequest{}, mapRepositoryError(err)
 	}
+	s.publishChange(resourceevents.Change{
+		Resource:     resourceevents.ResourceRequest,
+		Action:       resourceevents.ActionUpdated,
+		ResourceID:   moved.ID,
+		WorkspaceID:  workspaceID,
+		CollectionID: moved.CollectionID,
+		Audience: ownerScopedAudience(
+			collectionAudience(workspace, collectionID, false),
+			collectionAudience(workspace, targetCollectionID, false),
+		),
+	})
 	return moved, nil
 }
 
@@ -521,6 +664,16 @@ func (s *Service) DeleteSavedRequest(
 	if err := s.repository.DeleteSavedRequest(ctx, workspaceID, collectionID, requestID); err != nil {
 		return mapRepositoryError(err)
 	}
+	s.publishChange(resourceevents.Change{
+		Resource:     resourceevents.ResourceRequest,
+		Action:       resourceevents.ActionDeleted,
+		ResourceID:   requestID,
+		WorkspaceID:  workspaceID,
+		CollectionID: collectionID,
+		Audience: ownerScopedAudience(
+			collectionAudience(workspace, collectionID, false),
+		),
+	})
 	return nil
 }
 

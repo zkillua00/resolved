@@ -2,6 +2,7 @@ mod database;
 mod format;
 mod history;
 mod interchange;
+mod realtime;
 mod request;
 mod request_tabs;
 mod script;
@@ -23,6 +24,7 @@ pub use history::{HistoryEntry, REDACTED_VALUE, RequestHistory};
 pub use interchange::{
     ImportBundle, InterchangeFormat, MAX_INTERCHANGE_BYTES, export_request, import_requests,
 };
+pub use realtime::{RealtimeResourceChange, RealtimeSignal, watch_upstream_changes};
 pub use request::{
     BodyField, BodyFieldKind, BodyMode, HeaderEntry, RawBodyLanguage, RequestDraft, RequestError,
     RequestTask, ResponseData, STANDARD_HTTP_METHODS, build_client, spawn_request,

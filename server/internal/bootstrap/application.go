@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 
+	"resolved-server/eventsystem"
 	"resolved-server/internal/auth"
 	"resolved-server/internal/config"
 	"resolved-server/internal/database"
 	"resolved-server/internal/identity"
+	"resolved-server/internal/realtime"
 	"resolved-server/internal/roles"
 	"resolved-server/internal/security"
 	"resolved-server/internal/server"
@@ -22,6 +24,7 @@ import (
 type Application struct {
 	Server      *server.Server
 	Users       *users.Service
+	events      *eventsystem.EventListener
 	sqlDatabase *sql.DB
 }
 
@@ -65,6 +68,10 @@ func New(cfg config.Config, accessLog io.Writer) (*Application, error) {
 		closeOnError()
 		return nil, fmt.Errorf("initialize authentication: %w", err)
 	}
+	events := eventsystem.NewEventListener()
+	for range 3 {
+		events.StartNewEventLoop()
+	}
 	usersService := users.NewService(
 		repository,
 		hasher,
@@ -79,10 +86,16 @@ func New(cfg config.Config, accessLog io.Writer) (*Application, error) {
 		) error {
 			return workspaces.RekeyEnvironmentVariableValues(ctx, tx, environmentCipher, userID, oldKey, newKey)
 		}),
+		users.WithEvents(events),
 	)
-	rolesService := roles.NewService(repository)
+	rolesService := roles.NewService(repository, roles.WithEvents(events))
 	workspaceRepository := workspaces.NewRepository(db)
-	workspacesService := workspaces.NewService(workspaceRepository, environmentCipher)
+	workspacesService := workspaces.NewService(
+		workspaceRepository,
+		environmentCipher,
+		workspaces.WithEvents(events),
+	)
+	realtimePublisher := realtime.New(events)
 
 	authHandler := auth.NewHandler(authService)
 	usersHandler := users.NewHandler(usersService)
@@ -93,15 +106,20 @@ func New(cfg config.Config, accessLog io.Writer) (*Application, error) {
 		accessLog,
 		server.WithIdentity(authService, authHandler, usersHandler, rolesHandler),
 		server.WithWorkspaces(authService, workspacesHandler),
+		server.WithRealtime(authService, realtimePublisher),
 	)
 
 	return &Application{
 		Server:      httpServer,
 		Users:       usersService,
+		events:      events,
 		sqlDatabase: sqlDatabase,
 	}, nil
 }
 
 func (a *Application) Close() error {
+	if a.events != nil {
+		a.events.Stop()
+	}
 	return a.sqlDatabase.Close()
 }

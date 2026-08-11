@@ -50,3 +50,7 @@ func (m *MockWebsocketConnection) Close() error {
 	m.closed.Store(true)
 	return nil
 }
+
+func (m *MockWebsocketConnection) GetRemoteAddr() string {
+	return "mock"
+}

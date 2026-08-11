@@ -35,9 +35,6 @@ func MakeGorillaWebsocketServer() WebsocketServer {
 		upgrader: &gorillaWebsocket.Upgrader{
 			EnableCompression: true,
 			HandshakeTimeout:  3 * time.Second,
-			CheckOrigin: func(r *http.Request) bool {
-				return true
-			},
 		},
 		baseWebsocketServer: NewDefaultBaseWebsocketServerImplementation(),
 	}
