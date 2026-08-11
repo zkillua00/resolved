@@ -31,6 +31,33 @@ is wrong. Login identifiers are opaque, case-insensitive strings; deployments
 do not require them to be email addresses.
 The public login route has a per-process sliding-window rate limit.
 
+At login, the server derives a separate 256-bit environment key with Argon2id.
+Its input is a keyed HMAC over the authenticated password and user ID using the
+deployment's `RESOLVED_ENCRYPTION_SECRET`. A second domain-separated HMAC
+deterministically supplies the user-specific Argon2id salt. The same password,
+user ID, and deployment secret therefore produce the same key without storing
+the key, a salt, or a wrapped/encrypted copy of the key anywhere.
+
+The derived key is held only in process memory and is bound to the hash of the
+bearer token and the authenticated user. It is removed at logout, expiry,
+password change, or account deactivation. Server startup revokes database
+sessions from the previous process because their in-memory keys no longer
+exist. AES-256-GCM encrypts each environment value with the user ID and variable
+ID as authenticated associated data; its random nonce is stored with the
+encrypted value bytes.
+
+A password change derives the new key and transactionally re-encrypts the
+user's values using a current key from one of that user's active in-memory
+sessions. If values exist but that user has no active session key, the update is
+rejected instead of making the values unreadable. This is server-side
+encryption, not end-to-end or zero-knowledge encryption: the running server
+receives the password and plaintext values, and a process-memory compromise can
+expose keys for active users. A database-only leak contains encrypted values,
+password hashes, and token hashes, but no environment decryption key. The
+deployment secret has no default, must contain at least 32 bytes, and must be
+kept stable and backed up. Losing or replacing it prevents future logins from
+deriving keys for existing values.
+
 ## Workspace and collection access
 
 Deployment-wide RBAC and resource access are separate checks. A role permission
@@ -65,6 +92,29 @@ its destination; moving to the root requires workspace access. Moves are
 transactional and reject self/descendant cycles. Deleting a collection deletes
 its complete subtree.
 
+## Workspace environments and per-user values
+
+Environment definitions belong to a workspace, alongside its collection tree.
+An environment row stores its shared name and order. An environment-variable
+row stores only the shared key, order, `enabled` state, and `secret` state. It
+does not have a value column. A separate table uses
+`(environment_variable_id, user_id)` as its key and stores only authenticated
+ciphertext.
+
+Users with any effective access inside a workspace may read its shared
+environment definitions and their own values when RBAC also grants
+`environments.read`. Creating, renaming, or deleting definitions additionally
+requires a direct workspace grant (the Owner role bypasses grants), mirroring
+other workspace-wide mutations. `environment_values.update` writes only the
+authenticated user's row; no route accepts a target user ID. A newly shared key
+therefore appears to other users with an empty value until each user supplies
+their own value. Renaming the shared key preserves every user's value because
+values are attached to the variable ID.
+
+All environment values are encrypted at rest, including variables whose
+`secret` display flag is false. The flag is shared UI metadata and is not a
+switch for database encryption.
+
 ## Bootstrap and built-in data
 
 Migrations seed a fixed permission catalog and an immutable `Owner` system
@@ -86,6 +136,9 @@ Permissions in the initial catalog are:
 - `collections.read`, `collections.create`, `collections.update`,
   `collections.delete`, `collections.users.assign`
 - `requests.read`, `requests.create`, `requests.update`, `requests.delete`
+- `environments.read`, `environments.create`, `environments.update`,
+  `environments.delete`
+- `environment_values.update`
 
 ## HTTP surface
 
@@ -121,6 +174,15 @@ Permissions in the initial catalog are:
 | `GET` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/requests/:request_id` | `requests.read` |
 | `PATCH` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/requests/:request_id` | `requests.update` |
 | `DELETE` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/requests/:request_id` | `requests.delete` |
+| `GET` | `/api/v1/workspaces/:workspace_id/environments` | `environments.read` |
+| `POST` | `/api/v1/workspaces/:workspace_id/environments` | `environments.create` |
+| `GET` | `/api/v1/workspaces/:workspace_id/environments/:environment_id` | `environments.read` |
+| `PATCH` | `/api/v1/workspaces/:workspace_id/environments/:environment_id` | `environments.update` |
+| `DELETE` | `/api/v1/workspaces/:workspace_id/environments/:environment_id` | `environments.delete` |
+| `POST` | `/api/v1/workspaces/:workspace_id/environments/:environment_id/variables` | `environments.update` |
+| `PATCH` | `/api/v1/workspaces/:workspace_id/environments/:environment_id/variables/:variable_id` | `environments.update` |
+| `DELETE` | `/api/v1/workspaces/:workspace_id/environments/:environment_id/variables/:variable_id` | `environments.delete` |
+| `PUT` | `/api/v1/workspaces/:workspace_id/environments/:environment_id/variables/:variable_id/value` | `environment_values.update` |
 
 Role and permission assignment endpoints use replacement semantics: the sent
 set becomes the complete set. That makes administration deterministic and
@@ -146,6 +208,10 @@ dialect-specific recursive SQL, so the same behavior is used with every
 supported database. SQLite is opened with foreign keys, a busy timeout, and WAL
 in the default DSN. Remote database TLS is controlled by its DSN and should not
 be disabled outside a trusted local network.
+
+`RESOLVED_ENCRYPTION_SECRET` is independent of the database DSN password. Use a
+random deployment secret of at least 32 bytes, inject it through the process
+environment or secret manager, and include it in encrypted deployment backups.
 
 ## Not provided
 

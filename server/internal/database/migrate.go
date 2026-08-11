@@ -22,6 +22,9 @@ func MigrateAndSeed(db *gorm.DB) error {
 		&workspaces.SavedRequest{},
 		&workspaces.WorkspaceUser{},
 		&workspaces.CollectionUser{},
+		&workspaces.Environment{},
+		&workspaces.EnvironmentVariable{},
+		&workspaces.EnvironmentVariableValue{},
 	); err != nil {
 		return fmt.Errorf("migrate server schema: %w", err)
 	}

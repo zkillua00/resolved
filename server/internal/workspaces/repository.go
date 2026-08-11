@@ -124,6 +124,18 @@ func (r *Repository) DeleteWorkspace(ctx context.Context, id string) error {
 		if err := tx.Where("workspace_id = ?", id).Delete(&WorkspaceUser{}).Error; err != nil {
 			return err
 		}
+		environmentIDs := tx.Model(&Environment{}).Select("id").Where("workspace_id = ?", id)
+		variableIDs := tx.Model(&EnvironmentVariable{}).Select("id").Where("environment_id IN (?)", environmentIDs)
+		if err := tx.Where("environment_variable_id IN (?)", variableIDs).
+			Delete(&EnvironmentVariableValue{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("environment_id IN (?)", environmentIDs).Delete(&EnvironmentVariable{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("workspace_id = ?", id).Delete(&Environment{}).Error; err != nil {
+			return err
+		}
 		return tx.Delete(&Workspace{}, "id = ?", id).Error
 	})
 }

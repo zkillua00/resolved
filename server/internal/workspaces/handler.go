@@ -623,7 +623,8 @@ func (h *Handler) DeleteSavedRequestController() fiber.Handler {
 func actorFromContext(c fiber.Ctx) Actor {
 	principal := auth.PrincipalFromContext(c)
 	return Actor{
-		UserID: principal.User.ID,
-		Owner:  principal.HasRole(identity.OwnerRoleID),
+		UserID:         principal.User.ID,
+		Owner:          principal.HasRole(identity.OwnerRoleID),
+		EnvironmentKey: principal.EnvironmentKey(),
 	}
 }

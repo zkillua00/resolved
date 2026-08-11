@@ -15,9 +15,10 @@ const (
 )
 
 type Config struct {
-	Address    string
-	Database   Database
-	SessionTTL time.Duration
+	Address          string
+	Database         Database
+	SessionTTL       time.Duration
+	EncryptionSecret string
 }
 
 type Database struct {
@@ -49,13 +50,19 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("RESOLVED_SERVER_ADDRESS cannot be empty")
 	}
 
+	encryptionSecret := os.Getenv("RESOLVED_ENCRYPTION_SECRET")
+	if len([]byte(encryptionSecret)) < 32 {
+		return Config{}, fmt.Errorf("RESOLVED_ENCRYPTION_SECRET must contain at least 32 bytes")
+	}
+
 	return Config{
 		Address: address,
 		Database: Database{
 			Driver: driver,
 			DSN:    dsn,
 		},
-		SessionTTL: ttl,
+		SessionTTL:       ttl,
+		EncryptionSecret: encryptionSecret,
 	}, nil
 }
 

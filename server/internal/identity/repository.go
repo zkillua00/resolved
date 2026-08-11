@@ -24,6 +24,10 @@ type UserChanges struct {
 	Active       *bool
 }
 
+// BeforePasswordChange runs inside the same transaction as the password,
+// environment-value re-encryption, and session updates.
+type BeforePasswordChange func(context.Context, *gorm.DB, User, *UserChanges) error
+
 type RoleChanges struct {
 	Name           *string
 	NormalizedName *string
@@ -142,7 +146,12 @@ func (r *Repository) CreateFirstOwner(
 	return r.GetUser(ctx, user.ID)
 }
 
-func (r *Repository) UpdateUser(ctx context.Context, id string, changes UserChanges) (User, error) {
+func (r *Repository) UpdateUser(
+	ctx context.Context,
+	id string,
+	changes UserChanges,
+	passwordChangeSetups ...BeforePasswordChange,
+) (User, error) {
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var user User
 		if err := tx.Preload("Roles").First(&user, "id = ?", id).Error; err != nil {
@@ -155,6 +164,16 @@ func (r *Repository) UpdateUser(ctx context.Context, id string, changes UserChan
 		if changes.Active != nil && !*changes.Active && user.Active && hasOwnerRole(user.Roles) {
 			if err := ensureAnotherActiveOwner(tx, user.ID); err != nil {
 				return err
+			}
+		}
+		if changes.PasswordHash != nil {
+			for _, setup := range passwordChangeSetups {
+				if setup == nil {
+					continue
+				}
+				if err := setup(ctx, tx, user, &changes); err != nil {
+					return fmt.Errorf("prepare password change: %w", err)
+				}
 			}
 		}
 
@@ -362,6 +381,12 @@ func (r *Repository) FindSessionByHash(ctx context.Context, hash string) (Sessio
 
 func (r *Repository) DeleteSessionByHash(ctx context.Context, hash string) error {
 	return r.db.WithContext(ctx).Where("token_hash = ?", hash).Delete(&Session{}).Error
+}
+
+func (r *Repository) DeleteAllSessions(ctx context.Context) error {
+	return r.db.WithContext(ctx).
+		Session(&gorm.Session{AllowGlobalUpdate: true}).
+		Delete(&Session{}).Error
 }
 
 func preloadUser(db *gorm.DB) *gorm.DB {

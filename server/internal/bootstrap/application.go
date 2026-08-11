@@ -15,6 +15,8 @@ import (
 	"resolved-server/internal/server"
 	"resolved-server/internal/users"
 	"resolved-server/internal/workspaces"
+
+	"gorm.io/gorm"
 )
 
 type Application struct {
@@ -46,8 +48,19 @@ func New(cfg config.Config, accessLog io.Writer) (*Application, error) {
 	}
 
 	repository := identity.NewRepository(db)
-	hasher := security.NewPasswordHasher(security.DefaultPasswordParams())
-	authService, err := auth.NewService(repository, hasher, cfg.SessionTTL)
+	if err := repository.DeleteAllSessions(context.Background()); err != nil {
+		closeOnError()
+		return nil, fmt.Errorf("invalidate sessions from previous server process: %w", err)
+	}
+	passwordParams := security.DefaultPasswordParams()
+	hasher := security.NewPasswordHasher(passwordParams)
+	environmentCipher, err := security.NewEnvironmentCipher(cfg.EncryptionSecret, passwordParams)
+	if err != nil {
+		closeOnError()
+		return nil, fmt.Errorf("initialize environment encryption: %w", err)
+	}
+	sessionKeys := security.NewSessionEnvironmentKeys()
+	authService, err := auth.NewService(repository, hasher, environmentCipher, sessionKeys, cfg.SessionTTL)
 	if err != nil {
 		closeOnError()
 		return nil, fmt.Errorf("initialize authentication: %w", err)
@@ -55,11 +68,21 @@ func New(cfg config.Config, accessLog io.Writer) (*Application, error) {
 	usersService := users.NewService(
 		repository,
 		hasher,
+		environmentCipher,
+		sessionKeys,
 		users.WithFirstOwnerSetup(workspaces.SetupFirstOwnerWorkspace),
+		users.WithPasswordChangeSetup(func(
+			ctx context.Context,
+			tx *gorm.DB,
+			userID string,
+			oldKey, newKey []byte,
+		) error {
+			return workspaces.RekeyEnvironmentVariableValues(ctx, tx, environmentCipher, userID, oldKey, newKey)
+		}),
 	)
 	rolesService := roles.NewService(repository)
 	workspaceRepository := workspaces.NewRepository(db)
-	workspacesService := workspaces.NewService(workspaceRepository)
+	workspacesService := workspaces.NewService(workspaceRepository, environmentCipher)
 
 	authHandler := auth.NewHandler(authService)
 	usersHandler := users.NewHandler(usersService)

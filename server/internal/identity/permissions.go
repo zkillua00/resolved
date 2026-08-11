@@ -29,6 +29,12 @@ const (
 	PermissionRequestsCreate = "requests.create"
 	PermissionRequestsUpdate = "requests.update"
 	PermissionRequestsDelete = "requests.delete"
+
+	PermissionEnvironmentsRead        = "environments.read"
+	PermissionEnvironmentsCreate      = "environments.create"
+	PermissionEnvironmentsUpdate      = "environments.update"
+	PermissionEnvironmentsDelete      = "environments.delete"
+	PermissionEnvironmentValuesUpdate = "environment_values.update"
 )
 
 var permissionCatalog = []Permission{
@@ -55,6 +61,11 @@ var permissionCatalog = []Permission{
 	{Key: PermissionRequestsCreate, Description: "Create saved requests within accessible collections"},
 	{Key: PermissionRequestsUpdate, Description: "Update saved requests within accessible collections"},
 	{Key: PermissionRequestsDelete, Description: "Delete saved requests within accessible collections"},
+	{Key: PermissionEnvironmentsRead, Description: "View workspace environment definitions and the account's own values"},
+	{Key: PermissionEnvironmentsCreate, Description: "Create environments within directly accessible workspaces"},
+	{Key: PermissionEnvironmentsUpdate, Description: "Update environment names and shared variable definitions"},
+	{Key: PermissionEnvironmentsDelete, Description: "Delete environments and shared variable definitions"},
+	{Key: PermissionEnvironmentValuesUpdate, Description: "Update the account's own environment variable values"},
 }
 
 func PermissionCatalog() []Permission {

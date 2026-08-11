@@ -10,6 +10,7 @@ func TestLoadDefaultsToLocalSQLite(t *testing.T) {
 	t.Setenv("RESOLVED_DATABASE_DRIVER", "")
 	t.Setenv("RESOLVED_DATABASE_DSN", "")
 	t.Setenv("RESOLVED_SESSION_TTL", "")
+	t.Setenv("RESOLVED_ENCRYPTION_SECRET", "test deployment encryption secret with enough bytes")
 
 	cfg, err := Load()
 	if err != nil {
@@ -34,6 +35,7 @@ func TestLoadAcceptsMSSQLAlias(t *testing.T) {
 	t.Setenv("RESOLVED_DATABASE_DRIVER", "mssql")
 	t.Setenv("RESOLVED_DATABASE_DSN", "sqlserver://example")
 	t.Setenv("RESOLVED_SESSION_TTL", "2h")
+	t.Setenv("RESOLVED_ENCRYPTION_SECRET", "test deployment encryption secret with enough bytes")
 
 	cfg, err := Load()
 	if err != nil {
@@ -47,8 +49,19 @@ func TestLoadAcceptsMSSQLAlias(t *testing.T) {
 func TestLoadRequiresDSNForRemoteDatabase(t *testing.T) {
 	t.Setenv("RESOLVED_DATABASE_DRIVER", "postgres")
 	t.Setenv("RESOLVED_DATABASE_DSN", "")
+	t.Setenv("RESOLVED_ENCRYPTION_SECRET", "test deployment encryption secret with enough bytes")
 
 	if _, err := Load(); err == nil {
 		t.Fatal("expected a missing PostgreSQL DSN to fail")
+	}
+}
+
+func TestLoadRequiresEncryptionSecret(t *testing.T) {
+	t.Setenv("RESOLVED_DATABASE_DRIVER", "sqlite")
+	t.Setenv("RESOLVED_DATABASE_DSN", ":memory:")
+	t.Setenv("RESOLVED_ENCRYPTION_SECRET", "too short")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected a short encryption secret to fail")
 	}
 }

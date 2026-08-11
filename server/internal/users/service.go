@@ -3,6 +3,7 @@ package users
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"resolved-server/internal/identity"
@@ -10,15 +11,21 @@ import (
 	"resolved-server/internal/security"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type Service struct {
-	repository      *identity.Repository
-	hasher          *security.PasswordHasher
-	firstOwnerSetup identity.FirstOwnerSetup
+	repository          *identity.Repository
+	hasher              *security.PasswordHasher
+	environmentCipher   *security.EnvironmentCipher
+	sessionKeys         *security.SessionEnvironmentKeys
+	firstOwnerSetup     identity.FirstOwnerSetup
+	passwordChangeSetup PasswordChangeSetup
 }
 
 type ServiceOption func(*Service)
+
+type PasswordChangeSetup func(context.Context, *gorm.DB, string, []byte, []byte) error
 
 type CreateInput struct {
 	Email           string
@@ -41,12 +48,25 @@ func WithFirstOwnerSetup(setup identity.FirstOwnerSetup) ServiceOption {
 	}
 }
 
+func WithPasswordChangeSetup(setup PasswordChangeSetup) ServiceOption {
+	return func(service *Service) {
+		service.passwordChangeSetup = setup
+	}
+}
+
 func NewService(
 	repository *identity.Repository,
 	hasher *security.PasswordHasher,
+	environmentCipher *security.EnvironmentCipher,
+	sessionKeys *security.SessionEnvironmentKeys,
 	options ...ServiceOption,
 ) *Service {
-	service := &Service{repository: repository, hasher: hasher}
+	service := &Service{
+		repository:        repository,
+		hasher:            hasher,
+		environmentCipher: environmentCipher,
+		sessionKeys:       sessionKeys,
+	}
 	for _, option := range options {
 		option(service)
 	}
@@ -104,6 +124,7 @@ func (s *Service) Update(ctx context.Context, id string, input UpdateInput) (ide
 		return identity.User{}, err
 	}
 	changes := identity.UserChanges{Active: input.Active}
+	var beforePasswordChange identity.BeforePasswordChange
 	if input.Email != nil {
 		login := normalizeLogin(*input.Email)
 		if login == "" {
@@ -132,11 +153,38 @@ func (s *Service) Update(ctx context.Context, id string, input UpdateInput) (ide
 			return identity.User{}, err
 		}
 		changes.PasswordHash = &passwordHash
+		beforePasswordChange = func(
+			ctx context.Context,
+			tx *gorm.DB,
+			user identity.User,
+			_ *identity.UserChanges,
+		) error {
+			oldKey, ok := s.sessionKeys.AnyForUser(user.ID, user.PasswordHash)
+			if ok {
+				defer clear(oldKey)
+			}
+
+			newKey, err := s.environmentCipher.DeriveUserKey(user.ID, *input.Password)
+			if err != nil {
+				return err
+			}
+			defer clear(newKey)
+			if s.passwordChangeSetup == nil {
+				return errors.New("environment value password-change setup is required")
+			}
+			if err := s.passwordChangeSetup(ctx, tx, user.ID, oldKey, newKey); err != nil {
+				return fmt.Errorf("re-encrypt environment values: %w", err)
+			}
+			return nil
+		}
 	}
 
-	user, err := s.repository.UpdateUser(ctx, id, changes)
+	user, err := s.repository.UpdateUser(ctx, id, changes, beforePasswordChange)
 	if err != nil {
 		return identity.User{}, mapRepositoryError(err)
+	}
+	if input.Password != nil || input.Active != nil && !*input.Active {
+		s.sessionKeys.DeleteUser(id)
 	}
 	return user, nil
 }
@@ -176,8 +224,9 @@ func (s *Service) newUser(input CreateInput) (identity.User, error) {
 	if err != nil {
 		return identity.User{}, err
 	}
+	userID := uuid.NewString()
 	return identity.User{
-		ID:              uuid.NewString(),
+		ID:              userID,
 		Email:           login,
 		DisplayName:     displayName,
 		PasswordHash:    passwordHash,
@@ -238,6 +287,12 @@ func mapRepositoryError(err error) error {
 		return problem.New(problem.KindConflict, "last_owner", "the final active owner cannot be disabled or stripped of the owner role")
 	case errors.Is(err, identity.ErrUsersExist):
 		return problem.New(problem.KindConflict, "already_bootstrapped", "the deployment already has users")
+	case errors.Is(err, security.ErrEnvironmentKeyUnavailable):
+		return problem.New(
+			problem.KindConflict,
+			"environment_key_unavailable",
+			"the user's active login is required to preserve encrypted environment values during a password change",
+		)
 	default:
 		return problem.Wrap(err, "persist user")
 	}

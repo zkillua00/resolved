@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 const (
@@ -40,7 +42,7 @@ type apiResponse[Data any] struct {
 }
 
 func TestIdentityManagementAndDynamicPermissions(t *testing.T) {
-	app, usersService, closeDatabase := newTestServer(t)
+	app, usersService, _, closeDatabase := newTestServer(t)
 	defer closeDatabase()
 
 	owner, err := usersService.BootstrapOwner(t.Context(), users.CreateInput{
@@ -58,7 +60,6 @@ func TestIdentityManagementAndDynamicPermissions(t *testing.T) {
 	}); err == nil {
 		t.Fatal("expected a second bootstrap attempt to be rejected")
 	}
-
 	unauthorized := request[any](t, app, http.MethodGet, "/api/v1/users", "", nil, fiber.StatusUnauthorized)
 	if unauthorized.Error.Code != "unauthorized" || unauthorized.RequestID == "" {
 		t.Fatalf("unexpected unauthorized response: %+v", unauthorized)
@@ -157,7 +158,7 @@ func TestIdentityManagementAndDynamicPermissions(t *testing.T) {
 }
 
 func TestWorkspaceAndRecursiveCollectionScopes(t *testing.T) {
-	app, usersService, closeDatabase := newTestServer(t)
+	app, usersService, _, closeDatabase := newTestServer(t)
 	defer closeDatabase()
 
 	owner, err := usersService.BootstrapOwner(t.Context(), users.CreateInput{
@@ -539,6 +540,234 @@ func TestWorkspaceAndRecursiveCollectionScopes(t *testing.T) {
 	)
 }
 
+func TestEnvironmentValuesAreEncryptedUserScopedAndPreservedAcrossPasswordChange(t *testing.T) {
+	app, usersService, db, closeDatabase := newTestServer(t)
+	defer closeDatabase()
+
+	owner, err := usersService.BootstrapOwner(t.Context(), users.CreateInput{
+		Email:       "owner",
+		DisplayName: "Owner",
+		Password:    ownerPassword,
+	})
+	if err != nil {
+		t.Fatalf("bootstrap owner: %v", err)
+	}
+	ownerLogin := login(t, app, owner.Email, ownerPassword)
+	workspace := request[[]workspaces.WorkspaceView](
+		t, app, http.MethodGet, "/api/v1/workspaces", ownerLogin.Token, nil, fiber.StatusOK,
+	).Data[0]
+
+	role := request[identity.RoleView](t, app, http.MethodPost, "/api/v1/roles", ownerLogin.Token, map[string]any{
+		"name":        "Environment user",
+		"description": "Reads shared keys and writes personal values",
+		"permission_keys": []string{
+			identity.PermissionEnvironmentsRead,
+			identity.PermissionEnvironmentValuesUpdate,
+		},
+	}, fiber.StatusCreated).Data
+	createUser := func(loginName string) identity.UserView {
+		t.Helper()
+		return request[identity.UserView](t, app, http.MethodPost, "/api/v1/users", ownerLogin.Token, map[string]any{
+			"email":        loginName,
+			"display_name": loginName,
+			"password":     collaboratorPassword,
+			"role_ids":     []string{role.ID},
+		}, fiber.StatusCreated).Data
+	}
+	alice := createUser("alice")
+	bob := createUser("bob")
+	request[workspaces.WorkspaceView](
+		t,
+		app,
+		http.MethodPut,
+		"/api/v1/workspaces/"+workspace.ID+"/users",
+		ownerLogin.Token,
+		map[string]any{"user_ids": []string{owner.ID, alice.ID, bob.ID}},
+		fiber.StatusOK,
+	)
+	aliceLogin := login(t, app, alice.Email, collaboratorPassword)
+	bobLogin := login(t, app, bob.Email, collaboratorPassword)
+
+	environment := request[workspaces.EnvironmentView](
+		t,
+		app,
+		http.MethodPost,
+		"/api/v1/workspaces/"+workspace.ID+"/environments",
+		ownerLogin.Token,
+		map[string]any{"name": "Production"},
+		fiber.StatusCreated,
+	).Data
+	variable := request[workspaces.EnvironmentVariableView](
+		t,
+		app,
+		http.MethodPost,
+		"/api/v1/workspaces/"+workspace.ID+"/environments/"+environment.ID+"/variables",
+		ownerLogin.Token,
+		map[string]any{
+			"key":    "api_token",
+			"value":  "owner-token",
+			"secret": true,
+		},
+		fiber.StatusCreated,
+	).Data
+	if variable.Value != "owner-token" || !variable.Enabled || !variable.Secret {
+		t.Fatalf("created variable = %+v", variable)
+	}
+
+	sharedKey := "api_token"
+	valueFor := func(token string) string {
+		t.Helper()
+		environments := request[[]workspaces.EnvironmentView](
+			t,
+			app,
+			http.MethodGet,
+			"/api/v1/workspaces/"+workspace.ID+"/environments",
+			token,
+			nil,
+			fiber.StatusOK,
+		).Data
+		if len(environments) != 1 || len(environments[0].Variables) != 1 {
+			t.Fatalf("environments = %+v, want one environment and key", environments)
+		}
+		if environments[0].Variables[0].ID != variable.ID || environments[0].Variables[0].Key != sharedKey {
+			t.Fatalf("shared variable = %+v, want %s/%s", environments[0].Variables[0], variable.ID, sharedKey)
+		}
+		return environments[0].Variables[0].Value
+	}
+	if value := valueFor(aliceLogin.Token); value != "" {
+		t.Fatalf("Alice initial value = %q, want empty", value)
+	}
+	if value := valueFor(bobLogin.Token); value != "" {
+		t.Fatalf("Bob initial value = %q, want empty", value)
+	}
+
+	valuePath := "/api/v1/workspaces/" + workspace.ID + "/environments/" + environment.ID + "/variables/" + variable.ID + "/value"
+	request[workspaces.EnvironmentVariableView](
+		t, app, http.MethodPut, valuePath, aliceLogin.Token, map[string]any{"value": "alice-token"}, fiber.StatusOK,
+	)
+	request[workspaces.EnvironmentVariableView](
+		t, app, http.MethodPut, valuePath, bobLogin.Token, map[string]any{"value": "bob-token"}, fiber.StatusOK,
+	)
+	if value := valueFor(ownerLogin.Token); value != "owner-token" {
+		t.Fatalf("owner value = %q, want owner-token", value)
+	}
+	if value := valueFor(aliceLogin.Token); value != "alice-token" {
+		t.Fatalf("Alice value = %q, want alice-token", value)
+	}
+	if value := valueFor(bobLogin.Token); value != "bob-token" {
+		t.Fatalf("Bob value = %q, want bob-token", value)
+	}
+
+	sharedKey = "service_token"
+	renamed := request[workspaces.EnvironmentVariableView](
+		t,
+		app,
+		http.MethodPatch,
+		"/api/v1/workspaces/"+workspace.ID+"/environments/"+environment.ID+"/variables/"+variable.ID,
+		ownerLogin.Token,
+		map[string]any{"key": sharedKey},
+		fiber.StatusOK,
+	).Data
+	if renamed.Value != "owner-token" || !renamed.Enabled || !renamed.Secret {
+		t.Fatalf("renamed variable = %+v, want owner value and unchanged flags", renamed)
+	}
+	if value := valueFor(aliceLogin.Token); value != "alice-token" {
+		t.Fatalf("Alice value after shared key rename = %q, want alice-token", value)
+	}
+
+	columns, err := db.Migrator().ColumnTypes(&workspaces.EnvironmentVariable{})
+	if err != nil {
+		t.Fatalf("inspect environment variable columns: %v", err)
+	}
+	for _, column := range columns {
+		if column.Name() == "value" {
+			t.Fatal("global environment_variables table contains a value column")
+		}
+	}
+	for _, forbidden := range []struct {
+		model  any
+		column string
+	}{
+		{model: &identity.User{}, column: "environment_key_salt"},
+		{model: &identity.User{}, column: "environment_key_ciphertext"},
+		{model: &identity.Session{}, column: "environment_key_ciphertext"},
+	} {
+		if db.Migrator().HasColumn(forbidden.model, forbidden.column) {
+			t.Fatalf("database stores forbidden environment key column %s", forbidden.column)
+		}
+	}
+	var storedValues []workspaces.EnvironmentVariableValue
+	if err := db.Order("user_id ASC").Find(&storedValues).Error; err != nil {
+		t.Fatalf("load encrypted values: %v", err)
+	}
+	if len(storedValues) != 3 {
+		t.Fatalf("stored value count = %d, want 3", len(storedValues))
+	}
+	for _, stored := range storedValues {
+		for _, plaintext := range []string{"owner-token", "alice-token", "bob-token"} {
+			if bytes.Contains(stored.Ciphertext, []byte(plaintext)) {
+				t.Fatalf("ciphertext for user %s contains plaintext %q", stored.UserID, plaintext)
+			}
+		}
+	}
+	var aliceStored workspaces.EnvironmentVariableValue
+	if err := db.First(
+		&aliceStored,
+		"environment_variable_id = ? AND user_id = ?",
+		variable.ID,
+		alice.ID,
+	).Error; err != nil {
+		t.Fatalf("load Alice ciphertext: %v", err)
+	}
+	oldAliceCiphertext := append([]byte(nil), aliceStored.Ciphertext...)
+
+	newAlicePassword := "alice changed password"
+	request[identity.UserView](
+		t,
+		app,
+		http.MethodPatch,
+		"/api/v1/users/"+alice.ID,
+		ownerLogin.Token,
+		map[string]any{"password": newAlicePassword},
+		fiber.StatusOK,
+	)
+	request[any](t, app, http.MethodGet, "/api/v1/workspaces/"+workspace.ID+"/environments", aliceLogin.Token, nil, fiber.StatusUnauthorized)
+	aliceLogin = login(t, app, alice.Email, newAlicePassword)
+	if value := valueFor(aliceLogin.Token); value != "alice-token" {
+		t.Fatalf("Alice value after password change = %q, want alice-token", value)
+	}
+	if err := db.First(
+		&aliceStored,
+		"environment_variable_id = ? AND user_id = ?",
+		variable.ID,
+		alice.ID,
+	).Error; err != nil {
+		t.Fatalf("reload Alice ciphertext: %v", err)
+	}
+	if bytes.Equal(oldAliceCiphertext, aliceStored.Ciphertext) {
+		t.Fatal("password change did not re-encrypt Alice's value")
+	}
+
+	request[struct{}](t, app, http.MethodPost, "/api/v1/auth/logout", bobLogin.Token, nil, fiber.StatusOK)
+	newBobPassword := "bob changed password"
+	rejectedReset := request[identity.UserView](
+		t,
+		app,
+		http.MethodPatch,
+		"/api/v1/users/"+bob.ID,
+		ownerLogin.Token,
+		map[string]any{"password": newBobPassword},
+		fiber.StatusConflict,
+	)
+	if rejectedReset.Error.Code != "environment_key_unavailable" {
+		t.Fatalf("password reset error = %+v, want environment_key_unavailable", rejectedReset.Error)
+	}
+	bobLogin = login(t, app, bob.Email, collaboratorPassword)
+	if value := valueFor(bobLogin.Token); value != "bob-token" {
+		t.Fatalf("Bob value after rejected password reset = %q, want bob-token", value)
+	}
+}
+
 func assertCreator(t *testing.T, creator *identity.UserSummaryView, userID, login string) {
 	t.Helper()
 	if creator == nil || creator.ID != userID || creator.Email != login {
@@ -546,7 +775,7 @@ func assertCreator(t *testing.T, creator *identity.UserSummaryView, userID, logi
 	}
 }
 
-func newTestServer(t *testing.T) (*fiber.App, *users.Service, func()) {
+func newTestServer(t *testing.T) (*fiber.App, *users.Service, *gorm.DB, func()) {
 	t.Helper()
 	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared&_foreign_keys=on", uuid.NewString())
 	db, err := database.Open(config.Database{Driver: "sqlite", DSN: dsn})
@@ -563,14 +792,24 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, func()) {
 	}
 
 	repository := identity.NewRepository(db)
-	hasher := security.NewPasswordHasher(security.PasswordParams{
+	passwordParams := security.PasswordParams{
 		Memory:      8 * 1024,
 		Iterations:  1,
 		Parallelism: 1,
 		SaltLength:  16,
 		KeyLength:   32,
-	})
-	authService, err := auth.NewService(repository, hasher, time.Hour)
+	}
+	hasher := security.NewPasswordHasher(passwordParams)
+	environmentCipher, err := security.NewEnvironmentCipher(
+		"test deployment encryption secret with enough bytes",
+		passwordParams,
+	)
+	if err != nil {
+		_ = sqlDatabase.Close()
+		t.Fatalf("create environment cipher: %v", err)
+	}
+	sessionKeys := security.NewSessionEnvironmentKeys()
+	authService, err := auth.NewService(repository, hasher, environmentCipher, sessionKeys, time.Hour)
 	if err != nil {
 		_ = sqlDatabase.Close()
 		t.Fatalf("create auth service: %v", err)
@@ -578,11 +817,21 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, func()) {
 	usersService := users.NewService(
 		repository,
 		hasher,
+		environmentCipher,
+		sessionKeys,
 		users.WithFirstOwnerSetup(workspaces.SetupFirstOwnerWorkspace),
+		users.WithPasswordChangeSetup(func(
+			ctx context.Context,
+			tx *gorm.DB,
+			userID string,
+			oldKey, newKey []byte,
+		) error {
+			return workspaces.RekeyEnvironmentVariableValues(ctx, tx, environmentCipher, userID, oldKey, newKey)
+		}),
 	)
 	rolesService := roles.NewService(repository)
 	workspaceRepository := workspaces.NewRepository(db)
-	workspacesService := workspaces.NewService(workspaceRepository)
+	workspacesService := workspaces.NewService(workspaceRepository, environmentCipher)
 	httpServer := server.New(
 		"127.0.0.1:0",
 		io.Discard,
@@ -594,7 +843,7 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, func()) {
 		),
 		server.WithWorkspaces(authService, workspaces.NewHandler(workspacesService)),
 	)
-	return httpServer.App, usersService, func() { _ = sqlDatabase.Close() }
+	return httpServer.App, usersService, db, func() { _ = sqlDatabase.Close() }
 }
 
 func containsString(values []string, expected string) bool {

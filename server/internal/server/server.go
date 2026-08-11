@@ -96,6 +96,52 @@ func WithWorkspaces(authService *auth.Service, handler *workspaces.Handler) Modi
 		protected.Get("/workspaces/:workspace_id/collections/:collection_id/requests/:request_id", auth.RequirePermission(identity.PermissionRequestsRead), handler.GetSavedRequestController())
 		protected.Patch("/workspaces/:workspace_id/collections/:collection_id/requests/:request_id", auth.RequirePermission(identity.PermissionRequestsUpdate), handler.UpdateSavedRequestController())
 		protected.Delete("/workspaces/:workspace_id/collections/:collection_id/requests/:request_id", auth.RequirePermission(identity.PermissionRequestsDelete), handler.DeleteSavedRequestController())
+
+		protected.Get(
+			"/workspaces/:workspace_id/environments",
+			auth.RequirePermission(identity.PermissionEnvironmentsRead),
+			handler.ListEnvironmentsController(),
+		)
+		protected.Post(
+			"/workspaces/:workspace_id/environments",
+			auth.RequirePermission(identity.PermissionEnvironmentsCreate),
+			handler.CreateEnvironmentController(),
+		)
+		protected.Get(
+			"/workspaces/:workspace_id/environments/:environment_id",
+			auth.RequirePermission(identity.PermissionEnvironmentsRead),
+			handler.GetEnvironmentController(),
+		)
+		protected.Patch(
+			"/workspaces/:workspace_id/environments/:environment_id",
+			auth.RequirePermission(identity.PermissionEnvironmentsUpdate),
+			handler.UpdateEnvironmentController(),
+		)
+		protected.Delete(
+			"/workspaces/:workspace_id/environments/:environment_id",
+			auth.RequirePermission(identity.PermissionEnvironmentsDelete),
+			handler.DeleteEnvironmentController(),
+		)
+		protected.Post(
+			"/workspaces/:workspace_id/environments/:environment_id/variables",
+			auth.RequirePermission(identity.PermissionEnvironmentsUpdate),
+			handler.CreateEnvironmentVariableController(),
+		)
+		protected.Patch(
+			"/workspaces/:workspace_id/environments/:environment_id/variables/:variable_id",
+			auth.RequirePermission(identity.PermissionEnvironmentsUpdate),
+			handler.UpdateEnvironmentVariableController(),
+		)
+		protected.Delete(
+			"/workspaces/:workspace_id/environments/:environment_id/variables/:variable_id",
+			auth.RequirePermission(identity.PermissionEnvironmentsDelete),
+			handler.DeleteEnvironmentVariableController(),
+		)
+		protected.Put(
+			"/workspaces/:workspace_id/environments/:environment_id/variables/:variable_id/value",
+			auth.RequirePermission(identity.PermissionEnvironmentValuesUpdate),
+			handler.PutEnvironmentVariableValueController(),
+		)
 	}
 }
 

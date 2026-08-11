@@ -17,10 +17,12 @@ import (
 const dummyPassword = "this password exists only for timing"
 
 type Service struct {
-	repository *identity.Repository
-	hasher     *security.PasswordHasher
-	sessionTTL time.Duration
-	dummyHash  string
+	repository        *identity.Repository
+	hasher            *security.PasswordHasher
+	environmentCipher *security.EnvironmentCipher
+	sessionKeys       *security.SessionEnvironmentKeys
+	sessionTTL        time.Duration
+	dummyHash         string
 }
 
 type LoginResult struct {
@@ -30,24 +32,35 @@ type LoginResult struct {
 }
 
 type Principal struct {
-	User        identity.User
-	permissions map[string]struct{}
+	User           identity.User
+	permissions    map[string]struct{}
+	environmentKey []byte
 }
 
 func NewService(
 	repository *identity.Repository,
 	hasher *security.PasswordHasher,
+	environmentCipher *security.EnvironmentCipher,
+	sessionKeys *security.SessionEnvironmentKeys,
 	sessionTTL time.Duration,
 ) (*Service, error) {
+	if environmentCipher == nil {
+		return nil, errors.New("environment cipher is required")
+	}
+	if sessionKeys == nil {
+		return nil, errors.New("session environment keys are required")
+	}
 	dummyHash, err := hasher.Hash(dummyPassword)
 	if err != nil {
 		return nil, err
 	}
 	return &Service{
-		repository: repository,
-		hasher:     hasher,
-		sessionTTL: sessionTTL,
-		dummyHash:  dummyHash,
+		repository:        repository,
+		hasher:            hasher,
+		environmentCipher: environmentCipher,
+		sessionKeys:       sessionKeys,
+		sessionTTL:        sessionTTL,
+		dummyHash:         dummyHash,
 	}, nil
 }
 
@@ -57,6 +70,7 @@ func (s *Service) Login(ctx context.Context, login, password string) (LoginResul
 	if err != nil {
 		if errors.Is(err, identity.ErrUserNotFound) {
 			_, _ = s.hasher.Verify(s.dummyHash, password)
+			s.consumeEnvironmentDerivation("00000000-0000-0000-0000-000000000000", password)
 			return LoginResult{}, invalidCredentials()
 		}
 		return LoginResult{}, problem.Wrap(err, "find login user")
@@ -67,12 +81,23 @@ func (s *Service) Login(ctx context.Context, login, password string) (LoginResul
 		return LoginResult{}, problem.Wrap(err, "verify stored password")
 	}
 	if !valid || !user.Active {
+		s.consumeEnvironmentDerivation(user.ID, password)
 		return LoginResult{}, invalidCredentials()
 	}
+	verifiedPasswordHash := user.PasswordHash
 	user, err = s.repository.GetUser(ctx, user.ID)
 	if err != nil {
 		return LoginResult{}, problem.Wrap(err, "load authenticated user")
 	}
+	if !user.Active || user.PasswordHash != verifiedPasswordHash {
+		s.consumeEnvironmentDerivation(user.ID, password)
+		return LoginResult{}, invalidCredentials()
+	}
+	environmentKey, err := s.environmentCipher.DeriveUserKey(user.ID, password)
+	if err != nil {
+		return LoginResult{}, problem.Wrap(err, "derive login environment key")
+	}
+	defer clear(environmentKey)
 
 	token, err := security.NewSessionToken()
 	if err != nil {
@@ -80,9 +105,11 @@ func (s *Service) Login(ctx context.Context, login, password string) (LoginResul
 	}
 	createdAt := time.Now().UTC()
 	expiresAt := createdAt.Add(s.sessionTTL)
+	sessionID := uuid.NewString()
+	tokenHash := security.DigestSessionToken(token)
 	session := identity.Session{
-		ID:        uuid.NewString(),
-		TokenHash: security.DigestSessionToken(token),
+		ID:        sessionID,
+		TokenHash: tokenHash,
 		UserID:    user.ID,
 		ExpiresAt: expiresAt,
 		CreatedAt: createdAt,
@@ -90,8 +117,19 @@ func (s *Service) Login(ctx context.Context, login, password string) (LoginResul
 	if err := s.repository.CreateSession(ctx, session); err != nil {
 		return LoginResult{}, problem.Wrap(err, "persist login session")
 	}
+	if err := s.sessionKeys.Put(tokenHash, user.ID, user.PasswordHash, environmentKey, expiresAt); err != nil {
+		_ = s.repository.DeleteSessionByHash(ctx, tokenHash)
+		return LoginResult{}, problem.Wrap(err, "retain login environment key")
+	}
 
 	return LoginResult{Token: token, ExpiresAt: expiresAt, User: user}, nil
+}
+
+func (s *Service) consumeEnvironmentDerivation(userID, password string) {
+	key, err := s.environmentCipher.DeriveUserKey(userID, password)
+	if err == nil {
+		clear(key)
+	}
 }
 
 func (s *Service) Authenticate(ctx context.Context, token string) (*Principal, error) {
@@ -107,6 +145,12 @@ func (s *Service) Authenticate(ctx context.Context, token string) (*Principal, e
 		return nil, problem.Wrap(err, "load login session")
 	}
 	if !session.ExpiresAt.After(time.Now().UTC()) || !session.User.Active {
+		s.sessionKeys.Delete(hash)
+		_ = s.repository.DeleteSessionByHash(ctx, hash)
+		return nil, unauthorized()
+	}
+	environmentKey, ok := s.sessionKeys.Get(hash, session.UserID, session.User.PasswordHash)
+	if !ok {
 		_ = s.repository.DeleteSessionByHash(ctx, hash)
 		return nil, unauthorized()
 	}
@@ -117,14 +161,20 @@ func (s *Service) Authenticate(ctx context.Context, token string) (*Principal, e
 			permissions[permission.Key] = struct{}{}
 		}
 	}
-	return &Principal{User: session.User, permissions: permissions}, nil
+	return &Principal{
+		User:           session.User,
+		permissions:    permissions,
+		environmentKey: environmentKey,
+	}, nil
 }
 
 func (s *Service) Logout(ctx context.Context, token string) error {
 	if token == "" {
 		return unauthorized()
 	}
-	if err := s.repository.DeleteSessionByHash(ctx, security.DigestSessionToken(token)); err != nil {
+	hash := security.DigestSessionToken(token)
+	s.sessionKeys.Delete(hash)
+	if err := s.repository.DeleteSessionByHash(ctx, hash); err != nil {
 		return problem.Wrap(err, "revoke login session")
 	}
 	return nil
@@ -142,6 +192,13 @@ func (p *Principal) HasRole(roleID string) bool {
 		}
 	}
 	return false
+}
+
+func (p *Principal) EnvironmentKey() []byte {
+	if p == nil {
+		return nil
+	}
+	return append([]byte(nil), p.environmentKey...)
 }
 
 func normalizeLogin(login string) string {

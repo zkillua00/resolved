@@ -9,17 +9,20 @@ import (
 	"unicode/utf8"
 
 	"resolved-server/internal/problem"
+	"resolved-server/internal/security"
 
 	"github.com/google/uuid"
 )
 
 type Service struct {
-	repository *Repository
+	repository        *Repository
+	environmentCipher *security.EnvironmentCipher
 }
 
 type Actor struct {
-	UserID string
-	Owner  bool
+	UserID         string
+	Owner          bool
+	EnvironmentKey []byte
 }
 
 type CreateWorkspaceInput struct {
@@ -49,8 +52,8 @@ type UpdateSavedRequestInput struct {
 	Definition json.RawMessage
 }
 
-func NewService(repository *Repository) *Service {
-	return &Service{repository: repository}
+func NewService(repository *Repository, environmentCipher *security.EnvironmentCipher) *Service {
+	return &Service{repository: repository, environmentCipher: environmentCipher}
 }
 
 func (s *Service) List(ctx context.Context, actor Actor) ([]Workspace, error) {
@@ -667,6 +670,12 @@ func mapRepositoryError(err error) error {
 		)
 	case errors.Is(err, ErrCollectionCycle):
 		return problem.New(problem.KindConflict, "collection_cycle", "a collection cannot be moved into itself or one of its descendants")
+	case errors.Is(err, ErrEnvironmentNotFound):
+		return problem.New(problem.KindNotFound, "environment_not_found", "environment was not found")
+	case errors.Is(err, ErrEnvironmentVariableNotFound):
+		return problem.New(problem.KindNotFound, "environment_variable_not_found", "environment variable was not found")
+	case errors.Is(err, ErrEnvironmentVariableKeyExists):
+		return problem.New(problem.KindConflict, "environment_variable_key_exists", "the environment already contains this variable key")
 	default:
 		return problem.Wrap(err, "persist workspace")
 	}

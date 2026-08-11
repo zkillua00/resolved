@@ -12,7 +12,9 @@ The server currently provides:
 - assigning roles to users and permissions to roles;
 - workspaces with direct user grants;
 - recursive collection trees with inheritable user grants;
-- saved request templates inside collection nodes.
+- saved request templates inside collection nodes;
+- workspace-wide environment names and variable keys with encrypted,
+  per-user values.
 
 There is no hosted control plane, telemetry, or deployment registration.
 
@@ -29,6 +31,7 @@ without echoing it when run in a terminal and creates `My Workspace` for that
 owner.
 
 ```sh
+export RESOLVED_ENCRYPTION_SECRET="$(openssl rand -base64 32)"
 go run ./cmd/resolved-server bootstrap-admin \
   --email owner \
   --name "Deployment owner"
@@ -39,6 +42,9 @@ Then start the server:
 ```sh
 go run ./cmd/resolved-server serve
 ```
+
+Keep `RESOLVED_ENCRYPTION_SECRET` stable and backed up. Losing or replacing it
+makes existing encrypted environment values impossible to decrypt after login.
 
 The safe default listen address is `127.0.0.1:8787`. Put the service behind a
 TLS reverse proxy before exposing it to a network.
@@ -53,12 +59,14 @@ Configuration is read from the process environment.
 | `RESOLVED_DATABASE_DRIVER` | `sqlite` | `sqlite`, `postgres`, `mysql`, or `sqlserver` (`mssql` is accepted as an alias) |
 | `RESOLVED_DATABASE_DSN` | `./data/resolved-server.db?...` | GORM driver data source name |
 | `RESOLVED_SESSION_TTL` | `24h` | Bearer-session lifetime |
+| `RESOLVED_ENCRYPTION_SECRET` | none | Required deployment secret with at least 32 bytes; combines with each user's password to derive their environment key at login |
 
 Example PostgreSQL configuration:
 
 ```sh
 export RESOLVED_DATABASE_DRIVER=postgres
 export RESOLVED_DATABASE_DSN='host=127.0.0.1 user=resolved password=secret dbname=resolved port=5432 sslmode=require'
+export RESOLVED_ENCRYPTION_SECRET="$(openssl rand -base64 32)"
 go run ./cmd/resolved-server serve
 ```
 
@@ -93,6 +101,16 @@ Saved requests are returned with their owning collection node and are omitted
 from ancestor-only navigation shells.
 Authenticated users with `workspaces.create` can create another workspace with
 `POST /api/v1/workspaces`; the creator receives its initial direct grant.
+
+Environment definitions are workspace-wide. Every authorized user sees the
+same environment names, variable keys, order, `enabled` state, and `secret`
+state, but the returned `value` is always the authenticated user's own value.
+`PUT .../variables/{variable_id}/value` cannot address another user. Values are
+stored only as authenticated ciphertext; the shared variable-definition table
+has no value column. No environment key, derivation salt, or wrapped/encrypted
+copy of a key is stored in the database. Derived keys exist only in server
+memory for the lifetime of an authenticated session, so restarting the server
+requires every user to log in again.
 
 The complete route and permission table is in
 [`docs/architecture.md`](docs/architecture.md).
