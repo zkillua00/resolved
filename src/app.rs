@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::PathBuf,
     rc::Rc,
     sync::{Arc, OnceLock},
@@ -275,6 +275,7 @@ pub struct ApiTester {
     workspace_switch_abort_handle: Option<AbortHandle>,
     realtime_generation: u64,
     realtime_abort_handle: Option<AbortHandle>,
+    realtime_status: RealtimeConnectionStatus,
     realtime_refresh_generation: u64,
     realtime_refresh_abort_handle: Option<AbortHandle>,
     workspace_name: Entity<InputState>,
@@ -346,6 +347,16 @@ pub struct ApiTester {
     debug_overlay: Entity<DebugOverlay>,
     preview: Option<Entity<HtmlPreview>>,
     _subscriptions: Vec<Subscription>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum RealtimeConnectionStatus {
+    #[default]
+    Inactive,
+    Connecting,
+    Connected,
+    Reconnecting,
+    Unavailable,
 }
 
 #[cfg(test)]

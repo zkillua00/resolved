@@ -50,8 +50,10 @@ impl RealtimeResourceChange {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RealtimeSignal {
     Connected,
+    ConnectionLost,
     Change(RealtimeResourceChange),
     AuthenticationRequired,
+    Unavailable,
 }
 
 #[derive(Debug, Error)]
@@ -101,6 +103,10 @@ pub async fn watch_upstream_changes(
             ConnectionEnd::ReceiverClosed => return Ok(()),
             ConnectionEnd::Disconnected => reconnect_delay = Duration::from_secs(1),
             ConnectionEnd::Unavailable => {}
+        }
+
+        if sender.send(RealtimeSignal::ConnectionLost).is_err() {
+            return Ok(());
         }
 
         tokio::time::sleep(reconnect_delay).await;
@@ -217,7 +223,27 @@ fn realtime_url(base_url: &Url) -> Result<Url, RealtimeUrlError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::{
+        accept_async, accept_hdr_async,
+        tungstenite::{
+            Message,
+            handshake::server::{Request, Response},
+        },
+    };
+
     use super::*;
+
+    async fn next_signal(
+        receiver: &mut tokio::sync::mpsc::UnboundedReceiver<RealtimeSignal>,
+    ) -> RealtimeSignal {
+        tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .expect("timed out waiting for a real-time signal")
+            .expect("the real-time watcher stopped unexpectedly")
+    }
 
     #[test]
     fn builds_realtime_url_with_server_base_path() {
@@ -256,5 +282,125 @@ mod tests {
         assert_eq!(envelope.data.resource, "request");
         assert!(envelope.data.affects_workspace("workspace-1"));
         assert!(!envelope.data.is_identity_change());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::result_large_err)]
+    async fn authenticates_and_receives_resource_changes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let authorization = Arc::new(Mutex::new(None));
+        let received_authorization = Arc::clone(&authorization);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let callback = move |request: &Request, response: Response| {
+                *received_authorization.lock().unwrap() = request
+                    .headers()
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .map(ToOwned::to_owned);
+                Ok(response)
+            };
+            let mut socket = accept_hdr_async(stream, callback).await.unwrap();
+            socket
+                .send(Message::Text(
+                    r#"{
+                        "command":"resource.changed",
+                        "data":{
+                            "event_id":"event-live",
+                            "resource":"workspace",
+                            "action":"updated",
+                            "resource_id":"workspace-live",
+                            "workspace_id":"workspace-live",
+                            "occurred_at":"2026-08-11T10:00:00Z"
+                        }
+                    }"#
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let base_url = Url::parse(&format!("http://{address}/")).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let watcher = tokio::spawn(async move {
+            watch_upstream_changes(
+                &base_url,
+                "session-token",
+                Utc::now() + chrono::Duration::minutes(1),
+                sender,
+            )
+            .await
+        });
+
+        assert_eq!(next_signal(&mut receiver).await, RealtimeSignal::Connected);
+        let RealtimeSignal::Change(change) = next_signal(&mut receiver).await else {
+            panic!("expected a resource change");
+        };
+        assert_eq!(change.event_id, "event-live");
+        assert_eq!(change.workspace_id.as_deref(), Some("workspace-live"));
+        assert_eq!(
+            authorization.lock().unwrap().as_deref(),
+            Some("Bearer session-token")
+        );
+
+        watcher.abort();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconnects_after_a_connection_closes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut first_socket = accept_async(stream).await.unwrap();
+            first_socket.close(None).await.unwrap();
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut second_socket = accept_async(stream).await.unwrap();
+            second_socket
+                .send(Message::Text(
+                    r#"{
+                        "command":"resource.changed",
+                        "data":{
+                            "event_id":"event-after-reconnect",
+                            "resource":"collection",
+                            "action":"created",
+                            "resource_id":"collection-live",
+                            "workspace_id":"workspace-live",
+                            "collection_id":"collection-live",
+                            "occurred_at":"2026-08-11T10:01:00Z"
+                        }
+                    }"#
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let base_url = Url::parse(&format!("http://{address}/")).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let watcher = tokio::spawn(async move {
+            watch_upstream_changes(
+                &base_url,
+                "session-token",
+                Utc::now() + chrono::Duration::minutes(1),
+                sender,
+            )
+            .await
+        });
+
+        assert_eq!(next_signal(&mut receiver).await, RealtimeSignal::Connected);
+        assert_eq!(
+            next_signal(&mut receiver).await,
+            RealtimeSignal::ConnectionLost
+        );
+        assert_eq!(next_signal(&mut receiver).await, RealtimeSignal::Connected);
+        let RealtimeSignal::Change(change) = next_signal(&mut receiver).await else {
+            panic!("expected a resource change after reconnecting");
+        };
+        assert_eq!(change.event_id, "event-after-reconnect");
+
+        watcher.abort();
+        server.await.unwrap();
     }
 }

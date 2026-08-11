@@ -28,6 +28,24 @@ impl UpstreamLoginStatus {
 }
 
 impl ApiTester {
+    fn active_workspace_tooltip(&self) -> String {
+        let workspace = self.active_workspace_name();
+        if !matches!(
+            self.workspace_providers.active_id(),
+            WorkspaceProviderId::Upstream { .. }
+        ) {
+            return format!("Workspace: {workspace}");
+        }
+        let connection = match self.realtime_status {
+            RealtimeConnectionStatus::Inactive => "",
+            RealtimeConnectionStatus::Connecting => " · Connecting",
+            RealtimeConnectionStatus::Connected => " · Live",
+            RealtimeConnectionStatus::Reconnecting => " · Reconnecting",
+            RealtimeConnectionStatus::Unavailable => " · Unavailable",
+        };
+        format!("Workspace: {workspace}{connection}")
+    }
+
     pub(super) fn upstream_settings_page(&self, cx: &mut Context<Self>) -> SettingPage {
         SettingPage::new("Servers")
             .description("Connect to self-hosted Resolved servers and switch between them.")
@@ -47,7 +65,7 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let label = compact_label(&self.active_workspace_name(), if compact { 10 } else { 14 });
-        let tooltip = format!("Workspace: {}", self.active_workspace_name());
+        let tooltip = self.active_workspace_tooltip();
         let local_workspaces = self.local_workspaces.clone();
         let servers = self.settings.upstreams.servers.clone();
         let active_provider_id = self.workspace_providers.active_id().clone();
@@ -96,7 +114,7 @@ impl ApiTester {
         let servers = self.settings.upstreams.servers.clone();
         let active_provider_id = self.workspace_providers.active_id().clone();
         let disabled = self.sending || self.workspace_switch_status.busy();
-        let tooltip = format!("Workspace: {}", self.active_workspace_name());
+        let tooltip = self.active_workspace_tooltip();
         let this = cx.entity().downgrade();
 
         Button::new("title-workspaces")
@@ -783,11 +801,25 @@ impl ApiTester {
                                                 .font_semibold()
                                                 .child(server.display_label()),
                                         )
-                                        .when(active, |this| {
-                                            this.child(connection_badge(
-                                                "Active",
-                                                cx.theme().success,
-                                            ))
+                                        .when(active && !expired, |this| {
+                                            let (label, color) = match state.realtime_status {
+                                                RealtimeConnectionStatus::Inactive => {
+                                                    ("Selected", cx.theme().info)
+                                                }
+                                                RealtimeConnectionStatus::Connecting => {
+                                                    ("Connecting", cx.theme().info)
+                                                }
+                                                RealtimeConnectionStatus::Connected => {
+                                                    ("Live", cx.theme().success)
+                                                }
+                                                RealtimeConnectionStatus::Reconnecting => {
+                                                    ("Reconnecting", cx.theme().warning)
+                                                }
+                                                RealtimeConnectionStatus::Unavailable => {
+                                                    ("Unavailable", cx.theme().danger)
+                                                }
+                                            };
+                                            this.child(connection_badge(label, color))
                                         })
                                         .when(expired, |this| {
                                             this.child(connection_badge(

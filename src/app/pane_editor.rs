@@ -374,6 +374,91 @@ impl ApiTester {
         self.pane_editors.get_mut(&pane_id)
     }
 
+    /// Persist the editor contents of every request currently shown outside
+    /// the primary pane before a server snapshot is reconciled.
+    pub(super) fn snapshot_secondary_pane_request_tabs(&mut self, cx: &App) {
+        let active_workspace_tab = self.workspace_tabs.active_tab(&self.request_tabs);
+        let primary_pane_id = self.panes.pane_for_tab(&active_workspace_tab);
+        let snapshots = self
+            .pane_editors
+            .iter()
+            .filter_map(|(pane_id, session)| {
+                if primary_pane_id == Some(*pane_id) {
+                    return None;
+                }
+                let tab_id = session.active_tab_id.as_ref()?;
+                let active_tab = self.panes.pane(*pane_id)?.active_tab()?;
+                if active_tab != WorkspaceTab::Request(tab_id.clone()) {
+                    return None;
+                }
+                Some((
+                    tab_id.clone(),
+                    session.snapshot_template(cx),
+                    session.runtime_snapshot(),
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        for (tab_id, template, runtime) in snapshots {
+            if let Some(record) = self.request_tabs.get_mut(&tab_id) {
+                record.set_template(template);
+            }
+            self.request_tab_runtime
+                .insert(tab_id.as_str().to_owned(), runtime);
+        }
+    }
+
+    /// Reload clean secondary editors from the new server snapshot while
+    /// retaining local drafts in dirty editors.
+    pub(super) fn refresh_secondary_pane_request_tabs(
+        &mut self,
+        conflicts: &HashSet<RequestTabId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let active_workspace_tab = self.workspace_tabs.active_tab(&self.request_tabs);
+        let primary_pane_id = self.panes.pane_for_tab(&active_workspace_tab);
+        let refreshes = self
+            .pane_editors
+            .iter()
+            .filter_map(|(pane_id, session)| {
+                if primary_pane_id == Some(*pane_id) {
+                    return None;
+                }
+                let tab_id = session.active_tab_id.as_ref()?;
+                let active_tab = self.panes.pane(*pane_id)?.active_tab()?;
+                if active_tab != WorkspaceTab::Request(tab_id.clone()) {
+                    return None;
+                }
+                let record = self.request_tabs.get(tab_id)?.clone();
+                let runtime = self
+                    .request_tab_runtime
+                    .get(tab_id.as_str())
+                    .cloned()
+                    .unwrap_or_default();
+                Some((*pane_id, tab_id.clone(), record, runtime))
+            })
+            .collect::<Vec<_>>();
+
+        for (pane_id, tab_id, record, mut runtime) in refreshes {
+            if conflicts.contains(&tab_id) {
+                runtime.request_notice = Some(
+                    "This request changed on the server. Your edits are still here.".to_owned(),
+                );
+                self.request_tab_runtime
+                    .insert(tab_id.as_str().to_owned(), runtime.clone());
+            }
+            let Some(session) = self.pane_editors.get_mut(&pane_id) else {
+                continue;
+            };
+            if !record.is_dirty() {
+                session.load_template(record.template(), &runtime, window, cx);
+            } else if conflicts.contains(&tab_id) {
+                session.request_notice = runtime.request_notice.clone();
+            }
+        }
+    }
+
     /// Build (or refresh) the request-editor session for `pane_id` so it tracks
     /// the pane's active request tab, and drop sessions for panes that no
     /// longer exist.

@@ -2,6 +2,8 @@ use super::request_tab_reconciliation::reconcile_restored_request_tabs;
 use super::*;
 
 const REALTIME_REFRESH_DEBOUNCE: Duration = Duration::from_millis(120);
+const REALTIME_REFRESH_RETRY_DELAY: Duration = Duration::from_millis(300);
+const REALTIME_REFRESH_ATTEMPTS: usize = 3;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct RealtimeRefreshOutcome {
@@ -19,6 +21,7 @@ impl ApiTester {
         }
         self.realtime_generation = self.realtime_generation.wrapping_add(1);
         self.realtime_refresh_generation = self.realtime_refresh_generation.wrapping_add(1);
+        self.realtime_status = RealtimeConnectionStatus::Inactive;
     }
 
     pub(super) fn start_realtime_for_active_upstream(
@@ -34,6 +37,7 @@ impl ApiTester {
         let Some(_) = self.settings.upstreams.server(&target.upstream_id) else {
             return;
         };
+        self.realtime_status = RealtimeConnectionStatus::Connecting;
         let generation = self.realtime_generation;
         let upstream_id = target.upstream_id.clone();
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -54,12 +58,12 @@ impl ApiTester {
                 }
                 Ok(Err(error)) => {
                     tracing::warn!(%error, "could not open the saved real-time session");
-                    let _ = sender.send(RealtimeSignal::AuthenticationRequired);
+                    let _ = sender.send(RealtimeSignal::Unavailable);
                     return;
                 }
                 Err(error) => {
                     tracing::warn!(%error, "could not load the saved real-time session");
-                    let _ = sender.send(RealtimeSignal::AuthenticationRequired);
+                    let _ = sender.send(RealtimeSignal::Unavailable);
                     return;
                 }
             };
@@ -67,11 +71,12 @@ impl ApiTester {
                 &base_url,
                 credential.bearer_token(),
                 credential.expires_at,
-                sender,
+                sender.clone(),
             )
             .await
             {
                 tracing::warn!(%error, "the real-time endpoint is invalid");
+                let _ = sender.send(RealtimeSignal::Unavailable);
             }
         });
         self.realtime_abort_handle = Some(task.abort_handle());
@@ -84,13 +89,25 @@ impl ApiTester {
                     }
                     match signal {
                         RealtimeSignal::Connected => {
+                            this.realtime_status = RealtimeConnectionStatus::Connected;
                             this.queue_realtime_refresh(&upstream_id, None, window, cx);
+                            cx.notify();
+                        }
+                        RealtimeSignal::ConnectionLost => {
+                            this.realtime_status = RealtimeConnectionStatus::Reconnecting;
+                            cx.notify();
                         }
                         RealtimeSignal::Change(change) => {
+                            this.realtime_status = RealtimeConnectionStatus::Connected;
                             this.queue_realtime_refresh(&upstream_id, Some(&change), window, cx);
+                            cx.notify();
                         }
                         RealtimeSignal::AuthenticationRequired => {
                             this.mark_realtime_session_expired(&upstream_id, window, cx);
+                        }
+                        RealtimeSignal::Unavailable => {
+                            this.realtime_status = RealtimeConnectionStatus::Unavailable;
+                            cx.notify();
                         }
                     }
                 });
@@ -191,13 +208,26 @@ impl ApiTester {
             if credential.expires_at <= Utc::now() {
                 return Err("Log in to this server again.".to_owned());
             }
-            load_upstream_workspace(
-                &client,
-                &base_url,
-                credential.bearer_token(),
-                Some(&task_workspace_id),
-            )
-            .await
+            let mut retry_delay = REALTIME_REFRESH_RETRY_DELAY;
+            for attempt in 0..REALTIME_REFRESH_ATTEMPTS {
+                match load_upstream_workspace(
+                    &client,
+                    &base_url,
+                    credential.bearer_token(),
+                    Some(&task_workspace_id),
+                )
+                .await
+                {
+                    Ok(loaded) => return Ok(loaded),
+                    Err(error) if attempt + 1 < REALTIME_REFRESH_ATTEMPTS => {
+                        tracing::debug!(%error, attempt = attempt + 1, "retrying server refresh");
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = retry_delay.saturating_mul(2);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            unreachable!("the real-time refresh loop always returns")
         });
         self.realtime_refresh_abort_handle = Some(task.abort_handle());
 
@@ -352,8 +382,10 @@ impl ApiTester {
         let environment_editor_dirty = self.environment_editor_is_dirty(cx);
         let previous_selected_environment_id = self.selected_environment_id.clone();
         self.snapshot_active_request_tab(cx);
+        self.snapshot_secondary_pane_request_tabs(cx);
+        let active_request_id = self.request_tabs.active_tab_id().clone();
         let active_request_was_dirty = self.request_tabs.active().is_dirty();
-        let request_conflict = refresh_open_request_tabs(&mut self.request_tabs, &workspace);
+        let request_conflicts = refresh_open_request_tabs(&mut self.request_tabs, &workspace);
 
         if !self.update_realtime_profile(upstream_id, workspace_id, &loaded, cx) {
             return RealtimeRefreshOutcome::default();
@@ -434,8 +466,9 @@ impl ApiTester {
         } else {
             self.restore_active_request_tab(window, cx);
         }
+        self.refresh_secondary_pane_request_tabs(&request_conflicts, window, cx);
         self.persist_request_tabs_now(cx);
-        if request_conflict {
+        if request_conflicts.contains(&active_request_id) {
             self.request_notice =
                 Some("This request changed on the server. Your edits are still here.".to_owned());
         }
@@ -514,9 +547,10 @@ impl ApiTester {
     }
 }
 
-fn refresh_open_request_tabs(request_tabs: &mut RequestTabs, workspace: &Workspace) -> bool {
-    let before = request_tabs.clone();
-    let active_id = request_tabs.active_tab_id().clone();
+fn refresh_open_request_tabs(
+    request_tabs: &mut RequestTabs,
+    workspace: &Workspace,
+) -> HashSet<RequestTabId> {
     let snapshots = request_tabs
         .tabs()
         .iter()
@@ -530,18 +564,18 @@ fn refresh_open_request_tabs(request_tabs: &mut RequestTabs, workspace: &Workspa
             ))
         })
         .collect::<Vec<_>>();
-    let mut active_conflict = false;
+    let mut conflicts = HashSet::new();
 
     for (tab_id, request_id, previous_title, previous_template, dirty) in snapshots {
         let Some((collection, saved_request)) = workspace.saved_request(&request_id) else {
+            conflicts.insert(tab_id);
             continue;
         };
-        if tab_id == active_id
-            && dirty
+        if dirty
             && (previous_title != saved_request.name
                 || previous_template != saved_request.definition)
         {
-            active_conflict = true;
+            conflicts.insert(tab_id.clone());
         }
         if !dirty && let Some(tab) = request_tabs.get_mut(&tab_id) {
             tab.set_template(saved_request.definition.clone());
@@ -559,7 +593,7 @@ fn refresh_open_request_tabs(request_tabs: &mut RequestTabs, workspace: &Workspa
         );
     }
     reconcile_restored_request_tabs(request_tabs, workspace, true);
-    active_conflict || *request_tabs != before && request_tabs.active().is_dirty()
+    conflicts
 }
 
 #[cfg(test)]
@@ -606,14 +640,15 @@ mod tests {
             .rename_saved_request(&collection_id, &request_id, "People")
             .unwrap();
 
-        assert!(!refresh_open_request_tabs(&mut clean_tabs, &workspace));
+        assert!(refresh_open_request_tabs(&mut clean_tabs, &workspace).is_empty());
         assert_eq!(
             clean_tabs.active().template(),
             &template("https://example.test/people")
         );
         assert!(!clean_tabs.active().is_dirty());
 
-        assert!(refresh_open_request_tabs(&mut dirty_tabs, &workspace));
+        let conflicts = refresh_open_request_tabs(&mut dirty_tabs, &workspace);
+        assert!(conflicts.contains(dirty_tabs.active_tab_id()));
         assert_eq!(
             dirty_tabs.active().template(),
             &template("https://example.test/local-draft")
@@ -623,5 +658,37 @@ mod tests {
             &template("https://example.test/people")
         );
         assert!(dirty_tabs.active().is_dirty());
+    }
+
+    #[test]
+    fn detaches_deleted_open_requests_and_reports_the_conflict() {
+        let mut workspace = Workspace::default();
+        let collection_id = workspace.create_collection("API").unwrap();
+        let request_id = workspace
+            .create_saved_request(
+                &collection_id,
+                "Users",
+                template("https://example.test/users"),
+            )
+            .unwrap();
+        let (_, saved_request) = workspace.saved_request(&request_id).unwrap();
+        let mut tabs = RequestTabs::default();
+        tabs.open_saved(
+            saved_request.name.clone(),
+            saved_request.definition.clone(),
+            RequestTabAssociation::new(None, Some(collection_id.clone()), Some(request_id.clone())),
+        );
+
+        workspace
+            .remove_saved_request(&collection_id, &request_id)
+            .unwrap();
+        let conflicts = refresh_open_request_tabs(&mut tabs, &workspace);
+
+        assert!(conflicts.contains(tabs.active_tab_id()));
+        assert!(tabs.active().is_detached());
+        assert_eq!(
+            tabs.active().template(),
+            &template("https://example.test/users")
+        );
     }
 }

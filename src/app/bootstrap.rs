@@ -670,6 +670,7 @@ impl ApiTester {
             workspace_switch_abort_handle: None,
             realtime_generation: 0,
             realtime_abort_handle: None,
+            realtime_status: RealtimeConnectionStatus::Inactive,
             realtime_refresh_generation: 0,
             realtime_refresh_abort_handle: None,
             workspace_name,
