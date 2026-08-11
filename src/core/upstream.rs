@@ -14,7 +14,7 @@ use url::{Host, Url};
 use zeroize::Zeroizing;
 
 use super::{
-    Collection, Environment, Workspace,
+    Collection, Environment, ResourceCreator, Workspace,
     template::RequestTemplate,
     workspace::{CollectionFolder, EnvironmentVariable, SavedRequest},
 };
@@ -264,6 +264,16 @@ pub struct UpstreamUserSummary {
     pub display_name: String,
 }
 
+impl From<UpstreamUserSummary> for ResourceCreator {
+    fn from(user: UpstreamUserSummary) -> Self {
+        Self {
+            id: user.id,
+            email: user.email,
+            display_name: user.display_name,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct UpstreamWorkspaceView {
     pub id: String,
@@ -291,6 +301,7 @@ impl UpstreamEnvironmentView {
         Environment {
             id: self.id,
             name: self.name,
+            created_by: self.created_by.map(Into::into),
             variables: self
                 .variables
                 .into_iter()
@@ -321,6 +332,7 @@ impl UpstreamEnvironmentVariableView {
             value: self.value,
             enabled: self.enabled,
             secret: self.secret,
+            created_by: self.created_by.map(Into::into),
         }
     }
 }
@@ -348,12 +360,14 @@ impl UpstreamWorkspaceView {
                 Collection {
                     id: root.id,
                     name: root.name,
+                    created_by: root.created_by.map(Into::into),
                     folders,
                     requests,
                 }
             })
             .collect();
         Workspace {
+            created_by: self.created_by.map(Into::into),
             collections,
             environments: Vec::new(),
             snippets: Vec::new(),
@@ -393,6 +407,7 @@ impl UpstreamSavedRequestView {
         SavedRequest {
             id: self.id,
             name: self.name,
+            created_by: self.created_by.map(Into::into),
             folder_id,
             definition: self.definition,
             created_at: self.created_at,
@@ -1296,6 +1311,7 @@ fn flatten_remote_collections(
         folders.push(CollectionFolder {
             id: id.clone(),
             name: collection.name,
+            created_by: collection.created_by.map(Into::into),
             parent_folder_id: parent_folder_id.clone(),
         });
         requests.extend(
@@ -1416,6 +1432,14 @@ mod tests {
     };
 
     use super::*;
+
+    fn upstream_creator(id: &str, display_name: &str) -> UpstreamUserSummary {
+        UpstreamUserSummary {
+            id: id.to_owned(),
+            email: format!("{id}@example.test"),
+            display_name: display_name.to_owned(),
+        }
+    }
 
     #[test]
     fn normalizes_secure_and_loopback_server_urls() {
@@ -1666,26 +1690,26 @@ mod tests {
     }
 
     #[test]
-    fn maps_recursive_server_collections_to_the_local_tree_shape() {
+    fn maps_recursive_server_collections_and_creator_attribution_to_the_local_tree_shape() {
         let now = Utc::now();
         let view = UpstreamWorkspaceView {
             id: "workspace-1".to_owned(),
             name: "Team API".to_owned(),
             user_ids: vec!["user-1".to_owned()],
-            created_by: None,
+            created_by: Some(upstream_creator("workspace-user", "Workspace owner")),
             collections: vec![UpstreamCollectionView {
                 id: "root".to_owned(),
                 workspace_id: "workspace-1".to_owned(),
                 parent_collection_id: None,
                 name: "Root".to_owned(),
                 user_ids: Vec::new(),
-                created_by: None,
+                created_by: Some(upstream_creator("root-user", "Root creator")),
                 requests: vec![UpstreamSavedRequestView {
                     id: "root-request".to_owned(),
                     collection_id: "root".to_owned(),
                     name: "Root request".to_owned(),
                     definition: RequestTemplate::default(),
-                    created_by: None,
+                    created_by: Some(upstream_creator("root-request-user", "Root requester")),
                     created_at: now,
                     updated_at: now,
                 }],
@@ -1695,13 +1719,13 @@ mod tests {
                     parent_collection_id: Some("root".to_owned()),
                     name: "Child".to_owned(),
                     user_ids: Vec::new(),
-                    created_by: None,
+                    created_by: Some(upstream_creator("child-user", "Child creator")),
                     requests: vec![UpstreamSavedRequestView {
                         id: "child-request".to_owned(),
                         collection_id: "child".to_owned(),
                         name: "Child request".to_owned(),
                         definition: RequestTemplate::default(),
-                        created_by: None,
+                        created_by: Some(upstream_creator("child-request-user", "Child requester")),
                         created_at: now,
                         updated_at: now,
                     }],
@@ -1711,7 +1735,7 @@ mod tests {
                         parent_collection_id: Some("child".to_owned()),
                         name: "Grandchild".to_owned(),
                         user_ids: Vec::new(),
-                        created_by: None,
+                        created_by: Some(upstream_creator("grandchild-user", "Grandchild creator")),
                         requests: Vec::new(),
                         sub_collections: Vec::new(),
                         created_at: now,
@@ -1729,12 +1753,40 @@ mod tests {
 
         let workspace = view.into_local_workspace();
 
+        assert_eq!(
+            workspace
+                .created_by
+                .as_ref()
+                .map(|creator| creator.id.as_str()),
+            Some("workspace-user")
+        );
         assert_eq!(workspace.collections.len(), 1);
         assert_eq!(workspace.collections[0].id, "root");
+        assert_eq!(
+            workspace.collections[0]
+                .created_by
+                .as_ref()
+                .map(|creator| creator.id.as_str()),
+            Some("root-user")
+        );
         assert_eq!(workspace.collections[0].folders.len(), 2);
         assert_eq!(workspace.collections[0].folders[0].id, "child");
+        assert_eq!(
+            workspace.collections[0].folders[0]
+                .created_by
+                .as_ref()
+                .map(|creator| creator.id.as_str()),
+            Some("child-user")
+        );
         assert_eq!(workspace.collections[0].folders[0].parent_folder_id, None);
         assert_eq!(workspace.collections[0].folders[1].id, "grandchild");
+        assert_eq!(
+            workspace.collections[0].folders[1]
+                .created_by
+                .as_ref()
+                .map(|creator| creator.id.as_str()),
+            Some("grandchild-user")
+        );
         assert_eq!(
             workspace.collections[0].folders[1]
                 .parent_folder_id
@@ -1744,7 +1796,21 @@ mod tests {
         assert_eq!(workspace.collections[0].requests.len(), 2);
         assert_eq!(workspace.collections[0].requests[0].id, "root-request");
         assert_eq!(workspace.collections[0].requests[0].folder_id, None);
+        assert_eq!(
+            workspace.collections[0].requests[0]
+                .created_by
+                .as_ref()
+                .map(|creator| creator.id.as_str()),
+            Some("root-request-user")
+        );
         assert_eq!(workspace.collections[0].requests[1].id, "child-request");
+        assert_eq!(
+            workspace.collections[0].requests[1]
+                .created_by
+                .as_ref()
+                .map(|creator| creator.id.as_str()),
+            Some("child-request-user")
+        );
         assert_eq!(
             workspace.collections[0].requests[1].folder_id.as_deref(),
             Some("child")
@@ -1841,6 +1907,11 @@ mod tests {
                     "id": "environment-1",
                     "workspace_id": "workspace-1",
                     "name": "Production",
+                    "created_by": {
+                        "id": "environment-user",
+                        "email": "environment-user@example.test",
+                        "display_name": "Environment creator"
+                    },
                     "variables": [{
                         "id": "variable-1",
                         "environment_id": "environment-1",
@@ -1848,6 +1919,11 @@ mod tests {
                         "value": "this-users-token",
                         "enabled": true,
                         "secret": true,
+                        "created_by": {
+                            "id": "variable-user",
+                            "email": "variable-user@example.test",
+                            "display_name": "Variable creator"
+                        },
                         "created_at": now,
                         "updated_at": now
                     }],
@@ -1883,9 +1959,23 @@ mod tests {
         server.join().unwrap();
         let environment = environments.into_iter().next().unwrap().into_local();
         assert_eq!(environment.name, "Production");
+        assert_eq!(
+            environment
+                .created_by
+                .as_ref()
+                .map(|creator| creator.id.as_str()),
+            Some("environment-user")
+        );
         assert_eq!(environment.variables[0].key, "api_token");
         assert_eq!(environment.variables[0].value, "this-users-token");
         assert!(environment.variables[0].secret);
+        assert_eq!(
+            environment.variables[0]
+                .created_by
+                .as_ref()
+                .map(|creator| creator.id.as_str()),
+            Some("variable-user")
+        );
     }
 
     #[test]
@@ -1998,6 +2088,7 @@ mod tests {
         let baseline = Environment {
             id: "environment-1".to_owned(),
             name: "Staging".to_owned(),
+            created_by: None,
             variables: vec![
                 EnvironmentVariable {
                     id: "variable-1".to_owned(),
@@ -2005,6 +2096,7 @@ mod tests {
                     value: "old-value".to_owned(),
                     enabled: true,
                     secret: false,
+                    created_by: None,
                 },
                 EnvironmentVariable {
                     id: "variable-removed".to_owned(),
@@ -2012,12 +2104,14 @@ mod tests {
                     value: String::new(),
                     enabled: true,
                     secret: false,
+                    created_by: None,
                 },
             ],
         };
         let draft = Environment {
             id: "environment-1".to_owned(),
             name: "Production".to_owned(),
+            created_by: None,
             variables: vec![
                 EnvironmentVariable {
                     id: "variable-1".to_owned(),
@@ -2025,6 +2119,7 @@ mod tests {
                     value: "new-value".to_owned(),
                     enabled: false,
                     secret: true,
+                    created_by: None,
                 },
                 EnvironmentVariable {
                     id: "draft-variable".to_owned(),
@@ -2032,6 +2127,7 @@ mod tests {
                     value: "https://api.example.com".to_owned(),
                     enabled: true,
                     secret: false,
+                    created_by: None,
                 },
             ],
         };

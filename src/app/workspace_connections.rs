@@ -394,6 +394,7 @@ impl ApiTester {
         let mut candidate = self.workspace.clone();
         let created_id = created.id.clone();
         let created_name = created.name.clone();
+        let created_by = created.created_by.map(Into::into);
         if let Some(collection_id) = collection_id {
             let expected_parent_id = parent_folder_id
                 .clone()
@@ -419,6 +420,7 @@ impl ApiTester {
             collection.folders.push(CollectionFolder {
                 id: created_id.clone(),
                 name: created_name.clone(),
+                created_by,
                 parent_folder_id: parent_folder_id.clone(),
             });
             self.selected_collection_id = Some(collection_id.clone());
@@ -440,6 +442,7 @@ impl ApiTester {
             candidate.collections.push(Collection {
                 id: created_id.clone(),
                 name: created_name.clone(),
+                created_by,
                 folders: Vec::new(),
                 requests: Vec::new(),
             });

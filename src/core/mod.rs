@@ -87,8 +87,8 @@ pub use upstream_management::{
     update_management_user,
 };
 pub use workspace::{
-    Collection, CollectionFolder, Environment, RequestScripts, SavedRequest, Workspace,
-    WorkspaceMutationError,
+    Collection, CollectionFolder, Environment, RequestScripts, ResourceCreator, SavedRequest,
+    Workspace, WorkspaceMutationError,
 };
 #[allow(unused_imports)]
 pub use workspace_provider::{

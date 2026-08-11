@@ -380,7 +380,10 @@ impl ApiTester {
                 .expect("template variable mutation must preserve its environment");
             self.dismiss_template_variable_popover();
             self.mutate_environment_on_upstream(
-                UpstreamEnvironmentMutation::Save { baseline, draft },
+                UpstreamEnvironmentMutation::Save {
+                    baseline: Box::new(baseline),
+                    draft: Box::new(draft),
+                },
                 window,
                 cx,
             );

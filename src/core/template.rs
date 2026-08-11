@@ -373,6 +373,7 @@ mod tests {
         Environment {
             id: "environment-test".to_owned(),
             name: "Test".to_owned(),
+            created_by: None,
             variables,
         }
     }
@@ -384,6 +385,7 @@ mod tests {
             value: value.to_owned(),
             enabled,
             secret,
+            created_by: None,
         }
     }
 

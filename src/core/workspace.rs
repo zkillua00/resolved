@@ -47,6 +47,8 @@ impl RequestScripts {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Workspace {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<ResourceCreator>,
     #[serde(default)]
     pub collections: Vec<Collection>,
     #[serde(default)]
@@ -58,9 +60,18 @@ pub struct Workspace {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceCreator {
+    pub id: String,
+    pub email: String,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Collection {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<ResourceCreator>,
     #[serde(default)]
     pub folders: Vec<CollectionFolder>,
     #[serde(default)]
@@ -72,6 +83,7 @@ impl Collection {
         Ok(Self {
             id: new_id("collection"),
             name: checked_name("collection", name.into())?,
+            created_by: None,
             folders: Vec::new(),
             requests: Vec::new(),
         })
@@ -152,6 +164,8 @@ impl Collection {
 pub struct CollectionFolder {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<ResourceCreator>,
     #[serde(default)]
     pub parent_folder_id: Option<String>,
 }
@@ -164,6 +178,7 @@ impl CollectionFolder {
         Ok(Self {
             id: new_id("folder"),
             name: checked_name("folder", name.into())?,
+            created_by: None,
             parent_folder_id,
         })
     }
@@ -173,6 +188,8 @@ impl CollectionFolder {
 pub struct SavedRequest {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<ResourceCreator>,
     #[serde(default)]
     pub folder_id: Option<String>,
     pub definition: RequestTemplate,
@@ -189,6 +206,7 @@ impl SavedRequest {
         Ok(Self {
             id: new_id("request"),
             name: checked_name("request", name.into())?,
+            created_by: None,
             folder_id: None,
             definition,
             created_at: now,
@@ -201,6 +219,8 @@ impl SavedRequest {
 pub struct Environment {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<ResourceCreator>,
     #[serde(default)]
     pub variables: Vec<EnvironmentVariable>,
 }
@@ -210,6 +230,7 @@ impl Environment {
         Ok(Self {
             id: new_id("environment"),
             name: checked_name("environment", name.into())?,
+            created_by: None,
             variables: Vec::new(),
         })
     }
@@ -234,6 +255,7 @@ impl Environment {
             value: value.into(),
             enabled,
             secret,
+            created_by: None,
         };
         let id = variable.id.clone();
         self.variables.push(variable);
@@ -308,6 +330,8 @@ pub struct EnvironmentVariable {
     pub enabled: bool,
     #[serde(default)]
     pub secret: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<ResourceCreator>,
 }
 
 impl Workspace {
@@ -1381,6 +1405,8 @@ impl WorkspaceStore {
 #[derive(Debug, Serialize, Deserialize)]
 struct WorkspaceFile {
     version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_by: Option<ResourceCreator>,
     #[serde(default)]
     collections: Vec<Collection>,
     #[serde(default)]
@@ -1396,6 +1422,7 @@ impl WorkspaceFile {
     fn from_workspace(workspace: &Workspace) -> Self {
         Self {
             version: WORKSPACE_FILE_VERSION,
+            created_by: workspace.created_by.clone(),
             collections: workspace.collections.clone(),
             environments: workspace.environments.clone(),
             active_environment_id: workspace.active_environment_id.clone(),
@@ -1405,6 +1432,7 @@ impl WorkspaceFile {
 
     fn into_workspace(self) -> Workspace {
         Workspace {
+            created_by: self.created_by,
             collections: self.collections,
             environments: self.environments,
             active_environment_id: self.active_environment_id,
@@ -2273,9 +2301,11 @@ mod tests {
                 Collection {
                     id: "one".to_owned(),
                     name: "One".to_owned(),
+                    created_by: None,
                     folders: vec![CollectionFolder {
                         id: "folder-one".to_owned(),
                         name: "One".to_owned(),
+                        created_by: None,
                         parent_folder_id: Some("missing".to_owned()),
                     }],
                     requests: Vec::new(),
@@ -2283,9 +2313,11 @@ mod tests {
                 Collection {
                     id: "two".to_owned(),
                     name: "Two".to_owned(),
+                    created_by: None,
                     folders: vec![CollectionFolder {
                         id: "folder-two".to_owned(),
                         name: "Two".to_owned(),
+                        created_by: None,
                         parent_folder_id: None,
                     }],
                     requests: Vec::new(),
@@ -2412,12 +2444,14 @@ mod tests {
                 Collection {
                     id: "same".to_owned(),
                     name: "One".to_owned(),
+                    created_by: None,
                     folders: Vec::new(),
                     requests: Vec::new(),
                 },
                 Collection {
                     id: "same".to_owned(),
                     name: "Two".to_owned(),
+                    created_by: None,
                     folders: Vec::new(),
                     requests: Vec::new(),
                 },
@@ -2445,6 +2479,7 @@ mod tests {
         workspace.environments.push(Environment {
             id: "environment".to_owned(),
             name: "Test".to_owned(),
+            created_by: None,
             variables: vec![
                 EnvironmentVariable {
                     id: "one".to_owned(),
@@ -2452,6 +2487,7 @@ mod tests {
                     value: "one".to_owned(),
                     enabled: true,
                     secret: false,
+                    created_by: None,
                 },
                 EnvironmentVariable {
                     id: "two".to_owned(),
@@ -2459,6 +2495,7 @@ mod tests {
                     value: "two".to_owned(),
                     enabled: false,
                     secret: false,
+                    created_by: None,
                 },
             ],
         });

@@ -50,6 +50,7 @@ impl ApiTester {
 
         let environment_id = environment.id.clone();
         let environment_name = environment.name.clone();
+        let environment_attribution = environment.created_by.as_ref().map(creator_attribution);
         let editor_dirty = self.environment_editor_is_dirty(cx);
         let selected_is_active =
             self.workspace.active_environment_id.as_deref() == Some(environment_id.as_str());
@@ -243,6 +244,14 @@ impl ApiTester {
                             .text_color(cx.theme().muted_foreground)
                             .child(format!("{variable_count} variables")),
                     )
+                    .when_some(environment_attribution, |this, attribution| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(attribution),
+                        )
+                    })
                     .child(div().flex_1())
                     .child(
                         div()

@@ -35,6 +35,20 @@ impl ApiTester {
         let group_id: SharedString = format!("environment-variable-actions-{}", row.id).into();
         let context_scope_id: SharedString =
             format!("environment-variable-context-menu-scope-{}", row.id).into();
+        let variable_name = row.key.read(cx).value().to_string();
+        let variable_creator = self
+            .selected_environment_id
+            .as_deref()
+            .and_then(|environment_id| self.workspace.environment(environment_id))
+            .and_then(|environment| {
+                environment
+                    .variables
+                    .iter()
+                    .find(|variable| variable.id == row.id)
+            })
+            .and_then(|variable| variable.created_by.as_ref());
+        let attribution_tooltip =
+            resource_attribution_tooltip("Variable", &variable_name, variable_creator);
 
         let row = h_flex()
             .id(("environment-variable-grid-row", index))
@@ -79,11 +93,15 @@ impl ApiTester {
             )
             .child(
                 div()
+                    .id(("environment-variable-key-cell", index))
                     .flex_1()
                     .min_w_0()
                     .h_full()
                     .border_l_1()
                     .border_color(cx.api_outline_variant())
+                    .tooltip(move |window, cx| {
+                        Tooltip::new(attribution_tooltip.clone()).build(window, cx)
+                    })
                     .capture_any_mouse_down(move |event, _, _| {
                         if event.button == MouseButton::Right {
                             *key_context_enabled.borrow_mut() = false;

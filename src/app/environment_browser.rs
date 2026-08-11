@@ -37,6 +37,11 @@ impl ApiTester {
                 let context_environment_name = action_environment_name.clone();
                 let context_scope_id: SharedString =
                     format!("environment-context-menu-scope-{}", environment.id).into();
+                let attribution_tooltip = resource_attribution_tooltip(
+                    "Environment",
+                    &environment.name,
+                    environment.created_by.as_ref(),
+                );
 
                 div()
                     .id(context_scope_id)
@@ -80,6 +85,9 @@ impl ApiTester {
                                     .h_full()
                                     .justify_center()
                                     .cursor_pointer()
+                                    .tooltip(move |window, cx| {
+                                        Tooltip::new(attribution_tooltip.clone()).build(window, cx)
+                                    })
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.select_environment(select_id.clone(), window, cx);
                                     }))

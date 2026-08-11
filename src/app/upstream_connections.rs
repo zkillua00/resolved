@@ -30,11 +30,17 @@ impl UpstreamLoginStatus {
 impl ApiTester {
     fn active_workspace_tooltip(&self) -> String {
         let workspace = self.active_workspace_name();
+        let attribution = self
+            .workspace
+            .created_by
+            .as_ref()
+            .map(|creator| format!(" · {}", creator_attribution(creator)))
+            .unwrap_or_default();
         if !matches!(
             self.workspace_providers.active_id(),
             WorkspaceProviderId::Upstream { .. }
         ) {
-            return format!("Workspace: {workspace}");
+            return format!("Workspace: {workspace}{attribution}");
         }
         let connection = match self.realtime_status {
             RealtimeConnectionStatus::Inactive => "",
@@ -43,7 +49,7 @@ impl ApiTester {
             RealtimeConnectionStatus::Reconnecting => " · Reconnecting",
             RealtimeConnectionStatus::Unavailable => " · Unavailable",
         };
-        format!("Workspace: {workspace}{connection}")
+        format!("Workspace: {workspace}{attribution}{connection}")
     }
 
     pub(super) fn upstream_settings_page(&self, cx: &mut Context<Self>) -> SettingPage {

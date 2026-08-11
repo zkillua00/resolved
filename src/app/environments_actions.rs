@@ -5,8 +5,8 @@ pub(super) enum UpstreamEnvironmentMutation {
         name: String,
     },
     Save {
-        baseline: Environment,
-        draft: Environment,
+        baseline: Box<Environment>,
+        draft: Box<Environment>,
     },
     Delete {
         environment_id: String,
@@ -447,7 +447,10 @@ impl ApiTester {
 
         if !self.workspace_writable {
             self.mutate_environment_on_upstream(
-                UpstreamEnvironmentMutation::Save { baseline, draft },
+                UpstreamEnvironmentMutation::Save {
+                    baseline: Box::new(baseline),
+                    draft: Box::new(draft),
+                },
                 window,
                 cx,
             );
@@ -598,6 +601,7 @@ impl ApiTester {
     ) -> Result<Environment, WorkspaceMutationError> {
         let mut draft = Environment::new(self.environment_name.read(cx).value().to_string())?;
         draft.id = baseline.id.clone();
+        draft.created_by = baseline.created_by.clone();
         draft.variables.reserve(self.environment_variables.len());
         for row in &self.environment_variables {
             draft.add_variable(
@@ -606,16 +610,17 @@ impl ApiTester {
                 row.enabled,
                 row.secret,
             )?;
-            if baseline
+            if let Some(existing) = baseline
                 .variables
                 .iter()
-                .any(|variable| variable.id == row.id)
+                .find(|variable| variable.id == row.id)
             {
-                draft
+                let variable = draft
                     .variables
                     .last_mut()
-                    .expect("add_variable must append")
-                    .id = row.id.clone();
+                    .expect("add_variable must append");
+                variable.id = row.id.clone();
+                variable.created_by = existing.created_by.clone();
             }
         }
         Ok(draft)
@@ -732,8 +737,8 @@ impl ApiTester {
                     &task_target.base_url,
                     credential.bearer_token(),
                     &task_target.workspace_id,
-                    &baseline,
-                    &draft,
+                    baseline.as_ref(),
+                    draft.as_ref(),
                 )
                 .await
                 .map(|()| None)

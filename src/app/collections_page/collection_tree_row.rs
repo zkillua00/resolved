@@ -30,6 +30,11 @@ impl ApiTester {
         let drop_before_target = drop_target.clone();
         let drop_inside_target = drop_target.clone();
         let drop_after_target = drop_target;
+        let attribution_tooltip = resource_attribution_tooltip(
+            "Collection",
+            &collection.name,
+            collection.created_by.as_ref(),
+        );
 
         let row = h_flex()
             .id(("collection-tree-row", collection_index))
@@ -107,6 +112,9 @@ impl ApiTester {
                         .whitespace_nowrap()
                         .text_sm()
                         .font_semibold()
+                        .tooltip(move |window, cx| {
+                            Tooltip::new(attribution_tooltip.clone()).build(window, cx)
+                        })
                         .when(drag_enabled, |this| {
                             this.cursor_move()
                                 .on_drag(tree_drag, |drag, position, _, cx| {

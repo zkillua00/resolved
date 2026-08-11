@@ -34,6 +34,31 @@ pub(super) fn compact_url(url: &str) -> String {
     format!("{prefix}…")
 }
 
+pub(super) fn creator_attribution(creator: &ResourceCreator) -> String {
+    let display_name = creator.display_name.trim();
+    let login = creator.email.trim();
+    if display_name.is_empty() && login.is_empty() {
+        format!("Created by {}", creator.id)
+    } else if display_name.is_empty() || display_name == login {
+        format!("Created by {login}")
+    } else if login.is_empty() {
+        format!("Created by {display_name}")
+    } else {
+        format!("Created by {display_name} ({login})")
+    }
+}
+
+pub(super) fn resource_attribution_tooltip(
+    kind: &str,
+    name: &str,
+    creator: Option<&ResourceCreator>,
+) -> String {
+    creator.map_or_else(
+        || format!("{kind}: {name}"),
+        |creator| format!("{kind}: {name} · {}", creator_attribution(creator)),
+    )
+}
+
 pub(super) fn unique_name<'a>(base: &str, existing: impl IntoIterator<Item = &'a str>) -> String {
     let existing = existing.into_iter().collect::<Vec<_>>();
     if !existing.iter().any(|name| name.eq_ignore_ascii_case(base)) {
@@ -190,5 +215,44 @@ pub(super) fn status_color(status: u16, cx: &App) -> Hsla {
         300..=399 => cx.theme().info,
         400..=499 => cx.theme().warning,
         _ => cx.theme().danger,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn creator(display_name: &str, login: &str) -> ResourceCreator {
+        ResourceCreator {
+            id: "user-1".to_owned(),
+            email: login.to_owned(),
+            display_name: display_name.to_owned(),
+        }
+    }
+
+    #[test]
+    fn creator_attribution_uses_the_display_name_and_login_without_assuming_email_validation() {
+        assert_eq!(
+            creator_attribution(&creator("Ada", "ada")),
+            "Created by Ada (ada)"
+        );
+        assert_eq!(creator_attribution(&creator("", "root")), "Created by root");
+        assert_eq!(
+            creator_attribution(&creator("Service account", "")),
+            "Created by Service account"
+        );
+        assert_eq!(creator_attribution(&creator("", "")), "Created by user-1");
+    }
+
+    #[test]
+    fn resource_tooltip_only_adds_attribution_when_the_server_provided_it() {
+        assert_eq!(
+            resource_attribution_tooltip("Collection", "Payments", None),
+            "Collection: Payments"
+        );
+        assert_eq!(
+            resource_attribution_tooltip("Request", "Create charge", Some(&creator("Ada", "ada")),),
+            "Request: Create charge · Created by Ada (ada)"
+        );
     }
 }

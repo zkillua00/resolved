@@ -1795,6 +1795,7 @@ fn load_workspace_tx(
                     Ok(CollectionFolder {
                         id: row.get(0)?,
                         name: row.get(1)?,
+                        created_by: None,
                         parent_folder_id: row.get(2)?,
                     })
                 })?
@@ -1870,6 +1871,7 @@ fn load_workspace_tx(
                 id: request_id,
                 folder_id,
                 name: request_name,
+                created_by: None,
                 definition: RequestTemplate {
                     request: RequestDraft {
                         method,
@@ -1896,6 +1898,7 @@ fn load_workspace_tx(
         collections.push(Collection {
             id: collection_id,
             name,
+            created_by: None,
             folders: folder_rows,
             requests,
         });
@@ -1945,11 +1948,13 @@ fn load_workspace_tx(
                 value,
                 enabled: bool_from_i64(enabled, "environment variable enabled")?,
                 secret: bool_from_i64(secret, "environment variable secret")?,
+                created_by: None,
             });
         }
         environments.push(Environment {
             id: environment_id,
             name,
+            created_by: None,
             variables,
         });
     }
@@ -2037,6 +2042,7 @@ fn load_workspace_tx(
         .optional()?
         .flatten();
     let workspace = Workspace {
+        created_by: None,
         collections,
         environments,
         snippets,
@@ -2606,6 +2612,7 @@ fn read_legacy_workspace(path: &Path) -> Result<Option<Workspace>, DatabaseError
         });
     }
     let workspace = Workspace {
+        created_by: None,
         collections: file.collections,
         environments: file.environments,
         snippets: Vec::new(),
@@ -2720,18 +2727,22 @@ mod tests {
 
     fn sample_workspace() -> Workspace {
         Workspace {
+            created_by: None,
             collections: vec![Collection {
                 id: "collection-1".to_owned(),
                 name: "Development".to_owned(),
+                created_by: None,
                 folders: vec![
                     CollectionFolder {
                         id: "folder-1".to_owned(),
                         name: "Users".to_owned(),
+                        created_by: None,
                         parent_folder_id: None,
                     },
                     CollectionFolder {
                         id: "folder-2".to_owned(),
                         name: "Administration".to_owned(),
+                        created_by: None,
                         parent_folder_id: Some("folder-1".to_owned()),
                     },
                 ],
@@ -2739,6 +2750,7 @@ mod tests {
                     id: "request-1".to_owned(),
                     folder_id: Some("folder-2".to_owned()),
                     name: "Create user".to_owned(),
+                    created_by: None,
                     definition: RequestTemplate {
                         request: RequestDraft {
                             method: "POST".to_owned(),
@@ -2780,6 +2792,7 @@ mod tests {
             environments: vec![Environment {
                 id: "environment-1".to_owned(),
                 name: "Local".to_owned(),
+                created_by: None,
                 variables: vec![
                     EnvironmentVariable {
                         id: "variable-1".to_owned(),
@@ -2787,6 +2800,7 @@ mod tests {
                         value: "http://127.0.0.1:8080".to_owned(),
                         enabled: true,
                         secret: false,
+                        created_by: None,
                     },
                     EnvironmentVariable {
                         id: "variable-2".to_owned(),
@@ -2794,6 +2808,7 @@ mod tests {
                         value: "top-secret".to_owned(),
                         enabled: true,
                         secret: true,
+                        created_by: None,
                     },
                 ],
             }],
@@ -4015,6 +4030,7 @@ mod tests {
         workspace.collections.push(Collection {
             id: "collection-2".to_owned(),
             name: "Other".to_owned(),
+            created_by: None,
             folders: Vec::new(),
             requests: Vec::new(),
         });

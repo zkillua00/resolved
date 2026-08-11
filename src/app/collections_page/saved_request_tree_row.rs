@@ -73,6 +73,8 @@ impl ApiTester {
         };
         let drop_before_target = drop_target.clone();
         let drop_after_target = drop_target;
+        let attribution_tooltip =
+            resource_attribution_tooltip("Request", &request.name, request.created_by.as_ref());
 
         div()
             .id(context_scope_id)
@@ -99,6 +101,9 @@ impl ApiTester {
                             .h_full()
                             .gap_2()
                             .cursor_pointer()
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(attribution_tooltip.clone()).build(window, cx)
+                            })
                             .when(drag_enabled, |this| {
                                 this.cursor_move()
                                     .on_drag(tree_drag, |drag, position, _, cx| {
