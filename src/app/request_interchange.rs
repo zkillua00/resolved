@@ -14,7 +14,7 @@ const EXPORT_GROUPS: &[&str] = &[
     "Kotlin",
 ];
 
-pub(super) const REQUEST_INTERCHANGE_PANEL_WIDTH: f32 = 480.;
+pub(super) const REQUEST_INTERCHANGE_PANEL_WIDTH: f32 = 420.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RequestInterchangeTab {
@@ -56,44 +56,22 @@ impl RequestInterchangeState {
     }
 }
 
-fn build_export_group_menu(
-    menu: PopupMenu,
-    owner: gpui::WeakEntity<ApiTester>,
-    selected_group: &'static str,
-) -> PopupMenu {
-    EXPORT_GROUPS
-        .iter()
-        .fold(menu.min_w(px(210.)), |menu, group| {
-            let item_owner = owner.clone();
-            let group = *group;
-            menu.item(
-                PopupMenuItem::new(group)
-                    .checked(group == selected_group)
-                    .on_click(move |_, window, cx| {
-                        if let Some(owner) = item_owner.upgrade() {
-                            owner.update(cx, |this, cx| {
-                                this.select_request_export_group(group, window, cx);
-                            });
-                        }
-                    }),
-            )
-        })
-}
-
 fn build_export_format_menu(
-    menu: PopupMenu,
+    mut menu: PopupMenu,
     owner: gpui::WeakEntity<ApiTester>,
     selected_format: InterchangeFormat,
 ) -> PopupMenu {
-    let group = selected_format.group();
-    InterchangeFormat::ALL
-        .iter()
-        .copied()
-        .filter(|format| format.group() == group)
-        .fold(menu.min_w(px(220.)), |menu, format| {
+    menu = menu.min_w(px(280.)).max_h(px(520.)).scrollable(true);
+    for group in EXPORT_GROUPS {
+        menu = menu.label(*group);
+        for format in InterchangeFormat::ALL
+            .iter()
+            .copied()
+            .filter(|format| format.group() == *group)
+        {
             let item_owner = owner.clone();
-            menu.item(
-                PopupMenuItem::new(short_format_label(format))
+            menu = menu.item(
+                PopupMenuItem::new(format.label())
                     .checked(format == selected_format)
                     .on_click(move |_, window, cx| {
                         if let Some(owner) = item_owner.upgrade() {
@@ -102,18 +80,10 @@ fn build_export_format_menu(
                             });
                         }
                     }),
-            )
-        })
-}
-
-fn short_format_label(format: InterchangeFormat) -> String {
-    format
-        .label()
-        .split('·')
-        .next_back()
-        .map(str::trim)
-        .unwrap_or(format.label())
-        .to_owned()
+            );
+        }
+    }
+    menu
 }
 
 fn export_code_language(format: InterchangeFormat) -> CodeLanguage {
@@ -223,40 +193,6 @@ impl ApiTester {
         self.request_interchange.tab = RequestInterchangeTab::Export;
         self.sync_request_export_preview(window, cx);
         cx.notify();
-    }
-
-    fn select_request_interchange_tab(
-        &mut self,
-        tab: RequestInterchangeTab,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.request_interchange.tab = tab;
-        match tab {
-            RequestInterchangeTab::Import => self
-                .request_interchange
-                .import_editor
-                .read(cx)
-                .focus_handle(cx)
-                .focus(window),
-            RequestInterchangeTab::Export => self.sync_request_export_preview(window, cx),
-        }
-        cx.notify();
-    }
-
-    fn select_request_export_group(
-        &mut self,
-        group: &'static str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(format) = InterchangeFormat::ALL
-            .iter()
-            .copied()
-            .find(|format| format.group() == group)
-        {
-            self.select_request_export_format(format, window, cx);
-        }
     }
 
     fn select_request_export_format(
@@ -393,6 +329,10 @@ impl ApiTester {
             RequestInterchangeTab::Import => self.render_request_import_panel(cx),
             RequestInterchangeTab::Export => self.render_request_export_panel(cx),
         };
+        let (panel_title, close_tooltip) = match tab {
+            RequestInterchangeTab::Import => ("Import requests", "Close import"),
+            RequestInterchangeTab::Export => ("Export request", "Close export"),
+        };
         Some(
             v_flex()
                 .debug_selector(|| "request-interchange-panel".to_owned())
@@ -406,71 +346,22 @@ impl ApiTester {
                 .shadow_lg()
                 .child(
                     h_flex()
-                        .h(px(58.))
+                        .h(px(52.))
                         .flex_shrink_0()
                         .px_4()
                         .justify_between()
                         .border_b_1()
                         .border_color(cx.api_outline_variant())
-                        .child(
-                            v_flex()
-                                .gap_0p5()
-                                .child(div().text_base().font_semibold().child("Request transfer"))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child("Import safely or generate portable request code"),
-                                ),
-                        )
+                        .child(div().text_base().font_semibold().child(panel_title))
                         .child(
                             Button::new("close-request-interchange")
                                 .icon(IconName::Close)
                                 .small()
                                 .ghost()
-                                .tooltip("Close request transfer")
+                                .tooltip(close_tooltip)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.request_interchange.open = false;
                                     cx.notify();
-                                })),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .h(px(48.))
-                        .flex_shrink_0()
-                        .px_4()
-                        .gap_1()
-                        .border_b_1()
-                        .border_color(cx.api_outline_variant())
-                        .child(
-                            Button::new("request-interchange-import-tab")
-                                .label("Import")
-                                .small()
-                                .ghost()
-                                .rounded(px(18.))
-                                .selected(tab == RequestInterchangeTab::Import)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.select_request_interchange_tab(
-                                        RequestInterchangeTab::Import,
-                                        window,
-                                        cx,
-                                    );
-                                })),
-                        )
-                        .child(
-                            Button::new("request-interchange-export-tab")
-                                .label("Generate")
-                                .small()
-                                .ghost()
-                                .rounded(px(18.))
-                                .selected(tab == RequestInterchangeTab::Export)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.select_request_interchange_tab(
-                                        RequestInterchangeTab::Export,
-                                        window,
-                                        cx,
-                                    );
                                 })),
                         ),
                 )
@@ -652,9 +543,7 @@ impl ApiTester {
 
     fn render_request_export_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let format = self.request_interchange.selected_format;
-        let group = format.group();
         let owner = cx.entity().downgrade();
-        let format_owner = owner.clone();
         let export_available = self.request_interchange.export_error.is_none();
 
         v_flex()
@@ -664,72 +553,27 @@ impl ApiTester {
             .p_4()
             .gap_3()
             .child(
-                v_flex()
-                    .gap_2()
+                h_flex()
+                    .gap_3()
+                    .justify_between()
                     .child(
-                        h_flex()
-                            .justify_between()
-                            .child(div().text_sm().font_semibold().child("Generated request"))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Live preview"),
-                            ),
+                        div()
+                            .flex_shrink_0()
+                            .text_sm()
+                            .font_semibold()
+                            .child("Format"),
                     )
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("Category"),
-                                    )
-                                    .child(
-                                        Button::new("request-export-group")
-                                            .label(group)
-                                            .small()
-                                            .outline()
-                                            .dropdown_menu(move |menu, _, _| {
-                                                build_export_group_menu(
-                                                    menu,
-                                                    owner.clone(),
-                                                    group,
-                                                )
-                                            }),
-                                    ),
-                            )
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("Client or framework"),
-                                    )
-                                    .child(
-                                        Button::new("request-export-format")
-                                            .label(short_format_label(format))
-                                            .small()
-                                            .outline()
-                                            .dropdown_menu(move |menu, _, _| {
-                                                build_export_format_menu(
-                                                    menu,
-                                                    format_owner.clone(),
-                                                    format,
-                                                )
-                                            }),
-                                    ),
-                            ),
+                        Button::new("request-export-format")
+                            .label(format.label())
+                            .small()
+                            .outline()
+                            .w(px(280.))
+                            .dropdown_caret(true)
+                            .dropdown_menu(move |menu, _, _| {
+                                build_export_format_menu(menu, owner.clone(), format)
+                            })
+                            .anchor(Corner::TopRight),
                     ),
             )
             .when_some(
@@ -764,40 +608,29 @@ impl ApiTester {
             .child(
                 h_flex()
                     .flex_shrink_0()
-                    .justify_between()
-                    .gap_3()
+                    .justify_end()
+                    .gap_2()
                     .child(
-                        div()
-                            .max_w(px(250.))
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Only active request data is included; scripts and disabled fields stay private."),
+                        Button::new("save-request-export")
+                            .icon(IconName::FolderOpen)
+                            .label("Save file")
+                            .small()
+                            .outline()
+                            .disabled(!export_available)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.save_active_request_as(format, window, cx);
+                            })),
                     )
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("save-request-export")
-                                    .icon(IconName::FolderOpen)
-                                    .label("Save")
-                                    .small()
-                                    .outline()
-                                    .disabled(!export_available)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.save_active_request_as(format, window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("copy-request-export")
-                                    .icon(IconName::Copy)
-                                    .label("Copy code")
-                                    .small()
-                                    .primary()
-                                    .disabled(!export_available)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.copy_active_request_as(format, cx);
-                                    })),
-                            ),
+                        Button::new("copy-request-export")
+                            .icon(IconName::Copy)
+                            .label("Copy")
+                            .small()
+                            .primary()
+                            .disabled(!export_available)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.copy_active_request_as(format, cx);
+                            })),
                     ),
             )
             .into_any_element()
@@ -1126,7 +959,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn transfer_drawer_detects_imports_and_keeps_generated_code_live(cx: &mut TestAppContext) {
+    fn interchange_panels_detect_imports_and_keep_generated_code_live(cx: &mut TestAppContext) {
         let directory = tempfile::tempdir().expect("create temporary database directory");
         let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
         store.initialize().expect("initialize test database");
@@ -1177,7 +1010,7 @@ mod tests {
 
         cx.update(|window, cx| {
             app.update(cx, |app, cx| {
-                app.select_request_interchange_tab(RequestInterchangeTab::Export, window, cx);
+                app.open_request_export_panel(window, cx);
             });
         });
         cx.run_until_parked();
@@ -1193,7 +1026,7 @@ mod tests {
 
         cx.update(|window, cx| {
             app.update(cx, |app, cx| {
-                app.select_request_export_group("JavaScript", window, cx);
+                app.select_request_export_format(InterchangeFormat::JavaScriptFetch, window, cx);
             });
         });
         let javascript_source = cx.update(|_, cx| {

@@ -77,12 +77,14 @@ impl ApiTester {
                 || self.selected_collection_id.is_some());
         let can_switch_environment = self.workspace_writable && !self.sending;
         let dirty = self.request_is_dirty();
+        let request_actions_this = this.clone();
+        let request_actions_disabled = self.sending;
 
         h_flex()
             .h(px(APP_TITLE_BAR_HEIGHT))
             .flex_shrink_0()
             .pl(px(92.))
-            .pr_6()
+            .pr_2()
             .border_b_1()
             .border_color(cx.theme().title_bar_border)
             .bg(cx.theme().title_bar)
@@ -98,6 +100,7 @@ impl ApiTester {
                         h_flex()
                             .min_w_0()
                             .flex_1()
+                            .overflow_hidden()
                             .gap_2()
                             .child(
                                 h_flex()
@@ -119,7 +122,6 @@ impl ApiTester {
                                             .small()
                                             .appearance(false)
                                             .focus_bordered(false)
-                                            .flex_shrink_0()
                                             .w(px(request_name_width))
                                             .px_0(),
                                     ),
@@ -142,7 +144,7 @@ impl ApiTester {
             .child(
                 h_flex()
                     .flex_shrink_0()
-                    .gap_3()
+                    .gap_1()
                     .child(
                         Button::new("active-environment")
                             .icon(IconName::Settings2)
@@ -206,32 +208,6 @@ impl ApiTester {
                             }),
                     )
                     .child(
-                        Button::new("title-import-request")
-                            .label("Import")
-                            .large()
-                            .h(px(38.))
-                            .ghost()
-                            .rounded(px(20.))
-                            .disabled(self.sending)
-                            .tooltip("Open the request import workspace")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_request_import_panel(window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("title-export-request")
-                            .label("Code")
-                            .large()
-                            .h(px(38.))
-                            .outline()
-                            .rounded(px(20.))
-                            .disabled(self.sending)
-                            .tooltip("Preview, copy, or save generated request code")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_request_export_panel(window, cx);
-                            })),
-                    )
-                    .child(
                         Button::new("title-save-request")
                             .label(if has_saved_request { "Update" } else { "Save" })
                             .large()
@@ -243,20 +219,63 @@ impl ApiTester {
                                 this.save_current_request(false, window, cx);
                             })),
                     )
-                    .when(has_saved_request, |this| {
-                        this.child(
-                            Button::new("title-save-request-copy")
-                                .label("Save as")
-                                .large()
-                                .h(px(38.))
-                                .ghost()
-                                .rounded(px(20.))
-                                .disabled(!can_save)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.save_current_request(true, window, cx);
-                                })),
-                        )
-                    }),
+                    .child(
+                        Button::new("title-request-actions")
+                            .icon(IconName::EllipsisVertical)
+                            .small()
+                            .h(px(38.))
+                            .w(px(38.))
+                            .ghost()
+                            .rounded_full()
+                            .tooltip("Request actions")
+                            .dropdown_menu(move |menu, _, _| {
+                                let import_this = request_actions_this.clone();
+                                let export_this = request_actions_this.clone();
+                                let mut menu = menu
+                                    .min_w(px(220.))
+                                    .item(
+                                        PopupMenuItem::new("Import requests…")
+                                            .icon(IconName::FolderOpen)
+                                            .disabled(request_actions_disabled)
+                                            .on_click(move |_, window, cx| {
+                                                if let Some(this) = import_this.upgrade() {
+                                                    this.update(cx, |this, cx| {
+                                                        this.open_request_import_panel(window, cx);
+                                                    });
+                                                }
+                                            }),
+                                    )
+                                    .item(
+                                        PopupMenuItem::new("Export request…")
+                                            .icon(IconName::SquareTerminal)
+                                            .disabled(request_actions_disabled)
+                                            .on_click(move |_, window, cx| {
+                                                if let Some(this) = export_this.upgrade() {
+                                                    this.update(cx, |this, cx| {
+                                                        this.open_request_export_panel(window, cx);
+                                                    });
+                                                }
+                                            }),
+                                    );
+                                if has_saved_request {
+                                    let save_copy_this = request_actions_this.clone();
+                                    menu = menu.separator().item(
+                                        PopupMenuItem::new("Save as new request…")
+                                            .icon(IconName::Copy)
+                                            .disabled(!can_save)
+                                            .on_click(move |_, window, cx| {
+                                                if let Some(this) = save_copy_this.upgrade() {
+                                                    this.update(cx, |this, cx| {
+                                                        this.save_current_request(true, window, cx);
+                                                    });
+                                                }
+                                            }),
+                                    );
+                                }
+                                menu
+                            })
+                            .anchor(Corner::TopRight),
+                    ),
             )
             .into_any_element()
     }
