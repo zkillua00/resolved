@@ -1,3 +1,4 @@
+use super::environments_actions::UpstreamEnvironmentMutation;
 use super::*;
 
 impl ApiTester {
@@ -303,7 +304,7 @@ impl ApiTester {
                 "The active environment changed. Close this popover and try again.".to_owned(),
             );
         }
-        if !self.workspace_writable {
+        if !self.can_mutate_environment_content() {
             return Some("Environment storage is read-only for this session.".to_owned());
         }
         if self.sending {
@@ -358,13 +359,31 @@ impl ApiTester {
             environment_id,
             &popover.name,
             &popover.action,
-            popover.value.read(cx).value().to_string(),
+            popover.value.read(cx).unmask_value().to_string(),
         );
         if let Err(error) = result {
             if let Some(current) = self.template_variable_popover.as_mut() {
                 current.error = Some(error.to_string());
             }
             cx.notify();
+            return;
+        }
+        if !self.workspace_writable {
+            let baseline = self
+                .workspace
+                .environment(environment_id)
+                .cloned()
+                .expect("mutation blocker requires an active environment");
+            let draft = candidate
+                .environment(environment_id)
+                .cloned()
+                .expect("template variable mutation must preserve its environment");
+            self.dismiss_template_variable_popover();
+            self.mutate_environment_on_upstream(
+                UpstreamEnvironmentMutation::Save { baseline, draft },
+                window,
+                cx,
+            );
             return;
         }
         if let Err(error) = self.commit_workspace(candidate) {

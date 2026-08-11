@@ -39,15 +39,20 @@ impl WorkspaceSwitchStatus {
 }
 
 struct LoadedUpstreamWorkspace {
-    selected: Option<UpstreamWorkspaceView>,
+    selected: Option<LoadedUpstreamWorkspaceView>,
     summaries: Vec<UpstreamWorkspaceSummary>,
 }
 
+struct LoadedUpstreamWorkspaceView {
+    workspace: UpstreamWorkspaceView,
+    environments: Vec<UpstreamEnvironmentView>,
+}
+
 #[derive(Clone)]
-struct ActiveUpstreamWorkspace {
-    upstream_id: String,
-    workspace_id: String,
-    base_url: url::Url,
+pub(super) struct ActiveUpstreamWorkspace {
+    pub(super) upstream_id: String,
+    pub(super) workspace_id: String,
+    pub(super) base_url: url::Url,
 }
 
 impl ApiTester {
@@ -69,7 +74,7 @@ impl ApiTester {
         self.request_save_route().is_some()
     }
 
-    fn active_upstream_workspace(&self) -> Result<ActiveUpstreamWorkspace, String> {
+    pub(super) fn active_upstream_workspace(&self) -> Result<ActiveUpstreamWorkspace, String> {
         let WorkspaceProviderId::Upstream {
             upstream_id,
             workspace_id,
@@ -576,7 +581,7 @@ impl ApiTester {
         cx.notify();
     }
 
-    fn fail_remote_workspace_write(&mut self, message: String, cx: &mut Context<Self>) {
+    pub(super) fn fail_remote_workspace_write(&mut self, message: String, cx: &mut Context<Self>) {
         self.workspace_switch_status = WorkspaceSwitchStatus::Error(message.clone());
         self.workspace_warning = Some(message);
         cx.notify();
@@ -915,7 +920,7 @@ impl ApiTester {
                 .iter()
                 .map(UpstreamWorkspaceView::summary)
                 .collect::<Vec<_>>();
-            let selected = preferred_workspace_id
+            let selected_workspace = preferred_workspace_id
                 .as_deref()
                 .and_then(|workspace_id| {
                     workspaces
@@ -924,6 +929,22 @@ impl ApiTester {
                 })
                 .or_else(|| workspaces.first())
                 .cloned();
+            let selected = if let Some(workspace) = selected_workspace {
+                let environments = list_upstream_environments(
+                    &client,
+                    &base_url,
+                    credential.bearer_token(),
+                    &workspace.id,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                Some(LoadedUpstreamWorkspaceView {
+                    workspace,
+                    environments,
+                })
+            } else {
+                None
+            };
             Ok(LoadedUpstreamWorkspace {
                 selected,
                 summaries,
@@ -1020,8 +1041,19 @@ impl ApiTester {
             } else {
                 summaries.push(created_summary);
             }
+            let environments = list_upstream_environments(
+                &client,
+                &base_url,
+                credential.bearer_token(),
+                &created.id,
+            )
+            .await
+            .map_err(|error| format!("The workspace environments could not be loaded: {error}"))?;
             Ok(LoadedUpstreamWorkspace {
-                selected: Some(created),
+                selected: Some(LoadedUpstreamWorkspaceView {
+                    workspace: created,
+                    environments,
+                }),
                 summaries,
             })
         });
@@ -1069,7 +1101,7 @@ impl ApiTester {
         let selected_workspace_id = loaded
             .selected
             .as_ref()
-            .map(|workspace| workspace.id.clone());
+            .map(|loaded| loaded.workspace.id.clone());
         profile.replace_workspaces(loaded.summaries, selected_workspace_id.clone());
         let Some(selected) = loaded.selected else {
             if let Err(error) = self.database_store.save_app_settings(&settings) {
@@ -1087,9 +1119,25 @@ impl ApiTester {
             }
             return;
         };
-        let workspace_id = selected.id.clone();
-        let workspace_name = selected.name.clone();
-        let workspace = selected.into_local_workspace();
+        let workspace_id = selected.workspace.id.clone();
+        let workspace_name = selected.workspace.name.clone();
+        let active_environment_id = profile
+            .active_environment_id(&workspace_id)
+            .map(str::to_owned)
+            .filter(|environment_id| {
+                selected
+                    .environments
+                    .iter()
+                    .any(|environment| environment.id == *environment_id)
+            });
+        profile.set_active_environment_id(&workspace_id, active_environment_id.as_deref());
+        let mut workspace = selected.workspace.into_local_workspace();
+        workspace.environments = selected
+            .environments
+            .into_iter()
+            .map(UpstreamEnvironmentView::into_local)
+            .collect();
+        workspace.active_environment_id = active_environment_id;
         if let Err(error) = workspace.validate() {
             self.fail_workspace_switch(
                 format!("The server returned an invalid workspace: {error}"),

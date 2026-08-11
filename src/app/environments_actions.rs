@@ -1,6 +1,43 @@
 use super::*;
 
+pub(super) enum UpstreamEnvironmentMutation {
+    Create {
+        name: String,
+    },
+    Save {
+        baseline: Environment,
+        draft: Environment,
+    },
+    Delete {
+        environment_id: String,
+    },
+}
+
+struct UpstreamEnvironmentMutationResult {
+    environments: Vec<UpstreamEnvironmentView>,
+    created_environment_id: Option<String>,
+    mutation_error: Option<String>,
+}
+
 impl ApiTester {
+    pub(super) fn can_mutate_environment_content(&self) -> bool {
+        self.workspace_writable
+            || (!self.workspace_switch_status.busy()
+                && matches!(
+                    self.workspace_providers.active_id(),
+                    WorkspaceProviderId::Upstream { .. }
+                ))
+    }
+
+    pub(super) fn can_select_environment(&self) -> bool {
+        self.workspace_writable
+            || (self.settings_writable
+                && matches!(
+                    self.workspace_providers.active_id(),
+                    WorkspaceProviderId::Upstream { .. }
+                ))
+    }
+
     pub(super) fn active_environment_editor_is_dirty(&self, cx: &App) -> bool {
         self.workspace.active_environment_id == self.selected_environment_id
             && self.environment_editor_is_dirty(cx)
@@ -194,7 +231,7 @@ impl ApiTester {
     }
 
     pub(super) fn create_environment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.workspace_writable {
+        if !self.can_mutate_environment_content() || self.sending {
             return;
         }
         if self.environment_editor_is_dirty(cx) {
@@ -210,6 +247,14 @@ impl ApiTester {
                 .iter()
                 .map(|environment| environment.name.as_str()),
         );
+        if !self.workspace_writable {
+            self.mutate_environment_on_upstream(
+                UpstreamEnvironmentMutation::Create { name },
+                window,
+                cx,
+            );
+            return;
+        }
         let mut candidate = self.workspace.clone();
         match candidate.create_environment(name) {
             Ok(id) => {
@@ -282,13 +327,22 @@ impl ApiTester {
     }
 
     pub(super) fn activate_environment(&mut self, id: Option<String>, cx: &mut Context<Self>) {
-        if !self.workspace_writable || self.sending {
+        if !self.can_select_environment() || self.sending {
             return;
         }
         let mut candidate = self.workspace.clone();
         match candidate.set_active_environment(id.as_deref()) {
             Ok(()) => {
-                if self.commit_workspace(candidate).is_ok() {
+                if self.workspace_writable {
+                    if self.commit_workspace(candidate).is_ok() {
+                        self.refresh_variable_intelligence(cx);
+                    }
+                } else if self
+                    .persist_upstream_active_environment(id.as_deref(), cx)
+                    .is_ok()
+                {
+                    self.replace_active_remote_workspace(candidate);
+                    self.workspace_warning = None;
                     self.refresh_variable_intelligence(cx);
                 }
             }
@@ -298,75 +352,53 @@ impl ApiTester {
     }
 
     pub(super) fn save_environment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sending || !self.workspace_writable {
+        if self.sending || !self.can_mutate_environment_content() {
             return;
         }
         let Some(environment_id) = self.selected_environment_id.clone() else {
             return;
         };
-        let name = self.environment_name.read(cx).value().to_string();
-        let rows = self
-            .environment_variables
-            .iter()
-            .map(|row| {
-                (
-                    row.id.clone(),
-                    row.key.read(cx).value().to_string(),
-                    row.value.read(cx).value().to_string(),
-                    row.enabled,
-                    row.secret,
-                )
-            })
-            .collect::<Vec<_>>();
-        let mut candidate = self.workspace.clone();
-        let result = (|| {
-            candidate.rename_environment(&environment_id, name)?;
-            let current = candidate
-                .environment(&environment_id)
-                .cloned()
-                .ok_or_else(|| crate::core::WorkspaceMutationError::NotFound {
-                    kind: "environment",
-                    id: environment_id.clone(),
-                })?;
-            let mut replacement = Environment {
-                id: current.id,
-                name: candidate
-                    .environment(&environment_id)
-                    .expect("renamed environment must still exist")
-                    .name
-                    .clone(),
-                variables: Vec::with_capacity(rows.len()),
-            };
-            for (id, key, value, enabled, secret) in &rows {
-                replacement.add_variable(key.clone(), value.clone(), *enabled, *secret)?;
-                if !id.starts_with("draft-variable-") {
-                    replacement
-                        .variables
-                        .last_mut()
-                        .expect("add_variable must append")
-                        .id = id.clone();
-                }
+        let baseline = match self.workspace.environment(&environment_id).cloned() {
+            Some(environment) => environment,
+            None => return,
+        };
+        let draft = match self.environment_editor_draft(&baseline, cx) {
+            Ok(environment) => environment,
+            Err(error) => {
+                self.workspace_warning = Some(error.to_string());
+                cx.notify();
+                return;
             }
-            let environment = candidate
-                .environments
-                .iter_mut()
-                .find(|environment| environment.id == environment_id)
-                .ok_or_else(|| crate::core::WorkspaceMutationError::NotFound {
-                    kind: "environment",
-                    id: environment_id.clone(),
-                })?;
-            *environment = replacement;
-            Ok::<_, crate::core::WorkspaceMutationError>(())
-        })();
+        };
 
-        match result {
-            Ok(()) => {
-                if self.commit_workspace(candidate).is_ok() {
-                    self.reload_environment_editor(window, cx);
-                    self.refresh_variable_intelligence(cx);
-                }
-            }
-            Err(error) => self.workspace_warning = Some(error.to_string()),
+        if !self.workspace_writable {
+            self.mutate_environment_on_upstream(
+                UpstreamEnvironmentMutation::Save { baseline, draft },
+                window,
+                cx,
+            );
+            return;
+        }
+
+        let mut candidate = self.workspace.clone();
+        if let Err(error) = candidate.rename_environment(&environment_id, draft.name.clone()) {
+            self.workspace_warning = Some(error.to_string());
+            cx.notify();
+            return;
+        }
+        let Some(environment) = candidate
+            .environments
+            .iter_mut()
+            .find(|environment| environment.id == environment_id)
+        else {
+            return;
+        };
+        environment.variables = draft.variables;
+        if let Err(error) = candidate.validate() {
+            self.workspace_warning = Some(error.to_string());
+        } else if self.commit_workspace(candidate).is_ok() {
+            self.reload_environment_editor(window, cx);
+            self.refresh_variable_intelligence(cx);
         }
         cx.notify();
     }
@@ -383,7 +415,7 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.workspace_writable || self.sending {
+        if !self.can_mutate_environment_content() || self.sending {
             return;
         }
         let Some(environment) = self.workspace.environment(&id) else {
@@ -448,7 +480,15 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.can_mutate_environment_content() {
+            return;
+        }
         if !self.workspace_writable {
+            self.mutate_environment_on_upstream(
+                UpstreamEnvironmentMutation::Delete { environment_id: id },
+                window,
+                cx,
+            );
             return;
         }
         let deleting_selected = self.selected_environment_id.as_deref() == Some(id.as_str());
@@ -473,6 +513,295 @@ impl ApiTester {
                 }
             }
             Err(error) => self.workspace_warning = Some(error.to_string()),
+        }
+        cx.notify();
+    }
+
+    fn environment_editor_draft(
+        &self,
+        baseline: &Environment,
+        cx: &App,
+    ) -> Result<Environment, WorkspaceMutationError> {
+        let mut draft = Environment::new(self.environment_name.read(cx).value().to_string())?;
+        draft.id = baseline.id.clone();
+        draft.variables.reserve(self.environment_variables.len());
+        for row in &self.environment_variables {
+            draft.add_variable(
+                row.key.read(cx).value().to_string(),
+                row.value.read(cx).unmask_value().to_string(),
+                row.enabled,
+                row.secret,
+            )?;
+            if baseline
+                .variables
+                .iter()
+                .any(|variable| variable.id == row.id)
+            {
+                draft
+                    .variables
+                    .last_mut()
+                    .expect("add_variable must append")
+                    .id = row.id.clone();
+            }
+        }
+        Ok(draft)
+    }
+
+    fn persist_upstream_active_environment(
+        &mut self,
+        environment_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let WorkspaceProviderId::Upstream {
+            upstream_id,
+            workspace_id,
+        } = self.workspace_providers.active_id()
+        else {
+            return Err("No server workspace is selected.".to_owned());
+        };
+        let mut settings = self.settings.clone();
+        let profile = settings
+            .upstreams
+            .servers
+            .iter_mut()
+            .find(|profile| profile.id == *upstream_id)
+            .ok_or_else(|| "That server is no longer configured.".to_owned())?;
+        profile.set_active_environment_id(workspace_id, environment_id);
+        self.commit_settings(settings, false, cx)
+    }
+
+    fn replace_active_remote_workspace(&mut self, workspace: Workspace) {
+        let WorkspaceProviderId::Upstream {
+            upstream_id,
+            workspace_id,
+        } = self.workspace_providers.active_id().clone()
+        else {
+            return;
+        };
+        self.workspace = workspace.clone();
+        self.workspace_providers
+            .register(Arc::new(RemoteWorkspaceProvider::new(
+                self.database_store.clone(),
+                upstream_id,
+                workspace_id,
+                workspace,
+            )));
+    }
+
+    pub(super) fn mutate_environment_on_upstream(
+        &mut self,
+        mutation: UpstreamEnvironmentMutation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = match self.active_upstream_workspace() {
+            Ok(target) => target,
+            Err(error) => {
+                self.workspace_warning = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        self.workspace_switch_generation = self.workspace_switch_generation.wrapping_add(1);
+        let generation = self.workspace_switch_generation;
+        self.workspace_switch_status = WorkspaceSwitchStatus::Loading;
+        let vault = self.credential_vault.clone();
+        let client = self.upstream_client.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let credential_upstream_id = target.upstream_id.clone();
+        let task_target = target.clone();
+        let success_notice = match &mutation {
+            UpstreamEnvironmentMutation::Create { .. } => "Environment created.",
+            UpstreamEnvironmentMutation::Save { .. } => "Environment saved.",
+            UpstreamEnvironmentMutation::Delete { .. } => "Environment deleted.",
+        }
+        .to_owned();
+        let failure_prefix = match &mutation {
+            UpstreamEnvironmentMutation::Create { .. } => "The environment could not be created",
+            UpstreamEnvironmentMutation::Save { .. } => "The environment could not be saved",
+            UpstreamEnvironmentMutation::Delete { .. } => "The environment could not be deleted",
+        };
+        let task = self.runtime.spawn(async move {
+            let credential = runtime
+                .spawn_blocking(move || vault.load_upstream(&credential_upstream_id))
+                .await
+                .map_err(|error| format!("Could not open the saved session: {error}"))?
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Log in to this server again.".to_owned())?;
+            if credential.expires_at <= Utc::now() {
+                return Err("Log in to this server again.".to_owned());
+            }
+
+            let mutation_result = match mutation {
+                UpstreamEnvironmentMutation::Create { name } => create_upstream_environment(
+                    &client,
+                    &task_target.base_url,
+                    credential.bearer_token(),
+                    &task_target.workspace_id,
+                    &name,
+                )
+                .await
+                .map(|created| Some(created.id))
+                .map_err(|error| format!("{failure_prefix}: {error}")),
+                UpstreamEnvironmentMutation::Save { baseline, draft } => save_upstream_environment(
+                    &client,
+                    &task_target.base_url,
+                    credential.bearer_token(),
+                    &task_target.workspace_id,
+                    &baseline,
+                    &draft,
+                )
+                .await
+                .map(|()| None)
+                .map_err(|error| format!("{failure_prefix}: {error}")),
+                UpstreamEnvironmentMutation::Delete { environment_id } => {
+                    delete_upstream_environment(
+                        &client,
+                        &task_target.base_url,
+                        credential.bearer_token(),
+                        &task_target.workspace_id,
+                        &environment_id,
+                    )
+                    .await
+                    .map(|()| None)
+                    .map_err(|error| format!("{failure_prefix}: {error}"))
+                }
+            };
+            let environments = list_upstream_environments(
+                &client,
+                &task_target.base_url,
+                credential.bearer_token(),
+                &task_target.workspace_id,
+            )
+            .await
+            .map_err(|error| match &mutation_result {
+                Ok(_) => format!("The environment list could not be refreshed: {error}"),
+                Err(mutation_error) => format!(
+                    "{mutation_error}. The environment list could not be refreshed: {error}"
+                ),
+            })?;
+            let (created_environment_id, mutation_error) = match mutation_result {
+                Ok(created_environment_id) => (created_environment_id, None),
+                Err(error) => (None, Some(error)),
+            };
+            Ok(UpstreamEnvironmentMutationResult {
+                environments,
+                created_environment_id,
+                mutation_error,
+            })
+        });
+        self.workspace_switch_abort_handle = Some(task.abort_handle());
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.workspace_switch_generation != generation {
+                    return;
+                }
+                this.workspace_switch_abort_handle = None;
+                match result {
+                    Ok(Ok(result)) => this.finish_upstream_environment_mutation(
+                        target,
+                        result,
+                        success_notice,
+                        window,
+                        cx,
+                    ),
+                    Ok(Err(error)) => this.fail_remote_workspace_write(error, cx),
+                    Err(error) if error.is_cancelled() => {}
+                    Err(error) => this.fail_remote_workspace_write(
+                        format!("The environment could not be changed: {error}"),
+                        cx,
+                    ),
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn finish_upstream_environment_mutation(
+        &mut self,
+        target: ActiveUpstreamWorkspace,
+        result: UpstreamEnvironmentMutationResult,
+        success_notice: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let expected_provider = WorkspaceProviderId::Upstream {
+            upstream_id: target.upstream_id.clone(),
+            workspace_id: target.workspace_id.clone(),
+        };
+        if self.workspace_providers.active_id() != &expected_provider {
+            self.workspace_switch_status = WorkspaceSwitchStatus::Idle;
+            return;
+        }
+        if result
+            .environments
+            .iter()
+            .any(|environment| environment.workspace_id != target.workspace_id)
+        {
+            self.fail_remote_workspace_write(
+                "The server returned an environment from another workspace.".to_owned(),
+                cx,
+            );
+            return;
+        }
+
+        let mut candidate = self.workspace.clone();
+        candidate.environments = result
+            .environments
+            .into_iter()
+            .map(UpstreamEnvironmentView::into_local)
+            .collect();
+        let current_active = candidate.active_environment_id.clone();
+        let desired_active = result
+            .created_environment_id
+            .clone()
+            .filter(|id| candidate.environment(id).is_some())
+            .or_else(|| current_active.filter(|id| candidate.environment(id).is_some()));
+        candidate.active_environment_id = desired_active.clone();
+        let mut persistence_error = None;
+        if candidate.active_environment_id != self.workspace.active_environment_id
+            && let Err(error) =
+                self.persist_upstream_active_environment(desired_active.as_deref(), cx)
+        {
+            persistence_error = Some(error);
+        }
+        if let Err(error) = candidate.validate() {
+            self.fail_remote_workspace_write(
+                format!("The server returned invalid environments: {error}"),
+                cx,
+            );
+            return;
+        }
+
+        self.selected_environment_id = result
+            .created_environment_id
+            .filter(|id| candidate.environment(id).is_some())
+            .or_else(|| {
+                self.selected_environment_id
+                    .clone()
+                    .filter(|id| candidate.environment(id).is_some())
+            })
+            .or_else(|| {
+                candidate
+                    .environments
+                    .first()
+                    .map(|environment| environment.id.clone())
+            });
+        self.replace_active_remote_workspace(candidate);
+        self.reload_environment_editor(window, cx);
+        self.refresh_variable_intelligence(cx);
+
+        let warning = result.mutation_error.or(persistence_error);
+        if let Some(warning) = warning {
+            self.workspace_switch_status = WorkspaceSwitchStatus::Error(warning.clone());
+            self.workspace_warning = Some(warning);
+        } else {
+            self.workspace_switch_status = WorkspaceSwitchStatus::Idle;
+            self.workspace_warning = None;
+            self.request_notice = Some(success_notice);
         }
         cx.notify();
     }

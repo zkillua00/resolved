@@ -40,7 +40,7 @@ impl ApiTester {
                         .icon(IconName::Plus)
                         .label("New environment")
                         .primary()
-                        .disabled(self.sending || !self.workspace_writable)
+                        .disabled(self.sending || !self.can_mutate_environment_content())
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.create_environment(window, cx);
                         })),
@@ -55,7 +55,7 @@ impl ApiTester {
             self.workspace.active_environment_id.as_deref() == Some(environment_id.as_str());
         let active_editor_dirty = selected_is_active && editor_dirty;
         let variable_count = self.environment_variables.len();
-        let can_mutate = !self.sending && self.workspace_writable;
+        let can_mutate = !self.sending && self.can_mutate_environment_content();
         let activate_id = environment_id.clone();
         let actions_id = environment_id.clone();
         let context_id = environment_id.clone();

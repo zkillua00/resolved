@@ -429,6 +429,7 @@ impl ApiTester {
         if let Some(existing) = self.settings.upstreams.server(&profile.id) {
             profile.workspaces = existing.workspaces.clone();
             profile.active_workspace_id = existing.active_workspace_id.clone();
+            profile.active_environment_ids = existing.active_environment_ids.clone();
         }
         let profile_label = profile.display_label();
         let upstream_id = profile.id.clone();

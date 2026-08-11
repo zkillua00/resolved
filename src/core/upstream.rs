@@ -14,9 +14,9 @@ use url::{Host, Url};
 use zeroize::Zeroizing;
 
 use super::{
-    Collection, Workspace,
+    Collection, Environment, Workspace,
     template::RequestTemplate,
-    workspace::{CollectionFolder, SavedRequest},
+    workspace::{CollectionFolder, EnvironmentVariable, SavedRequest},
 };
 
 const LOGIN_RESPONSE_LIMIT_BYTES: usize = 64 * 1024;
@@ -160,6 +160,8 @@ pub struct UpstreamProfile {
     pub workspaces: Vec<UpstreamWorkspaceSummary>,
     #[serde(default)]
     pub active_workspace_id: Option<String>,
+    #[serde(default)]
+    pub active_environment_ids: BTreeMap<String, String>,
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -181,6 +183,7 @@ impl UpstreamProfile {
             connected_at: Utc::now(),
             workspaces: Vec::new(),
             active_workspace_id: None,
+            active_environment_ids: BTreeMap::new(),
             extra: BTreeMap::new(),
         }
     }
@@ -203,6 +206,21 @@ impl UpstreamProfile {
         self.active_workspace_id
             .as_deref()
             .and_then(|id| self.workspaces.iter().find(|workspace| workspace.id == id))
+    }
+
+    pub fn active_environment_id(&self, workspace_id: &str) -> Option<&str> {
+        self.active_environment_ids
+            .get(workspace_id)
+            .map(String::as_str)
+    }
+
+    pub fn set_active_environment_id(&mut self, workspace_id: &str, environment_id: Option<&str>) {
+        if let Some(environment_id) = environment_id {
+            self.active_environment_ids
+                .insert(workspace_id.to_owned(), environment_id.to_owned());
+        } else {
+            self.active_environment_ids.remove(workspace_id);
+        }
     }
 
     pub fn replace_workspaces(
@@ -244,6 +262,56 @@ pub struct UpstreamWorkspaceView {
     pub created_by: Option<UpstreamUserSummary>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct UpstreamEnvironmentView {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub variables: Vec<UpstreamEnvironmentVariableView>,
+    pub created_by: Option<UpstreamUserSummary>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl UpstreamEnvironmentView {
+    pub fn into_local(self) -> Environment {
+        Environment {
+            id: self.id,
+            name: self.name,
+            variables: self
+                .variables
+                .into_iter()
+                .map(UpstreamEnvironmentVariableView::into_local)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct UpstreamEnvironmentVariableView {
+    pub id: String,
+    pub environment_id: String,
+    pub key: String,
+    pub value: String,
+    pub enabled: bool,
+    pub secret: bool,
+    pub created_by: Option<UpstreamUserSummary>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl UpstreamEnvironmentVariableView {
+    pub fn into_local(self) -> EnvironmentVariable {
+        EnvironmentVariable {
+            id: self.id,
+            key: self.key,
+            value: self.value,
+            enabled: self.enabled,
+            secret: self.secret,
+        }
+    }
 }
 
 impl UpstreamWorkspaceView {
@@ -422,6 +490,31 @@ struct SaveRequestRequest<'a> {
     definition: &'a RequestTemplate,
 }
 
+#[derive(Serialize)]
+struct EnvironmentRequest<'a> {
+    name: &'a str,
+}
+
+#[derive(Serialize)]
+struct CreateEnvironmentVariableRequest<'a> {
+    key: &'a str,
+    value: &'a str,
+    enabled: bool,
+    secret: bool,
+}
+
+#[derive(Serialize)]
+struct UpdateEnvironmentVariableRequest<'a> {
+    key: &'a str,
+    enabled: bool,
+    secret: bool,
+}
+
+#[derive(Serialize)]
+struct PutEnvironmentVariableValueRequest<'a> {
+    value: &'a str,
+}
+
 #[derive(Deserialize)]
 struct LoginEnvelope {
     success: bool,
@@ -571,6 +664,290 @@ pub async fn create_upstream_collection(
         .await
         .map_err(UpstreamWorkspaceError::Transport)?;
     parse_workspace_response(response).await
+}
+
+pub async fn list_upstream_environments(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+) -> Result<Vec<UpstreamEnvironmentView>, UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join(&format!("api/v1/workspaces/{workspace_id}/environments"))
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .get(endpoint)
+        .bearer_auth(bearer_token)
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response(response).await
+}
+
+pub async fn create_upstream_environment(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    name: &str,
+) -> Result<UpstreamEnvironmentView, UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join(&format!("api/v1/workspaces/{workspace_id}/environments"))
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .post(endpoint)
+        .bearer_auth(bearer_token)
+        .json(&EnvironmentRequest { name })
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response(response).await
+}
+
+pub async fn update_upstream_environment(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    environment_id: &str,
+    name: &str,
+) -> Result<UpstreamEnvironmentView, UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join(&format!(
+            "api/v1/workspaces/{workspace_id}/environments/{environment_id}"
+        ))
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .patch(endpoint)
+        .bearer_auth(bearer_token)
+        .json(&EnvironmentRequest { name })
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response(response).await
+}
+
+pub async fn delete_upstream_environment(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    environment_id: &str,
+) -> Result<(), UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join(&format!(
+            "api/v1/workspaces/{workspace_id}/environments/{environment_id}"
+        ))
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .delete(endpoint)
+        .bearer_auth(bearer_token)
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response::<serde_json::Value>(response)
+        .await
+        .map(|_| ())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_upstream_environment_variable(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    environment_id: &str,
+    variable: &EnvironmentVariable,
+) -> Result<UpstreamEnvironmentVariableView, UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join(&format!(
+            "api/v1/workspaces/{workspace_id}/environments/{environment_id}/variables"
+        ))
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .post(endpoint)
+        .bearer_auth(bearer_token)
+        .json(&CreateEnvironmentVariableRequest {
+            key: &variable.key,
+            value: &variable.value,
+            enabled: variable.enabled,
+            secret: variable.secret,
+        })
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response(response).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_upstream_environment_variable(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    environment_id: &str,
+    variable_id: &str,
+    variable: &EnvironmentVariable,
+) -> Result<UpstreamEnvironmentVariableView, UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join(&format!(
+            "api/v1/workspaces/{workspace_id}/environments/{environment_id}/variables/{variable_id}"
+        ))
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .patch(endpoint)
+        .bearer_auth(bearer_token)
+        .json(&UpdateEnvironmentVariableRequest {
+            key: &variable.key,
+            enabled: variable.enabled,
+            secret: variable.secret,
+        })
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response(response).await
+}
+
+pub async fn put_upstream_environment_variable_value(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    environment_id: &str,
+    variable_id: &str,
+    value: &str,
+) -> Result<UpstreamEnvironmentVariableView, UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join(&format!(
+            "api/v1/workspaces/{workspace_id}/environments/{environment_id}/variables/{variable_id}/value"
+        ))
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .put(endpoint)
+        .bearer_auth(bearer_token)
+        .json(&PutEnvironmentVariableValueRequest { value })
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response(response).await
+}
+
+pub async fn delete_upstream_environment_variable(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    environment_id: &str,
+    variable_id: &str,
+) -> Result<(), UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join(&format!(
+            "api/v1/workspaces/{workspace_id}/environments/{environment_id}/variables/{variable_id}"
+        ))
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .delete(endpoint)
+        .bearer_auth(bearer_token)
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response::<serde_json::Value>(response)
+        .await
+        .map(|_| ())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn save_upstream_environment(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    baseline: &Environment,
+    draft: &Environment,
+) -> Result<(), UpstreamWorkspaceError> {
+    if baseline.id != draft.id {
+        return Err(UpstreamWorkspaceError::InvalidResponse(
+            "the edited environment no longer matches the server environment".to_owned(),
+        ));
+    }
+
+    if baseline.name != draft.name {
+        update_upstream_environment(
+            client,
+            base_url,
+            bearer_token,
+            workspace_id,
+            &baseline.id,
+            &draft.name,
+        )
+        .await?;
+    }
+
+    for variable in &baseline.variables {
+        if !draft
+            .variables
+            .iter()
+            .any(|candidate| candidate.id == variable.id)
+        {
+            delete_upstream_environment_variable(
+                client,
+                base_url,
+                bearer_token,
+                workspace_id,
+                &baseline.id,
+                &variable.id,
+            )
+            .await?;
+        }
+    }
+
+    for variable in &draft.variables {
+        let Some(previous) = baseline
+            .variables
+            .iter()
+            .find(|candidate| candidate.id == variable.id)
+        else {
+            create_upstream_environment_variable(
+                client,
+                base_url,
+                bearer_token,
+                workspace_id,
+                &baseline.id,
+                variable,
+            )
+            .await?;
+            continue;
+        };
+        if previous.key != variable.key
+            || previous.enabled != variable.enabled
+            || previous.secret != variable.secret
+        {
+            update_upstream_environment_variable(
+                client,
+                base_url,
+                bearer_token,
+                workspace_id,
+                &baseline.id,
+                &variable.id,
+                variable,
+            )
+            .await?;
+        }
+        if previous.value != variable.value {
+            put_upstream_environment_variable_value(
+                client,
+                base_url,
+                bearer_token,
+                workspace_id,
+                &baseline.id,
+                &variable.id,
+                &variable.value,
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
 }
 
 pub async fn create_upstream_saved_request(
@@ -879,6 +1256,41 @@ mod tests {
     }
 
     #[test]
+    fn remembers_an_active_environment_for_each_server_workspace() {
+        let base_url = normalize_upstream_url("https://resolved.example.com").unwrap();
+        let user = LoginUser {
+            id: "user-1".to_owned(),
+            email: "owner".to_owned(),
+            display_name: "Owner".to_owned(),
+            active: true,
+        };
+        let mut profile = UpstreamProfile::from_login(
+            None,
+            &base_url,
+            &user,
+            Utc::now() + chrono::Duration::hours(1),
+        );
+
+        profile.set_active_environment_id("workspace-a", Some("environment-a"));
+        profile.set_active_environment_id("workspace-b", Some("environment-b"));
+        assert_eq!(
+            profile.active_environment_id("workspace-a"),
+            Some("environment-a")
+        );
+        assert_eq!(
+            profile.active_environment_id("workspace-b"),
+            Some("environment-b")
+        );
+
+        profile.set_active_environment_id("workspace-a", None);
+        assert_eq!(profile.active_environment_id("workspace-a"), None);
+        assert_eq!(
+            profile.active_environment_id("workspace-b"),
+            Some("environment-b")
+        );
+    }
+
+    #[test]
     fn login_envelope_never_exposes_tokens_through_debug() {
         let result = UpstreamLoginResult {
             base_url: normalize_upstream_url("https://resolved.example.com").unwrap(),
@@ -1122,6 +1534,264 @@ mod tests {
         assert_eq!(workspaces.len(), 1);
         assert_eq!(workspaces[0].id, "workspace-1");
         assert_eq!(workspaces[0].name, "Team API");
+    }
+
+    #[test]
+    fn lists_server_environments_with_the_current_users_values() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let request = read_http_request(&mut stream);
+            let headers = String::from_utf8(request).unwrap().to_ascii_lowercase();
+            assert!(
+                headers.starts_with("get /api/v1/workspaces/workspace-1/environments http/1.1\r\n")
+            );
+            assert!(headers.contains("authorization: bearer saved-session-token\r\n"));
+
+            let now = Utc::now();
+            let body = serde_json::to_vec(&serde_json::json!({
+                "request_id": "request-1",
+                "success": true,
+                "data": [{
+                    "id": "environment-1",
+                    "workspace_id": "workspace-1",
+                    "name": "Production",
+                    "variables": [{
+                        "id": "variable-1",
+                        "environment_id": "environment-1",
+                        "key": "api_token",
+                        "value": "this-users-token",
+                        "enabled": true,
+                        "secret": true,
+                        "created_at": now,
+                        "updated_at": now
+                    }],
+                    "created_at": now,
+                    "updated_at": now
+                }]
+            }))
+            .unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = build_upstream_client().unwrap();
+        let base_url = Url::parse(&format!("http://{address}/")).unwrap();
+        let environments = runtime
+            .block_on(list_upstream_environments(
+                &client,
+                &base_url,
+                "saved-session-token",
+                "workspace-1",
+            ))
+            .unwrap();
+
+        server.join().unwrap();
+        let environment = environments.into_iter().next().unwrap().into_local();
+        assert_eq!(environment.name, "Production");
+        assert_eq!(environment.variables[0].key, "api_token");
+        assert_eq!(environment.variables[0].value, "this-users-token");
+        assert!(environment.variables[0].secret);
+    }
+
+    #[test]
+    fn saves_shared_environment_changes_and_personal_values_through_separate_routes() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let now = Utc::now();
+            for step in 0..5 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .unwrap();
+                let request = read_http_request(&mut stream);
+                let header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .unwrap();
+                let headers = String::from_utf8(request[..header_end].to_vec())
+                    .unwrap()
+                    .to_ascii_lowercase();
+                assert!(headers.contains("authorization: bearer saved-session-token\r\n"));
+                let request_body = (request.len() > header_end + 4).then(|| {
+                    serde_json::from_slice::<serde_json::Value>(&request[header_end + 4..]).unwrap()
+                });
+
+                let (expected_start, expected_body, response_data) = match step {
+                    0 => (
+                        "patch /api/v1/workspaces/workspace-1/environments/environment-1 http/1.1\r\n",
+                        Some(serde_json::json!({"name": "Production"})),
+                        serde_json::json!({
+                            "id": "environment-1",
+                            "workspace_id": "workspace-1",
+                            "name": "Production",
+                            "variables": [],
+                            "created_at": now,
+                            "updated_at": now
+                        }),
+                    ),
+                    1 => (
+                        "delete /api/v1/workspaces/workspace-1/environments/environment-1/variables/variable-removed http/1.1\r\n",
+                        None,
+                        serde_json::json!({}),
+                    ),
+                    2 => (
+                        "patch /api/v1/workspaces/workspace-1/environments/environment-1/variables/variable-1 http/1.1\r\n",
+                        Some(serde_json::json!({
+                            "key": "service_token",
+                            "enabled": false,
+                            "secret": true
+                        })),
+                        environment_variable_response(
+                            "variable-1",
+                            "service_token",
+                            "old-value",
+                            false,
+                            true,
+                            now,
+                        ),
+                    ),
+                    3 => (
+                        "put /api/v1/workspaces/workspace-1/environments/environment-1/variables/variable-1/value http/1.1\r\n",
+                        Some(serde_json::json!({"value": "new-value"})),
+                        environment_variable_response(
+                            "variable-1",
+                            "service_token",
+                            "new-value",
+                            false,
+                            true,
+                            now,
+                        ),
+                    ),
+                    4 => (
+                        "post /api/v1/workspaces/workspace-1/environments/environment-1/variables http/1.1\r\n",
+                        Some(serde_json::json!({
+                            "key": "base_url",
+                            "value": "https://api.example.com",
+                            "enabled": true,
+                            "secret": false
+                        })),
+                        environment_variable_response(
+                            "variable-new-server-id",
+                            "base_url",
+                            "https://api.example.com",
+                            true,
+                            false,
+                            now,
+                        ),
+                    ),
+                    _ => unreachable!(),
+                };
+                assert!(headers.starts_with(expected_start));
+                assert_eq!(request_body, expected_body);
+                let body = serde_json::to_vec(&serde_json::json!({
+                    "request_id": "response-1",
+                    "success": true,
+                    "data": response_data
+                }))
+                .unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+
+        let baseline = Environment {
+            id: "environment-1".to_owned(),
+            name: "Staging".to_owned(),
+            variables: vec![
+                EnvironmentVariable {
+                    id: "variable-1".to_owned(),
+                    key: "api_token".to_owned(),
+                    value: "old-value".to_owned(),
+                    enabled: true,
+                    secret: false,
+                },
+                EnvironmentVariable {
+                    id: "variable-removed".to_owned(),
+                    key: "remove_me".to_owned(),
+                    value: String::new(),
+                    enabled: true,
+                    secret: false,
+                },
+            ],
+        };
+        let draft = Environment {
+            id: "environment-1".to_owned(),
+            name: "Production".to_owned(),
+            variables: vec![
+                EnvironmentVariable {
+                    id: "variable-1".to_owned(),
+                    key: "service_token".to_owned(),
+                    value: "new-value".to_owned(),
+                    enabled: false,
+                    secret: true,
+                },
+                EnvironmentVariable {
+                    id: "draft-variable".to_owned(),
+                    key: "base_url".to_owned(),
+                    value: "https://api.example.com".to_owned(),
+                    enabled: true,
+                    secret: false,
+                },
+            ],
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = build_upstream_client().unwrap();
+        let base_url = Url::parse(&format!("http://{address}/")).unwrap();
+        runtime
+            .block_on(save_upstream_environment(
+                &client,
+                &base_url,
+                "saved-session-token",
+                "workspace-1",
+                &baseline,
+                &draft,
+            ))
+            .unwrap();
+
+        server.join().unwrap();
+    }
+
+    fn environment_variable_response(
+        id: &str,
+        key: &str,
+        value: &str,
+        enabled: bool,
+        secret: bool,
+        now: DateTime<Utc>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "environment_id": "environment-1",
+            "key": key,
+            "value": value,
+            "enabled": enabled,
+            "secret": secret,
+            "created_at": now,
+            "updated_at": now
+        })
     }
 
     #[test]

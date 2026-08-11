@@ -75,7 +75,7 @@ impl ApiTester {
             && self.can_save_request_content()
             && (active_request_tab.association().collection_id().is_some()
                 || self.selected_collection_id.is_some());
-        let can_switch_environment = self.workspace_writable && !self.sending;
+        let can_switch_environment = self.can_select_environment() && !self.sending;
         let dirty = self.request_is_dirty();
         let request_actions_this = this.clone();
         let request_actions_disabled = self.sending;

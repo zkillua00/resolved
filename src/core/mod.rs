@@ -56,11 +56,15 @@ pub use snippet::{
 pub use template::{RequestTemplate, ResolvedRequest, resolve_request};
 #[allow(unused_imports)]
 pub use upstream::{
-    LoginUser, UpstreamCollectionView, UpstreamLoginError, UpstreamLoginResult, UpstreamProfile,
-    UpstreamSavedRequestView, UpstreamSettings, UpstreamUrlError, UpstreamUserSummary,
-    UpstreamWorkspaceError, UpstreamWorkspaceSummary, UpstreamWorkspaceView, build_upstream_client,
-    create_upstream_collection, create_upstream_saved_request, create_upstream_workspace,
-    list_upstream_workspaces, login_upstream, normalize_upstream_url,
+    LoginUser, UpstreamCollectionView, UpstreamEnvironmentVariableView, UpstreamEnvironmentView,
+    UpstreamLoginError, UpstreamLoginResult, UpstreamProfile, UpstreamSavedRequestView,
+    UpstreamSettings, UpstreamUrlError, UpstreamUserSummary, UpstreamWorkspaceError,
+    UpstreamWorkspaceSummary, UpstreamWorkspaceView, build_upstream_client,
+    create_upstream_collection, create_upstream_environment, create_upstream_environment_variable,
+    create_upstream_saved_request, create_upstream_workspace, delete_upstream_environment,
+    delete_upstream_environment_variable, list_upstream_environments, list_upstream_workspaces,
+    login_upstream, normalize_upstream_url, put_upstream_environment_variable_value,
+    save_upstream_environment, update_upstream_environment, update_upstream_environment_variable,
     update_upstream_saved_request, upstream_url_label,
 };
 #[allow(unused_imports)]

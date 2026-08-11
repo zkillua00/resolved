@@ -99,9 +99,12 @@ and request-tab state. Existing pre-workspace data migrates into a default
 Selecting a connected server reads its bearer token from the credential vault
 and requests `GET /api/v1/workspaces` directly from that server. The returned
 recursive collection tree is mapped into Resolved's collection and folder
-models. The provider registers and becomes active only after the response,
-workspace validation, request-tab restoration, and selection persistence all
-succeed, so a failed switch leaves the current workspace active.
+models. Resolved then requests the selected workspace's environments. Shared
+environment names, variable keys, enabled states, and secret flags come from the
+server; each variable value belongs to the authenticated user. The provider
+registers and becomes active only after both responses, workspace validation,
+request-tab restoration, and selection persistence succeed, so a failed switch
+leaves the current workspace active.
 
 The workspace picker creates a server workspace through
 `POST /api/v1/workspaces`, using the same saved bearer session. A successful
@@ -112,6 +115,13 @@ folders, and saved requests through the collaboration API. Save and Update send
 the complete portable request template to the collection node represented by
 the selected collection or folder. Server responses are applied to the active
 workspace only after the authenticated write succeeds.
+
+Environment creation, shared-definition edits, and deletion use the workspace
+environment API. Value changes use the dedicated per-user value route. Resolved
+reloads the environment list after every write, including a rejected or
+partially completed multi-step edit, so the editor returns to the server's
+authoritative state. The active-environment choice is stored locally per server
+workspace and is never imposed on another user.
 
 Request-tab drafts remain device-local and are persisted under their
 server/workspace identity. Forgetting a server removes its encrypted session,

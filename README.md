@@ -83,10 +83,12 @@ switch between Local and a connected server.
 Each local workspace has independent collections, environments, snippets,
 saved requests, and request-tab drafts in SQLite. Selecting a server fetches its
 workspace list directly with the encrypted local session and loads its recursive
-collection tree and saved requests. Server workspaces support creating root
-collections, nested folders, and saving or updating requests; request-tab drafts
-remain local and are isolated by server and workspace. Switching never uploads
-or exposes a local workspace. See
+collection tree, saved requests, and environments. Server workspaces support
+creating root collections, nested folders, saving or updating requests, and
+managing environments. Environment definitions are shared by the server while
+each signed-in user has an independently encrypted value for every variable.
+The active environment and request-tab drafts remain local and are isolated by
+server and workspace. Switching never uploads or exposes a local workspace. See
 [`docs/upstreams.md`](docs/upstreams.md) for the provider and credential-vault
 design.
 

@@ -6,7 +6,7 @@ pub(super) use environment_variable_row::EnvironmentVariableRow;
 
 impl ApiTester {
     pub(super) fn render_environment_variable_grid(&self, cx: &mut Context<Self>) -> AnyElement {
-        let can_mutate = !self.sending && self.workspace_writable;
+        let can_mutate = !self.sending && self.can_mutate_environment_content();
         let rows = self
             .environment_variables
             .iter()

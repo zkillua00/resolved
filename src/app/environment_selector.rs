@@ -21,7 +21,7 @@ impl ApiTester {
             .and_then(|id| self.workspace.environment(id))
             .map(|environment| environment.name.as_str())
             .unwrap_or("No environment selected");
-        let can_switch_environment = self.workspace_writable && !self.sending;
+        let can_switch_environment = self.can_select_environment() && !self.sending;
         let this = cx.entity().downgrade();
 
         h_flex()
