@@ -95,6 +95,7 @@ func WithWorkspaces(authService *auth.Service, handler *workspaces.Handler) Modi
 		protected.Post("/workspaces/:workspace_id/collections/:collection_id/requests", auth.RequirePermission(identity.PermissionRequestsCreate), handler.CreateSavedRequestController())
 		protected.Get("/workspaces/:workspace_id/collections/:collection_id/requests/:request_id", auth.RequirePermission(identity.PermissionRequestsRead), handler.GetSavedRequestController())
 		protected.Patch("/workspaces/:workspace_id/collections/:collection_id/requests/:request_id", auth.RequirePermission(identity.PermissionRequestsUpdate), handler.UpdateSavedRequestController())
+		protected.Put("/workspaces/:workspace_id/collections/:collection_id/requests/:request_id/collection", auth.RequirePermission(identity.PermissionRequestsUpdate), handler.MoveSavedRequestController())
 		protected.Delete("/workspaces/:workspace_id/collections/:collection_id/requests/:request_id", auth.RequirePermission(identity.PermissionRequestsDelete), handler.DeleteSavedRequestController())
 
 		protected.Get(

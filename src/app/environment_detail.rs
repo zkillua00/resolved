@@ -40,7 +40,7 @@ impl ApiTester {
                         .icon(IconName::Plus)
                         .label("New environment")
                         .primary()
-                        .disabled(self.sending || !self.can_mutate_environment_content())
+                        .disabled(self.sending || !self.can_create_environment_content())
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.create_environment(window, cx);
                         })),
@@ -55,7 +55,10 @@ impl ApiTester {
             self.workspace.active_environment_id.as_deref() == Some(environment_id.as_str());
         let active_editor_dirty = selected_is_active && editor_dirty;
         let variable_count = self.environment_variables.len();
-        let can_mutate = !self.sending && self.can_mutate_environment_content();
+        let can_update_definition = !self.sending && self.can_update_environment_definition();
+        let can_save = !self.sending && self.can_save_environment_editor(cx);
+        let can_delete = !self.sending && self.can_delete_environment_content();
+        let can_activate = !self.sending && self.can_select_environment();
         let activate_id = environment_id.clone();
         let actions_id = environment_id.clone();
         let context_id = environment_id.clone();
@@ -111,7 +114,7 @@ impl ApiTester {
                                         .child(
                                             Input::new(&self.environment_name)
                                                 .large()
-                                                .disabled(!can_mutate),
+                                                .disabled(!can_update_definition),
                                         ),
                                 ),
                         )
@@ -146,7 +149,7 @@ impl ApiTester {
                                     .small()
                                     .outline()
                                     .selected(selected_is_active)
-                                    .disabled(!can_mutate)
+                                    .disabled(!can_activate)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.activate_environment(
                                             if selected_is_active {
@@ -163,7 +166,7 @@ impl ApiTester {
                                     .label("Revert")
                                     .small()
                                     .ghost()
-                                    .disabled(!can_mutate || !editor_dirty)
+                                    .disabled(!editor_dirty)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.revert_environment(window, cx);
                                     })),
@@ -173,7 +176,7 @@ impl ApiTester {
                                     .label("Save")
                                     .small()
                                     .primary()
-                                    .disabled(!can_mutate || !editor_dirty)
+                                    .disabled(!can_save || !editor_dirty)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.save_environment(window, cx);
                                     })),
@@ -191,7 +194,7 @@ impl ApiTester {
                                             actions_this.clone(),
                                             actions_id.clone(),
                                             actions_name.clone(),
-                                            can_mutate,
+                                            can_delete,
                                         )
                                     }),
                             ),
@@ -205,7 +208,7 @@ impl ApiTester {
                                 context_this.clone(),
                                 context_id.clone(),
                                 context_name.clone(),
-                                can_mutate,
+                                can_delete,
                             )
                         }),
                 ),

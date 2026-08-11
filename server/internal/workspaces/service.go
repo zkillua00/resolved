@@ -466,6 +466,40 @@ func (s *Service) UpdateSavedRequest(
 	return updated, nil
 }
 
+func (s *Service) MoveSavedRequest(
+	ctx context.Context,
+	actor Actor,
+	workspaceID, collectionID, requestID, targetCollectionID string,
+) (SavedRequest, error) {
+	if err := validateWorkspaceCollectionRequestIDs(workspaceID, collectionID, requestID); err != nil {
+		return SavedRequest{}, err
+	}
+	if err := validateID("target_collection_id", targetCollectionID); err != nil {
+		return SavedRequest{}, err
+	}
+	workspace, err := s.repository.GetWorkspace(ctx, workspaceID)
+	if err != nil {
+		return SavedRequest{}, mapRepositoryError(err)
+	}
+	if _, exists := findCollection(workspace.Collections, collectionID); !exists {
+		return SavedRequest{}, mapRepositoryError(ErrCollectionNotFound)
+	}
+	if _, exists := findCollection(workspace.Collections, targetCollectionID); !exists {
+		return SavedRequest{}, mapRepositoryError(ErrCollectionNotFound)
+	}
+	if !hasCollectionGrant(workspace, collectionID, actor) ||
+		!hasCollectionGrant(workspace, targetCollectionID, actor) {
+		return SavedRequest{}, collectionAccessDenied()
+	}
+	moved, err := s.repository.MoveSavedRequest(
+		ctx, workspaceID, collectionID, requestID, targetCollectionID,
+	)
+	if err != nil {
+		return SavedRequest{}, mapRepositoryError(err)
+	}
+	return moved, nil
+}
+
 func (s *Service) DeleteSavedRequest(
 	ctx context.Context,
 	actor Actor,

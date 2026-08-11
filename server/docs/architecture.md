@@ -173,6 +173,7 @@ Permissions in the initial catalog are:
 | `POST` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/requests` | `requests.create` |
 | `GET` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/requests/:request_id` | `requests.read` |
 | `PATCH` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/requests/:request_id` | `requests.update` |
+| `PUT` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/requests/:request_id/collection` | `requests.update` |
 | `DELETE` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/requests/:request_id` | `requests.delete` |
 | `GET` | `/api/v1/workspaces/:workspace_id/environments` | `environments.read` |
 | `POST` | `/api/v1/workspaces/:workspace_id/environments` | `environments.create` |

@@ -997,7 +997,9 @@ fn build_workspace_picker_menu(
         let create_server_id = server.id.clone();
         menu = menu.item(
             PopupMenuItem::new("New workspace…")
-                .disabled(server.session_expired(Utc::now()))
+                .disabled(
+                    server.session_expired(Utc::now()) || !server.has_permission(WORKSPACES_CREATE),
+                )
                 .on_click(move |_, window, cx| {
                     if let Some(this) = create_this.upgrade() {
                         this.update(cx, |this, cx| {
@@ -1010,6 +1012,61 @@ fn build_workspace_picker_menu(
                     }
                 }),
         );
+
+        let active_workspace_id = match active_provider_id {
+            WorkspaceProviderId::Upstream {
+                upstream_id,
+                workspace_id,
+            } if upstream_id == &server.id => Some(workspace_id.clone()),
+            _ => None,
+        };
+        if let Some(workspace_id) = active_workspace_id {
+            let rename_this = this.clone();
+            let rename_server_id = server.id.clone();
+            let rename_workspace_id = workspace_id.clone();
+            let delete_this = this.clone();
+            let delete_server_id = server.id.clone();
+            let delete_workspace_id = workspace_id;
+            menu = menu
+                .item(
+                    PopupMenuItem::new("Rename current workspace…")
+                        .disabled(
+                            server.session_expired(Utc::now())
+                                || !server.has_permission(WORKSPACES_UPDATE),
+                        )
+                        .on_click(move |_, window, cx| {
+                            if let Some(this) = rename_this.upgrade() {
+                                this.update(cx, |this, cx| {
+                                    this.open_rename_upstream_workspace_dialog(
+                                        rename_server_id.clone(),
+                                        rename_workspace_id.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Delete current workspace…")
+                        .disabled(
+                            server.session_expired(Utc::now())
+                                || !server.has_permission(WORKSPACES_DELETE),
+                        )
+                        .on_click(move |_, window, cx| {
+                            if let Some(this) = delete_this.upgrade() {
+                                this.update(cx, |this, cx| {
+                                    this.open_delete_upstream_workspace_dialog(
+                                        delete_server_id.clone(),
+                                        delete_workspace_id.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                        }),
+                );
+        }
     }
 
     let add_server_this = this.clone();
@@ -1197,7 +1254,7 @@ mod tests {
     fn server_workspace_creation_dialog_mounts(cx: &mut TestAppContext) {
         let (app, cx, _directory) = mount_app(cx);
         let base_url = normalize_upstream_url("https://resolved.example.com").unwrap();
-        let profile = UpstreamProfile::from_login(
+        let mut profile = UpstreamProfile::from_login(
             None,
             &base_url,
             &crate::core::LoginUser {
@@ -1205,9 +1262,11 @@ mod tests {
                 email: "owner".to_owned(),
                 display_name: "Owner".to_owned(),
                 active: true,
+                roles: Vec::new(),
             },
             Utc::now() + chrono::Duration::hours(1),
         );
+        profile.permission_keys.insert(WORKSPACES_CREATE.to_owned());
         let upstream_id = profile.id.clone();
         cx.update(|window, cx| {
             app.update(cx, |app, cx| {

@@ -383,6 +383,34 @@ func (r *Repository) UpdateSavedRequest(
 	return r.GetSavedRequest(ctx, workspaceID, collectionID, requestID)
 }
 
+func (r *Repository) MoveSavedRequest(
+	ctx context.Context,
+	workspaceID, collectionID, requestID, targetCollectionID string,
+) (SavedRequest, error) {
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := ensureCollectionExists(tx, workspaceID, collectionID); err != nil {
+			return err
+		}
+		if err := ensureCollectionExists(tx, workspaceID, targetCollectionID); err != nil {
+			return err
+		}
+		result := tx.Model(&SavedRequest{}).
+			Where("collection_id = ? AND id = ?", collectionID, requestID).
+			Update("collection_id", targetCollectionID)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrSavedRequestNotFound
+		}
+		return touchWorkspace(tx, workspaceID)
+	})
+	if err != nil {
+		return SavedRequest{}, err
+	}
+	return r.GetSavedRequest(ctx, workspaceID, targetCollectionID, requestID)
+}
+
 func (r *Repository) DeleteSavedRequest(
 	ctx context.Context,
 	workspaceID, collectionID, requestID string,

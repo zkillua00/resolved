@@ -122,8 +122,12 @@ impl ApiTester {
         cx.notify();
     }
 
-    pub(super) fn finish_collection_folder_rename(&mut self, cx: &mut Context<Self>) {
-        if !self.workspace_writable {
+    pub(super) fn finish_collection_folder_rename(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_update_collection_content() {
             return;
         }
         let (Some(collection_id), Some(folder_id)) = (
@@ -136,7 +140,16 @@ impl ApiTester {
         let mut candidate = self.workspace.clone();
         match candidate.rename_collection_folder(&collection_id, &folder_id, name) {
             Ok(()) => {
-                if self.commit_workspace(candidate).is_ok() {
+                if !self.workspace_writable {
+                    let Some(folder) = candidate
+                        .collection(&collection_id)
+                        .and_then(|collection| collection.folder(&folder_id))
+                    else {
+                        return;
+                    };
+                    self.rename_collection_on_upstream(folder_id, folder.name.clone(), window, cx);
+                    self.renaming_folder_id = None;
+                } else if self.commit_workspace(candidate).is_ok() {
                     self.renaming_folder_id = None;
                 }
             }
@@ -150,9 +163,17 @@ impl ApiTester {
         collection_id: String,
         folder_id: String,
         parent_folder_id: Option<String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.workspace_writable || self.sending {
+        if !self.can_update_collection_content() || self.sending {
+            return;
+        }
+        if !self.workspace_writable {
+            let remote_parent_id = parent_folder_id
+                .clone()
+                .unwrap_or_else(|| collection_id.clone());
+            self.move_collection_on_upstream(folder_id, Some(remote_parent_id), window, cx);
             return;
         }
         let mut candidate = self.workspace.clone();
@@ -198,7 +219,7 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.workspace_writable || self.sending {
+        if !self.can_delete_collection_content() || self.sending {
             return;
         }
         let Some(folder_name) = self
@@ -246,7 +267,7 @@ impl ApiTester {
                         },
                     ]
                 })
-                .on_ok(move |_, _, cx| {
+                .on_ok(move |_, window, cx| {
                     if input_for_ok.read(cx).value().as_ref() != expected_name.as_str() {
                         return false;
                     }
@@ -255,6 +276,7 @@ impl ApiTester {
                             this.delete_collection_folder(
                                 delete_collection_id.clone(),
                                 delete_folder_id.clone(),
+                                window,
                                 cx,
                             );
                         });
@@ -282,10 +304,15 @@ impl ApiTester {
         &mut self,
         collection_id: String,
         folder_id: String,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.workspace_writable || self.sending {
+        if !self.can_delete_collection_content() || self.sending {
             return false;
+        }
+        if !self.workspace_writable {
+            self.delete_collection_on_upstream(folder_id, true, window, cx);
+            return true;
         }
         let Some(collection) = self.workspace.collection(&collection_id) else {
             return false;
@@ -366,9 +393,10 @@ impl ApiTester {
         &mut self,
         collection_id: String,
         request_id: String,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.workspace_writable || self.sending {
+        if !self.can_update_request_content() || self.sending {
             return;
         }
         let target_folder_id =
@@ -377,6 +405,35 @@ impl ApiTester {
             } else {
                 None
             };
+        if !self.workspace_writable {
+            let Some(source) = self
+                .workspace
+                .collection(&collection_id)
+                .and_then(|collection| {
+                    collection
+                        .requests
+                        .iter()
+                        .find(|request| request.id == request_id)
+                })
+            else {
+                return;
+            };
+            let source_remote_collection_id = source
+                .folder_id
+                .clone()
+                .unwrap_or_else(|| collection_id.clone());
+            let target_remote_collection_id = target_folder_id
+                .clone()
+                .unwrap_or_else(|| collection_id.clone());
+            self.move_request_on_upstream(
+                source_remote_collection_id,
+                request_id,
+                target_remote_collection_id,
+                window,
+                cx,
+            );
+            return;
+        }
         let mut candidate = self.workspace.clone();
         match candidate.move_saved_request(&collection_id, &request_id, target_folder_id.as_deref())
         {

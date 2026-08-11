@@ -72,7 +72,11 @@ impl ApiTester {
             .saved_request_id()
             .is_some();
         let can_save = !self.sending
-            && self.can_save_request_content()
+            && self.can_save_request_content(false)
+            && (active_request_tab.association().collection_id().is_some()
+                || self.selected_collection_id.is_some());
+        let can_save_as = !self.sending
+            && self.can_save_request_content(true)
             && (active_request_tab.association().collection_id().is_some()
                 || self.selected_collection_id.is_some());
         let can_switch_environment = self.can_select_environment() && !self.sending;
@@ -262,7 +266,7 @@ impl ApiTester {
                                     menu = menu.separator().item(
                                         PopupMenuItem::new("Save as new request…")
                                             .icon(IconName::Copy)
-                                            .disabled(!can_save)
+                                            .disabled(!can_save_as)
                                             .on_click(move |_, window, cx| {
                                                 if let Some(this) = save_copy_this.upgrade() {
                                                     this.update(cx, |this, cx| {

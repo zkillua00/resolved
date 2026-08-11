@@ -38,7 +38,10 @@ impl ApiTester {
             collection.id, request.id
         )
         .into();
-        let can_mutate = !self.sending && self.workspace_writable;
+        let can_update = !self.sending && self.can_update_request_content();
+        let can_duplicate = !self.sending && self.can_create_request_content();
+        let can_delete = !self.sending && self.can_delete_request_content();
+        let drag_enabled = drag_enabled && can_update;
         let selected_same_collection =
             self.selected_collection_id.as_deref() == Some(collection.id.as_str());
         let move_target = selected_same_collection
@@ -57,7 +60,7 @@ impl ApiTester {
         };
         let actions_move_label = move_label.clone();
         let context_move_label = move_label;
-        let can_move = can_mutate && selected_same_collection && request.folder_id != move_target;
+        let can_move = can_update && selected_same_collection && request.folder_id != move_target;
         let row_inset = px(14. + (depth as f32 * 14.));
         let tree_drag = CollectionTreeDrag::request(
             collection.id.clone(),
@@ -149,7 +152,9 @@ impl ApiTester {
                                             actions_this.clone(),
                                             actions_collection_id.clone(),
                                             actions_request_id.clone(),
-                                            can_mutate,
+                                            can_update,
+                                            can_duplicate,
+                                            can_delete,
                                             actions_move_label.clone(),
                                             can_move,
                                         )
@@ -178,7 +183,9 @@ impl ApiTester {
                             context_this.clone(),
                             context_collection_id.clone(),
                             context_request_id.clone(),
-                            can_mutate,
+                            can_update,
+                            can_duplicate,
+                            can_delete,
                             context_move_label.clone(),
                             can_move,
                         )
@@ -189,12 +196,15 @@ impl ApiTester {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_saved_request_actions_menu(
     menu: PopupMenu,
     owner: gpui::WeakEntity<ApiTester>,
     collection_id: String,
     request_id: String,
-    can_mutate: bool,
+    can_update: bool,
+    can_duplicate: bool,
+    can_delete: bool,
     move_label: String,
     can_move: bool,
 ) -> PopupMenu {
@@ -216,7 +226,7 @@ fn build_saved_request_actions_menu(
 
     menu.item(
         PopupMenuItem::new("Rename")
-            .disabled(!can_mutate)
+            .disabled(!can_update)
             .on_click(move |_, window, cx| {
                 let rename_this = rename_this.clone();
                 let rename_collection_id = rename_collection_id.clone();
@@ -237,13 +247,14 @@ fn build_saved_request_actions_menu(
     )
     .item(
         PopupMenuItem::new("Duplicate")
-            .disabled(!can_mutate)
-            .on_click(move |_, _, cx| {
+            .disabled(!can_duplicate)
+            .on_click(move |_, window, cx| {
                 if let Some(this) = duplicate_this.upgrade() {
                     this.update(cx, |this, cx| {
                         this.duplicate_saved_request(
                             duplicate_collection_id.clone(),
                             duplicate_request_id.clone(),
+                            window,
                             cx,
                         );
                     });
@@ -253,12 +264,13 @@ fn build_saved_request_actions_menu(
     .item(
         PopupMenuItem::new(move_label)
             .disabled(!can_move)
-            .on_click(move |_, _, cx| {
+            .on_click(move |_, window, cx| {
                 if let Some(this) = move_this.upgrade() {
                     this.update(cx, |this, cx| {
                         this.move_saved_request_to_selected_folder(
                             move_collection_id.clone(),
                             move_request_id.clone(),
+                            window,
                             cx,
                         );
                     });
@@ -279,7 +291,7 @@ fn build_saved_request_actions_menu(
     .separator()
     .item(
         PopupMenuItem::new("Delete…")
-            .disabled(!can_mutate)
+            .disabled(!can_delete)
             .on_click(move |_, window, cx| {
                 let delete_this = delete_this.clone();
                 let delete_collection_id = delete_collection_id.clone();

@@ -20,13 +20,36 @@ struct UpstreamEnvironmentMutationResult {
 }
 
 impl ApiTester {
-    pub(super) fn can_mutate_environment_content(&self) -> bool {
+    pub(super) fn can_create_environment_content(&self) -> bool {
         self.workspace_writable
             || (!self.workspace_switch_status.busy()
-                && matches!(
-                    self.workspace_providers.active_id(),
-                    WorkspaceProviderId::Upstream { .. }
-                ))
+                && self.active_upstream_has_permission(ENVIRONMENTS_READ)
+                && self.active_upstream_has_permission(ENVIRONMENTS_CREATE))
+    }
+
+    pub(super) fn can_update_environment_definition(&self) -> bool {
+        self.workspace_writable
+            || (!self.workspace_switch_status.busy()
+                && self.active_upstream_has_permission(ENVIRONMENTS_READ)
+                && self.active_upstream_has_permission(ENVIRONMENTS_UPDATE))
+    }
+
+    pub(super) fn can_delete_environment_content(&self) -> bool {
+        self.workspace_writable
+            || (!self.workspace_switch_status.busy()
+                && self.active_upstream_has_permission(ENVIRONMENTS_READ)
+                && self.active_upstream_has_permission(ENVIRONMENTS_DELETE))
+    }
+
+    pub(super) fn can_update_environment_values_content(&self) -> bool {
+        self.workspace_writable
+            || (!self.workspace_switch_status.busy()
+                && self.active_upstream_has_permission(ENVIRONMENTS_READ)
+                && self.active_upstream_has_permission(ENVIRONMENT_VALUES_UPDATE))
+    }
+
+    pub(super) fn can_mutate_environment_content(&self) -> bool {
+        self.can_update_environment_definition() || self.can_update_environment_values_content()
     }
 
     pub(super) fn can_select_environment(&self) -> bool {
@@ -41,6 +64,54 @@ impl ApiTester {
     pub(super) fn active_environment_editor_is_dirty(&self, cx: &App) -> bool {
         self.workspace.active_environment_id == self.selected_environment_id
             && self.environment_editor_is_dirty(cx)
+    }
+
+    pub(super) fn can_save_environment_editor(&self, cx: &App) -> bool {
+        let Some(baseline) = self
+            .selected_environment_id
+            .as_deref()
+            .and_then(|id| self.workspace.environment(id))
+        else {
+            return false;
+        };
+        let Ok(draft) = self.environment_editor_draft(baseline, cx) else {
+            return false;
+        };
+        self.can_apply_environment_draft(baseline, &draft)
+    }
+
+    fn can_apply_environment_draft(&self, baseline: &Environment, draft: &Environment) -> bool {
+        if self.workspace_writable {
+            return true;
+        }
+        let definition_changed = baseline.name != draft.name
+            || draft.variables.iter().any(|variable| {
+                baseline
+                    .variables
+                    .iter()
+                    .find(|candidate| candidate.id == variable.id)
+                    .is_none_or(|previous| {
+                        previous.key != variable.key
+                            || previous.enabled != variable.enabled
+                            || previous.secret != variable.secret
+                    })
+            });
+        let definition_deleted = baseline.variables.iter().any(|variable| {
+            !draft
+                .variables
+                .iter()
+                .any(|candidate| candidate.id == variable.id)
+        });
+        let value_changed = draft.variables.iter().any(|variable| {
+            baseline
+                .variables
+                .iter()
+                .find(|candidate| candidate.id == variable.id)
+                .is_some_and(|previous| previous.value != variable.value)
+        });
+        (!definition_changed || self.can_update_environment_definition())
+            && (!definition_deleted || self.can_delete_environment_content())
+            && (!value_changed || self.can_update_environment_values_content())
     }
 
     pub(super) fn environment_rows(
@@ -231,7 +302,7 @@ impl ApiTester {
     }
 
     pub(super) fn create_environment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.can_mutate_environment_content() || self.sending {
+        if !self.can_create_environment_content() || self.sending {
             return;
         }
         if self.environment_editor_is_dirty(cx) {
@@ -370,6 +441,9 @@ impl ApiTester {
                 return;
             }
         };
+        if !self.can_apply_environment_draft(&baseline, &draft) {
+            return;
+        }
 
         if !self.workspace_writable {
             self.mutate_environment_on_upstream(
@@ -415,7 +489,7 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.can_mutate_environment_content() || self.sending {
+        if !self.can_delete_environment_content() || self.sending {
             return;
         }
         let Some(environment) = self.workspace.environment(&id) else {
@@ -480,7 +554,7 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.can_mutate_environment_content() {
+        if !self.can_delete_environment_content() {
             return;
         }
         if !self.workspace_writable {
@@ -594,6 +668,16 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let allowed = match &mutation {
+            UpstreamEnvironmentMutation::Create { .. } => self.can_create_environment_content(),
+            UpstreamEnvironmentMutation::Save { baseline, draft } => {
+                self.can_apply_environment_draft(baseline, draft)
+            }
+            UpstreamEnvironmentMutation::Delete { .. } => self.can_delete_environment_content(),
+        };
+        if !allowed {
+            return;
+        }
         let target = match self.active_upstream_workspace() {
             Ok(target) => target,
             Err(error) => {

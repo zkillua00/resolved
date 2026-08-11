@@ -14,9 +14,14 @@ impl ApiTester {
         &self,
         index: usize,
         row: &EnvironmentVariableRow,
-        can_mutate: bool,
+        can_update_definition: bool,
+        can_update_values: bool,
+        can_delete_definition: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let draft = row.id.starts_with("draft-variable-");
+        let can_update_value = can_update_values || (draft && can_update_definition);
+        let can_delete = can_delete_definition || (draft && can_update_definition);
         let checkbox_id = row.id.clone();
         let secret_id = row.id.clone();
         let action_this = cx.entity().downgrade();
@@ -59,7 +64,7 @@ impl ApiTester {
                         Checkbox::new(("environment-variable-enabled", index))
                             .checked(row.enabled)
                             .small()
-                            .disabled(!can_mutate)
+                            .disabled(!can_update_definition)
                             .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                                 if let Some(row) = this
                                     .environment_variables
@@ -90,7 +95,7 @@ impl ApiTester {
                             .small()
                             .size_full()
                             .px_3()
-                            .disabled(!can_mutate),
+                            .disabled(!can_update_definition),
                     ),
             )
             .child(
@@ -111,7 +116,7 @@ impl ApiTester {
                             .small()
                             .size_full()
                             .px_3()
-                            .disabled(!can_mutate),
+                            .disabled(!can_update_value),
                     ),
             )
             .child(
@@ -135,7 +140,7 @@ impl ApiTester {
                             .xsmall()
                             .ghost()
                             .selected(row.secret)
-                            .disabled(!can_mutate)
+                            .disabled(!can_update_definition)
                             .tooltip(if row.secret {
                                 "Show as a plain variable"
                             } else {
@@ -181,7 +186,8 @@ impl ApiTester {
                                     menu,
                                     action_this.clone(),
                                     actions_row_id.clone(),
-                                    can_mutate,
+                                    can_update_definition,
+                                    can_delete,
                                 )
                             }),
                     ),
@@ -194,7 +200,8 @@ impl ApiTester {
                     menu,
                     context_this.clone(),
                     context_row_id.clone(),
-                    can_mutate,
+                    can_update_definition,
+                    can_delete,
                 )
             });
 
@@ -210,7 +217,8 @@ fn build_environment_variable_actions_menu(
     menu: PopupMenu,
     owner: gpui::WeakEntity<ApiTester>,
     row_id: String,
-    can_mutate: bool,
+    can_duplicate: bool,
+    can_delete: bool,
 ) -> PopupMenu {
     let duplicate_this = owner.clone();
     let duplicate_id = row_id.clone();
@@ -218,7 +226,7 @@ fn build_environment_variable_actions_menu(
     let remove_id = row_id;
     menu.item(
         PopupMenuItem::new("Duplicate")
-            .disabled(!can_mutate)
+            .disabled(!can_duplicate)
             .on_click(move |_, window, cx| {
                 if let Some(this) = duplicate_this.upgrade() {
                     this.update(cx, |this, cx| {
@@ -230,7 +238,7 @@ fn build_environment_variable_actions_menu(
     .separator()
     .item(
         PopupMenuItem::new("Delete")
-            .disabled(!can_mutate)
+            .disabled(!can_delete)
             .on_click(move |_, _, cx| {
                 if let Some(this) = remove_this.upgrade() {
                     this.update(cx, |this, cx| {

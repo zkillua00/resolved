@@ -117,6 +117,15 @@ type UpdateSavedRequestRequest struct {
 
 type UpdateSavedRequestPayload UpdateSavedRequestRequest
 
+type MoveSavedRequestRequest struct {
+	WorkspaceID        string `json:"-" validate:"required"`
+	CollectionID       string `json:"-" validate:"required"`
+	RequestID          string `json:"-" validate:"required"`
+	TargetCollectionID string `json:"target_collection_id" validate:"required"`
+}
+
+type MoveSavedRequestPayload MoveSavedRequestRequest
+
 func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
 }
@@ -307,6 +316,21 @@ func (request *UpdateSavedRequestRequest) ToPayload(*httpkit.ProcessingContext) 
 }
 
 func (request *UpdateSavedRequestRequest) Validate() httpkit.ValidationErrors {
+	return httpkit.DefaultValidation(request)
+}
+
+func (request *MoveSavedRequestRequest) BindFiber(c fiber.Ctx) error {
+	request.WorkspaceID = c.Params("workspace_id")
+	request.CollectionID = c.Params("collection_id")
+	request.RequestID = c.Params("request_id")
+	return c.Bind().Body(request)
+}
+
+func (request *MoveSavedRequestRequest) ToPayload(*httpkit.ProcessingContext) (MoveSavedRequestPayload, error) {
+	return MoveSavedRequestPayload(*request), nil
+}
+
+func (request *MoveSavedRequestRequest) Validate() httpkit.ValidationErrors {
 	return httpkit.DefaultValidation(request)
 }
 
@@ -594,6 +618,29 @@ func (h *Handler) UpdateSavedRequestController() fiber.Handler {
 				payload.CollectionID,
 				payload.RequestID,
 				UpdateSavedRequestInput{Name: payload.Name, Definition: payload.Definition},
+			)
+			if err != nil {
+				return httpkit.NewErrorResponse[SavedRequestView](err)
+			}
+			return httpkit.NewSuccessResponse(fiber.StatusOK, ViewSavedRequest(result))
+		},
+	)
+}
+
+func (h *Handler) MoveSavedRequestController() fiber.Handler {
+	return httpkit.WithProcessedPayload[
+		SavedRequestView,
+		MoveSavedRequestPayload,
+		MoveSavedRequestRequest,
+	](
+		func(c fiber.Ctx, payload MoveSavedRequestPayload) httpkit.Response[SavedRequestView] {
+			result, err := h.service.MoveSavedRequest(
+				c.Context(),
+				actorFromContext(c),
+				payload.WorkspaceID,
+				payload.CollectionID,
+				payload.RequestID,
+				payload.TargetCollectionID,
 			)
 			if err != nil {
 				return httpkit.NewErrorResponse[SavedRequestView](err)

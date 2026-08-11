@@ -180,9 +180,17 @@ impl ApiTester {
                     .border_b_2()
                     .border_color(cx.theme().drag_border),
             })
-            .on_drop(cx.listener(move |this, drag: &CollectionTreeDrag, _, cx| {
-                this.drop_collection_tree_item(drag.clone(), drop_target.clone(), placement, cx);
-            }))
+            .on_drop(
+                cx.listener(move |this, drag: &CollectionTreeDrag, window, cx| {
+                    this.drop_collection_tree_item(
+                        drag.clone(),
+                        drop_target.clone(),
+                        placement,
+                        window,
+                        cx,
+                    );
+                }),
+            )
             .into_any_element()
     }
 
@@ -192,7 +200,7 @@ impl ApiTester {
         target: &CollectionTreeDropTarget,
         placement: DropPlacement,
     ) -> bool {
-        if !self.workspace_writable || self.sending {
+        if self.sending {
             return false;
         }
 
@@ -201,7 +209,8 @@ impl ApiTester {
                 CollectionTreeDrag::Collection { collection_id, .. },
                 CollectionTreeDropTarget::Collection(target_collection_id),
             ) => {
-                placement != DropPlacement::Inside
+                self.workspace_writable
+                    && placement != DropPlacement::Inside
                     && collection_id != target_collection_id
                     && self.workspace.collection(collection_id).is_some()
                     && self.workspace.collection(target_collection_id).is_some()
@@ -214,12 +223,16 @@ impl ApiTester {
                 },
                 CollectionTreeDropTarget::Collection(target_collection_id),
             ) => {
-                placement == DropPlacement::Inside
+                self.can_update_collection_content()
+                    && placement == DropPlacement::Inside
                     && collection_id == target_collection_id
                     && self
                         .workspace
                         .collection(collection_id)
-                        .is_some_and(|collection| collection.folder(folder_id).is_some())
+                        .and_then(|collection| collection.folder(folder_id))
+                        .is_some_and(|folder| {
+                            self.workspace_writable || folder.parent_folder_id.is_some()
+                        })
             }
             (
                 CollectionTreeDrag::Folder {
@@ -232,7 +245,8 @@ impl ApiTester {
                     folder_id: target_folder_id,
                 },
             ) => {
-                collection_id == target_collection_id
+                self.can_update_collection_content()
+                    && collection_id == target_collection_id
                     && folder_id != target_folder_id
                     && self
                         .workspace
@@ -243,6 +257,24 @@ impl ApiTester {
                                 .iter()
                                 .any(|ancestor_id| ancestor_id == folder_id)
                         })
+                    && (self.workspace_writable
+                        || self
+                            .workspace
+                            .collection(collection_id)
+                            .and_then(|collection| {
+                                let source = collection.folder(folder_id)?;
+                                let target = collection.folder(target_folder_id)?;
+                                Some(match placement {
+                                    DropPlacement::Inside => {
+                                        source.parent_folder_id.as_deref()
+                                            != Some(target_folder_id.as_str())
+                                    }
+                                    DropPlacement::Before | DropPlacement::After => {
+                                        source.parent_folder_id != target.parent_folder_id
+                                    }
+                                })
+                            })
+                            .unwrap_or(false))
             }
             (
                 CollectionTreeDrag::Request {
@@ -252,7 +284,8 @@ impl ApiTester {
                 },
                 CollectionTreeDropTarget::Collection(target_collection_id),
             ) => {
-                placement == DropPlacement::Inside
+                self.can_update_request_content()
+                    && placement == DropPlacement::Inside
                     && self
                         .workspace
                         .collection(collection_id)
@@ -263,6 +296,18 @@ impl ApiTester {
                                 .any(|request| request.id == *request_id)
                         })
                     && self.workspace.collection(target_collection_id).is_some()
+                    && (self.workspace_writable
+                        || collection_id != target_collection_id
+                        || self
+                            .workspace
+                            .collection(collection_id)
+                            .and_then(|collection| {
+                                collection
+                                    .requests
+                                    .iter()
+                                    .find(|request| request.id == *request_id)
+                            })
+                            .is_some_and(|request| request.folder_id.is_some()))
             }
             (
                 CollectionTreeDrag::Request {
@@ -275,7 +320,8 @@ impl ApiTester {
                     folder_id: target_folder_id,
                 },
             ) => {
-                placement == DropPlacement::Inside
+                self.can_update_request_content()
+                    && placement == DropPlacement::Inside
                     && self
                         .workspace
                         .collection(collection_id)
@@ -289,6 +335,20 @@ impl ApiTester {
                         .workspace
                         .collection(target_collection_id)
                         .is_some_and(|collection| collection.folder(target_folder_id).is_some())
+                    && (self.workspace_writable
+                        || collection_id != target_collection_id
+                        || self
+                            .workspace
+                            .collection(collection_id)
+                            .and_then(|collection| {
+                                collection
+                                    .requests
+                                    .iter()
+                                    .find(|request| request.id == *request_id)
+                            })
+                            .is_some_and(|request| {
+                                request.folder_id.as_deref() != Some(target_folder_id.as_str())
+                            }))
             }
             (
                 CollectionTreeDrag::Request {
@@ -301,7 +361,8 @@ impl ApiTester {
                     request_id: target_request_id,
                 },
             ) => {
-                placement != DropPlacement::Inside
+                self.can_update_request_content()
+                    && placement != DropPlacement::Inside
                     && request_id != target_request_id
                     && self
                         .workspace
@@ -321,6 +382,28 @@ impl ApiTester {
                                 .iter()
                                 .any(|request| request.id == *target_request_id)
                         })
+                    && (self.workspace_writable
+                        || self
+                            .workspace
+                            .collection(collection_id)
+                            .and_then(|collection| {
+                                collection
+                                    .requests
+                                    .iter()
+                                    .find(|request| request.id == *request_id)
+                            })
+                            .zip(self.workspace.collection(target_collection_id).and_then(
+                                |collection| {
+                                    collection
+                                        .requests
+                                        .iter()
+                                        .find(|request| request.id == *target_request_id)
+                                },
+                            ))
+                            .is_some_and(|(source, target)| {
+                                collection_id != target_collection_id
+                                    || source.folder_id != target.folder_id
+                            }))
             }
             _ => false,
         }
@@ -331,9 +414,10 @@ impl ApiTester {
         drag: CollectionTreeDrag,
         target: CollectionTreeDropTarget,
         placement: DropPlacement,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.workspace_writable || self.sending {
+        if self.sending {
             return;
         }
 
@@ -341,7 +425,7 @@ impl ApiTester {
             (
                 CollectionTreeDrag::Collection { collection_id, .. },
                 CollectionTreeDropTarget::Collection(target_collection_id),
-            ) if placement != DropPlacement::Inside => {
+            ) if self.workspace_writable && placement != DropPlacement::Inside => {
                 let before_collection_id = match placement {
                     DropPlacement::Before => Some(target_collection_id),
                     DropPlacement::After => {
@@ -368,7 +452,7 @@ impl ApiTester {
                 },
                 CollectionTreeDropTarget::Collection(target_collection_id),
             ) if placement == DropPlacement::Inside && collection_id == target_collection_id => {
-                self.drop_collection_folder(collection_id, folder_id, None, None, cx);
+                self.drop_collection_folder(collection_id, folder_id, None, None, window, cx);
                 return;
             }
             (
@@ -411,6 +495,7 @@ impl ApiTester {
                     folder_id,
                     parent_folder_id,
                     before_folder_id,
+                    window,
                     cx,
                 );
                 return;
@@ -429,6 +514,7 @@ impl ApiTester {
                     target_collection_id,
                     None,
                     None,
+                    window,
                     cx,
                 );
                 return;
@@ -450,6 +536,7 @@ impl ApiTester {
                     target_collection_id,
                     Some(target_folder_id),
                     None,
+                    window,
                     cx,
                 );
                 return;
@@ -495,6 +582,7 @@ impl ApiTester {
                     target_collection_id,
                     target_folder_id,
                     before_request_id,
+                    window,
                     cx,
                 );
                 return;
@@ -510,8 +598,16 @@ impl ApiTester {
         folder_id: String,
         parent_folder_id: Option<String>,
         before_folder_id: Option<String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.workspace_writable {
+            let parent_collection_id = parent_folder_id
+                .clone()
+                .unwrap_or_else(|| collection_id.clone());
+            self.move_collection_on_upstream(folder_id, Some(parent_collection_id), window, cx);
+            return;
+        }
         let mut candidate = self.workspace.clone();
         match candidate.move_collection_folder_before(
             &collection_id,
@@ -543,8 +639,40 @@ impl ApiTester {
         target_collection_id: String,
         target_folder_id: Option<String>,
         before_request_id: Option<String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.workspace_writable {
+            let Some(source_remote_collection_id) = self
+                .workspace
+                .collection(&source_collection_id)
+                .and_then(|collection| {
+                    collection
+                        .requests
+                        .iter()
+                        .find(|request| request.id == request_id)
+                })
+                .map(|request| {
+                    request
+                        .folder_id
+                        .clone()
+                        .unwrap_or_else(|| source_collection_id.clone())
+                })
+            else {
+                return;
+            };
+            let target_remote_collection_id = target_folder_id
+                .clone()
+                .unwrap_or_else(|| target_collection_id.clone());
+            self.move_request_on_upstream(
+                source_remote_collection_id,
+                request_id,
+                target_remote_collection_id,
+                window,
+                cx,
+            );
+            return;
+        }
         let mut candidate_workspace = self.workspace.clone();
         match candidate_workspace.move_saved_request_before(
             &source_collection_id,

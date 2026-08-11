@@ -304,8 +304,8 @@ impl ApiTester {
                 "The active environment changed. Close this popover and try again.".to_owned(),
             );
         }
-        if !self.can_mutate_environment_content() {
-            return Some("Environment storage is read-only for this session.".to_owned());
+        if !self.can_update_environment_values_content() {
+            return Some("You do not have permission to change environment values.".to_owned());
         }
         if self.sending {
             return Some(

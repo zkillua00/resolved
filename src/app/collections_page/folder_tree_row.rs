@@ -48,8 +48,10 @@ impl ApiTester {
         let finish_rename_id: SharedString = format!("finish-folder-rename-{folder_id}").into();
         let actions_id: SharedString = format!("collection-folder-actions-{folder_id}").into();
         let row_inset = px(8. + (depth as f32 * 14.));
-        let can_mutate = !self.sending && self.workspace_writable;
+        let can_update = !self.sending && self.can_update_collection_content();
+        let can_delete = !self.sending && self.can_delete_collection_content();
         let can_create_subfolder = !self.sending && self.can_create_collection_content();
+        let drag_enabled = drag_enabled && can_update;
         let tree_drag = CollectionTreeDrag::folder(
             collection.id.clone(),
             folder.id.clone(),
@@ -127,8 +129,8 @@ impl ApiTester {
                                 .xsmall()
                                 .ghost()
                                 .tooltip("Apply folder name")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.finish_collection_folder_rename(cx);
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.finish_collection_folder_rename(window, cx);
                                 })),
                         )
                     })
@@ -177,7 +179,7 @@ impl ApiTester {
                                 .rounded_full()
                                 .invisible()
                                 .group_hover(row_group, |style| style.visible())
-                                .disabled(!can_mutate && !can_create_subfolder)
+                                .disabled(!can_update && !can_delete && !can_create_subfolder)
                                 .dropdown_menu(move |menu, window, cx| {
                                     build_folder_actions_menu(
                                         menu,
@@ -187,7 +189,8 @@ impl ApiTester {
                                         actions_parent_id.clone(),
                                         actions_move_targets.clone(),
                                         can_create_subfolder,
-                                        can_mutate,
+                                        can_update,
+                                        can_delete,
                                         window,
                                         cx,
                                     )
@@ -226,7 +229,8 @@ impl ApiTester {
                             context_parent_id.clone(),
                             context_move_targets.clone(),
                             can_create_subfolder,
-                            can_mutate && !renaming,
+                            can_update && !renaming,
+                            can_delete,
                             window,
                             cx,
                         )
@@ -246,7 +250,8 @@ fn build_folder_actions_menu(
     current_parent_id: Option<String>,
     move_targets: CollectionFolderMoveTargets,
     can_create_subfolder: bool,
-    can_mutate: bool,
+    can_update: bool,
+    can_delete: bool,
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
@@ -280,7 +285,7 @@ fn build_folder_actions_menu(
             }),
         );
     }
-    if can_mutate {
+    if can_update {
         menu = menu
             .item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
                 if let Some(this) = rename_this.upgrade() {
@@ -304,13 +309,14 @@ fn build_folder_actions_menu(
                         PopupMenuItem::new(target_label)
                             .checked(is_current)
                             .disabled(is_current)
-                            .on_click(move |_, _, cx| {
+                            .on_click(move |_, window, cx| {
                                 if let Some(this) = target_this.upgrade() {
                                     this.update(cx, |this, cx| {
                                         this.move_collection_folder(
                                             target_collection_id.clone(),
                                             target_folder_id.clone(),
                                             target_parent_id.clone(),
+                                            window,
                                             cx,
                                         );
                                     });
@@ -319,27 +325,31 @@ fn build_folder_actions_menu(
                     );
                 }
                 submenu
-            })
-            .separator()
-            .item(
-                PopupMenuItem::new("Delete…").on_click(move |_, window, cx| {
-                    let delete_this = delete_this.clone();
-                    let delete_collection_id = delete_collection_id.clone();
-                    let delete_folder_id = delete_folder_id.clone();
-                    window.defer(cx, move |window, cx| {
-                        if let Some(this) = delete_this.upgrade() {
-                            this.update(cx, |this, cx| {
-                                this.open_collection_folder_delete_dialog(
-                                    delete_collection_id,
-                                    delete_folder_id,
-                                    window,
-                                    cx,
-                                );
-                            });
-                        }
-                    });
-                }),
-            );
+            });
+    }
+    if can_delete {
+        if can_update {
+            menu = menu.separator();
+        }
+        menu = menu.item(
+            PopupMenuItem::new("Delete…").on_click(move |_, window, cx| {
+                let delete_this = delete_this.clone();
+                let delete_collection_id = delete_collection_id.clone();
+                let delete_folder_id = delete_folder_id.clone();
+                window.defer(cx, move |window, cx| {
+                    if let Some(this) = delete_this.upgrade() {
+                        this.update(cx, |this, cx| {
+                            this.open_collection_folder_delete_dialog(
+                                delete_collection_id,
+                                delete_folder_id,
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                });
+            }),
+        );
     }
     menu
 }

@@ -265,6 +265,36 @@ impl ManagementMutation {
 }
 
 impl ApiTester {
+    fn sync_upstream_profile_permissions(
+        &mut self,
+        upstream_id: &str,
+        user: &ManagementUser,
+        cx: &mut Context<Self>,
+    ) {
+        let permission_keys = user
+            .roles
+            .iter()
+            .flat_map(|role| role.permissions.iter())
+            .map(|permission| permission.key.clone())
+            .collect::<BTreeSet<_>>();
+        let mut settings = self.settings.clone();
+        let Some(profile) = settings
+            .upstreams
+            .servers
+            .iter_mut()
+            .find(|profile| profile.id == upstream_id)
+        else {
+            return;
+        };
+        if profile.permission_keys == permission_keys {
+            return;
+        }
+        profile.replace_permissions(permission_keys);
+        if let Err(error) = self.commit_settings(settings, false, cx) {
+            self.settings_notice = Some(error);
+        }
+    }
+
     pub(super) fn ensure_server_management_loaded(
         &mut self,
         window: &mut Window,
@@ -357,6 +387,11 @@ impl ApiTester {
                 this.server_management_abort_handle = None;
                 match result {
                     Ok(Ok(snapshot)) => {
+                        this.sync_upstream_profile_permissions(
+                            &upstream_id,
+                            &snapshot.current_user,
+                            cx,
+                        );
                         this.server_management.status = ServerManagementStatus::Ready;
                         this.server_management.set_snapshot(snapshot);
                     }
@@ -438,6 +473,11 @@ impl ApiTester {
                 this.server_management_abort_handle = None;
                 match result {
                     Ok(Ok((notice, snapshot))) => {
+                        this.sync_upstream_profile_permissions(
+                            &upstream_id,
+                            &snapshot.current_user,
+                            cx,
+                        );
                         this.server_management.status = ServerManagementStatus::Ready;
                         this.server_management.set_snapshot(snapshot);
                         this.settings_notice = Some(notice);

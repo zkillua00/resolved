@@ -41,6 +41,7 @@ impl WorkspaceSwitchStatus {
 struct LoadedUpstreamWorkspace {
     selected: Option<LoadedUpstreamWorkspaceView>,
     summaries: Vec<UpstreamWorkspaceSummary>,
+    permission_keys: BTreeSet<String>,
 }
 
 struct LoadedUpstreamWorkspaceView {
@@ -56,22 +57,83 @@ pub(super) struct ActiveUpstreamWorkspace {
 }
 
 impl ApiTester {
-    pub(super) fn can_create_collection_content(&self) -> bool {
-        self.workspace_writable
-            || (!self.workspace_switch_status.busy() && self.active_upstream_workspace().is_ok())
+    pub(super) fn active_upstream_has_permission(&self, permission: &str) -> bool {
+        let WorkspaceProviderId::Upstream { upstream_id, .. } =
+            self.workspace_providers.active_id()
+        else {
+            return false;
+        };
+        self.settings
+            .upstreams
+            .server(upstream_id)
+            .is_some_and(|profile| profile.has_permission(permission))
     }
 
-    pub(super) fn request_save_route(&self) -> Option<RequestSaveRoute> {
+    pub(super) fn can_create_collection_content(&self) -> bool {
+        self.workspace_writable
+            || (!self.workspace_switch_status.busy()
+                && self.active_upstream_workspace().is_ok()
+                && self.active_upstream_has_permission(COLLECTIONS_CREATE))
+    }
+
+    pub(super) fn can_update_collection_content(&self) -> bool {
+        self.workspace_writable
+            || (!self.workspace_switch_status.busy()
+                && self.active_upstream_workspace().is_ok()
+                && self.active_upstream_has_permission(COLLECTIONS_UPDATE))
+    }
+
+    pub(super) fn can_delete_collection_content(&self) -> bool {
+        self.workspace_writable
+            || (!self.workspace_switch_status.busy()
+                && self.active_upstream_workspace().is_ok()
+                && self.active_upstream_has_permission(COLLECTIONS_DELETE))
+    }
+
+    pub(super) fn can_create_request_content(&self) -> bool {
+        self.workspace_writable
+            || (!self.workspace_switch_status.busy()
+                && self.active_upstream_workspace().is_ok()
+                && self.active_upstream_has_permission(REQUESTS_CREATE))
+    }
+
+    pub(super) fn can_update_request_content(&self) -> bool {
+        self.workspace_writable
+            || (!self.workspace_switch_status.busy()
+                && self.active_upstream_workspace().is_ok()
+                && self.active_upstream_has_permission(REQUESTS_UPDATE))
+    }
+
+    pub(super) fn can_delete_request_content(&self) -> bool {
+        self.workspace_writable
+            || (!self.workspace_switch_status.busy()
+                && self.active_upstream_workspace().is_ok()
+                && self.active_upstream_has_permission(REQUESTS_DELETE))
+    }
+
+    pub(super) fn request_save_route(&self, save_as: bool) -> Option<RequestSaveRoute> {
+        let updating = !save_as
+            && self
+                .request_tabs
+                .active()
+                .association()
+                .saved_request_id()
+                .is_some();
+        let upstream_allowed = if updating {
+            self.can_update_request_content()
+        } else {
+            self.can_create_request_content()
+        };
         request_save_route_for_state(
             self.workspace_writable,
-            self.active_upstream_workspace().is_ok(),
+            !self.workspace_writable && upstream_allowed,
             self.workspace_switch_status.busy(),
             self.sending,
         )
     }
 
-    pub(super) fn can_save_request_content(&self) -> bool {
-        self.request_save_route().is_some()
+    pub(super) fn can_save_request_content(&self, save_as: bool) -> bool {
+        self.request_save_route(save_as).is_some()
     }
 
     pub(super) fn active_upstream_workspace(&self) -> Result<ActiveUpstreamWorkspace, String> {
@@ -684,6 +746,9 @@ impl ApiTester {
             cx.notify();
             return;
         }
+        if !profile.has_permission(WORKSPACES_CREATE) {
+            return;
+        }
 
         let title = format!("New workspace on {}", profile.display_label());
         self.workspace_name.update(cx, |input, cx| {
@@ -912,6 +977,10 @@ impl ApiTester {
             if credential.expires_at <= Utc::now() {
                 return Err("Log in to this server again.".to_owned());
             }
+            let current_user = get_upstream_user(&client, &base_url, credential.bearer_token())
+                .await
+                .map_err(|error| error.to_string())?;
+            let permission_keys = current_user.permission_keys();
             let workspaces =
                 list_upstream_workspaces(&client, &base_url, credential.bearer_token())
                     .await
@@ -930,14 +999,18 @@ impl ApiTester {
                 .or_else(|| workspaces.first())
                 .cloned();
             let selected = if let Some(workspace) = selected_workspace {
-                let environments = list_upstream_environments(
-                    &client,
-                    &base_url,
-                    credential.bearer_token(),
-                    &workspace.id,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
+                let environments = if permission_keys.contains(ENVIRONMENTS_READ) {
+                    list_upstream_environments(
+                        &client,
+                        &base_url,
+                        credential.bearer_token(),
+                        &workspace.id,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?
+                } else {
+                    Vec::new()
+                };
                 Some(LoadedUpstreamWorkspaceView {
                     workspace,
                     environments,
@@ -948,6 +1021,7 @@ impl ApiTester {
             Ok(LoadedUpstreamWorkspace {
                 selected,
                 summaries,
+                permission_keys,
             })
         });
         self.workspace_switch_abort_handle = Some(task.abort_handle());
@@ -1004,6 +1078,9 @@ impl ApiTester {
             cx.notify();
             return;
         }
+        if !profile.has_permission(WORKSPACES_CREATE) {
+            return;
+        }
         let Some(base_url) = profile.parsed_base_url() else {
             self.settings_notice = Some("That server URL is invalid.".to_owned());
             cx.notify();
@@ -1028,6 +1105,10 @@ impl ApiTester {
             if credential.expires_at <= Utc::now() {
                 return Err("Log in to this server again.".to_owned());
             }
+            let current_user = get_upstream_user(&client, &base_url, credential.bearer_token())
+                .await
+                .map_err(|error| format!("The account permissions could not be loaded: {error}"))?;
+            let permission_keys = current_user.permission_keys();
             let created =
                 create_upstream_workspace(&client, &base_url, credential.bearer_token(), &name)
                     .await
@@ -1041,20 +1122,27 @@ impl ApiTester {
             } else {
                 summaries.push(created_summary);
             }
-            let environments = list_upstream_environments(
-                &client,
-                &base_url,
-                credential.bearer_token(),
-                &created.id,
-            )
-            .await
-            .map_err(|error| format!("The workspace environments could not be loaded: {error}"))?;
+            let environments = if permission_keys.contains(ENVIRONMENTS_READ) {
+                list_upstream_environments(
+                    &client,
+                    &base_url,
+                    credential.bearer_token(),
+                    &created.id,
+                )
+                .await
+                .map_err(|error| {
+                    format!("The workspace environments could not be loaded: {error}")
+                })?
+            } else {
+                Vec::new()
+            };
             Ok(LoadedUpstreamWorkspace {
                 selected: Some(LoadedUpstreamWorkspaceView {
                     workspace: created,
                     environments,
                 }),
                 summaries,
+                permission_keys,
             })
         });
         self.workspace_switch_abort_handle = Some(task.abort_handle());
@@ -1102,6 +1190,7 @@ impl ApiTester {
             .selected
             .as_ref()
             .map(|loaded| loaded.workspace.id.clone());
+        profile.replace_permissions(loaded.permission_keys);
         profile.replace_workspaces(loaded.summaries, selected_workspace_id.clone());
         let Some(selected) = loaded.selected else {
             if let Err(error) = self.database_store.save_app_settings(&settings) {

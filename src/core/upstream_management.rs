@@ -23,10 +23,24 @@ pub const ROLES_UPDATE: &str = "roles.update";
 pub const ROLES_ASSIGN_PERMISSIONS: &str = "roles.permissions.assign";
 pub const PERMISSIONS_READ: &str = "permissions.read";
 pub const WORKSPACES_READ: &str = "workspaces.read";
+pub const WORKSPACES_CREATE: &str = "workspaces.create";
+pub const WORKSPACES_UPDATE: &str = "workspaces.update";
+pub const WORKSPACES_DELETE: &str = "workspaces.delete";
 pub const WORKSPACES_ASSIGN_USERS: &str = "workspaces.users.assign";
 pub const COLLECTIONS_READ: &str = "collections.read";
+pub const COLLECTIONS_CREATE: &str = "collections.create";
+pub const COLLECTIONS_UPDATE: &str = "collections.update";
+pub const COLLECTIONS_DELETE: &str = "collections.delete";
 pub const COLLECTIONS_ASSIGN_USERS: &str = "collections.users.assign";
 pub const REQUESTS_READ: &str = "requests.read";
+pub const REQUESTS_CREATE: &str = "requests.create";
+pub const REQUESTS_UPDATE: &str = "requests.update";
+pub const REQUESTS_DELETE: &str = "requests.delete";
+pub const ENVIRONMENTS_READ: &str = "environments.read";
+pub const ENVIRONMENTS_CREATE: &str = "environments.create";
+pub const ENVIRONMENTS_UPDATE: &str = "environments.update";
+pub const ENVIRONMENTS_DELETE: &str = "environments.delete";
+pub const ENVIRONMENT_VALUES_UPDATE: &str = "environment_values.update";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct ManagementPermission {

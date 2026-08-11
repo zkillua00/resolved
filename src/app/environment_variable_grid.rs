@@ -6,12 +6,23 @@ pub(super) use environment_variable_row::EnvironmentVariableRow;
 
 impl ApiTester {
     pub(super) fn render_environment_variable_grid(&self, cx: &mut Context<Self>) -> AnyElement {
-        let can_mutate = !self.sending && self.can_mutate_environment_content();
+        let can_update_definition = !self.sending && self.can_update_environment_definition();
+        let can_update_values = !self.sending && self.can_update_environment_values_content();
+        let can_delete_definition = !self.sending && self.can_delete_environment_content();
         let rows = self
             .environment_variables
             .iter()
             .enumerate()
-            .map(|(index, row)| self.render_environment_variable_row(index, row, can_mutate, cx))
+            .map(|(index, row)| {
+                self.render_environment_variable_row(
+                    index,
+                    row,
+                    can_update_definition,
+                    can_update_values,
+                    can_delete_definition,
+                    cx,
+                )
+            })
             .collect::<Vec<_>>();
         let empty = rows.is_empty();
 
@@ -111,7 +122,7 @@ impl ApiTester {
                                     .label("Add variable")
                                     .small()
                                     .ghost()
-                                    .disabled(!can_mutate)
+                                    .disabled(!can_update_definition)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.push_environment_row(window, cx);
                                         if let Some(input) = this

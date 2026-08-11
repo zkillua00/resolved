@@ -157,6 +157,8 @@ pub struct UpstreamProfile {
     pub session_expires_at: DateTime<Utc>,
     pub connected_at: DateTime<Utc>,
     #[serde(default)]
+    pub permission_keys: BTreeSet<String>,
+    #[serde(default)]
     pub workspaces: Vec<UpstreamWorkspaceSummary>,
     #[serde(default)]
     pub active_workspace_id: Option<String>,
@@ -181,6 +183,7 @@ impl UpstreamProfile {
             display_name: user.display_name.clone(),
             session_expires_at: expires_at,
             connected_at: Utc::now(),
+            permission_keys: user.permission_keys(),
             workspaces: Vec::new(),
             active_workspace_id: None,
             active_environment_ids: BTreeMap::new(),
@@ -200,6 +203,14 @@ impl UpstreamProfile {
 
     pub fn session_expired(&self, now: DateTime<Utc>) -> bool {
         self.session_expires_at <= now
+    }
+
+    pub fn has_permission(&self, permission: &str) -> bool {
+        self.permission_keys.contains(permission)
+    }
+
+    pub fn replace_permissions(&mut self, permissions: impl IntoIterator<Item = String>) {
+        self.permission_keys = permissions.into_iter().collect();
     }
 
     pub fn active_workspace(&self) -> Option<&UpstreamWorkspaceSummary> {
@@ -396,6 +407,29 @@ pub struct LoginUser {
     pub email: String,
     pub display_name: String,
     pub active: bool,
+    #[serde(default)]
+    pub roles: Vec<LoginRole>,
+}
+
+impl LoginUser {
+    pub fn permission_keys(&self) -> BTreeSet<String> {
+        self.roles
+            .iter()
+            .flat_map(|role| role.permissions.iter())
+            .map(|permission| permission.key.clone())
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct LoginRole {
+    #[serde(default)]
+    pub permissions: Vec<LoginPermission>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct LoginPermission {
+    pub key: String,
 }
 
 pub struct UpstreamLoginResult {
@@ -476,6 +510,16 @@ struct LoginRequest<'a> {
 #[derive(Serialize)]
 struct CreateWorkspaceRequest<'a> {
     name: &'a str,
+}
+
+#[derive(Serialize)]
+struct MoveCollectionRequest<'a> {
+    parent_collection_id: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct MoveSavedRequestRequest<'a> {
+    target_collection_id: &'a str,
 }
 
 #[derive(Serialize)]
@@ -623,6 +667,41 @@ pub async fn list_upstream_workspaces(
     parse_workspace_response(response).await
 }
 
+pub async fn get_upstream_user(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+) -> Result<LoginUser, UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join("api/v1/auth/me")
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .get(endpoint)
+        .bearer_auth(bearer_token)
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response(response).await
+}
+
+pub async fn get_upstream_workspace(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+) -> Result<UpstreamWorkspaceView, UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join(&format!("api/v1/workspaces/{workspace_id}"))
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .get(endpoint)
+        .bearer_auth(bearer_token)
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response(response).await
+}
+
 pub async fn create_upstream_workspace(
     client: &Client,
     base_url: &Url,
@@ -640,6 +719,46 @@ pub async fn create_upstream_workspace(
         .await
         .map_err(UpstreamWorkspaceError::Transport)?;
     parse_workspace_response(response).await
+}
+
+pub async fn update_upstream_workspace(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    name: &str,
+) -> Result<UpstreamWorkspaceView, UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join(&format!("api/v1/workspaces/{workspace_id}"))
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .patch(endpoint)
+        .bearer_auth(bearer_token)
+        .json(&CreateWorkspaceRequest { name })
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response(response).await
+}
+
+pub async fn delete_upstream_workspace(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+) -> Result<(), UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join(&format!("api/v1/workspaces/{workspace_id}"))
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .delete(endpoint)
+        .bearer_auth(bearer_token)
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response::<serde_json::Value>(response)
+        .await
+        .map(|_| ())
 }
 
 pub async fn create_upstream_collection(
@@ -664,6 +783,77 @@ pub async fn create_upstream_collection(
         .await
         .map_err(UpstreamWorkspaceError::Transport)?;
     parse_workspace_response(response).await
+}
+
+pub async fn update_upstream_collection(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    collection_id: &str,
+    name: &str,
+) -> Result<UpstreamCollectionView, UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join(&format!(
+            "api/v1/workspaces/{workspace_id}/collections/{collection_id}"
+        ))
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .patch(endpoint)
+        .bearer_auth(bearer_token)
+        .json(&CreateWorkspaceRequest { name })
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response(response).await
+}
+
+pub async fn move_upstream_collection(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    collection_id: &str,
+    parent_collection_id: Option<&str>,
+) -> Result<UpstreamCollectionView, UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join(&format!(
+            "api/v1/workspaces/{workspace_id}/collections/{collection_id}/parent"
+        ))
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .put(endpoint)
+        .bearer_auth(bearer_token)
+        .json(&MoveCollectionRequest {
+            parent_collection_id,
+        })
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response(response).await
+}
+
+pub async fn delete_upstream_collection(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    collection_id: &str,
+) -> Result<(), UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join(&format!(
+            "api/v1/workspaces/{workspace_id}/collections/{collection_id}"
+        ))
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .delete(endpoint)
+        .bearer_auth(bearer_token)
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response::<serde_json::Value>(response)
+        .await
+        .map(|_| ())
 }
 
 pub async fn list_upstream_environments(
@@ -1000,6 +1190,56 @@ pub async fn update_upstream_saved_request(
     parse_workspace_response(response).await
 }
 
+pub async fn move_upstream_saved_request(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    collection_id: &str,
+    request_id: &str,
+    target_collection_id: &str,
+) -> Result<UpstreamSavedRequestView, UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join(&format!(
+            "api/v1/workspaces/{workspace_id}/collections/{collection_id}/requests/{request_id}/collection"
+        ))
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .put(endpoint)
+        .bearer_auth(bearer_token)
+        .json(&MoveSavedRequestRequest {
+            target_collection_id,
+        })
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response(response).await
+}
+
+pub async fn delete_upstream_saved_request(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    collection_id: &str,
+    request_id: &str,
+) -> Result<(), UpstreamWorkspaceError> {
+    let endpoint = base_url
+        .join(&format!(
+            "api/v1/workspaces/{workspace_id}/collections/{collection_id}/requests/{request_id}"
+        ))
+        .map_err(|error| UpstreamWorkspaceError::InvalidResponse(error.to_string()))?;
+    let response = client
+        .delete(endpoint)
+        .bearer_auth(bearer_token)
+        .send()
+        .await
+        .map_err(UpstreamWorkspaceError::Transport)?;
+    parse_workspace_response::<serde_json::Value>(response)
+        .await
+        .map(|_| ())
+}
+
 async fn parse_workspace_response<T: for<'de> Deserialize<'de>>(
     mut response: reqwest::Response,
 ) -> Result<T, UpstreamWorkspaceError> {
@@ -1230,6 +1470,7 @@ mod tests {
             email: "owner".to_owned(),
             display_name: "Owner".to_owned(),
             active: true,
+            roles: Vec::new(),
         };
         let expires = Utc::now() + chrono::Duration::hours(1);
         let first = UpstreamProfile::from_login(None, &base_a, &user, expires);
@@ -1256,6 +1497,34 @@ mod tests {
     }
 
     #[test]
+    fn profiles_saved_before_permission_caching_remain_readable() {
+        let base_url = normalize_upstream_url("https://one.example.com").unwrap();
+        let user = LoginUser {
+            id: "user-1".to_owned(),
+            email: "owner".to_owned(),
+            display_name: "Owner".to_owned(),
+            active: true,
+            roles: vec![LoginRole {
+                permissions: vec![LoginPermission {
+                    key: "collections.update".to_owned(),
+                }],
+            }],
+        };
+        let profile = UpstreamProfile::from_login(
+            None,
+            &base_url,
+            &user,
+            Utc::now() + chrono::Duration::hours(1),
+        );
+        let mut saved = serde_json::to_value(profile).unwrap();
+        saved.as_object_mut().unwrap().remove("permission_keys");
+
+        let restored: UpstreamProfile = serde_json::from_value(saved).unwrap();
+
+        assert!(restored.permission_keys.is_empty());
+    }
+
+    #[test]
     fn remembers_an_active_environment_for_each_server_workspace() {
         let base_url = normalize_upstream_url("https://resolved.example.com").unwrap();
         let user = LoginUser {
@@ -1263,6 +1532,7 @@ mod tests {
             email: "owner".to_owned(),
             display_name: "Owner".to_owned(),
             active: true,
+            roles: Vec::new(),
         };
         let mut profile = UpstreamProfile::from_login(
             None,
@@ -1301,6 +1571,7 @@ mod tests {
                 email: "owner".to_owned(),
                 display_name: "Owner".to_owned(),
                 active: true,
+                roles: Vec::new(),
             },
         };
         let debug = format!("{result:?}");
@@ -1324,7 +1595,12 @@ mod tests {
                     "email": "owner",
                     "display_name": "Owner",
                     "active": true,
-                    "roles": []
+                    "roles": [{
+                        "permissions": [
+                            {"key": "collections.create"},
+                            {"key": "requests.read"}
+                        ]
+                    }]
                 }
             }
         });
@@ -1339,6 +1615,10 @@ mod tests {
         assert_eq!(result.base_url, base_url);
         assert_eq!(result.token.as_str(), "server-session-token");
         assert_eq!(result.user.email, "owner");
+        assert_eq!(
+            result.user.permission_keys(),
+            BTreeSet::from(["collections.create".to_owned(), "requests.read".to_owned(),])
+        );
         assert_eq!(result.expires_at, expires_at);
     }
 
@@ -1369,6 +1649,7 @@ mod tests {
             email: "owner".to_owned(),
             display_name: "Owner".to_owned(),
             active: true,
+            roles: Vec::new(),
         };
         let expires = Utc::now() + chrono::Duration::hours(1);
         let profile = UpstreamProfile::from_login(None, &base_url, &user, expires);
@@ -2041,6 +2322,226 @@ mod tests {
         server.join().unwrap();
         assert_eq!(created.id, "request-1");
         assert_eq!(updated.name, "List all users");
+    }
+
+    #[test]
+    fn remote_crud_helpers_use_the_server_contract() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let now = Utc::now();
+        let definition = RequestTemplate::default();
+        let response_definition = serde_json::to_value(&definition).unwrap();
+        let workspace_response = serde_json::json!({
+            "id": "workspace-1",
+            "name": "Renamed workspace",
+            "user_ids": ["user-1"],
+            "collections": [],
+            "created_at": now,
+            "updated_at": now
+        });
+        let collection_response = serde_json::json!({
+            "id": "collection-1",
+            "workspace_id": "workspace-1",
+            "parent_collection_id": "collection-root",
+            "name": "Renamed collection",
+            "user_ids": [],
+            "sub_collections": [],
+            "requests": [],
+            "created_at": now,
+            "updated_at": now
+        });
+        let moved_request_response = serde_json::json!({
+            "id": "request-1",
+            "collection_id": "collection-2",
+            "name": "List users",
+            "definition": response_definition,
+            "created_at": now,
+            "updated_at": now
+        });
+        let expected = vec![
+            (
+                "get /api/v1/auth/me http/1.1\r\n",
+                None,
+                serde_json::json!({
+                    "id": "user-1",
+                    "email": "owner",
+                    "display_name": "Owner",
+                    "active": true,
+                    "roles": [{"permissions": [{"key": "collections.update"}]}]
+                }),
+            ),
+            (
+                "get /api/v1/workspaces/workspace-1 http/1.1\r\n",
+                None,
+                workspace_response.clone(),
+            ),
+            (
+                "patch /api/v1/workspaces/workspace-1 http/1.1\r\n",
+                Some(serde_json::json!({"name": "Renamed workspace"})),
+                workspace_response,
+            ),
+            (
+                "patch /api/v1/workspaces/workspace-1/collections/collection-1 http/1.1\r\n",
+                Some(serde_json::json!({"name": "Renamed collection"})),
+                collection_response.clone(),
+            ),
+            (
+                "put /api/v1/workspaces/workspace-1/collections/collection-1/parent http/1.1\r\n",
+                Some(serde_json::json!({
+                    "parent_collection_id": "collection-root"
+                })),
+                collection_response,
+            ),
+            (
+                "put /api/v1/workspaces/workspace-1/collections/collection-1/requests/request-1/collection http/1.1\r\n",
+                Some(serde_json::json!({"target_collection_id": "collection-2"})),
+                moved_request_response,
+            ),
+            (
+                "delete /api/v1/workspaces/workspace-1/collections/collection-2/requests/request-1 http/1.1\r\n",
+                None,
+                serde_json::json!({}),
+            ),
+            (
+                "delete /api/v1/workspaces/workspace-1/collections/collection-1 http/1.1\r\n",
+                None,
+                serde_json::json!({}),
+            ),
+            (
+                "delete /api/v1/workspaces/workspace-1 http/1.1\r\n",
+                None,
+                serde_json::json!({}),
+            ),
+        ];
+        let server = thread::spawn(move || {
+            for (expected_start, expected_body, response_data) in expected {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .unwrap();
+                let request = read_http_request(&mut stream);
+                let header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .unwrap();
+                let headers = String::from_utf8(request[..header_end].to_vec())
+                    .unwrap()
+                    .to_ascii_lowercase();
+                assert!(headers.starts_with(expected_start));
+                assert!(headers.contains("authorization: bearer saved-session-token\r\n"));
+                match expected_body {
+                    Some(expected_body) => {
+                        let body: serde_json::Value =
+                            serde_json::from_slice(&request[header_end + 4..]).unwrap();
+                        assert_eq!(body, expected_body);
+                    }
+                    None => assert_eq!(request.len(), header_end + 4),
+                }
+
+                let body = serde_json::to_vec(&serde_json::json!({
+                    "request_id": "response-1",
+                    "success": true,
+                    "data": response_data
+                }))
+                .unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = build_upstream_client().unwrap();
+        let base_url = Url::parse(&format!("http://{address}/")).unwrap();
+        let user = runtime
+            .block_on(get_upstream_user(&client, &base_url, "saved-session-token"))
+            .unwrap();
+        assert!(user.permission_keys().contains("collections.update"));
+        runtime
+            .block_on(get_upstream_workspace(
+                &client,
+                &base_url,
+                "saved-session-token",
+                "workspace-1",
+            ))
+            .unwrap();
+        runtime
+            .block_on(update_upstream_workspace(
+                &client,
+                &base_url,
+                "saved-session-token",
+                "workspace-1",
+                "Renamed workspace",
+            ))
+            .unwrap();
+        runtime
+            .block_on(update_upstream_collection(
+                &client,
+                &base_url,
+                "saved-session-token",
+                "workspace-1",
+                "collection-1",
+                "Renamed collection",
+            ))
+            .unwrap();
+        runtime
+            .block_on(move_upstream_collection(
+                &client,
+                &base_url,
+                "saved-session-token",
+                "workspace-1",
+                "collection-1",
+                Some("collection-root"),
+            ))
+            .unwrap();
+        let moved = runtime
+            .block_on(move_upstream_saved_request(
+                &client,
+                &base_url,
+                "saved-session-token",
+                "workspace-1",
+                "collection-1",
+                "request-1",
+                "collection-2",
+            ))
+            .unwrap();
+        assert_eq!(moved.collection_id, "collection-2");
+        runtime
+            .block_on(delete_upstream_saved_request(
+                &client,
+                &base_url,
+                "saved-session-token",
+                "workspace-1",
+                "collection-2",
+                "request-1",
+            ))
+            .unwrap();
+        runtime
+            .block_on(delete_upstream_collection(
+                &client,
+                &base_url,
+                "saved-session-token",
+                "workspace-1",
+                "collection-1",
+            ))
+            .unwrap();
+        runtime
+            .block_on(delete_upstream_workspace(
+                &client,
+                &base_url,
+                "saved-session-token",
+                "workspace-1",
+            ))
+            .unwrap();
+
+        server.join().unwrap();
     }
 
     fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {

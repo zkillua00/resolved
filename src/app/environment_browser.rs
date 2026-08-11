@@ -2,7 +2,9 @@ use super::*;
 
 impl ApiTester {
     pub(super) fn render_environment_browser(&self, cx: &mut Context<Self>) -> AnyElement {
-        let can_mutate = !self.sending && self.can_mutate_environment_content();
+        let can_create = !self.sending && self.can_create_environment_content();
+        let can_delete = !self.sending && self.can_delete_environment_content();
+        let can_activate = !self.sending && self.can_select_environment();
         let query = self
             .environment_search
             .read(cx)
@@ -124,7 +126,8 @@ impl ApiTester {
                                                     action_environment_id.clone(),
                                                     action_environment_name.clone(),
                                                     active,
-                                                    can_mutate,
+                                                    can_activate,
+                                                    can_delete,
                                                 )
                                             }),
                                     ),
@@ -136,7 +139,8 @@ impl ApiTester {
                                     context_environment_id.clone(),
                                     context_environment_name.clone(),
                                     active,
-                                    can_mutate,
+                                    can_activate,
+                                    can_delete,
                                 )
                             }),
                     )
@@ -169,7 +173,7 @@ impl ApiTester {
                             .ghost()
                             .rounded_full()
                             .tooltip("New environment")
-                            .disabled(!can_mutate)
+                            .disabled(!can_create)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.create_environment(window, cx);
                             })),
@@ -278,7 +282,8 @@ fn build_environment_browser_actions_menu(
     environment_id: String,
     environment_name: String,
     active: bool,
-    can_mutate: bool,
+    can_activate: bool,
+    can_delete: bool,
 ) -> PopupMenu {
     let activation_this = owner.clone();
     let activation_id = environment_id.clone();
@@ -292,7 +297,7 @@ fn build_environment_browser_actions_menu(
             "Use for requests"
         })
         .checked(active)
-        .disabled(!can_mutate)
+        .disabled(!can_activate)
         .on_click(move |_, _, cx| {
             if let Some(this) = activation_this.upgrade() {
                 this.update(cx, |this, cx| {
@@ -307,7 +312,7 @@ fn build_environment_browser_actions_menu(
             "Delete “{}”…",
             compact_label(&environment_name, 22)
         ))
-        .disabled(!can_mutate)
+        .disabled(!can_delete)
         .on_click(move |_, window, cx| {
             let delete_this = delete_this.clone();
             let delete_id = delete_id.clone();

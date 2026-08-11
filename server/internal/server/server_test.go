@@ -378,6 +378,39 @@ func TestWorkspaceAndRecursiveCollectionScopes(t *testing.T) {
 	if updatedRequest.Name != "Updated admin request" || !bytes.Contains(updatedRequest.Definition, []byte(`"method":"POST"`)) {
 		t.Fatalf("updated request = %+v", updatedRequest)
 	}
+	moveDenied := request[workspaces.SavedRequestView](
+		t,
+		app,
+		http.MethodPut,
+		"/api/v1/workspaces/"+workspace.ID+"/collections/"+admin.ID+"/requests/"+adminRequest.ID+"/collection",
+		nestedLogin.Token,
+		map[string]any{"target_collection_id": other.ID},
+		fiber.StatusForbidden,
+	)
+	if moveDenied.Error.Code != "collection_access_denied" {
+		t.Fatalf("request move access code = %q", moveDenied.Error.Code)
+	}
+	movedRequest := request[workspaces.SavedRequestView](
+		t,
+		app,
+		http.MethodPut,
+		"/api/v1/workspaces/"+workspace.ID+"/collections/"+product.ID+"/requests/"+productRequest.ID+"/collection",
+		ownerLogin.Token,
+		map[string]any{"target_collection_id": other.ID},
+		fiber.StatusOK,
+	).Data
+	if movedRequest.ID != productRequest.ID || movedRequest.CollectionID != other.ID {
+		t.Fatalf("moved request = %+v, want request %s in collection %s", movedRequest, productRequest.ID, other.ID)
+	}
+	request[workspaces.SavedRequestView](
+		t,
+		app,
+		http.MethodGet,
+		"/api/v1/workspaces/"+workspace.ID+"/collections/"+product.ID+"/requests/"+productRequest.ID,
+		ownerLogin.Token,
+		nil,
+		fiber.StatusNotFound,
+	)
 	request[workspaces.CollectionView](
 		t,
 		app,

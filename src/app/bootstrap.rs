@@ -575,17 +575,17 @@ impl ApiTester {
             },
         );
         let collection_name_subscription =
-            cx.subscribe_in(&collection_name, window, |this, _, event, _, cx| {
+            cx.subscribe_in(&collection_name, window, |this, _, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
-                    this.rename_collection(cx);
+                    this.rename_collection(window, cx);
                     this.renaming_collection_id = None;
                     cx.notify();
                 }
             });
         let folder_name_subscription =
-            cx.subscribe_in(&folder_name, window, |this, _, event, _, cx| {
+            cx.subscribe_in(&folder_name, window, |this, _, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
-                    this.finish_collection_folder_rename(cx);
+                    this.finish_collection_folder_rename(window, cx);
                 }
             });
         let saved_request_name_subscription =

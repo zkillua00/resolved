@@ -249,7 +249,7 @@ impl ApiTester {
             .trim()
             .to_lowercase();
         let searching = !query.is_empty();
-        let drag_enabled = !searching && self.workspace_writable && !self.sending;
+        let drag_enabled = !searching && !self.sending;
         let mut tree_rows = Vec::new();
 
         for (collection_index, collection) in self.workspace.collections.iter().enumerate() {
