@@ -21,10 +21,11 @@ type Service struct {
 type ServiceOption func(*Service)
 
 type CreateInput struct {
-	Email       string
-	DisplayName string
-	Password    string
-	RoleIDs     []string
+	Email           string
+	DisplayName     string
+	Password        string
+	RoleIDs         []string
+	CreatedByUserID *string
 }
 
 type UpdateInput struct {
@@ -176,11 +177,12 @@ func (s *Service) newUser(input CreateInput) (identity.User, error) {
 		return identity.User{}, err
 	}
 	return identity.User{
-		ID:           uuid.NewString(),
-		Email:        login,
-		DisplayName:  displayName,
-		PasswordHash: passwordHash,
-		Active:       true,
+		ID:              uuid.NewString(),
+		Email:           login,
+		DisplayName:     displayName,
+		PasswordHash:    passwordHash,
+		Active:          true,
+		CreatedByUserID: input.CreatedByUserID,
 	}, nil
 }
 

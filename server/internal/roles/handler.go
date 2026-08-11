@@ -1,6 +1,7 @@
 package roles
 
 import (
+	"resolved-server/internal/auth"
 	"resolved-server/internal/httpkit"
 	"resolved-server/internal/identity"
 	"resolved-server/internal/problem"
@@ -126,10 +127,12 @@ func (h *Handler) CreateController() fiber.Handler {
 		CreateRequest,
 	](
 		func(c fiber.Ctx, payload CreatePayload) httpkit.Response[identity.RoleView] {
+			creatorID := auth.PrincipalFromContext(c).User.ID
 			result, err := h.service.Create(c.Context(), CreateInput{
-				Name:           payload.Name,
-				Description:    payload.Description,
-				PermissionKeys: payload.PermissionKeys,
+				Name:            payload.Name,
+				Description:     payload.Description,
+				PermissionKeys:  payload.PermissionKeys,
+				CreatedByUserID: &creatorID,
 			})
 			if err != nil {
 				return httpkit.NewErrorResponse[identity.RoleView](err)

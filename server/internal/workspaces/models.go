@@ -10,12 +10,14 @@ import (
 // Workspace is the top-level collaboration boundary. UserIDs and Collections
 // are hydrated aggregates and are not stored as columns on the workspace row.
 type Workspace struct {
-	ID          string       `gorm:"type:char(36);primaryKey"`
-	Name        string       `gorm:"size:120;not null"`
-	UserIDs     []string     `gorm:"-"`
-	Collections []Collection `gorm:"-"`
-	CreatedAt   time.Time    `gorm:"not null"`
-	UpdatedAt   time.Time    `gorm:"not null"`
+	ID              string         `gorm:"type:char(36);primaryKey"`
+	Name            string         `gorm:"size:120;not null"`
+	UserIDs         []string       `gorm:"-"`
+	Collections     []Collection   `gorm:"-"`
+	CreatedByUserID *string        `gorm:"type:char(36);index"`
+	CreatedByUser   *identity.User `gorm:"-"`
+	CreatedAt       time.Time      `gorm:"not null"`
+	UpdatedAt       time.Time      `gorm:"not null"`
 }
 
 // Collection is one node in a workspace collection tree. A nil
@@ -29,6 +31,8 @@ type Collection struct {
 	UserIDs            []string       `gorm:"-"`
 	SubCollections     []Collection   `gorm:"-"`
 	Requests           []SavedRequest `gorm:"-"`
+	CreatedByUserID    *string        `gorm:"type:char(36);index"`
+	CreatedByUser      *identity.User `gorm:"-"`
 	CreatedAt          time.Time      `gorm:"not null"`
 	UpdatedAt          time.Time      `gorm:"not null"`
 }
@@ -37,13 +41,15 @@ type Collection struct {
 // Definition stores the application's portable request-template JSON without
 // coupling the server schema to individual editor fields.
 type SavedRequest struct {
-	ID           string     `gorm:"type:char(36);primaryKey"`
-	CollectionID string     `gorm:"type:char(36);not null;index"`
-	Collection   Collection `gorm:"foreignKey:CollectionID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
-	Name         string     `gorm:"size:120;not null"`
-	Definition   string     `gorm:"type:text;not null"`
-	CreatedAt    time.Time  `gorm:"not null"`
-	UpdatedAt    time.Time  `gorm:"not null"`
+	ID              string         `gorm:"type:char(36);primaryKey"`
+	CollectionID    string         `gorm:"type:char(36);not null;index"`
+	Collection      Collection     `gorm:"foreignKey:CollectionID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	Name            string         `gorm:"size:120;not null"`
+	Definition      string         `gorm:"type:text;not null"`
+	CreatedByUserID *string        `gorm:"type:char(36);index"`
+	CreatedByUser   *identity.User `gorm:"-"`
+	CreatedAt       time.Time      `gorm:"not null"`
+	UpdatedAt       time.Time      `gorm:"not null"`
 }
 
 // WorkspaceUser is a direct workspace grant. Collection grants are not
@@ -67,33 +73,36 @@ type CollectionUser struct {
 }
 
 type WorkspaceView struct {
-	ID          string           `json:"id"`
-	Name        string           `json:"name"`
-	UserIDs     []string         `json:"user_ids"`
-	Collections []CollectionView `json:"collections"`
-	CreatedAt   time.Time        `json:"created_at"`
-	UpdatedAt   time.Time        `json:"updated_at"`
+	ID          string                    `json:"id"`
+	Name        string                    `json:"name"`
+	UserIDs     []string                  `json:"user_ids"`
+	Collections []CollectionView          `json:"collections"`
+	CreatedBy   *identity.UserSummaryView `json:"created_by"`
+	CreatedAt   time.Time                 `json:"created_at"`
+	UpdatedAt   time.Time                 `json:"updated_at"`
 }
 
 type CollectionView struct {
-	ID                 string             `json:"id"`
-	WorkspaceID        string             `json:"workspace_id"`
-	ParentCollectionID *string            `json:"parent_collection_id"`
-	Name               string             `json:"name"`
-	UserIDs            []string           `json:"user_ids"`
-	SubCollections     []CollectionView   `json:"sub_collections"`
-	Requests           []SavedRequestView `json:"requests"`
-	CreatedAt          time.Time          `json:"created_at"`
-	UpdatedAt          time.Time          `json:"updated_at"`
+	ID                 string                    `json:"id"`
+	WorkspaceID        string                    `json:"workspace_id"`
+	ParentCollectionID *string                   `json:"parent_collection_id"`
+	Name               string                    `json:"name"`
+	UserIDs            []string                  `json:"user_ids"`
+	SubCollections     []CollectionView          `json:"sub_collections"`
+	Requests           []SavedRequestView        `json:"requests"`
+	CreatedBy          *identity.UserSummaryView `json:"created_by"`
+	CreatedAt          time.Time                 `json:"created_at"`
+	UpdatedAt          time.Time                 `json:"updated_at"`
 }
 
 type SavedRequestView struct {
-	ID           string          `json:"id"`
-	CollectionID string          `json:"collection_id"`
-	Name         string          `json:"name"`
-	Definition   json.RawMessage `json:"definition"`
-	CreatedAt    time.Time       `json:"created_at"`
-	UpdatedAt    time.Time       `json:"updated_at"`
+	ID           string                    `json:"id"`
+	CollectionID string                    `json:"collection_id"`
+	Name         string                    `json:"name"`
+	Definition   json.RawMessage           `json:"definition"`
+	CreatedBy    *identity.UserSummaryView `json:"created_by"`
+	CreatedAt    time.Time                 `json:"created_at"`
+	UpdatedAt    time.Time                 `json:"updated_at"`
 }
 
 func ViewWorkspace(workspace Workspace) WorkspaceView {
@@ -102,6 +111,7 @@ func ViewWorkspace(workspace Workspace) WorkspaceView {
 		Name:        workspace.Name,
 		UserIDs:     cloneStrings(workspace.UserIDs),
 		Collections: ViewCollections(workspace.Collections),
+		CreatedBy:   identity.ViewUserSummary(workspace.CreatedByUser),
 		CreatedAt:   workspace.CreatedAt,
 		UpdatedAt:   workspace.UpdatedAt,
 	}
@@ -124,6 +134,7 @@ func ViewCollection(collection Collection) CollectionView {
 		UserIDs:            cloneStrings(collection.UserIDs),
 		SubCollections:     ViewCollections(collection.SubCollections),
 		Requests:           ViewSavedRequests(collection.Requests),
+		CreatedBy:          identity.ViewUserSummary(collection.CreatedByUser),
 		CreatedAt:          collection.CreatedAt,
 		UpdatedAt:          collection.UpdatedAt,
 	}
@@ -135,6 +146,7 @@ func ViewSavedRequest(request SavedRequest) SavedRequestView {
 		CollectionID: request.CollectionID,
 		Name:         request.Name,
 		Definition:   json.RawMessage(request.Definition),
+		CreatedBy:    identity.ViewUserSummary(request.CreatedByUser),
 		CreatedAt:    request.CreatedAt,
 		UpdatedAt:    request.UpdatedAt,
 	}

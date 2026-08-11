@@ -28,6 +28,9 @@ func (r *Repository) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
 		return nil, err
 	}
 	for index := range workspaces {
+		if err := hydrateCreator(r.db.WithContext(ctx), workspaces[index].CreatedByUserID, &workspaces[index].CreatedByUser); err != nil {
+			return nil, err
+		}
 		if err := hydrateWorkspace(r.db.WithContext(ctx), &workspaces[index]); err != nil {
 			return nil, err
 		}
@@ -41,6 +44,9 @@ func (r *Repository) GetWorkspace(ctx context.Context, id string) (Workspace, er
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return Workspace{}, ErrWorkspaceNotFound
 		}
+		return Workspace{}, err
+	}
+	if err := hydrateCreator(r.db.WithContext(ctx), workspace.CreatedByUserID, &workspace.CreatedByUser); err != nil {
 		return Workspace{}, err
 	}
 	if err := hydrateWorkspace(r.db.WithContext(ctx), &workspace); err != nil {
@@ -334,6 +340,9 @@ func (r *Repository) GetSavedRequest(
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return SavedRequest{}, ErrSavedRequestNotFound
 	}
+	if err == nil {
+		err = hydrateCreator(r.db.WithContext(ctx), request.CreatedByUserID, &request.CreatedByUser)
+	}
 	return request, err
 }
 
@@ -461,6 +470,13 @@ func loadSavedRequests(db *gorm.DB, workspaceID string) ([]SavedRequest, error) 
 		Order("saved_requests.created_at ASC").
 		Order("saved_requests.id ASC").
 		Find(&requests).Error
+	if err == nil {
+		for index := range requests {
+			if hydrateErr := hydrateCreator(db, requests[index].CreatedByUserID, &requests[index].CreatedByUser); hydrateErr != nil {
+				return nil, hydrateErr
+			}
+		}
+	}
 	return requests, err
 }
 
@@ -469,7 +485,27 @@ func loadFlatCollections(db *gorm.DB, workspaceID string) ([]Collection, error) 
 	err := db.Where("workspace_id = ?", workspaceID).
 		Order("created_at ASC").Order("id ASC").
 		Find(&collections).Error
+	if err == nil {
+		for index := range collections {
+			if hydrateErr := hydrateCreator(db, collections[index].CreatedByUserID, &collections[index].CreatedByUser); hydrateErr != nil {
+				return nil, hydrateErr
+			}
+		}
+	}
 	return collections, err
+}
+
+func hydrateCreator(db *gorm.DB, id *string, target **identity.User) error {
+	if id == nil {
+		*target = nil
+		return nil
+	}
+	var creator identity.User
+	if err := db.Select("id", "email", "display_name").First(&creator, "id = ?", *id).Error; err != nil {
+		return err
+	}
+	*target = &creator
+	return nil
 }
 
 func buildCollectionTree(collections []Collection) ([]Collection, error) {

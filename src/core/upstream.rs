@@ -229,11 +229,19 @@ pub struct UpstreamWorkspaceSummary {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct UpstreamUserSummary {
+    pub id: String,
+    pub email: String,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct UpstreamWorkspaceView {
     pub id: String,
     pub name: String,
     pub user_ids: Vec<String>,
     pub collections: Vec<UpstreamCollectionView>,
+    pub created_by: Option<UpstreamUserSummary>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -285,6 +293,7 @@ pub struct UpstreamCollectionView {
     pub sub_collections: Vec<UpstreamCollectionView>,
     #[serde(default)]
     pub requests: Vec<UpstreamSavedRequestView>,
+    pub created_by: Option<UpstreamUserSummary>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -295,6 +304,7 @@ pub struct UpstreamSavedRequestView {
     pub collection_id: String,
     pub name: String,
     pub definition: RequestTemplate,
+    pub created_by: Option<UpstreamUserSummary>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -969,17 +979,20 @@ mod tests {
             id: "workspace-1".to_owned(),
             name: "Team API".to_owned(),
             user_ids: vec!["user-1".to_owned()],
+            created_by: None,
             collections: vec![UpstreamCollectionView {
                 id: "root".to_owned(),
                 workspace_id: "workspace-1".to_owned(),
                 parent_collection_id: None,
                 name: "Root".to_owned(),
                 user_ids: Vec::new(),
+                created_by: None,
                 requests: vec![UpstreamSavedRequestView {
                     id: "root-request".to_owned(),
                     collection_id: "root".to_owned(),
                     name: "Root request".to_owned(),
                     definition: RequestTemplate::default(),
+                    created_by: None,
                     created_at: now,
                     updated_at: now,
                 }],
@@ -989,11 +1002,13 @@ mod tests {
                     parent_collection_id: Some("root".to_owned()),
                     name: "Child".to_owned(),
                     user_ids: Vec::new(),
+                    created_by: None,
                     requests: vec![UpstreamSavedRequestView {
                         id: "child-request".to_owned(),
                         collection_id: "child".to_owned(),
                         name: "Child request".to_owned(),
                         definition: RequestTemplate::default(),
+                        created_by: None,
                         created_at: now,
                         updated_at: now,
                     }],
@@ -1003,6 +1018,7 @@ mod tests {
                         parent_collection_id: Some("child".to_owned()),
                         name: "Grandchild".to_owned(),
                         user_ids: Vec::new(),
+                        created_by: None,
                         requests: Vec::new(),
                         sub_collections: Vec::new(),
                         created_at: now,

@@ -1082,3 +1082,175 @@ index 2b96572..b9793e7 100644
 +    pub button_style: ButtonClassStyle,
 @@ -204,0 +225 @@ impl From<&ThemeColor> for Theme {
 +            button_style: ButtonClassStyle::default(),
+diff --git a/src/setting/page.rs b/src/setting/page.rs
+--- a/src/setting/page.rs
++++ b/src/setting/page.rs
+@@ -18,6 +18,7 @@
+ #[derive(Clone)]
+ pub struct SettingPage {
+     resettable: bool,
++    full_bleed: bool,
+     pub(super) default_open: bool,
+     pub(super) title: SharedString,
+     pub(super) description: Option<SharedString>,
+@@ -28,6 +29,7 @@
+     pub fn new(title: impl Into<SharedString>) -> Self {
+         Self {
+             resettable: true,
++            full_bleed: false,
+             default_open: false,
+             title: title.into(),
+             description: None,
+@@ -61,6 +63,12 @@
+         self
+     }
+-
++
++    /// Let a custom setting item occupy the complete page body without a group container.
++    pub fn full_bleed(mut self) -> Self {
++        self.full_bleed = true;
++        self
++    }
++
+     /// Add a setting group to the page.
+     pub fn group(mut self, group: SettingGroup) -> Self {
+         self.groups.push(group);
+@@ -122,6 +130,69 @@
+             list_state.scroll_to_reveal_item(ix);
+         }
+-
++
++        let body = if self.full_bleed {
++            let mut items = Vec::new();
++            for (group_ix, group) in groups.iter().enumerate() {
++                for (item_ix, item) in group.items.iter().enumerate() {
++                    if item.is_match(&query) {
++                        items.push(
++                            item.clone()
++                                .render_item(
++                                    &RenderOptions {
++                                        page_ix: ix,
++                                        group_ix,
++                                        item_ix,
++                                        full_bleed: true,
++                                        ..*options
++                                    },
++                                    window,
++                                    cx,
++                                )
++                                .into_any_element(),
++                        );
++                    }
++                }
++            }
++
++            div()
++                .flex_1()
++                .min_h_0()
++                .w_full()
++                .children(items)
++                .into_any_element()
++        } else {
++            div()
++                .px_4()
++                .relative()
++                .flex_1()
++                .w_full()
++                .child(
++                    list(list_state.clone(), {
++                        let query = query.clone();
++                        let options = *options;
++                        move |group_ix, window, cx| {
++                            let group = groups[group_ix].clone();
++                            group
++                                .py_4()
++                                .render(
++                                    &query,
++                                    &RenderOptions {
++                                        page_ix: ix,
++                                        group_ix,
++                                        ..options
++                                    },
++                                    window,
++                                    cx,
++                                )
++                                .into_any_element()
++                        }
++                    })
++                    .size_full(),
++                )
++                .vertical_scrollbar(&list_state)
++                .into_any_element()
++        };
++
+         v_flex()
+             .id(ix)
+             .size_full()
+@@ -157,36 +228,6 @@
+                         )
+                     }),
+             )
+-            .child(
+-                div()
+-                    .px_4()
+-                    .relative()
+-                    .flex_1()
+-                    .w_full()
+-                    .child(
+-                        list(list_state.clone(), {
+-                            let query = query.clone();
+-                            let options = *options;
+-                            move |group_ix, window, cx| {
+-                                let group = groups[group_ix].clone();
+-                                group
+-                                    .py_4()
+-                                    .render(
+-                                        &query,
+-                                        &RenderOptions {
+-                                            page_ix: ix,
+-                                            group_ix,
+-                                            ..options
+-                                        },
+-                                        window,
+-                                        cx,
+-                                    )
+-                                    .into_any_element()
+-                            }
+-                        })
+-                        .size_full(),
+-                    )
+-                    .vertical_scrollbar(&list_state),
+-            )
++            .child(body)
+     }
+ }
+diff --git a/src/setting/settings.rs b/src/setting/settings.rs
+--- a/src/setting/settings.rs
++++ b/src/setting/settings.rs
+@@ -224,6 +224,7 @@
+     pub page_ix: usize,
+     pub group_ix: usize,
+     pub item_ix: usize,
++    pub full_bleed: bool,
+     pub size: Size,
+     pub group_variant: GroupBoxVariant,
+     pub layout: Axis,
+@@ -257,6 +258,7 @@
+             page_ix: 0,
+             group_ix: 0,
+             item_ix: 0,
++            full_bleed: false,
+             size: self.size,
+             group_variant: self.group_variant,
+             layout: Axis::Horizontal,
+diff --git a/src/setting/item.rs b/src/setting/item.rs
+--- a/src/setting/item.rs
++++ b/src/setting/item.rs
+@@ -178,6 +178,7 @@
+         div()
+             .id(SharedString::from(format!("item-{}", options.item_ix)))
+             .w_full()
++            .when(options.full_bleed, |this| this.h_full())
+             .child(match self {
+                 SettingItem::Item {
+                     title,

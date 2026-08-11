@@ -72,7 +72,7 @@ func createInitialWorkspace(ctx context.Context, tx *gorm.DB, ownerID string) er
 		return nil
 	}
 
-	workspace := Workspace{ID: uuid.NewString(), Name: DefaultWorkspaceName}
+	workspace := Workspace{ID: uuid.NewString(), Name: DefaultWorkspaceName, CreatedByUserID: &ownerID}
 	if err := tx.WithContext(ctx).Create(&workspace).Error; err != nil {
 		return err
 	}

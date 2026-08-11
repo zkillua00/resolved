@@ -9,7 +9,7 @@ impl ApiTester {
     pub(super) fn open_workspace_tool_tab(
         &mut self,
         tab: WorkspaceToolTab,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.dismiss_template_variable_popover();
@@ -22,7 +22,11 @@ impl ApiTester {
             self.cancel_shortcut_recording(cx);
         }
 
+        let opening_settings = matches!(tab, WorkspaceToolTab::Settings);
         self.workspace_tabs.open_tool(tab);
+        if opening_settings {
+            self.ensure_server_management_loaded(window, cx);
+        }
         cx.notify();
     }
 

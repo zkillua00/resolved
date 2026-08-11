@@ -121,6 +121,7 @@ mod response_tab;
 mod response_workspace;
 mod script_console;
 mod script_console_model;
+mod server_management;
 mod settings_actions;
 mod settings_page;
 mod shell;
@@ -288,6 +289,9 @@ pub struct ApiTester {
     base_key_bindings: Vec<gpui::KeyBinding>,
     recording_shortcut_id: Option<ShortcutId>,
     settings_notice: Option<String>,
+    server_management: server_management::ServerManagementState,
+    server_management_generation: u64,
+    server_management_abort_handle: Option<AbortHandle>,
     upstream_client: Client,
     upstream_login_open: bool,
     upstream_login_url: Entity<InputState>,

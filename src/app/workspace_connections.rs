@@ -854,6 +854,9 @@ impl ApiTester {
         );
         self.workspace_switch_status = WorkspaceSwitchStatus::Idle;
         self.settings_notice = Some(format!("Opened {}.", self.active_workspace_name()));
+        if self.workspace_tabs.active() == ActiveWorkspaceTab::Settings {
+            self.refresh_server_management(window, cx);
+        }
         cx.notify();
     }
 
@@ -1146,6 +1149,9 @@ impl ApiTester {
         );
         self.workspace_switch_status = WorkspaceSwitchStatus::Idle;
         self.settings_notice = Some(format!("Opened {workspace_name}."));
+        if self.workspace_tabs.active() == ActiveWorkspaceTab::Settings {
+            self.refresh_server_management(window, cx);
+        }
         cx.notify();
     }
 

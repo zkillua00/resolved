@@ -45,16 +45,24 @@ func (r *Repository) FindUserByEmail(ctx context.Context, email string) (User, e
 
 func (r *Repository) GetUser(ctx context.Context, id string) (User, error) {
 	var user User
-	err := preloadUser(r.db.WithContext(ctx)).First(&user, "id = ?", id).Error
+	db := r.db.WithContext(ctx)
+	err := preloadUser(db).First(&user, "id = ?", id).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return User{}, ErrUserNotFound
+	}
+	if err == nil {
+		err = hydrateUserCreators(db, &user)
 	}
 	return user, err
 }
 
 func (r *Repository) ListUsers(ctx context.Context) ([]User, error) {
 	var users []User
-	err := preloadUser(r.db.WithContext(ctx)).Order("email ASC").Find(&users).Error
+	db := r.db.WithContext(ctx)
+	err := preloadUser(db).Order("email ASC").Find(&users).Error
+	if err == nil {
+		err = hydrateUsersCreators(db, users)
+	}
 	return users, err
 }
 
@@ -217,16 +225,24 @@ func (r *Repository) ReplaceUserRoles(ctx context.Context, id string, roleIDs []
 
 func (r *Repository) GetRole(ctx context.Context, id string) (Role, error) {
 	var role Role
-	err := preloadRole(r.db.WithContext(ctx)).First(&role, "id = ?", id).Error
+	db := r.db.WithContext(ctx)
+	err := preloadRole(db).First(&role, "id = ?", id).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return Role{}, ErrRoleNotFound
+	}
+	if err == nil {
+		role.CreatedByUser, err = loadCreator(db, role.CreatedByUserID)
 	}
 	return role, err
 }
 
 func (r *Repository) ListRoles(ctx context.Context) ([]Role, error) {
 	var roles []Role
-	err := preloadRole(r.db.WithContext(ctx)).Order("normalized_name ASC").Find(&roles).Error
+	db := r.db.WithContext(ctx)
+	err := preloadRole(db).Order("normalized_name ASC").Find(&roles).Error
+	if err == nil {
+		err = hydrateRoleCreators(db, roles)
+	}
 	return roles, err
 }
 
@@ -338,6 +354,9 @@ func (r *Repository) FindSessionByHash(ctx context.Context, hash string) (Sessio
 		Preload("User.Roles.Permissions").
 		Where("token_hash = ?", hash).
 		First(&session).Error
+	if err == nil {
+		err = hydrateUserCreators(r.db.WithContext(ctx), &session.User)
+	}
 	return session, err
 }
 
@@ -351,6 +370,46 @@ func preloadUser(db *gorm.DB) *gorm.DB {
 
 func preloadRole(db *gorm.DB) *gorm.DB {
 	return db.Preload("Permissions")
+}
+
+func hydrateUsersCreators(db *gorm.DB, users []User) error {
+	for index := range users {
+		if err := hydrateUserCreators(db, &users[index]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func hydrateUserCreators(db *gorm.DB, user *User) error {
+	creator, err := loadCreator(db, user.CreatedByUserID)
+	if err != nil {
+		return err
+	}
+	user.CreatedByUser = creator
+	return hydrateRoleCreators(db, user.Roles)
+}
+
+func hydrateRoleCreators(db *gorm.DB, roles []Role) error {
+	for index := range roles {
+		creator, err := loadCreator(db, roles[index].CreatedByUserID)
+		if err != nil {
+			return err
+		}
+		roles[index].CreatedByUser = creator
+	}
+	return nil
+}
+
+func loadCreator(db *gorm.DB, id *string) (*User, error) {
+	if id == nil {
+		return nil, nil
+	}
+	var creator User
+	if err := db.Select("id", "email", "display_name").First(&creator, "id = ?", *id).Error; err != nil {
+		return nil, err
+	}
+	return &creator, nil
 }
 
 func loadRoles(tx *gorm.DB, ids []string) ([]Role, error) {

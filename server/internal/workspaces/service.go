@@ -87,7 +87,8 @@ func (s *Service) Create(ctx context.Context, actor Actor, input CreateWorkspace
 	if err != nil {
 		return Workspace{}, err
 	}
-	workspace := Workspace{ID: uuid.NewString(), Name: name}
+	creatorID := actor.UserID
+	workspace := Workspace{ID: uuid.NewString(), Name: name, CreatedByUserID: &creatorID}
 	created, err := s.repository.CreateWorkspace(ctx, workspace, []string{actor.UserID})
 	if err != nil {
 		return Workspace{}, mapRepositoryError(err)
@@ -226,6 +227,7 @@ func (s *Service) CreateCollection(
 		WorkspaceID:        workspaceID,
 		ParentCollectionID: input.ParentCollectionID,
 		Name:               name,
+		CreatedByUserID:    &actor.UserID,
 	}
 	created, err := s.repository.CreateCollection(ctx, collection)
 	if err != nil {
@@ -413,10 +415,11 @@ func (s *Service) CreateSavedRequest(
 		return SavedRequest{}, collectionAccessDenied()
 	}
 	created, err := s.repository.CreateSavedRequest(ctx, workspaceID, SavedRequest{
-		ID:           uuid.NewString(),
-		CollectionID: collectionID,
-		Name:         name,
-		Definition:   definition,
+		ID:              uuid.NewString(),
+		CollectionID:    collectionID,
+		Name:            name,
+		Definition:      definition,
+		CreatedByUserID: &actor.UserID,
 	})
 	if err != nil {
 		return SavedRequest{}, mapRepositoryError(err)
@@ -511,6 +514,7 @@ func scopeWorkspace(workspace Workspace, actor Actor) (Workspace, bool) {
 
 	scoped := workspace
 	scoped.UserIDs = []string{}
+	scoped.CreatedByUser = nil
 	scoped.Collections = filterCollections(workspace.Collections, visible, effective)
 	return scoped, true
 }
@@ -567,6 +571,7 @@ func filterCollections(
 		if _, ok := effective[collection.ID]; !ok {
 			copy.UserIDs = []string{}
 			copy.Requests = []SavedRequest{}
+			copy.CreatedByUser = nil
 		}
 		copy.SubCollections = filterCollections(collection.SubCollections, visible, effective)
 		filtered = append(filtered, copy)

@@ -34,6 +34,10 @@ impl ApiTester {
     }
 
     pub(super) fn render_settings_workspace(&self, cx: &mut Context<Self>) -> AnyElement {
+        let using_server = matches!(
+            self.workspace_providers.active_id(),
+            WorkspaceProviderId::Upstream { .. }
+        );
         let servers_page = self.upstream_settings_page(cx);
         let editor_page = SettingPage::new("Editor")
             .description(
@@ -109,6 +113,22 @@ impl ApiTester {
                     ]),
             );
 
+        let mut pages = Vec::with_capacity(if using_server { 8 } else { 5 });
+        pages.push(servers_page);
+        if using_server {
+            pages.extend([
+                self.user_management_settings_page(cx),
+                self.role_management_settings_page(cx),
+                self.resource_management_settings_page(cx),
+            ]);
+        }
+        pages.extend([editor_page, keyboard_page, appearance_page, developer_page]);
+        let settings_view_id = if using_server {
+            "api-tester-settings-server"
+        } else {
+            "api-tester-settings-local"
+        };
+
         v_flex()
             .size_full()
             .min_h_0()
@@ -121,16 +141,10 @@ impl ApiTester {
             })
             .child(
                 div().flex_1().min_h_0().child(
-                    SettingsView::new("api-tester-settings")
+                    SettingsView::new(settings_view_id)
                         .sidebar_width(px(220.))
                         .with_group_variant(GroupBoxVariant::Outline)
-                        .pages([
-                            servers_page,
-                            editor_page,
-                            keyboard_page,
-                            appearance_page,
-                            developer_page,
-                        ]),
+                        .pages(pages),
                 ),
             )
             .into_any_element()

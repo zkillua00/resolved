@@ -82,6 +82,7 @@ func TestIdentityManagementAndDynamicPermissions(t *testing.T) {
 	if len(initialWorkspaces[0].UserIDs) != 1 || initialWorkspaces[0].UserIDs[0] != owner.ID {
 		t.Fatalf("initial workspace users = %v, want [%s]", initialWorkspaces[0].UserIDs, owner.ID)
 	}
+	assertCreator(t, initialWorkspaces[0].CreatedBy, owner.ID, owner.Email)
 	invalidUser := request[identity.UserView](t, app, http.MethodPost, "/api/v1/users", ownerLogin.Token, map[string]any{
 		"email":        "not-an-email",
 		"display_name": "Invalid",
@@ -100,6 +101,7 @@ func TestIdentityManagementAndDynamicPermissions(t *testing.T) {
 	if roleResponse.Data.ID == "" {
 		t.Fatal("created role did not include an ID")
 	}
+	assertCreator(t, roleResponse.Data.CreatedBy, owner.ID, owner.Email)
 
 	userResponse := request[identity.UserView](t, app, http.MethodPost, "/api/v1/users", ownerLogin.Token, map[string]any{
 		"email":        "collaborator",
@@ -107,6 +109,7 @@ func TestIdentityManagementAndDynamicPermissions(t *testing.T) {
 		"password":     collaboratorPassword,
 		"role_ids":     []string{roleResponse.Data.ID},
 	}, fiber.StatusCreated)
+	assertCreator(t, userResponse.Data.CreatedBy, owner.ID, owner.Email)
 	collaboratorLogin := login(t, app, userResponse.Data.Email, collaboratorPassword)
 
 	request[[]identity.UserView](t, app, http.MethodGet, "/api/v1/users", collaboratorLogin.Token, nil, fiber.StatusOK)
@@ -133,6 +136,7 @@ func TestIdentityManagementAndDynamicPermissions(t *testing.T) {
 	if createdAfterPermission.Data.Email != "after-permission" {
 		t.Fatalf("created email = %q", createdAfterPermission.Data.Email)
 	}
+	assertCreator(t, createdAfterPermission.Data.CreatedBy, userResponse.Data.ID, userResponse.Data.Email)
 
 	immutableOwner := request[identity.RoleView](t, app, http.MethodPut, "/api/v1/roles/"+identity.OwnerRoleID+"/permissions", ownerLogin.Token, map[string]any{
 		"permission_keys": []string{},
@@ -210,6 +214,7 @@ func TestWorkspaceAndRecursiveCollectionScopes(t *testing.T) {
 	if len(workspace.UserIDs) != 1 || workspace.UserIDs[0] != owner.ID {
 		t.Fatalf("workspace creator grants = %v, want [%s]", workspace.UserIDs, owner.ID)
 	}
+	assertCreator(t, workspace.CreatedBy, owner.ID, owner.Email)
 
 	createCollection := func(name string, parentID *string) workspaces.CollectionView {
 		t.Helper()
@@ -228,6 +233,7 @@ func TestWorkspaceAndRecursiveCollectionScopes(t *testing.T) {
 		).Data
 	}
 	product := createCollection("Product", nil)
+	assertCreator(t, product.CreatedBy, owner.ID, owner.Email)
 	admin := createCollection("Admin", &product.ID)
 	secrets := createCollection("Secrets", &admin.ID)
 	public := createCollection("Public", &product.ID)
@@ -251,6 +257,7 @@ func TestWorkspaceAndRecursiveCollectionScopes(t *testing.T) {
 		).Data
 	}
 	productRequest := createSavedRequest(product.ID, "Product request", "https://example.com/product")
+	assertCreator(t, productRequest.CreatedBy, owner.ID, owner.Email)
 	adminRequest := createSavedRequest(admin.ID, "Admin request", "https://example.com/admin")
 	secretsRequest := createSavedRequest(secrets.ID, "Secrets request", "https://example.com/secrets")
 	createSavedRequest(public.ID, "Public request", "https://example.com/public")
@@ -298,12 +305,18 @@ func TestWorkspaceAndRecursiveCollectionScopes(t *testing.T) {
 	if len(nestedWorkspace.UserIDs) != 0 {
 		t.Fatalf("collection-scoped workspace users = %v, want hidden", nestedWorkspace.UserIDs)
 	}
+	if nestedWorkspace.CreatedBy != nil {
+		t.Fatalf("collection-scoped workspace creator = %+v, want hidden", nestedWorkspace.CreatedBy)
+	}
 	if len(nestedWorkspace.Collections) != 1 || nestedWorkspace.Collections[0].ID != product.ID {
 		t.Fatalf("nested roots = %+v, want Product ancestor shell", nestedWorkspace.Collections)
 	}
 	productShell := nestedWorkspace.Collections[0]
 	if len(productShell.UserIDs) != 0 {
 		t.Fatalf("ancestor shell users = %v, want hidden", productShell.UserIDs)
+	}
+	if productShell.CreatedBy != nil {
+		t.Fatalf("ancestor shell creator = %+v, want hidden", productShell.CreatedBy)
 	}
 	if len(productShell.Requests) != 0 {
 		t.Fatalf("ancestor shell requests = %+v, want hidden", productShell.Requests)
@@ -386,6 +399,7 @@ func TestWorkspaceAndRecursiveCollectionScopes(t *testing.T) {
 	if nestedChild.ParentCollectionID == nil || *nestedChild.ParentCollectionID != admin.ID {
 		t.Fatalf("nested child parent = %v, want %s", nestedChild.ParentCollectionID, admin.ID)
 	}
+	assertCreator(t, nestedChild.CreatedBy, nestedUser.ID, nestedUser.Email)
 
 	rootDenied := request[workspaces.CollectionView](
 		t,
@@ -523,6 +537,13 @@ func TestWorkspaceAndRecursiveCollectionScopes(t *testing.T) {
 		nil,
 		fiber.StatusNotFound,
 	)
+}
+
+func assertCreator(t *testing.T, creator *identity.UserSummaryView, userID, login string) {
+	t.Helper()
+	if creator == nil || creator.ID != userID || creator.Email != login {
+		t.Fatalf("creator = %+v, want user %s (%s)", creator, userID, login)
+	}
 }
 
 func newTestServer(t *testing.T) (*fiber.App, *users.Service, func()) {

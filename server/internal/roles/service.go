@@ -17,9 +17,10 @@ type Service struct {
 }
 
 type CreateInput struct {
-	Name           string
-	Description    string
-	PermissionKeys []string
+	Name            string
+	Description     string
+	PermissionKeys  []string
+	CreatedByUserID *string
 }
 
 type UpdateInput struct {
@@ -56,11 +57,12 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (identity.Role,
 		return identity.Role{}, err
 	}
 	role := identity.Role{
-		ID:             uuid.NewString(),
-		Name:           name,
-		NormalizedName: normalizedName,
-		Description:    strings.TrimSpace(input.Description),
-		System:         false,
+		ID:              uuid.NewString(),
+		Name:            name,
+		NormalizedName:  normalizedName,
+		Description:     strings.TrimSpace(input.Description),
+		System:          false,
+		CreatedByUserID: input.CreatedByUserID,
 	}
 	created, err := s.repository.CreateRole(ctx, role, normalizePermissionKeys(input.PermissionKeys))
 	if err != nil {

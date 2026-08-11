@@ -1,0 +1,844 @@
+use std::collections::BTreeSet;
+
+use gpui_component::setting::{SettingGroup, SettingItem, SettingPage};
+use gpui_component::switch::Switch;
+use zeroize::Zeroizing;
+
+use crate::core::{
+    COLLECTIONS_ASSIGN_USERS, ManagementRole, ManagementUser, ROLES_ASSIGN_PERMISSIONS,
+    ROLES_CREATE, ROLES_UPDATE, USERS_ASSIGN_ROLES, USERS_CREATE, USERS_UPDATE,
+    UpstreamCollectionView, UpstreamManagementSnapshot, UpstreamSavedRequestView,
+    UpstreamUserSummary, UpstreamWorkspaceView, WORKSPACES_ASSIGN_USERS, create_management_role,
+    create_management_user, load_upstream_management, replace_management_collection_users,
+    replace_management_role_permissions, replace_management_user_roles,
+    replace_management_workspace_users, update_management_role, update_management_user,
+};
+
+use super::*;
+
+mod discord_views;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) enum ServerManagementStatus {
+    #[default]
+    Idle,
+    Loading,
+    Ready,
+    Saving,
+    Error(String),
+}
+
+impl ServerManagementStatus {
+    fn busy(&self) -> bool {
+        matches!(self, Self::Loading | Self::Saving)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct ServerManagementState {
+    pub upstream_id: Option<String>,
+    pub status: ServerManagementStatus,
+    pub snapshot: Option<UpstreamManagementSnapshot>,
+    selected_user_id: Option<String>,
+    selected_role_id: Option<String>,
+    selected_resource: Option<ManagementResourceSelection>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ManagementResourceSelection {
+    Workspace(String),
+    Collection(String),
+    Request(String),
+}
+
+impl ServerManagementState {
+    fn set_snapshot(&mut self, snapshot: UpstreamManagementSnapshot) {
+        if !snapshot.users.as_ref().is_some_and(|users| {
+            self.selected_user_id
+                .as_ref()
+                .is_some_and(|selected| users.iter().any(|user| &user.id == selected))
+        }) {
+            self.selected_user_id = snapshot
+                .users
+                .as_ref()
+                .and_then(|users| users.first())
+                .map(|user| user.id.clone());
+        }
+        if !snapshot.roles.as_ref().is_some_and(|roles| {
+            self.selected_role_id
+                .as_ref()
+                .is_some_and(|selected| roles.iter().any(|role| &role.id == selected))
+        }) {
+            self.selected_role_id = snapshot
+                .roles
+                .as_ref()
+                .and_then(|roles| roles.first())
+                .map(|role| role.id.clone());
+        }
+        if !snapshot.workspaces.as_ref().is_some_and(|workspaces| {
+            self.selected_resource.as_ref().is_some_and(|selected| {
+                discord_views::resource_selection_exists(workspaces, selected)
+            })
+        }) {
+            self.selected_resource = snapshot
+                .workspaces
+                .as_ref()
+                .and_then(|workspaces| workspaces.first())
+                .map(|workspace| ManagementResourceSelection::Workspace(workspace.id.clone()));
+        }
+        self.snapshot = Some(snapshot);
+    }
+}
+
+enum ManagementMutation {
+    CreateUser {
+        login: String,
+        display_name: String,
+        password: Zeroizing<String>,
+    },
+    UpdateUser {
+        user_id: String,
+        login: Option<String>,
+        display_name: Option<String>,
+        password: Option<Zeroizing<String>>,
+        active: Option<bool>,
+    },
+    ReplaceUserRoles {
+        user_id: String,
+        role_ids: Vec<String>,
+    },
+    CreateRole {
+        name: String,
+        description: String,
+    },
+    UpdateRole {
+        role_id: String,
+        name: String,
+        description: String,
+    },
+    ReplaceRolePermissions {
+        role_id: String,
+        permission_keys: Vec<String>,
+    },
+    ReplaceWorkspaceUsers {
+        workspace_id: String,
+        user_ids: Vec<String>,
+    },
+    ReplaceCollectionUsers {
+        workspace_id: String,
+        collection_id: String,
+        user_ids: Vec<String>,
+    },
+}
+
+impl ManagementMutation {
+    async fn execute(
+        self,
+        client: &Client,
+        base_url: &url::Url,
+        bearer_token: &str,
+    ) -> Result<String, String> {
+        match self {
+            Self::CreateUser {
+                login,
+                display_name,
+                password,
+            } => {
+                create_management_user(
+                    client,
+                    base_url,
+                    bearer_token,
+                    &login,
+                    &display_name,
+                    password.as_str(),
+                    &[],
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                Ok(format!("Created {display_name}."))
+            }
+            Self::UpdateUser {
+                user_id,
+                login,
+                display_name,
+                password,
+                active,
+            } => {
+                let user = update_management_user(
+                    client,
+                    base_url,
+                    bearer_token,
+                    &user_id,
+                    login.as_deref(),
+                    display_name.as_deref(),
+                    password.as_deref().map(|password| password.as_str()),
+                    active,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                Ok(format!("Updated {}.", user.display_name))
+            }
+            Self::ReplaceUserRoles { user_id, role_ids } => {
+                let user = replace_management_user_roles(
+                    client,
+                    base_url,
+                    bearer_token,
+                    &user_id,
+                    &role_ids,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                Ok(format!("Updated roles for {}.", user.display_name))
+            }
+            Self::CreateRole { name, description } => {
+                create_management_role(client, base_url, bearer_token, &name, &description, &[])
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok(format!("Created {name}."))
+            }
+            Self::UpdateRole {
+                role_id,
+                name,
+                description,
+            } => {
+                let role = update_management_role(
+                    client,
+                    base_url,
+                    bearer_token,
+                    &role_id,
+                    Some(&name),
+                    Some(&description),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                Ok(format!("Updated {}.", role.name))
+            }
+            Self::ReplaceRolePermissions {
+                role_id,
+                permission_keys,
+            } => {
+                let role = replace_management_role_permissions(
+                    client,
+                    base_url,
+                    bearer_token,
+                    &role_id,
+                    &permission_keys,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                Ok(format!("Updated permissions for {}.", role.name))
+            }
+            Self::ReplaceWorkspaceUsers {
+                workspace_id,
+                user_ids,
+            } => {
+                let workspace = replace_management_workspace_users(
+                    client,
+                    base_url,
+                    bearer_token,
+                    &workspace_id,
+                    &user_ids,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                Ok(format!("Updated access to {}.", workspace.name))
+            }
+            Self::ReplaceCollectionUsers {
+                workspace_id,
+                collection_id,
+                user_ids,
+            } => {
+                let collection = replace_management_collection_users(
+                    client,
+                    base_url,
+                    bearer_token,
+                    &workspace_id,
+                    &collection_id,
+                    &user_ids,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                Ok(format!("Updated access to {}.", collection.name))
+            }
+        }
+    }
+}
+
+impl ApiTester {
+    pub(super) fn ensure_server_management_loaded(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let active_id = self.settings.upstreams.active_upstream_id.as_deref();
+        let current = self.server_management.upstream_id.as_deref();
+        if active_id != current
+            || matches!(
+                self.server_management.status,
+                ServerManagementStatus::Idle | ServerManagementStatus::Error(_)
+            )
+        {
+            self.refresh_server_management(window, cx);
+        }
+    }
+
+    pub(super) fn refresh_server_management(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(abort_handle) = self.server_management_abort_handle.take() {
+            abort_handle.abort();
+        }
+        self.server_management_generation = self.server_management_generation.wrapping_add(1);
+        let generation = self.server_management_generation;
+
+        let Some(profile) = self.settings.upstreams.active().cloned() else {
+            self.server_management = ServerManagementState::default();
+            cx.notify();
+            return;
+        };
+        let upstream_id = profile.id.clone();
+        if profile.session_expired(Utc::now()) {
+            self.server_management = ServerManagementState {
+                upstream_id: Some(upstream_id),
+                status: ServerManagementStatus::Error(
+                    "Log in to this server again to manage it.".to_owned(),
+                ),
+                snapshot: None,
+                ..ServerManagementState::default()
+            };
+            cx.notify();
+            return;
+        }
+        let Some(base_url) = profile.parsed_base_url() else {
+            self.server_management = ServerManagementState {
+                upstream_id: Some(upstream_id),
+                status: ServerManagementStatus::Error("The server URL is invalid.".to_owned()),
+                snapshot: None,
+                ..ServerManagementState::default()
+            };
+            cx.notify();
+            return;
+        };
+
+        self.server_management = ServerManagementState {
+            upstream_id: Some(upstream_id.clone()),
+            status: ServerManagementStatus::Loading,
+            snapshot: None,
+            ..ServerManagementState::default()
+        };
+        let vault = self.credential_vault.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let client = self.upstream_client.clone();
+        let task_upstream_id = upstream_id.clone();
+        let task = self.runtime.spawn(async move {
+            let credential = runtime
+                .spawn_blocking(move || vault.load_upstream(&task_upstream_id))
+                .await
+                .map_err(|error| format!("Could not open the saved session: {error}"))?
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Log in to this server again.".to_owned())?;
+            load_upstream_management(&client, &base_url, credential.bearer_token())
+                .await
+                .map_err(|error| error.to_string())
+        });
+        self.server_management_abort_handle = Some(task.abort_handle());
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                if this.server_management_generation != generation
+                    || this.server_management.upstream_id.as_deref() != Some(upstream_id.as_str())
+                {
+                    return;
+                }
+                this.server_management_abort_handle = None;
+                match result {
+                    Ok(Ok(snapshot)) => {
+                        this.server_management.status = ServerManagementStatus::Ready;
+                        this.server_management.set_snapshot(snapshot);
+                    }
+                    Ok(Err(error)) => {
+                        this.server_management.status = ServerManagementStatus::Error(error);
+                        this.server_management.snapshot = None;
+                    }
+                    Err(error) if error.is_cancelled() => return,
+                    Err(error) => {
+                        this.server_management.status = ServerManagementStatus::Error(format!(
+                            "The server settings could not be loaded: {error}"
+                        ));
+                        this.server_management.snapshot = None;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn run_management_mutation(
+        &mut self,
+        mutation: ManagementMutation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.server_management.status.busy() {
+            return;
+        }
+        let Some(profile) = self.settings.upstreams.active().cloned() else {
+            self.settings_notice = Some("Select a server first.".to_owned());
+            cx.notify();
+            return;
+        };
+        let Some(base_url) = profile.parsed_base_url() else {
+            self.settings_notice = Some("The server URL is invalid.".to_owned());
+            cx.notify();
+            return;
+        };
+
+        if let Some(abort_handle) = self.server_management_abort_handle.take() {
+            abort_handle.abort();
+        }
+        self.server_management_generation = self.server_management_generation.wrapping_add(1);
+        let generation = self.server_management_generation;
+        let upstream_id = profile.id.clone();
+        self.server_management.status = ServerManagementStatus::Saving;
+        let vault = self.credential_vault.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let client = self.upstream_client.clone();
+        let task_upstream_id = upstream_id.clone();
+        let task = self.runtime.spawn(async move {
+            let credential = runtime
+                .spawn_blocking(move || vault.load_upstream(&task_upstream_id))
+                .await
+                .map_err(|error| format!("Could not open the saved session: {error}"))?
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Log in to this server again.".to_owned())?;
+            let notice = mutation
+                .execute(&client, &base_url, credential.bearer_token())
+                .await?;
+            let snapshot = load_upstream_management(&client, &base_url, credential.bearer_token())
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok::<_, String>((notice, snapshot))
+        });
+        self.server_management_abort_handle = Some(task.abort_handle());
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                if this.server_management_generation != generation
+                    || this.server_management.upstream_id.as_deref() != Some(upstream_id.as_str())
+                {
+                    return;
+                }
+                this.server_management_abort_handle = None;
+                match result {
+                    Ok(Ok((notice, snapshot))) => {
+                        this.server_management.status = ServerManagementStatus::Ready;
+                        this.server_management.set_snapshot(snapshot);
+                        this.settings_notice = Some(notice);
+                    }
+                    Ok(Err(error)) => {
+                        this.server_management.status = ServerManagementStatus::Ready;
+                        this.settings_notice = Some(error);
+                    }
+                    Err(error) if error.is_cancelled() => return,
+                    Err(error) => {
+                        this.server_management.status = ServerManagementStatus::Ready;
+                        this.settings_notice =
+                            Some(format!("The server change could not be saved: {error}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn user_management_settings_page(&self, cx: &mut Context<Self>) -> SettingPage {
+        let this = cx.entity().downgrade();
+        SettingPage::new("Users")
+            .description("Create accounts, update profiles, and assign roles.")
+            .resettable(false)
+            .full_bleed()
+            .group(SettingGroup::new().item(SettingItem::render_searchable(
+                "users accounts login roles active inactive",
+                move |_, _, cx| render_user_management(&this, cx),
+            )))
+    }
+
+    pub(super) fn role_management_settings_page(&self, cx: &mut Context<Self>) -> SettingPage {
+        let this = cx.entity().downgrade();
+        SettingPage::new("Roles")
+            .description("Group permissions into roles that can be assigned to users.")
+            .resettable(false)
+            .full_bleed()
+            .group(SettingGroup::new().item(SettingItem::render_searchable(
+                "roles permissions capabilities access",
+                move |_, _, cx| render_role_management(&this, cx),
+            )))
+    }
+
+    pub(super) fn resource_management_settings_page(&self, cx: &mut Context<Self>) -> SettingPage {
+        let this = cx.entity().downgrade();
+        SettingPage::new("Resources")
+            .description("Manage direct access to workspaces and collection trees.")
+            .resettable(false)
+            .full_bleed()
+            .group(SettingGroup::new().item(SettingItem::render_searchable(
+                "resources workspaces collections requests access users creator",
+                move |_, _, cx| render_resource_management(&this, cx),
+            )))
+    }
+
+    fn open_create_user_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let login = cx.new(|cx| InputState::new(window, cx).placeholder("Login"));
+        let display_name = cx.new(|cx| InputState::new(window, cx).placeholder("Display name"));
+        let password = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Password")
+                .masked(true)
+        });
+        let this = cx.entity().downgrade();
+        let dialog_login = login.clone();
+        let dialog_display_name = display_name.clone();
+        let dialog_password = password.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let create_this = this.clone();
+            let create_login = dialog_login.clone();
+            let create_display_name = dialog_display_name.clone();
+            let create_password = dialog_password.clone();
+            dialog
+                .title("New user")
+                .w(px(480.))
+                .confirm()
+                .button_props(DialogButtonProps::default().ok_text("Create user"))
+                .on_ok(move |_, window, cx| {
+                    let login = create_login.read(cx).value().trim().to_owned();
+                    let display_name = create_display_name.read(cx).value().trim().to_owned();
+                    let password = Zeroizing::new(create_password.read(cx).value().to_string());
+                    if login.is_empty() || display_name.is_empty() || password.is_empty() {
+                        return false;
+                    }
+                    create_password.update(cx, |input, cx| input.set_value("", window, cx));
+                    if let Some(this) = create_this.upgrade() {
+                        this.update(cx, |this, cx| {
+                            this.run_management_mutation(
+                                ManagementMutation::CreateUser {
+                                    login: login.clone(),
+                                    display_name: display_name.clone(),
+                                    password,
+                                },
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                    true
+                })
+                .child(
+                    v_flex()
+                        .gap_4()
+                        .child(management_dialog_field("LOGIN", Input::new(&dialog_login)))
+                        .child(management_dialog_field(
+                            "DISPLAY NAME",
+                            Input::new(&dialog_display_name),
+                        ))
+                        .child(management_dialog_field(
+                            "PASSWORD",
+                            Input::new(&dialog_password).mask_toggle(),
+                        )),
+                )
+        });
+        login.read(cx).focus_handle(cx).focus(window);
+    }
+
+    fn open_edit_user_dialog(
+        &mut self,
+        user: ManagementUser,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let login = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Login")
+                .default_value(user.email.clone())
+        });
+        let display_name = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Display name")
+                .default_value(user.display_name.clone())
+        });
+        let password = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Leave blank to keep the current password")
+                .masked(true)
+        });
+        let user_id = user.id.clone();
+        let title = format!("Edit {}", user.display_name);
+        let this = cx.entity().downgrade();
+        let dialog_login = login.clone();
+        let dialog_display_name = display_name.clone();
+        let dialog_password = password.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let edit_this = this.clone();
+            let edit_user_id = user_id.clone();
+            let edit_login = dialog_login.clone();
+            let edit_display_name = dialog_display_name.clone();
+            let edit_password = dialog_password.clone();
+            dialog
+                .title(title.clone())
+                .w(px(480.))
+                .confirm()
+                .button_props(DialogButtonProps::default().ok_text("Save user"))
+                .on_ok(move |_, window, cx| {
+                    let login = edit_login.read(cx).value().trim().to_owned();
+                    let display_name = edit_display_name.read(cx).value().trim().to_owned();
+                    let password = Zeroizing::new(edit_password.read(cx).value().to_string());
+                    if login.is_empty() || display_name.is_empty() {
+                        return false;
+                    }
+                    edit_password.update(cx, |input, cx| input.set_value("", window, cx));
+                    if let Some(this) = edit_this.upgrade() {
+                        this.update(cx, |this, cx| {
+                            this.run_management_mutation(
+                                ManagementMutation::UpdateUser {
+                                    user_id: edit_user_id.clone(),
+                                    login: Some(login.clone()),
+                                    display_name: Some(display_name.clone()),
+                                    password: if password.is_empty() {
+                                        None
+                                    } else {
+                                        Some(password)
+                                    },
+                                    active: None,
+                                },
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                    true
+                })
+                .child(
+                    v_flex()
+                        .gap_4()
+                        .child(management_dialog_field("LOGIN", Input::new(&dialog_login)))
+                        .child(management_dialog_field(
+                            "DISPLAY NAME",
+                            Input::new(&dialog_display_name),
+                        ))
+                        .child(management_dialog_field(
+                            "NEW PASSWORD",
+                            Input::new(&dialog_password).mask_toggle(),
+                        )),
+                )
+        });
+        login.read(cx).focus_handle(cx).focus(window);
+    }
+
+    fn open_create_role_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder("Role name"));
+        let description = cx.new(|cx| InputState::new(window, cx).placeholder("Description"));
+        let this = cx.entity().downgrade();
+        let dialog_name = name.clone();
+        let dialog_description = description.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let create_this = this.clone();
+            let create_name = dialog_name.clone();
+            let create_description = dialog_description.clone();
+            dialog
+                .title("New role")
+                .w(px(480.))
+                .confirm()
+                .button_props(DialogButtonProps::default().ok_text("Create role"))
+                .on_ok(move |_, window, cx| {
+                    let name = create_name.read(cx).value().trim().to_owned();
+                    let description = create_description.read(cx).value().trim().to_owned();
+                    if name.is_empty() {
+                        return false;
+                    }
+                    if let Some(this) = create_this.upgrade() {
+                        this.update(cx, |this, cx| {
+                            this.run_management_mutation(
+                                ManagementMutation::CreateRole {
+                                    name: name.clone(),
+                                    description: description.clone(),
+                                },
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                    true
+                })
+                .child(
+                    v_flex()
+                        .gap_4()
+                        .child(management_dialog_field("NAME", Input::new(&dialog_name)))
+                        .child(management_dialog_field(
+                            "DESCRIPTION",
+                            Input::new(&dialog_description),
+                        )),
+                )
+        });
+        name.read(cx).focus_handle(cx).focus(window);
+    }
+
+    fn open_edit_role_dialog(
+        &mut self,
+        role: ManagementRole,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Role name")
+                .default_value(role.name.clone())
+        });
+        let description = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Description")
+                .default_value(role.description.clone())
+        });
+        let role_id = role.id.clone();
+        let title = format!("Edit {}", role.name);
+        let this = cx.entity().downgrade();
+        let dialog_name = name.clone();
+        let dialog_description = description.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let edit_this = this.clone();
+            let edit_role_id = role_id.clone();
+            let edit_name = dialog_name.clone();
+            let edit_description = dialog_description.clone();
+            dialog
+                .title(title.clone())
+                .w(px(480.))
+                .confirm()
+                .button_props(DialogButtonProps::default().ok_text("Save role"))
+                .on_ok(move |_, window, cx| {
+                    let name = edit_name.read(cx).value().trim().to_owned();
+                    let description = edit_description.read(cx).value().trim().to_owned();
+                    if name.is_empty() {
+                        return false;
+                    }
+                    if let Some(this) = edit_this.upgrade() {
+                        this.update(cx, |this, cx| {
+                            this.run_management_mutation(
+                                ManagementMutation::UpdateRole {
+                                    role_id: edit_role_id.clone(),
+                                    name: name.clone(),
+                                    description: description.clone(),
+                                },
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                    true
+                })
+                .child(
+                    v_flex()
+                        .gap_4()
+                        .child(management_dialog_field("NAME", Input::new(&dialog_name)))
+                        .child(management_dialog_field(
+                            "DESCRIPTION",
+                            Input::new(&dialog_description),
+                        )),
+                )
+        });
+        name.read(cx).focus_handle(cx).focus(window);
+    }
+}
+
+fn render_user_management(this: &WeakEntity<ApiTester>, cx: &mut App) -> AnyElement {
+    discord_views::render_user_management(this, cx)
+}
+
+fn render_role_management(this: &WeakEntity<ApiTester>, cx: &mut App) -> AnyElement {
+    discord_views::render_role_management(this, cx)
+}
+
+fn render_resource_management(this: &WeakEntity<ApiTester>, cx: &mut App) -> AnyElement {
+    discord_views::render_resource_management(this, cx)
+}
+
+fn management_status_element(
+    state: &ServerManagementState,
+    active_id: Option<&str>,
+    cx: &mut App,
+) -> Option<AnyElement> {
+    if active_id.is_none() {
+        return Some(management_empty(
+            "Select a connected server to manage its users and access.",
+            cx,
+        ));
+    }
+    if state.upstream_id.as_deref() != active_id {
+        return Some(management_empty("Loading server settings…", cx));
+    }
+    match &state.status {
+        ServerManagementStatus::Idle | ServerManagementStatus::Loading => {
+            Some(management_empty("Loading server settings…", cx))
+        }
+        ServerManagementStatus::Saving if state.snapshot.is_none() => {
+            Some(management_empty("Saving changes…", cx))
+        }
+        ServerManagementStatus::Saving => None,
+        ServerManagementStatus::Error(message) => Some(management_empty(message, cx)),
+        ServerManagementStatus::Ready => None,
+    }
+}
+
+fn management_empty(message: impl Into<SharedString>, cx: &mut App) -> AnyElement {
+    div()
+        .w_full()
+        .min_h(px(120.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_sm()
+        .text_color(cx.theme().muted_foreground)
+        .child(message.into())
+        .into_any_element()
+}
+
+fn management_badge(label: impl Into<SharedString>, color: Hsla) -> AnyElement {
+    div()
+        .px_1p5()
+        .py_0p5()
+        .rounded_sm()
+        .bg(color.opacity(0.12))
+        .text_color(color)
+        .text_size(px(10.))
+        .font_semibold()
+        .child(label.into())
+        .into_any_element()
+}
+
+fn creator_line(creator: Option<&UpstreamUserSummary>, cx: &mut App) -> AnyElement {
+    div()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child(creator_text(creator))
+        .into_any_element()
+}
+
+fn creator_text(creator: Option<&UpstreamUserSummary>) -> String {
+    creator.map_or_else(
+        || "Created by an unknown user".to_owned(),
+        |creator| format!("Created by {} ({})", creator.display_name, creator.email),
+    )
+}
+
+fn management_dialog_field(label: &'static str, input: Input) -> AnyElement {
+    v_flex()
+        .gap_2()
+        .child(div().text_xs().font_semibold().child(label))
+        .child(input)
+        .into_any_element()
+}

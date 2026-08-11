@@ -1,6 +1,7 @@
 package users
 
 import (
+	"resolved-server/internal/auth"
 	"resolved-server/internal/httpkit"
 	"resolved-server/internal/identity"
 	"resolved-server/internal/problem"
@@ -129,11 +130,13 @@ func (h *Handler) CreateController() fiber.Handler {
 		CreateRequest,
 	](
 		func(c fiber.Ctx, payload CreatePayload) httpkit.Response[identity.UserView] {
+			creatorID := auth.PrincipalFromContext(c).User.ID
 			result, err := h.service.Create(c.Context(), CreateInput{
-				Email:       payload.Email,
-				DisplayName: payload.DisplayName,
-				Password:    payload.Password,
-				RoleIDs:     payload.RoleIDs,
+				Email:           payload.Email,
+				DisplayName:     payload.DisplayName,
+				Password:        payload.Password,
+				RoleIDs:         payload.RoleIDs,
+				CreatedByUserID: &creatorID,
 			})
 			if err != nil {
 				return httpkit.NewErrorResponse[identity.UserView](err)

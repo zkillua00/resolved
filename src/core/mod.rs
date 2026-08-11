@@ -10,6 +10,7 @@ mod settings;
 mod snippet;
 mod template;
 mod upstream;
+mod upstream_management;
 mod workspace;
 mod workspace_provider;
 
@@ -56,11 +57,22 @@ pub use template::{RequestTemplate, ResolvedRequest, resolve_request};
 #[allow(unused_imports)]
 pub use upstream::{
     LoginUser, UpstreamCollectionView, UpstreamLoginError, UpstreamLoginResult, UpstreamProfile,
-    UpstreamSavedRequestView, UpstreamSettings, UpstreamUrlError, UpstreamWorkspaceError,
-    UpstreamWorkspaceSummary, UpstreamWorkspaceView, build_upstream_client,
+    UpstreamSavedRequestView, UpstreamSettings, UpstreamUrlError, UpstreamUserSummary,
+    UpstreamWorkspaceError, UpstreamWorkspaceSummary, UpstreamWorkspaceView, build_upstream_client,
     create_upstream_collection, create_upstream_saved_request, create_upstream_workspace,
     list_upstream_workspaces, login_upstream, normalize_upstream_url,
     update_upstream_saved_request, upstream_url_label,
+};
+#[allow(unused_imports)]
+pub use upstream_management::{
+    COLLECTIONS_ASSIGN_USERS, COLLECTIONS_READ, ManagementPermission, ManagementRole,
+    ManagementUser, PERMISSIONS_READ, REQUESTS_READ, ROLES_ASSIGN_PERMISSIONS, ROLES_CREATE,
+    ROLES_READ, ROLES_UPDATE, USERS_ASSIGN_ROLES, USERS_CREATE, USERS_READ, USERS_UPDATE,
+    UpstreamManagementError, UpstreamManagementSnapshot, WORKSPACES_ASSIGN_USERS, WORKSPACES_READ,
+    create_management_role, create_management_user, load_upstream_management,
+    replace_management_collection_users, replace_management_role_permissions,
+    replace_management_user_roles, replace_management_workspace_users, update_management_role,
+    update_management_user,
 };
 pub use workspace::{
     Collection, CollectionFolder, Environment, RequestScripts, SavedRequest, Workspace,
