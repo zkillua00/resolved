@@ -484,6 +484,48 @@ func TestStressBaseServerUserAndChannelManagement(t *testing.T) {
 	}
 }
 
+func TestAddUserIsIdempotentForSameConnectionAndChannel(t *testing.T) {
+	base := makeStressServer()
+	conn := newStressConnection("same-membership", 1)
+
+	base.AddUser("user", "channel", conn)
+	base.AddUser("user", "channel", conn)
+
+	userConns, ok := base.GetUserConnection("user", "channel")
+	if !ok {
+		t.Fatal("expected user channel membership")
+	}
+	if got := len(userConns); got != 1 {
+		t.Fatalf("user channel connections = %d, want 1", got)
+	}
+
+	hub, ok := base.GetChannel("channel")
+	if !ok {
+		t.Fatal("expected channel hub")
+	}
+	if got := hub.Len(); got != 1 {
+		t.Fatalf("channel hub connections = %d, want 1", got)
+	}
+}
+
+func TestBroadcastAllDeliversOncePerPhysicalConnection(t *testing.T) {
+	base := makeStressServer()
+	multiChannelConn := newStressConnection("multi-channel", 1)
+	singleChannelConn := newStressConnection("single-channel", 1)
+
+	base.AddUser("user", "first", multiChannelConn)
+	base.AddUser("user", "second", multiChannelConn)
+	base.AddUser("user", "first", singleChannelConn)
+	base.Broadcast([]byte("message"), nil)
+
+	if got := multiChannelConn.sentCount(); got != 1 {
+		t.Fatalf("multi-channel connection deliveries = %d, want 1", got)
+	}
+	if got := singleChannelConn.sentCount(); got != 1 {
+		t.Fatalf("single-channel connection deliveries = %d, want 1", got)
+	}
+}
+
 func TestStressCloseConnectionRunsInactiveCleanupOnce(t *testing.T) {
 	t.Parallel()
 

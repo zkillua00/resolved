@@ -58,6 +58,16 @@ func (ucons *UserConnections) Store(channel string, con connection.WebsocketConn
 	ucons.conns[channel] = append(ucons.conns[channel], con)
 }
 
+func (ucons *UserConnections) Contains(channel string, con connection.WebsocketConnection) bool {
+	ucons.mu.RLock()
+	defer ucons.mu.RUnlock()
+	sn, ok := ucons.conns[channel]
+	if !ok {
+		return false
+	}
+	return slices.Contains(sn, con)
+}
+
 func (ucons *UserConnections) Load(channel string) ([]connection.WebsocketConnection, bool) {
 	ucons.mu.RLock()
 	defer ucons.mu.RUnlock()
@@ -259,6 +269,11 @@ func defaultAddUser(base *baseWebsocketServer, id string, channel string, con co
 			continue
 		}
 
+		if slices.Contains(userConnections.conns[channel], con) {
+			userConnections.mu.Unlock()
+			return
+		}
+
 		userConnections.conns[channel] = append(userConnections.conns[channel], con)
 		userConnections.mu.Unlock()
 		break
@@ -359,9 +374,15 @@ func (base *baseWebsocketServer) CloseConnection(gcon connection.WebsocketConnec
 }
 
 func (base *baseWebsocketServer) broadcastToAllChannels(message []byte) {
-	base.connectedUsers.Range(func(uId string, uCons *UserConnections) bool {
-		uCons.Range(func(channel string, con []connection.WebsocketConnection) bool {
+	seen := make(map[string]struct{})
+	base.connectedUsers.Range(func(_ string, uCons *UserConnections) bool {
+		uCons.Range(func(_ string, con []connection.WebsocketConnection) bool {
 			for _, chSock := range con {
+				id := chSock.Id()
+				if _, ok := seen[id]; ok {
+					continue
+				}
+				seen[id] = struct{}{}
 				_ = chSock.Send(chSock.Context(), message)
 			}
 			return true
