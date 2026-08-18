@@ -604,6 +604,8 @@ struct LoginData {
 #[derive(Deserialize)]
 struct LoginErrorBody {
     message: String,
+    #[serde(default)]
+    fields: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -611,6 +613,21 @@ struct WorkspaceEnvelope<T> {
     success: bool,
     data: Option<T>,
     error: Option<LoginErrorBody>,
+}
+
+fn format_upstream_error(error: LoginErrorBody) -> String {
+    let mut fields = error
+        .fields
+        .into_iter()
+        .filter(|(_, message)| !message.trim().is_empty())
+        .map(|(field, message)| format!("{field}: {message}"))
+        .collect::<Vec<_>>();
+    fields.sort();
+    if fields.is_empty() {
+        error.message
+    } else {
+        format!("{} ({})", error.message, fields.join(", "))
+    }
 }
 
 pub fn build_upstream_client() -> Result<Client, UpstreamLoginError> {
@@ -699,7 +716,7 @@ pub async fn get_upstream_execution_policy(
     if !status.is_success() || !envelope.success {
         let message = envelope
             .error
-            .map(|error| error.message)
+            .map(format_upstream_error)
             .filter(|message| !message.trim().is_empty())
             .unwrap_or_else(|| format!("could not load server execution policy: HTTP {status}"));
         return Err(RequestError::Upstream(message));
@@ -992,7 +1009,7 @@ async fn parse_proxy_response(
     if !status.is_success() || !envelope.success {
         let message = envelope
             .error
-            .map(|error| error.message)
+            .map(format_upstream_error)
             .filter(|message| !message.trim().is_empty())
             .unwrap_or_else(|| format!("server execution failed with HTTP {status}"));
         return Err(RequestError::Upstream(message));
@@ -1703,7 +1720,7 @@ async fn parse_workspace_response<T: for<'de> Deserialize<'de>>(
     if !status.is_success() || !envelope.success {
         let message = envelope
             .error
-            .map(|error| error.message)
+            .map(format_upstream_error)
             .filter(|message| !message.trim().is_empty())
             .unwrap_or_else(|| format!("workspace request failed with HTTP {status}"));
         return Err(UpstreamWorkspaceError::Rejected { status, message });
@@ -1749,7 +1766,7 @@ fn parse_login_response(
     if !status.is_success() || !envelope.success {
         let message = envelope
             .error
-            .map(|error| error.message)
+            .map(format_upstream_error)
             .filter(|message| !message.trim().is_empty())
             .unwrap_or_else(|| format!("login failed with HTTP {status}"));
         return Err(UpstreamLoginError::Rejected { status, message });
@@ -1855,6 +1872,22 @@ mod tests {
             email: format!("{id}@example.test"),
             display_name: display_name.to_owned(),
         }
+    }
+
+    #[test]
+    fn upstream_validation_errors_keep_field_reasons() {
+        let message = format_upstream_error(LoginErrorBody {
+            message: "request validation failed".to_owned(),
+            fields: BTreeMap::from([
+                ("url".to_owned(), "must use HTTP or HTTPS".to_owned()),
+                ("method".to_owned(), "is not a valid HTTP method".to_owned()),
+            ]),
+        });
+
+        assert_eq!(
+            message,
+            "request validation failed (method: is not a valid HTTP method, url: must use HTTP or HTTPS)"
+        );
     }
 
     #[test]
@@ -3172,6 +3205,52 @@ mod tests {
         assert_eq!(
             response.content_type.as_deref(),
             Some("application/octet-stream")
+        );
+    }
+
+    #[test]
+    fn proxied_request_validation_error_includes_the_field_reason() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_http_request(&mut stream);
+            let response_body = br#"{
+                "success": false,
+                "error": {
+                    "code": "validation_failed",
+                    "message": "request validation failed",
+                    "fields": {"url": "must use HTTP or HTTPS"}
+                }
+            }"#;
+            write!(
+                stream,
+                "HTTP/1.1 422 Unprocessable Entity\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response_body.len()
+            )
+            .unwrap();
+            stream.write_all(response_body).unwrap();
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = build_upstream_execution_client().unwrap();
+        let error = runtime
+            .block_on(execute_upstream_request(
+                &client,
+                &Url::parse(&format!("http://{address}/")).unwrap(),
+                "saved-session-token",
+                "workspace-1",
+                RequestDraft::new("GET", "https://target.example.test"),
+            ))
+            .unwrap_err();
+
+        server.join().unwrap();
+        assert_eq!(
+            error.to_string(),
+            "request validation failed (url: must use HTTP or HTTPS)"
         );
     }
 

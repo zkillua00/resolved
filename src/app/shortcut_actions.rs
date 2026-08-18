@@ -218,6 +218,7 @@ mod tests {
 
         for active_workspace_tab in [
             ActiveWorkspaceTab::Welcome,
+            ActiveWorkspaceTab::RequestProxy,
             ActiveWorkspaceTab::Settings,
             ActiveWorkspaceTab::ThemeCss,
         ] {
@@ -244,6 +245,7 @@ mod tests {
 
         for active_workspace_tab in [
             ActiveWorkspaceTab::Welcome,
+            ActiveWorkspaceTab::RequestProxy,
             ActiveWorkspaceTab::Settings,
             ActiveWorkspaceTab::ThemeCss,
         ] {

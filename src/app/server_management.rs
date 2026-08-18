@@ -554,20 +554,6 @@ impl ApiTester {
             )))
     }
 
-    pub(super) fn request_execution_settings_page(&self, cx: &mut Context<Self>) -> SettingPage {
-        let this = cx.entity().downgrade();
-        SettingPage::new("Request execution")
-            .description(
-                "Choose where server-workspace requests run and define server hostname overrides.",
-            )
-            .resettable(false)
-            .full_bleed()
-            .group(SettingGroup::new().item(SettingItem::render_searchable(
-                "server request execution proxy hostname overrides custom dns network",
-                move |_, _, cx| network_views::render_request_execution_management(&this, cx),
-            )))
-    }
-
     fn open_create_user_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let login = cx.new(|cx| InputState::new(window, cx).placeholder("Login"));
         let display_name = cx.new(|cx| InputState::new(window, cx).placeholder("Display name"));
@@ -999,7 +985,7 @@ fn management_status_element(
 ) -> Option<AnyElement> {
     if active_id.is_none() {
         return Some(management_empty(
-            "Select a connected server to manage its users and access.",
+            "Select a connected server to manage its settings.",
             cx,
         ));
     }

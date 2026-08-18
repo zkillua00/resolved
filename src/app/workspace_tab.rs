@@ -2,15 +2,16 @@ use crate::core::{RequestTabId, RequestTabs};
 
 /// The content surface currently shown below the workspace tab strip.
 ///
-/// Request records stay in [`RequestTabs`]. Snippets, Settings, and theme
-/// editors are runtime-only tool surfaces and never enter request-tab
-/// persistence.
+/// Request records stay in [`RequestTabs`]. Snippets, Request Proxy, Settings,
+/// and theme editors are runtime-only tool surfaces and never enter
+/// request-tab persistence.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum ActiveWorkspaceTab {
     #[default]
     Request,
     Welcome,
     Snippets,
+    RequestProxy,
     Settings,
     ThemeCss,
 }
@@ -18,6 +19,7 @@ pub(super) enum ActiveWorkspaceTab {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum WorkspaceToolTab {
     Snippets,
+    RequestProxy,
     Settings,
     ThemeCss(String),
 }
@@ -48,6 +50,7 @@ pub(super) struct WorkspaceTabs {
     /// default order until the first explicit reorder.
     tab_order: Option<Vec<WorkspaceTab>>,
     snippets_open: bool,
+    request_proxy_open: bool,
     settings_open: bool,
     theme_editor_ids: Vec<String>,
     active_theme_editor_id: Option<String>,
@@ -74,6 +77,10 @@ impl WorkspaceTabs {
 
     pub fn snippets_open(&self) -> bool {
         self.snippets_open
+    }
+
+    pub fn request_proxy_open(&self) -> bool {
+        self.request_proxy_open
     }
 
     pub fn active_theme_editor_id(&self) -> Option<&str> {
@@ -126,6 +133,7 @@ impl WorkspaceTabs {
     pub fn tool_is_active(&self, tab: &WorkspaceToolTab) -> bool {
         match tab {
             WorkspaceToolTab::Snippets => self.active == ActiveWorkspaceTab::Snippets,
+            WorkspaceToolTab::RequestProxy => self.active == ActiveWorkspaceTab::RequestProxy,
             WorkspaceToolTab::Settings => self.active == ActiveWorkspaceTab::Settings,
             WorkspaceToolTab::ThemeCss(editor_id) => {
                 self.active == ActiveWorkspaceTab::ThemeCss
@@ -139,6 +147,10 @@ impl WorkspaceTabs {
             WorkspaceToolTab::Snippets => {
                 self.snippets_open = true;
                 self.active = ActiveWorkspaceTab::Snippets;
+            }
+            WorkspaceToolTab::RequestProxy => {
+                self.request_proxy_open = true;
+                self.active = ActiveWorkspaceTab::RequestProxy;
             }
             WorkspaceToolTab::Settings => {
                 self.settings_open = true;
@@ -197,11 +209,33 @@ impl WorkspaceTabs {
                 }
                 self.snippets_open = false;
                 if self.active == ActiveWorkspaceTab::Snippets {
+                    self.active = if self.request_proxy_open {
+                        ActiveWorkspaceTab::RequestProxy
+                    } else if self.settings_open {
+                        ActiveWorkspaceTab::Settings
+                    } else if !self.theme_editor_ids.is_empty() {
+                        self.active_theme_editor_id = self.theme_editor_ids.first().cloned();
+                        ActiveWorkspaceTab::ThemeCss
+                    } else if self.welcome_visible {
+                        ActiveWorkspaceTab::Welcome
+                    } else {
+                        ActiveWorkspaceTab::Request
+                    };
+                }
+            }
+            WorkspaceToolTab::RequestProxy => {
+                if !self.request_proxy_open {
+                    return false;
+                }
+                self.request_proxy_open = false;
+                if self.active == ActiveWorkspaceTab::RequestProxy {
                     self.active = if self.settings_open {
                         ActiveWorkspaceTab::Settings
                     } else if !self.theme_editor_ids.is_empty() {
                         self.active_theme_editor_id = self.theme_editor_ids.first().cloned();
                         ActiveWorkspaceTab::ThemeCss
+                    } else if self.snippets_open {
+                        ActiveWorkspaceTab::Snippets
                     } else if self.welcome_visible {
                         ActiveWorkspaceTab::Welcome
                     } else {
@@ -215,7 +249,9 @@ impl WorkspaceTabs {
                 }
                 self.settings_open = false;
                 if self.active == ActiveWorkspaceTab::Settings {
-                    self.active = if !self.theme_editor_ids.is_empty() {
+                    self.active = if self.request_proxy_open {
+                        ActiveWorkspaceTab::RequestProxy
+                    } else if !self.theme_editor_ids.is_empty() {
                         self.active_theme_editor_id = self.theme_editor_ids.first().cloned();
                         ActiveWorkspaceTab::ThemeCss
                     } else if self.snippets_open {
@@ -249,6 +285,9 @@ impl WorkspaceTabs {
                     } else if self.settings_open {
                         self.active_theme_editor_id = None;
                         ActiveWorkspaceTab::Settings
+                    } else if self.request_proxy_open {
+                        self.active_theme_editor_id = None;
+                        ActiveWorkspaceTab::RequestProxy
                     } else if self.snippets_open {
                         self.active_theme_editor_id = None;
                         ActiveWorkspaceTab::Snippets
@@ -323,6 +362,7 @@ impl WorkspaceTabs {
                 WorkspaceTab::Request(request_tabs.active_tab_id().clone())
             }
             ActiveWorkspaceTab::Snippets => WorkspaceTab::Tool(WorkspaceToolTab::Snippets),
+            ActiveWorkspaceTab::RequestProxy => WorkspaceTab::Tool(WorkspaceToolTab::RequestProxy),
             ActiveWorkspaceTab::Settings => WorkspaceTab::Tool(WorkspaceToolTab::Settings),
             ActiveWorkspaceTab::ThemeCss => WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss(
                 self.active_theme_editor_id
@@ -349,6 +389,9 @@ impl WorkspaceTabs {
         );
         if self.snippets_open {
             tabs.push(WorkspaceTab::Tool(WorkspaceToolTab::Snippets));
+        }
+        if self.request_proxy_open {
+            tabs.push(WorkspaceTab::Tool(WorkspaceToolTab::RequestProxy));
         }
         if self.settings_open {
             tabs.push(WorkspaceTab::Tool(WorkspaceToolTab::Settings));
@@ -556,6 +599,18 @@ mod tests {
             ]
         );
 
+        tabs.open_tool(WorkspaceToolTab::RequestProxy);
+        tabs.open_tool(WorkspaceToolTab::RequestProxy);
+        assert_eq!(tabs.active(), ActiveWorkspaceTab::RequestProxy);
+        assert_eq!(
+            tabs.visible_tabs(&requests),
+            vec![
+                WorkspaceTab::Request(requests.active_tab_id().clone()),
+                WorkspaceTab::Tool(WorkspaceToolTab::RequestProxy),
+                WorkspaceTab::Tool(WorkspaceToolTab::Settings),
+            ]
+        );
+
         tabs.open_tool(WorkspaceToolTab::Snippets);
         tabs.open_tool(WorkspaceToolTab::Snippets);
         assert_eq!(tabs.active(), ActiveWorkspaceTab::Snippets);
@@ -564,6 +619,7 @@ mod tests {
             vec![
                 WorkspaceTab::Request(requests.active_tab_id().clone()),
                 WorkspaceTab::Tool(WorkspaceToolTab::Snippets),
+                WorkspaceTab::Tool(WorkspaceToolTab::RequestProxy),
                 WorkspaceTab::Tool(WorkspaceToolTab::Settings),
             ]
         );
@@ -576,6 +632,7 @@ mod tests {
             vec![
                 WorkspaceTab::Request(requests.active_tab_id().clone()),
                 WorkspaceTab::Tool(WorkspaceToolTab::Snippets),
+                WorkspaceTab::Tool(WorkspaceToolTab::RequestProxy),
                 WorkspaceTab::Tool(WorkspaceToolTab::Settings),
                 WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss("ocean".to_owned())),
                 WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss("forest".to_owned())),
@@ -585,6 +642,29 @@ mod tests {
         tabs.open_tool(WorkspaceToolTab::ThemeCss("ocean".to_owned()));
         assert_eq!(tabs.theme_editor_ids, ["ocean", "forest"]);
         assert!(tabs.tool_is_active(&WorkspaceToolTab::ThemeCss("ocean".to_owned())));
+    }
+
+    #[test]
+    fn request_proxy_is_a_closeable_singleton_workspace_tool() {
+        let requests = RequestTabs::default();
+        let mut tabs = WorkspaceTabs::default();
+
+        tabs.open_tool(WorkspaceToolTab::RequestProxy);
+        tabs.open_tool(WorkspaceToolTab::RequestProxy);
+        assert!(tabs.request_proxy_open());
+        assert!(tabs.tool_is_active(&WorkspaceToolTab::RequestProxy));
+        assert_eq!(
+            tabs.visible_tabs(&requests),
+            vec![
+                WorkspaceTab::Request(requests.active_tab_id().clone()),
+                WorkspaceTab::Tool(WorkspaceToolTab::RequestProxy),
+            ]
+        );
+
+        assert!(tabs.close_tool(&WorkspaceToolTab::RequestProxy));
+        assert_eq!(tabs.active(), ActiveWorkspaceTab::Request);
+        assert!(!tabs.request_proxy_open());
+        assert!(!tabs.close_tool(&WorkspaceToolTab::RequestProxy));
     }
 
     #[test]

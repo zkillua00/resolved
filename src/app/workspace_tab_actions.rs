@@ -22,9 +22,12 @@ impl ApiTester {
             self.cancel_shortcut_recording(cx);
         }
 
-        let opening_settings = matches!(tab, WorkspaceToolTab::Settings);
+        let opening_server_management = matches!(
+            tab,
+            WorkspaceToolTab::RequestProxy | WorkspaceToolTab::Settings
+        );
         self.workspace_tabs.open_tool(tab);
-        if opening_settings {
+        if opening_server_management {
             self.ensure_server_management_loaded(window, cx);
         }
         cx.notify();
@@ -84,6 +87,9 @@ impl ApiTester {
                 WorkspaceToolTab::Snippets => {
                     self.open_workspace_tool_tab(WorkspaceToolTab::Snippets, window, cx);
                 }
+                WorkspaceToolTab::RequestProxy => {
+                    self.open_workspace_tool_tab(WorkspaceToolTab::RequestProxy, window, cx);
+                }
                 WorkspaceToolTab::Settings => {
                     self.open_workspace_tool_tab(WorkspaceToolTab::Settings, window, cx);
                 }
@@ -118,6 +124,7 @@ impl ApiTester {
             .fallback_after_closing(&self.request_tabs, std::slice::from_ref(&closing));
         let closed = match &tab {
             WorkspaceToolTab::Snippets => self.workspace_tabs.close_tool(&tab),
+            WorkspaceToolTab::RequestProxy => self.workspace_tabs.close_tool(&tab),
             WorkspaceToolTab::Settings => {
                 self.cancel_shortcut_recording(cx);
                 self.workspace_tabs.close_tool(&tab)
@@ -279,6 +286,7 @@ impl ApiTester {
         for tool in tools.into_iter().rev() {
             let closed = match &tool {
                 WorkspaceToolTab::Snippets => self.workspace_tabs.close_tool(&tool),
+                WorkspaceToolTab::RequestProxy => self.workspace_tabs.close_tool(&tool),
                 WorkspaceToolTab::Settings => {
                     self.cancel_shortcut_recording(cx);
                     self.workspace_tabs.close_tool(&tool)
@@ -319,6 +327,9 @@ impl ApiTester {
             ActiveWorkspaceTab::Snippets => {
                 self.close_workspace_tool_tab(WorkspaceToolTab::Snippets, window, cx);
             }
+            ActiveWorkspaceTab::RequestProxy => {
+                self.close_workspace_tool_tab(WorkspaceToolTab::RequestProxy, window, cx);
+            }
             ActiveWorkspaceTab::Settings => {
                 self.close_workspace_tool_tab(WorkspaceToolTab::Settings, window, cx);
             }
@@ -355,6 +366,7 @@ impl ApiTester {
                 }
             }
             ActiveWorkspaceTab::Snippets
+            | ActiveWorkspaceTab::RequestProxy
             | ActiveWorkspaceTab::Settings
             | ActiveWorkspaceTab::ThemeCss => {
                 self.hide_preview(cx);

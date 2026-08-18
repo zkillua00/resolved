@@ -15,6 +15,13 @@ pub(super) fn render_workspace_tool_tab(
             IconName::CaseSensitive,
             app.snippet_editor_is_dirty(cx),
         ),
+        WorkspaceToolTab::RequestProxy => (
+            "workspace-tool-tab-request-proxy".to_owned(),
+            "workspace-request-proxy-tab-drag-handle",
+            "Request proxy".to_owned(),
+            IconName::Globe,
+            false,
+        ),
         WorkspaceToolTab::Settings => (
             "workspace-tool-tab-settings".to_owned(),
             "workspace-settings-tab-drag-handle",
@@ -32,8 +39,11 @@ pub(super) fn render_workspace_tool_tab(
                 .is_some_and(|session| session.dirty),
         ),
     };
-    let row_debug_selector =
-        matches!(&tool, WorkspaceToolTab::Settings).then_some("workspace-settings-tab");
+    let row_debug_selector = match &tool {
+        WorkspaceToolTab::RequestProxy => Some("workspace-request-proxy-tab"),
+        WorkspaceToolTab::Settings => Some("workspace-settings-tab"),
+        WorkspaceToolTab::Snippets | WorkspaceToolTab::ThemeCss(_) => None,
+    };
 
     WorkspaceTabControl::new(WorkspaceTab::Tool(tool), row_id, title)
         .pane_opt(pane_id)

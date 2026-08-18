@@ -112,6 +112,7 @@ fn workspace_tab_dom_key(tab: &WorkspaceTab) -> String {
         WorkspaceTab::Welcome => "welcome".to_owned(),
         WorkspaceTab::Request(tab_id) => format!("request-{}", tab_id.as_str()),
         WorkspaceTab::Tool(WorkspaceToolTab::Snippets) => "snippets".to_owned(),
+        WorkspaceTab::Tool(WorkspaceToolTab::RequestProxy) => "request-proxy".to_owned(),
         WorkspaceTab::Tool(WorkspaceToolTab::Settings) => "settings".to_owned(),
         WorkspaceTab::Tool(WorkspaceToolTab::ThemeCss(editor_id)) => {
             format!("theme-css-{editor_id}")
@@ -280,6 +281,11 @@ impl ApiTester {
         };
         if !open_now(&WorkspaceToolTab::Snippets) {
             let _ = self.workspace_tabs.close_tool(&WorkspaceToolTab::Snippets);
+        }
+        if !open_now(&WorkspaceToolTab::RequestProxy) {
+            let _ = self
+                .workspace_tabs
+                .close_tool(&WorkspaceToolTab::RequestProxy);
         }
         if !open_now(&WorkspaceToolTab::Settings) {
             let _ = self.workspace_tabs.close_tool(&WorkspaceToolTab::Settings);

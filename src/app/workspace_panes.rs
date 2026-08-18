@@ -64,6 +64,16 @@ impl ApiTester {
                 .when(active != ActiveWorkspaceTab::Snippets, |this| this.hidden())
                 .child(self.render_snippets_workspace(cx))
         });
+        let request_proxy_workspace = self.workspace_tabs.request_proxy_open().then(|| {
+            let active = active_workspace_tab;
+            div()
+                .size_full()
+                .min_h_0()
+                .when(active != ActiveWorkspaceTab::RequestProxy, |this| {
+                    this.hidden()
+                })
+                .child(self.render_request_proxy_workspace(cx))
+        });
         let settings_workspace = self.workspace_tabs.settings_open().then(|| {
             let active = active_workspace_tab;
             div()
@@ -94,6 +104,7 @@ impl ApiTester {
                     .overflow_hidden()
                     .child(workspace)
                     .children(snippets_workspace)
+                    .children(request_proxy_workspace)
                     .children(settings_workspace)
                     .children(split_overlay),
             )
@@ -110,6 +121,7 @@ impl ApiTester {
                 .child(self.render_welcome_page(cx))
                 .into_any_element(),
             ActiveWorkspaceTab::Snippets => div().hidden().into_any_element(),
+            ActiveWorkspaceTab::RequestProxy => div().hidden().into_any_element(),
             ActiveWorkspaceTab::Settings => div().hidden().into_any_element(),
             ActiveWorkspaceTab::ThemeCss => div()
                 .size_full()
@@ -227,6 +239,16 @@ impl ApiTester {
                 .when(active != ActiveWorkspaceTab::Snippets, |this| this.hidden())
                 .child(self.render_snippets_workspace(cx))
         });
+        let request_proxy_workspace = self.workspace_tabs.request_proxy_open().then(|| {
+            let active = active_workspace_tab;
+            div()
+                .size_full()
+                .min_h_0()
+                .when(active != ActiveWorkspaceTab::RequestProxy, |this| {
+                    this.hidden()
+                })
+                .child(self.render_request_proxy_workspace(cx))
+        });
         let settings_workspace = self.workspace_tabs.settings_open().then(|| {
             let active = active_workspace_tab;
             div()
@@ -241,6 +263,7 @@ impl ApiTester {
             .min_h_0()
             .child(workspace)
             .children(snippets_workspace)
+            .children(request_proxy_workspace)
             .children(settings_workspace)
             .into_any_element()
     }

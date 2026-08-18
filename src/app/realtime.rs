@@ -143,7 +143,10 @@ impl ApiTester {
         }
         self.stop_realtime();
         self.settings_notice = Some(format!("Log in to {label} again."));
-        if self.workspace_tabs.active() == ActiveWorkspaceTab::Settings {
+        if matches!(
+            self.workspace_tabs.active(),
+            ActiveWorkspaceTab::RequestProxy | ActiveWorkspaceTab::Settings
+        ) {
             self.refresh_server_management(window, cx);
         }
         cx.notify();
@@ -250,7 +253,10 @@ impl ApiTester {
                             cx,
                         );
                         if !outcome.switched_workspace
-                            && this.workspace_tabs.active() == ActiveWorkspaceTab::Settings
+                            && matches!(
+                                this.workspace_tabs.active(),
+                                ActiveWorkspaceTab::RequestProxy | ActiveWorkspaceTab::Settings
+                            )
                         {
                             this.refresh_server_management(window, cx);
                         }
