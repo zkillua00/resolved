@@ -111,6 +111,12 @@ func statusForKind(kind problem.Kind) int {
 		return fiber.StatusConflict
 	case problem.KindRateLimited:
 		return fiber.StatusTooManyRequests
+	case problem.KindPayloadTooLarge:
+		return fiber.StatusRequestEntityTooLarge
+	case problem.KindBadGateway:
+		return fiber.StatusBadGateway
+	case problem.KindGatewayTimeout:
+		return fiber.StatusGatewayTimeout
 	default:
 		return fiber.StatusInternalServerError
 	}
@@ -130,6 +136,12 @@ func codeForStatus(status int) string {
 		return "method_not_allowed"
 	case fiber.StatusTooManyRequests:
 		return "rate_limited"
+	case fiber.StatusRequestEntityTooLarge:
+		return "payload_too_large"
+	case fiber.StatusBadGateway:
+		return "bad_gateway"
+	case fiber.StatusGatewayTimeout:
+		return "gateway_timeout"
 	default:
 		return "request_failed"
 	}

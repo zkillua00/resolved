@@ -12,6 +12,7 @@ import (
 	"resolved-server/internal/database"
 	"resolved-server/internal/identity"
 	"resolved-server/internal/realtime"
+	"resolved-server/internal/requestproxy"
 	"resolved-server/internal/roles"
 	"resolved-server/internal/security"
 	"resolved-server/internal/server"
@@ -101,11 +102,16 @@ func New(cfg config.Config, accessLog io.Writer) (*Application, error) {
 	usersHandler := users.NewHandler(usersService)
 	rolesHandler := roles.NewHandler(rolesService)
 	workspacesHandler := workspaces.NewHandler(workspacesService)
+	requestProxyHandler := requestproxy.NewHandler(requestproxy.NewService(
+		workspacesService,
+		requestproxy.NewSettingsRepository(db),
+	))
 	httpServer := server.New(
 		cfg.Address,
 		accessLog,
 		server.WithIdentity(authService, authHandler, usersHandler, rolesHandler),
 		server.WithWorkspaces(authService, workspacesHandler),
+		server.WithRequestProxy(authService, requestProxyHandler),
 		server.WithRealtime(authService, realtimePublisher),
 	)
 

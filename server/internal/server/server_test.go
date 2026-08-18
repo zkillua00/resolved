@@ -3,11 +3,13 @@ package server_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"resolved-server/internal/database"
 	"resolved-server/internal/identity"
 	"resolved-server/internal/realtime"
+	"resolved-server/internal/requestproxy"
 	"resolved-server/internal/resourceevents"
 	"resolved-server/internal/roles"
 	"resolved-server/internal/security"
@@ -160,6 +163,214 @@ func TestIdentityManagementAndDynamicPermissions(t *testing.T) {
 
 	request[struct{}](t, app, http.MethodPost, "/api/v1/auth/logout", collaboratorLogin.Token, nil, fiber.StatusOK)
 	request[any](t, app, http.MethodGet, "/api/v1/users", collaboratorLogin.Token, nil, fiber.StatusUnauthorized)
+}
+
+func TestRequestProxyExecutesFromServerWithDynamicPermissionAndWorkspaceScope(t *testing.T) {
+	app, usersService, _, closeDatabase := newTestServer(t)
+	defer closeDatabase()
+
+	owner, err := usersService.BootstrapOwner(t.Context(), users.CreateInput{
+		Email:       "owner",
+		DisplayName: "Owner",
+		Password:    ownerPassword,
+	})
+	if err != nil {
+		t.Fatalf("bootstrap owner: %v", err)
+	}
+	ownerLogin := login(t, app, owner.Email, ownerPassword)
+	workspace := request[[]workspaces.WorkspaceView](
+		t, app, http.MethodGet, "/api/v1/workspaces", ownerLogin.Token, nil, fiber.StatusOK,
+	).Data[0]
+
+	role := request[identity.RoleView](t, app, http.MethodPost, "/api/v1/roles", ownerLogin.Token, map[string]any{
+		"name":            "Request runner",
+		"description":     "Can be granted proxied request execution",
+		"permission_keys": []string{},
+	}, fiber.StatusCreated).Data
+	user := request[identity.UserView](t, app, http.MethodPost, "/api/v1/users", ownerLogin.Token, map[string]any{
+		"email":        "runner",
+		"display_name": "Runner",
+		"password":     collaboratorPassword,
+		"role_ids":     []string{role.ID},
+	}, fiber.StatusCreated).Data
+	request[workspaces.WorkspaceView](
+		t,
+		app,
+		http.MethodPut,
+		"/api/v1/workspaces/"+workspace.ID+"/users",
+		ownerLogin.Token,
+		map[string]any{"user_ids": []string{owner.ID, user.ID}},
+		fiber.StatusOK,
+	)
+	runnerLogin := login(t, app, user.Email, collaboratorPassword)
+	defaultPolicy := request[requestproxy.Policy](
+		t, app, http.MethodGet, "/api/v1/request-execution", runnerLogin.Token, nil, fiber.StatusOK,
+	).Data
+	if defaultPolicy.Mode != requestproxy.ModeLocal {
+		t.Fatalf("default request execution mode = %q, want local", defaultPolicy.Mode)
+	}
+	disabled := request[requestproxy.ExecuteResult](
+		t,
+		app,
+		http.MethodPost,
+		"/api/v1/workspaces/"+workspace.ID+"/execute",
+		ownerLogin.Token,
+		map[string]any{
+			"method": "GET",
+			"url":    "http://127.0.0.1:1/must-not-connect",
+			"body":   map[string]any{"mode": "none"},
+		},
+		fiber.StatusConflict,
+	)
+	if disabled.Error.Code != "server_execution_disabled" {
+		t.Fatalf("disabled execution error = %q", disabled.Error.Code)
+	}
+	request[requestproxy.Settings](
+		t,
+		app,
+		http.MethodGet,
+		"/api/v1/request-execution/settings",
+		runnerLogin.Token,
+		nil,
+		fiber.StatusForbidden,
+	)
+
+	targetAuthorization := make(chan string, 1)
+	targetHost := make(chan string, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, incoming *http.Request) {
+		body, readErr := io.ReadAll(incoming.Body)
+		if readErr != nil {
+			t.Errorf("read proxied request: %v", readErr)
+		}
+		if incoming.Method != http.MethodPatch {
+			t.Errorf("proxied method = %s, want PATCH", incoming.Method)
+		}
+		if string(body) != `{"proxied":true}` {
+			t.Errorf("proxied body = %q", body)
+		}
+		if incoming.Header.Get("X-Resolved-Test") != "yes" {
+			t.Errorf("proxied header = %q", incoming.Header.Get("X-Resolved-Test"))
+		}
+		if incoming.Header.Get("Content-Type") != "application/custom+json" {
+			t.Errorf("proxied content type = %q", incoming.Header.Get("Content-Type"))
+		}
+		targetAuthorization <- incoming.Header.Get("Authorization")
+		targetHost <- incoming.Host
+		writer.Header().Add("X-Target", "one")
+		writer.Header().Add("X-Target", "two")
+		writer.Header().Set("Content-Type", "application/octet-stream")
+		writer.WriteHeader(http.StatusCreated)
+		_, _ = writer.Write([]byte{0, 1, 2, 255})
+	}))
+	defer target.Close()
+	targetPort := target.Listener.Addr().(*net.TCPAddr).Port
+	targetURL := fmt.Sprintf("http://service.internal:%d/resource", targetPort)
+	settings := request[requestproxy.Settings](
+		t,
+		app,
+		http.MethodPut,
+		"/api/v1/request-execution/settings",
+		ownerLogin.Token,
+		map[string]any{
+			"mode": requestproxy.ModeServer,
+			"hostname_overrides": []map[string]string{
+				{"hostname": "SERVICE.INTERNAL.", "target": "127.0.0.1"},
+			},
+		},
+		fiber.StatusOK,
+	).Data
+	if settings.Mode != requestproxy.ModeServer || len(settings.HostnameOverrides) != 1 || settings.HostnameOverrides[0].Hostname != "service.internal" {
+		t.Fatalf("normalized request execution settings = %+v", settings)
+	}
+	serverPolicy := request[requestproxy.Policy](
+		t, app, http.MethodGet, "/api/v1/request-execution", runnerLogin.Token, nil, fiber.StatusOK,
+	).Data
+	if serverPolicy.Mode != requestproxy.ModeServer {
+		t.Fatalf("updated request execution mode = %q, want server", serverPolicy.Mode)
+	}
+
+	proxyPayload := map[string]any{
+		"method": "PATCH",
+		"url":    targetURL,
+		"headers": []map[string]string{
+			{"name": "X-Resolved-Test", "value": "yes"},
+			{"name": "Content-Type", "value": "application/custom+json"},
+		},
+		"body": map[string]any{
+			"mode":             "raw",
+			"raw_content_type": "application/json",
+			"data_base64":      base64.StdEncoding.EncodeToString([]byte(`{"proxied":true}`)),
+		},
+	}
+	forbidden := request[requestproxy.ExecuteResult](
+		t,
+		app,
+		http.MethodPost,
+		"/api/v1/workspaces/"+workspace.ID+"/execute",
+		runnerLogin.Token,
+		proxyPayload,
+		fiber.StatusForbidden,
+	)
+	if forbidden.Error.Code != "forbidden" {
+		t.Fatalf("proxy permission error = %q, want forbidden", forbidden.Error.Code)
+	}
+
+	request[identity.RoleView](t, app, http.MethodPut, "/api/v1/roles/"+role.ID+"/permissions", ownerLogin.Token, map[string]any{
+		"permission_keys": []string{identity.PermissionRequestsExecute},
+	}, fiber.StatusOK)
+	result := request[requestproxy.ExecuteResult](
+		t,
+		app,
+		http.MethodPost,
+		"/api/v1/workspaces/"+workspace.ID+"/execute",
+		runnerLogin.Token,
+		proxyPayload,
+		fiber.StatusOK,
+	).Data
+	if result.Status != http.StatusCreated || result.StatusText != "Created" {
+		t.Fatalf("target status = %d %q", result.Status, result.StatusText)
+	}
+	if result.FinalURL != targetURL || result.HTTPVersion == "" || result.DurationMicros < 0 {
+		t.Fatalf("unexpected proxy metadata: %+v", result)
+	}
+	decodedBody, err := base64.StdEncoding.DecodeString(result.BodyBase64)
+	if err != nil {
+		t.Fatalf("decode proxied response: %v", err)
+	}
+	if !bytes.Equal(decodedBody, []byte{0, 1, 2, 255}) {
+		t.Fatalf("proxied response body = %v", decodedBody)
+	}
+	var targetHeaders []string
+	for _, header := range result.Headers {
+		if header.Name == "X-Target" {
+			targetHeaders = append(targetHeaders, header.Value)
+		}
+	}
+	if len(targetHeaders) != 2 {
+		t.Fatalf("repeated target response headers = %v", targetHeaders)
+	}
+	if authorization := <-targetAuthorization; authorization != "" {
+		t.Fatalf("server bearer token leaked to target as %q", authorization)
+	}
+	if host := <-targetHost; host != fmt.Sprintf("service.internal:%d", targetPort) {
+		t.Fatalf("custom hostname changed target origin to %q", host)
+	}
+
+	otherWorkspace := request[workspaces.WorkspaceView](t, app, http.MethodPost, "/api/v1/workspaces", ownerLogin.Token, map[string]any{
+		"name": "Private",
+	}, fiber.StatusCreated).Data
+	deniedByScope := request[requestproxy.ExecuteResult](
+		t,
+		app,
+		http.MethodPost,
+		"/api/v1/workspaces/"+otherWorkspace.ID+"/execute",
+		runnerLogin.Token,
+		proxyPayload,
+		fiber.StatusForbidden,
+	)
+	if deniedByScope.Error.Code != "workspace_access_denied" {
+		t.Fatalf("proxy scope error = %q, want workspace_access_denied", deniedByScope.Error.Code)
+	}
 }
 
 func TestAuthenticatedWebsocketPublishesResourceChanges(t *testing.T) {
@@ -965,6 +1176,10 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, *gorm.DB, func()) 
 		workspaces.WithEvents(events),
 	)
 	realtimePublisher := realtime.New(events)
+	requestProxyHandler := requestproxy.NewHandler(requestproxy.NewService(
+		workspacesService,
+		requestproxy.NewSettingsRepository(db),
+	))
 	httpServer := server.New(
 		"127.0.0.1:0",
 		io.Discard,
@@ -975,6 +1190,7 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, *gorm.DB, func()) 
 			roles.NewHandler(rolesService),
 		),
 		server.WithWorkspaces(authService, workspaces.NewHandler(workspacesService)),
+		server.WithRequestProxy(authService, requestProxyHandler),
 		server.WithRealtime(authService, realtimePublisher),
 	)
 	return httpServer.App, usersService, db, func() {

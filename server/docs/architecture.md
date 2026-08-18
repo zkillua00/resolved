@@ -136,6 +136,8 @@ Permissions in the initial catalog are:
 - `collections.read`, `collections.create`, `collections.update`,
   `collections.delete`, `collections.users.assign`
 - `requests.read`, `requests.create`, `requests.update`, `requests.delete`
+- `requests.execute`
+- `server_settings.read`, `server_settings.update`
 - `environments.read`, `environments.create`, `environments.update`,
   `environments.delete`
 - `environment_values.update`
@@ -159,6 +161,9 @@ Permissions in the initial catalog are:
 | `PATCH` | `/api/v1/roles/:id` | `roles.update` |
 | `PUT` | `/api/v1/roles/:id/permissions` | `roles.permissions.assign` |
 | `GET` | `/api/v1/permissions` | `permissions.read` |
+| `GET` | `/api/v1/request-execution` | authenticated |
+| `GET` | `/api/v1/request-execution/settings` | `server_settings.read` |
+| `PUT` | `/api/v1/request-execution/settings` | `server_settings.update` |
 | `GET` | `/api/v1/workspaces` | `workspaces.read`, `collections.read`, `requests.read` |
 | `POST` | `/api/v1/workspaces` | `workspaces.create` |
 | `GET` | `/api/v1/workspaces/:workspace_id` | `workspaces.read`, `collections.read`, `requests.read` |
@@ -176,6 +181,7 @@ Permissions in the initial catalog are:
 | `PATCH` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/requests/:request_id` | `requests.update` |
 | `PUT` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/requests/:request_id/collection` | `requests.update` |
 | `DELETE` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/requests/:request_id` | `requests.delete` |
+| `POST` | `/api/v1/workspaces/:workspace_id/execute` | `requests.execute` plus workspace access |
 | `GET` | `/api/v1/workspaces/:workspace_id/environments` | `environments.read` |
 | `POST` | `/api/v1/workspaces/:workspace_id/environments` | `environments.create` |
 | `GET` | `/api/v1/workspaces/:workspace_id/environments/:environment_id` | `environments.read` |
@@ -221,6 +227,46 @@ be disabled outside a trusted local network.
 `RESOLVED_ENCRYPTION_SECRET` is independent of the database DSN password. Use a
 random deployment secret of at least 32 bytes, inject it through the process
 environment or secret manager, and include it in encrypted deployment backups.
+
+## Request execution boundary
+
+The deployment-wide request execution policy defaults to `local`. A server
+workspace therefore continues to send from the user's computer unless an
+administrator with `server_settings.update` explicitly selects `server` mode.
+The authenticated policy route exposes only that mode; reading or replacing the
+full configuration, including hostname overrides, has separate server-settings
+permissions.
+
+Server mode moves only the HTTP exchange onto the self-hosted server. Variable
+resolution and pre-request/post-response scripts remain inside the desktop app.
+For multipart bodies, Resolved reads selected local files and sends their bytes
+to the execution endpoint; local paths are never included in the server
+payload.
+
+The endpoint checks the current bearer session, reloads effective RBAC through
+the normal authentication middleware, requires `requests.execute`, and then
+checks that the user can access the addressed workspace. The collaboration
+session token is used only on the outer call and is not copied into target
+headers. Hop-by-hop headers and caller-supplied content lengths are discarded;
+target redirects are bounded by Go's standard ten-redirect policy. The endpoint
+also reloads the execution policy and rejects the request before connecting if
+an administrator has returned the deployment to local mode.
+
+Hostname overrides are exact, case-insensitive mappings from the request URL's
+hostname to another hostname or IP. An IP target is DNS-style: it changes only
+the dial address and preserves the requested URL hostname, HTTP Host, and TLS
+server name. A hostname target rewrites the outgoing URL hostname, HTTP Host,
+and TLS server name to that target. Both retain the original port. Overrides
+take precedence over the process's HTTP-proxy selection and apply independently
+to redirect targets. Changing the configuration closes idle target connections
+so the next request cannot reuse an earlier destination.
+
+This is intentionally a network-capability permission. The target may be any
+HTTP or HTTPS address reachable by the server, including private deployment
+services. Administrators should grant it only to accounts allowed to make such
+connections. Request and response bodies are buffered up to 64 MiB each, and
+the target exchange has a 60-second deadline. Target payloads and responses are
+not written to the collaboration database or emitted through realtime events.
 
 ## Not provided
 

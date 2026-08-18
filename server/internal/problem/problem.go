@@ -12,6 +12,9 @@ const (
 	KindNotFound
 	KindConflict
 	KindRateLimited
+	KindPayloadTooLarge
+	KindBadGateway
+	KindGatewayTimeout
 	KindInternal
 )
 

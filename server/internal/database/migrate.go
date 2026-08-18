@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"resolved-server/internal/identity"
+	"resolved-server/internal/requestproxy"
 	"resolved-server/internal/workspaces"
 
 	"gorm.io/gorm"
@@ -17,6 +18,8 @@ func MigrateAndSeed(db *gorm.DB) error {
 		&identity.User{},
 		&identity.Session{},
 		&identity.BootstrapState{},
+		&requestproxy.SettingsRecord{},
+		&requestproxy.HostnameOverrideRecord{},
 		&workspaces.Workspace{},
 		&workspaces.Collection{},
 		&workspaces.SavedRequest{},
@@ -61,6 +64,14 @@ func MigrateAndSeed(db *gorm.DB) error {
 
 		if err := tx.Model(&owner).Association("Permissions").Replace(&permissions); err != nil {
 			return fmt.Errorf("reconcile owner permissions: %w", err)
+		}
+
+		settings := requestproxy.SettingsRecord{
+			ID:   requestproxy.SettingsRecordID,
+			Mode: requestproxy.ModeLocal,
+		}
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&settings).Error; err != nil {
+			return fmt.Errorf("seed request execution settings: %w", err)
 		}
 		return nil
 	})

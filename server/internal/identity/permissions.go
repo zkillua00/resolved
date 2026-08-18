@@ -25,10 +25,14 @@ const (
 	PermissionCollectionsDelete      = "collections.delete"
 	PermissionCollectionsAssignUsers = "collections.users.assign"
 
-	PermissionRequestsRead   = "requests.read"
-	PermissionRequestsCreate = "requests.create"
-	PermissionRequestsUpdate = "requests.update"
-	PermissionRequestsDelete = "requests.delete"
+	PermissionRequestsRead    = "requests.read"
+	PermissionRequestsCreate  = "requests.create"
+	PermissionRequestsUpdate  = "requests.update"
+	PermissionRequestsDelete  = "requests.delete"
+	PermissionRequestsExecute = "requests.execute"
+
+	PermissionServerSettingsRead   = "server_settings.read"
+	PermissionServerSettingsUpdate = "server_settings.update"
 
 	PermissionEnvironmentsRead        = "environments.read"
 	PermissionEnvironmentsCreate      = "environments.create"
@@ -61,6 +65,9 @@ var permissionCatalog = []Permission{
 	{Key: PermissionRequestsCreate, Description: "Create saved requests within accessible collections"},
 	{Key: PermissionRequestsUpdate, Description: "Update saved requests within accessible collections"},
 	{Key: PermissionRequestsDelete, Description: "Delete saved requests within accessible collections"},
+	{Key: PermissionRequestsExecute, Description: "Run requests from accessible workspaces through this server"},
+	{Key: PermissionServerSettingsRead, Description: "View server request execution and hostname override settings"},
+	{Key: PermissionServerSettingsUpdate, Description: "Update server request execution and hostname override settings"},
 	{Key: PermissionEnvironmentsRead, Description: "View workspace environment definitions and the account's own values"},
 	{Key: PermissionEnvironmentsCreate, Description: "Create environments within directly accessible workspaces"},
 	{Key: PermissionEnvironmentsUpdate, Description: "Update environment names and shared variable definitions"},

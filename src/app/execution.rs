@@ -190,11 +190,58 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) {
         self.execution_stage = Some(ExecutionStage::Request);
-        let task: RequestTask = spawn_request(
-            self.runtime.handle(),
-            self.client.clone(),
-            resolved.request.clone(),
-        );
+        let task: RequestTask = match self.workspace_providers.active_id() {
+            WorkspaceProviderId::Local(_) => spawn_request(
+                self.runtime.handle(),
+                self.client.clone(),
+                resolved.request.clone(),
+            ),
+            WorkspaceProviderId::Upstream { .. } => {
+                let target = match self.active_upstream_workspace() {
+                    Ok(target) => target,
+                    Err(error) => {
+                        self.pre_script_report = Some(pre_report);
+                        self.fail_request_with_secrets(
+                            &resolved.request,
+                            resolved.redact_secrets(&error),
+                            &resolved.sensitive_values,
+                            cx,
+                        );
+                        return;
+                    }
+                };
+                let vault = self.credential_vault.clone();
+                let client = self.upstream_execution_client.clone();
+                let local_client = self.client.clone();
+                let runtime = Arc::clone(&self.runtime);
+                let credential_upstream_id = target.upstream_id.clone();
+                let request = resolved.request.clone();
+                RequestTask::spawn(self.runtime.handle(), async move {
+                    let credential = runtime
+                        .spawn_blocking(move || vault.load_upstream(&credential_upstream_id))
+                        .await
+                        .map_err(|error| RequestError::TaskFailed(error.to_string()))?
+                        .map_err(|error| RequestError::Upstream(error.to_string()))?
+                        .ok_or_else(|| {
+                            RequestError::Upstream("Log in to this server again.".to_owned())
+                        })?;
+                    if credential.expires_at <= Utc::now() {
+                        return Err(RequestError::Upstream(
+                            "Log in to this server again.".to_owned(),
+                        ));
+                    }
+                    send_request_for_upstream_workspace(
+                        &client,
+                        &local_client,
+                        &target.base_url,
+                        credential.bearer_token(),
+                        &target.workspace_id,
+                        request,
+                    )
+                    .await
+                })
+            }
+        };
         self.abort_handle = Some(task.abort_handle());
         cx.notify();
 

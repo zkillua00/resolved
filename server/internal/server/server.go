@@ -12,6 +12,7 @@ import (
 	"resolved-server/internal/identity"
 	"resolved-server/internal/problem"
 	"resolved-server/internal/realtime"
+	"resolved-server/internal/requestproxy"
 	"resolved-server/internal/roles"
 	"resolved-server/internal/users"
 	"resolved-server/internal/workspaces"
@@ -153,6 +154,34 @@ func WithWorkspaces(authService *auth.Service, handler *workspaces.Handler) Modi
 	}
 }
 
+func WithRequestProxy(authService *auth.Service, handler *requestproxy.Handler) Modifier {
+	return func(app *fiber.App) {
+		app.Get(
+			"/api/v1/request-execution",
+			authService.Middleware(),
+			handler.PolicyController(),
+		)
+		app.Get(
+			"/api/v1/request-execution/settings",
+			authService.Middleware(),
+			auth.RequirePermission(identity.PermissionServerSettingsRead),
+			handler.SettingsController(),
+		)
+		app.Put(
+			"/api/v1/request-execution/settings",
+			authService.Middleware(),
+			auth.RequirePermission(identity.PermissionServerSettingsUpdate),
+			handler.UpdateSettingsController(),
+		)
+		app.Post(
+			"/api/v1/workspaces/:workspace_id/execute",
+			authService.Middleware(),
+			auth.RequirePermission(identity.PermissionRequestsExecute),
+			handler.ExecuteController(),
+		)
+	}
+}
+
 func New(address string, accessLog io.Writer, modifiers ...Modifier) *Server {
 	if accessLog == nil {
 		accessLog = os.Stdout
@@ -160,6 +189,7 @@ func New(address string, accessLog io.Writer, modifiers ...Modifier) *Server {
 	app := fiber.New(fiber.Config{
 		AppName:      "Resolved collaboration server",
 		ErrorHandler: httpkit.ErrorHandler,
+		BodyLimit:    96 * 1024 * 1024,
 	})
 	app.Use(recover.New())
 	app.Use(requestid.New())

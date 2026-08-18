@@ -123,6 +123,28 @@ partially completed multi-step edit, so the editor returns to the server's
 authoritative state. The active-environment choice is stored locally per server
 workspace and is never imposed on another user.
 
+Local workspaces always use the desktop HTTP client. Before sending from a
+server workspace, Resolved reads that deployment's authenticated execution
+policy. `local`, the default, keeps the target exchange on the Mac. `server`
+requires `requests.execute` and sends the resolved request to
+`POST /api/v1/workspaces/{workspace_id}/execute`; the self-hosted server makes
+the target connection and returns the buffered response. A server without the
+policy endpoint is treated as `local` for compatibility.
+
+Server administrators with `server_settings.read` and
+`server_settings.update` manage this policy and its exact hostname overrides in
+Settings → Request execution. In server mode, an override maps the hostname in
+a request URL to another hostname or IP. An IP target is DNS-style: only the
+dial destination changes, while the requested HTTP Host and TLS server name stay
+intact. A hostname target becomes the outgoing URL hostname, HTTP Host, and TLS
+server name. Both forms preserve the request's original port.
+
+Pre-request and post-response scripts, variable resolution, response rendering,
+redaction, and history remain local in both modes. Multipart file contents are
+materialized only for server execution, while their local paths never leave the
+Mac. The outer bearer session authenticates Resolved and is not forwarded to
+the target request.
+
 Request-tab drafts remain device-local and are persisted under their
 server/workspace identity. Forgetting a server removes its encrypted session,
 profile, providers, and cached drafts. No local workspace content is uploaded

@@ -17,6 +17,7 @@ use crate::core::{
 use super::*;
 
 mod discord_views;
+mod network_views;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) enum ServerManagementStatus {
@@ -128,6 +129,9 @@ enum ManagementMutation {
         workspace_id: String,
         collection_id: String,
         user_ids: Vec<String>,
+    },
+    UpdateRequestExecutionSettings {
+        settings: RequestExecutionSettings,
     },
 }
 
@@ -259,6 +263,21 @@ impl ManagementMutation {
                 .await
                 .map_err(|error| error.to_string())?;
                 Ok(format!("Updated access to {}.", collection.name))
+            }
+            Self::UpdateRequestExecutionSettings { settings } => {
+                let updated =
+                    update_request_execution_settings(client, base_url, bearer_token, &settings)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                Ok(match updated.mode {
+                    RequestExecutionMode::Local => {
+                        "Requests from server workspaces will run on each user's computer."
+                            .to_owned()
+                    }
+                    RequestExecutionMode::Server => {
+                        "Requests from server workspaces will run from this server.".to_owned()
+                    }
+                })
             }
         }
     }
@@ -535,6 +554,20 @@ impl ApiTester {
             )))
     }
 
+    pub(super) fn request_execution_settings_page(&self, cx: &mut Context<Self>) -> SettingPage {
+        let this = cx.entity().downgrade();
+        SettingPage::new("Request execution")
+            .description(
+                "Choose where server-workspace requests run and define server hostname overrides.",
+            )
+            .resettable(false)
+            .full_bleed()
+            .group(SettingGroup::new().item(SettingItem::render_searchable(
+                "server request execution proxy hostname overrides custom dns network",
+                move |_, _, cx| network_views::render_request_execution_management(&this, cx),
+            )))
+    }
+
     fn open_create_user_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let login = cx.new(|cx| InputState::new(window, cx).placeholder("Login"));
         let display_name = cx.new(|cx| InputState::new(window, cx).placeholder("Display name"));
@@ -792,6 +825,158 @@ impl ApiTester {
                 )
         });
         name.read(cx).focus_handle(cx).focus(window);
+    }
+
+    fn open_hostname_override_dialog(
+        &mut self,
+        existing: Option<HostnameOverride>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let hostname = cx.new(|cx| {
+            let input = InputState::new(window, cx).placeholder("api.internal");
+            if let Some(existing) = existing.as_ref() {
+                input.default_value(existing.hostname.clone())
+            } else {
+                input
+            }
+        });
+        let target = cx.new(|cx| {
+            let input = InputState::new(window, cx).placeholder("10.0.0.25 or gateway.internal");
+            if let Some(existing) = existing.as_ref() {
+                input.default_value(existing.target.clone())
+            } else {
+                input
+            }
+        });
+        let original_hostname = existing.as_ref().map(|entry| entry.hostname.clone());
+        let title = if existing.is_some() {
+            "Edit hostname override"
+        } else {
+            "New hostname override"
+        };
+        let this = cx.entity().downgrade();
+        let dialog_hostname = hostname.clone();
+        let dialog_target = target.clone();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let save_this = this.clone();
+            let save_hostname = dialog_hostname.clone();
+            let save_target = dialog_target.clone();
+            let save_original = original_hostname.clone();
+            dialog
+                .title(title)
+                .w(px(480.))
+                .confirm()
+                .button_props(DialogButtonProps::default().ok_text("Save override"))
+                .on_ok(move |_, window, cx| {
+                    let hostname = save_hostname.read(cx).value().trim().to_owned();
+                    let target = save_target.read(cx).value().trim().to_owned();
+                    if hostname.is_empty() || target.is_empty() {
+                        return false;
+                    }
+                    if let Some(this) = save_this.upgrade() {
+                        this.update(cx, |this, cx| {
+                            let Some(mut settings) = this
+                                .server_management
+                                .snapshot
+                                .as_ref()
+                                .and_then(|snapshot| snapshot.request_execution_settings.clone())
+                            else {
+                                return;
+                            };
+                            if let Some(original) = save_original.as_deref() {
+                                settings
+                                    .hostname_overrides
+                                    .retain(|entry| entry.hostname != original);
+                            }
+                            settings.hostname_overrides.push(HostnameOverride {
+                                hostname: hostname.clone(),
+                                target: target.clone(),
+                            });
+                            this.run_management_mutation(
+                                ManagementMutation::UpdateRequestExecutionSettings { settings },
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                    true
+                })
+                .child(
+                    v_flex()
+                        .gap_4()
+                        .child(management_dialog_field(
+                            "REQUEST HOSTNAME",
+                            Input::new(&dialog_hostname),
+                        ))
+                        .child(management_dialog_field(
+                            "CONNECT TO HOSTNAME OR IP",
+                            Input::new(&dialog_target),
+                        ))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(
+                                    "An IP target keeps the request hostname for Host and TLS. A hostname target replaces both with the target hostname.",
+                                ),
+                        ),
+                )
+        });
+        hostname.read(cx).focus_handle(cx).focus(window);
+    }
+
+    fn request_delete_hostname_override(
+        &mut self,
+        hostname: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let this = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let delete_this = this.clone();
+            let delete_hostname = hostname.clone();
+            dialog
+                .title("Delete hostname override?")
+                .w(px(440.))
+                .confirm()
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Delete override")
+                        .ok_variant(ButtonVariant::Danger),
+                )
+                .on_ok(move |_, window, cx| {
+                    if let Some(this) = delete_this.upgrade() {
+                        this.update(cx, |this, cx| {
+                            let Some(mut settings) = this
+                                .server_management
+                                .snapshot
+                                .as_ref()
+                                .and_then(|snapshot| snapshot.request_execution_settings.clone())
+                            else {
+                                return;
+                            };
+                            settings
+                                .hostname_overrides
+                                .retain(|entry| entry.hostname != delete_hostname);
+                            this.run_management_mutation(
+                                ManagementMutation::UpdateRequestExecutionSettings { settings },
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                    true
+                })
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!(
+                            "Requests to ‘{hostname}’ will return to normal DNS resolution."
+                        )),
+                )
+        });
     }
 }
 

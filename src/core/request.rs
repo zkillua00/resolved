@@ -1,4 +1,5 @@
 use std::fmt;
+use std::future::Future;
 use std::path::Path;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -470,6 +471,7 @@ pub enum RequestError {
     },
     ResponseBodyAllocationFailed(String),
     Transport(reqwest::Error),
+    Upstream(String),
     Cancelled,
     TaskFailed(String),
 }
@@ -514,6 +516,7 @@ impl fmt::Display for RequestError {
                 )
             }
             Self::Transport(error) => write!(formatter, "{error}"),
+            Self::Upstream(message) => formatter.write_str(message),
             Self::Cancelled => formatter.write_str("request cancelled"),
             Self::TaskFailed(reason) => write!(formatter, "request task failed: {reason}"),
         }
@@ -738,6 +741,15 @@ pub struct RequestTask {
 }
 
 impl RequestTask {
+    pub fn spawn<F>(runtime: &Handle, future: F) -> Self
+    where
+        F: Future<Output = Result<ResponseData, RequestError>> + Send + 'static,
+    {
+        Self {
+            join_handle: runtime.spawn(future),
+        }
+    }
+
     pub fn abort_handle(&self) -> AbortHandle {
         self.join_handle.abort_handle()
     }
@@ -752,8 +764,7 @@ impl RequestTask {
 }
 
 pub fn spawn_request(runtime: &Handle, client: Client, request: RequestDraft) -> RequestTask {
-    let join_handle = runtime.spawn(async move { send_request(&client, request).await });
-    RequestTask { join_handle }
+    RequestTask::spawn(runtime, async move { send_request(&client, request).await })
 }
 
 #[cfg(test)]

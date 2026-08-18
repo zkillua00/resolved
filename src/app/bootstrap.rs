@@ -496,6 +496,8 @@ impl ApiTester {
         let client = build_client().expect("failed to create the HTTP client");
         let upstream_client =
             build_upstream_client().expect("failed to create the upstream login client");
+        let upstream_execution_client = build_upstream_execution_client()
+            .expect("failed to create the upstream request client");
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
@@ -704,6 +706,7 @@ impl ApiTester {
             server_management_generation: 0,
             server_management_abort_handle: None,
             upstream_client,
+            upstream_execution_client,
             upstream_login_open: false,
             upstream_login_url,
             upstream_login_email,

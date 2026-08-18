@@ -1349,7 +1349,10 @@ fn management_split_panel(sidebar: AnyElement, detail: AnyElement) -> AnyElement
         .into_any_element()
 }
 
-fn management_detail_empty(message: impl Into<SharedString>, cx: &mut App) -> AnyElement {
+pub(super) fn management_detail_empty(
+    message: impl Into<SharedString>,
+    cx: &mut App,
+) -> AnyElement {
     div()
         .w_full()
         .h_full()
@@ -1364,7 +1367,7 @@ fn management_detail_empty(message: impl Into<SharedString>, cx: &mut App) -> An
         .into_any_element()
 }
 
-fn management_section_title(title: &'static str) -> AnyElement {
+pub(super) fn management_section_title(title: &'static str) -> AnyElement {
     div()
         .text_size(px(11.))
         .font_semibold()

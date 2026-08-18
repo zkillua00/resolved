@@ -14,7 +14,9 @@ The server currently provides:
 - recursive collection trees with inheritable user grants;
 - saved request templates inside collection nodes;
 - workspace-wide environment names and variable keys with encrypted,
-  per-user values.
+  per-user values;
+- authenticated request execution from the server network for authorized
+  workspace members.
 
 There is no hosted control plane, telemetry, or deployment registration.
 
@@ -135,6 +137,29 @@ has no value column. No environment key, derivation salt, or wrapped/encrypted
 copy of a key is stored in the database. Derived keys exist only in server
 memory for the lifetime of an authenticated session, so restarting the server
 requires every user to log in again.
+
+Request execution defaults to `local`, so selecting a server workspace does not
+automatically move target traffic onto the server. Administrators with
+`server_settings.read` and `server_settings.update` can enable `server` mode and
+manage exact hostname overrides through the desktop's Request execution
+settings. The policy is deployment-wide and persisted in the collaboration
+database.
+
+In `server` mode, `POST /api/v1/workspaces/{workspace_id}/execute` runs an HTTP
+request from the Resolved server and returns the buffered target response. It
+requires both `requests.execute` and access to that workspace. An exact hostname
+override can target an IP or another hostname. IP targets change only the dial
+destination and preserve the requested HTTP Host and TLS server name. Hostname
+targets become the outgoing URL hostname, HTTP Host, and TLS server name. The
+original port is preserved in both cases. Request definitions, headers, bodies,
+uploaded multipart file bytes, and responses are not persisted by the execution
+endpoint. The Resolved bearer token authenticates the outer server call and is
+never forwarded automatically.
+
+Grant `requests.execute` carefully. A user with this permission can reach HTTP
+services visible from the server's network, including private services that may
+not be reachable from their own Mac. Proxied target requests time out after 60
+seconds, and request and response bodies are each limited to 64 MiB.
 
 The complete route and permission table is in
 [`docs/architecture.md`](docs/architecture.md).

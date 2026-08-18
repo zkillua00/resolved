@@ -1,11 +1,16 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    fs::File,
+    io::Read as _,
     net::IpAddr,
+    path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use reqwest::{Client, StatusCode, redirect::Policy};
 use serde::{Deserialize, Serialize};
@@ -14,14 +19,21 @@ use url::{Host, Url};
 use zeroize::Zeroizing;
 
 use super::{
-    Collection, Environment, ResourceCreator, Workspace,
+    BodyFieldKind, BodyMode, Collection, Environment, RequestDraft, RequestError, ResourceCreator,
+    ResponseData, Workspace,
+    request::ResponseHeader,
     template::RequestTemplate,
+    upstream_management::RequestExecutionMode,
     workspace::{CollectionFolder, EnvironmentVariable, SavedRequest},
 };
 
 const LOGIN_RESPONSE_LIMIT_BYTES: usize = 64 * 1024;
 const WORKSPACE_RESPONSE_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(20);
+const PROXY_TIMEOUT: Duration = Duration::from_secs(75);
+const PROXY_POLICY_RESPONSE_LIMIT_BYTES: usize = 64 * 1024;
+const PROXY_ENVELOPE_LIMIT_BYTES: usize = 96 * 1024 * 1024;
+const MAX_PROXY_BODY_BYTES: usize = 64 * 1024 * 1024;
 static NEXT_UPSTREAM_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Persisted connection metadata for every self-hosted Resolved server.
@@ -613,6 +625,409 @@ pub fn build_upstream_client() -> Result<Client, UpstreamLoginError> {
         .timeout(LOGIN_TIMEOUT)
         .build()
         .map_err(UpstreamLoginError::Client)
+}
+
+pub fn build_upstream_execution_client() -> Result<Client, RequestError> {
+    Client::builder()
+        .user_agent(concat!(
+            env!("CARGO_PKG_NAME"),
+            "/",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .redirect(Policy::none())
+        .timeout(PROXY_TIMEOUT)
+        .build()
+        .map_err(RequestError::Transport)
+}
+
+#[derive(Deserialize)]
+struct ProxyExecutionPolicy {
+    mode: RequestExecutionMode,
+}
+
+pub async fn get_upstream_execution_policy(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+) -> Result<RequestExecutionMode, RequestError> {
+    let endpoint = base_url.join("api/v1/request-execution").map_err(|error| {
+        RequestError::Upstream(format!(
+            "the server execution policy URL is invalid: {error}"
+        ))
+    })?;
+    let mut response = client
+        .get(endpoint)
+        .bearer_auth(bearer_token)
+        .send()
+        .await
+        .map_err(RequestError::Transport)?;
+    if response.status().is_redirection() {
+        return Err(RequestError::Upstream(
+            "the server redirected the request execution policy".to_owned(),
+        ));
+    }
+    let status = response.status();
+    // Servers released before request proxying do not expose a policy route;
+    // their server workspaces retain the original local-execution behavior.
+    if status == StatusCode::NOT_FOUND {
+        return Ok(RequestExecutionMode::Local);
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > PROXY_POLICY_RESPONSE_LIMIT_BYTES as u64)
+    {
+        return Err(RequestError::Upstream(
+            "the server returned an oversized request execution policy".to_owned(),
+        ));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(RequestError::Transport)? {
+        if body.len().saturating_add(chunk.len()) > PROXY_POLICY_RESPONSE_LIMIT_BYTES {
+            return Err(RequestError::Upstream(
+                "the server returned an oversized request execution policy".to_owned(),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    let envelope: WorkspaceEnvelope<ProxyExecutionPolicy> =
+        serde_json::from_slice(&body).map_err(|error| {
+            RequestError::Upstream(format!(
+                "the server returned an invalid request execution policy: {error}"
+            ))
+        })?;
+    if !status.is_success() || !envelope.success {
+        let message = envelope
+            .error
+            .map(|error| error.message)
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or_else(|| format!("could not load server execution policy: HTTP {status}"));
+        return Err(RequestError::Upstream(message));
+    }
+    envelope.data.map(|policy| policy.mode).ok_or_else(|| {
+        RequestError::Upstream(
+            "the server response did not include its request execution policy".to_owned(),
+        )
+    })
+}
+
+pub async fn send_request_for_upstream_workspace(
+    upstream_client: &Client,
+    local_client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    request: RequestDraft,
+) -> Result<ResponseData, RequestError> {
+    match get_upstream_execution_policy(upstream_client, base_url, bearer_token).await? {
+        RequestExecutionMode::Local => super::request::send_request(local_client, request).await,
+        RequestExecutionMode::Server => {
+            execute_upstream_request(
+                upstream_client,
+                base_url,
+                bearer_token,
+                workspace_id,
+                request,
+            )
+            .await
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ProxyExecuteRequest {
+    method: String,
+    url: String,
+    headers: Vec<ProxyHeader>,
+    body: ProxyBody,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ProxyHeader {
+    name: String,
+    value: String,
+}
+
+#[derive(Serialize)]
+struct ProxyBody {
+    mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_base64: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    fields: Vec<ProxyBodyField>,
+}
+
+#[derive(Serialize)]
+struct ProxyBodyField {
+    name: String,
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_base64: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ProxyExecuteResult {
+    status: u16,
+    status_text: String,
+    http_version: String,
+    final_url: String,
+    headers: Vec<ProxyHeader>,
+    #[serde(default)]
+    content_type: String,
+    body_base64: String,
+    duration_micros: u64,
+}
+
+pub async fn execute_upstream_request(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    request: RequestDraft,
+) -> Result<ResponseData, RequestError> {
+    let payload = proxy_request_payload(request).await?;
+    let endpoint = base_url
+        .join(&format!("api/v1/workspaces/{workspace_id}/execute"))
+        .map_err(|error| {
+            RequestError::Upstream(format!("the server execution URL is invalid: {error}"))
+        })?;
+    let response = client
+        .post(endpoint)
+        .bearer_auth(bearer_token)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(RequestError::Transport)?;
+    parse_proxy_response(response).await
+}
+
+async fn proxy_request_payload(request: RequestDraft) -> Result<ProxyExecuteRequest, RequestError> {
+    let mut headers = request
+        .headers
+        .iter()
+        .filter(|header| header.enabled && !header.name.trim().is_empty())
+        .map(|header| ProxyHeader {
+            name: header.name.clone(),
+            value: header.value.clone(),
+        })
+        .collect::<Vec<_>>();
+    if !headers
+        .iter()
+        .any(|header| header.name.eq_ignore_ascii_case("user-agent"))
+    {
+        headers.push(ProxyHeader {
+            name: "User-Agent".to_owned(),
+            value: concat!("resolved/", env!("CARGO_PKG_VERSION")).to_owned(),
+        });
+    }
+
+    let body = match request.body_mode {
+        BodyMode::None => ProxyBody {
+            mode: "none",
+            raw_content_type: None,
+            data_base64: None,
+            fields: Vec::new(),
+        },
+        BodyMode::Raw => {
+            ensure_proxy_body_limit(request.body.len())?;
+            ProxyBody {
+                mode: "raw",
+                raw_content_type: (!request.body.is_empty())
+                    .then(|| request.raw_body_language.content_type().to_owned()),
+                data_base64: Some(BASE64_STANDARD.encode(request.body.as_bytes())),
+                fields: Vec::new(),
+            }
+        }
+        BodyMode::FormUrlEncoded => ProxyBody {
+            mode: "form_url_encoded",
+            raw_content_type: None,
+            data_base64: None,
+            fields: request
+                .body_fields
+                .iter()
+                .filter(|field| field.enabled && !field.name.trim().is_empty())
+                .map(|field| ProxyBodyField {
+                    name: field.name.clone(),
+                    kind: "text",
+                    value: Some(field.value.clone()),
+                    filename: None,
+                    content_base64: None,
+                })
+                .collect(),
+        },
+        BodyMode::MultipartFormData => {
+            let mut fields = Vec::new();
+            let mut materialized_bytes = 0usize;
+            for field in request
+                .body_fields
+                .iter()
+                .filter(|field| field.enabled && !field.name.trim().is_empty())
+            {
+                match field.kind {
+                    BodyFieldKind::Text => {
+                        materialized_bytes = materialized_bytes.saturating_add(field.value.len());
+                        ensure_proxy_body_limit(materialized_bytes)?;
+                        fields.push(ProxyBodyField {
+                            name: field.name.clone(),
+                            kind: "text",
+                            value: Some(field.value.clone()),
+                            filename: None,
+                            content_base64: None,
+                        });
+                    }
+                    BodyFieldKind::File => {
+                        let Some(path) = field.file_path() else {
+                            continue;
+                        };
+                        let path = path.to_path_buf();
+                        let filename = path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "file".to_owned());
+                        let field_name = field.name.clone();
+                        let remaining = MAX_PROXY_BODY_BYTES.saturating_sub(materialized_bytes);
+                        let task_path = path.clone();
+                        let content = tokio::task::spawn_blocking(move || {
+                            read_proxy_file(&task_path, remaining)
+                        })
+                        .await
+                        .map_err(|error| RequestError::TaskFailed(error.to_string()))?
+                        .map_err(|reason| {
+                            RequestError::MultipartFileRead {
+                                field_name: field_name.clone(),
+                                path: path.display().to_string(),
+                                reason,
+                            }
+                        })?;
+                        materialized_bytes = materialized_bytes.saturating_add(content.len());
+                        ensure_proxy_body_limit(materialized_bytes)?;
+                        fields.push(ProxyBodyField {
+                            name: field_name,
+                            kind: "file",
+                            value: None,
+                            filename: Some(filename),
+                            content_base64: Some(BASE64_STANDARD.encode(content)),
+                        });
+                    }
+                }
+            }
+            ProxyBody {
+                mode: "multipart_form_data",
+                raw_content_type: None,
+                data_base64: None,
+                fields,
+            }
+        }
+    };
+
+    Ok(ProxyExecuteRequest {
+        method: request.method,
+        url: request.url,
+        headers,
+        body,
+    })
+}
+
+fn read_proxy_file(path: &PathBuf, limit: usize) -> std::io::Result<Vec<u8>> {
+    let file = File::open(path)?;
+    let take_limit = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
+    let mut content = Vec::new();
+    file.take(take_limit).read_to_end(&mut content)?;
+    if content.len() > limit {
+        return Err(std::io::Error::other(format!(
+            "file exceeds the {MAX_PROXY_BODY_BYTES}-byte proxied request limit"
+        )));
+    }
+    Ok(content)
+}
+
+fn ensure_proxy_body_limit(size: usize) -> Result<(), RequestError> {
+    if size > MAX_PROXY_BODY_BYTES {
+        return Err(RequestError::Upstream(format!(
+            "request body exceeds the {MAX_PROXY_BODY_BYTES}-byte proxied request limit"
+        )));
+    }
+    Ok(())
+}
+
+async fn parse_proxy_response(
+    mut response: reqwest::Response,
+) -> Result<ResponseData, RequestError> {
+    if response.status().is_redirection() {
+        return Err(RequestError::Upstream(
+            "the server redirected the proxied request endpoint".to_owned(),
+        ));
+    }
+    let status = response.status();
+    if response
+        .content_length()
+        .is_some_and(|length| length > PROXY_ENVELOPE_LIMIT_BYTES as u64)
+    {
+        return Err(RequestError::Upstream(
+            "the server returned an oversized proxied response".to_owned(),
+        ));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(RequestError::Transport)? {
+        if body.len().saturating_add(chunk.len()) > PROXY_ENVELOPE_LIMIT_BYTES {
+            return Err(RequestError::Upstream(
+                "the server returned an oversized proxied response".to_owned(),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    let envelope: WorkspaceEnvelope<ProxyExecuteResult> =
+        serde_json::from_slice(&body).map_err(|error| {
+            RequestError::Upstream(format!(
+                "the server returned an invalid proxied response: {error}"
+            ))
+        })?;
+    if !status.is_success() || !envelope.success {
+        let message = envelope
+            .error
+            .map(|error| error.message)
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or_else(|| format!("server execution failed with HTTP {status}"));
+        return Err(RequestError::Upstream(message));
+    }
+    let data = envelope.data.ok_or_else(|| {
+        RequestError::Upstream("the server response did not include execution data".to_owned())
+    })?;
+    let decoded = BASE64_STANDARD.decode(data.body_base64).map_err(|error| {
+        RequestError::Upstream(format!(
+            "the server returned invalid response data: {error}"
+        ))
+    })?;
+    if decoded.len() > MAX_PROXY_BODY_BYTES {
+        return Err(RequestError::ResponseBodyTooLarge {
+            limit_bytes: MAX_PROXY_BODY_BYTES,
+        });
+    }
+
+    Ok(ResponseData {
+        status: data.status,
+        status_text: data.status_text,
+        http_version: data.http_version,
+        final_url: data.final_url,
+        headers: data
+            .headers
+            .into_iter()
+            .map(|header| ResponseHeader {
+                name: header.name,
+                value: header.value,
+            })
+            .collect(),
+        content_type: (!data.content_type.is_empty()).then_some(data.content_type),
+        body: Bytes::from(decoded),
+        duration: Duration::from_micros(data.duration_micros),
+    })
 }
 
 pub async fn login_upstream(
@@ -1432,6 +1847,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::core::{BodyField, HeaderEntry};
 
     fn upstream_creator(id: &str, display_name: &str) -> UpstreamUserSummary {
         UpstreamUserSummary {
@@ -2638,6 +3054,266 @@ mod tests {
             .unwrap();
 
         server.join().unwrap();
+    }
+
+    #[test]
+    fn executes_a_request_through_the_server_contract_and_decodes_binary_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut policy_stream, _) = listener.accept().unwrap();
+            let policy_request = read_http_request(&mut policy_stream);
+            let policy_header_end = policy_request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .unwrap();
+            let policy_headers =
+                String::from_utf8(policy_request[..policy_header_end].to_vec()).unwrap();
+            assert!(policy_headers.starts_with("GET /api/v1/request-execution HTTP/1.1\r\n"));
+            let policy_body = br#"{"success":true,"data":{"mode":"server"}}"#;
+            write!(
+                policy_stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                policy_body.len()
+            )
+            .unwrap();
+            policy_stream.write_all(policy_body).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let request = read_http_request(&mut stream);
+            let header_end = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .unwrap();
+            let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+            assert!(
+                headers.starts_with("POST /api/v1/workspaces/workspace-1/execute HTTP/1.1\r\n")
+            );
+            assert!(headers.contains("authorization: Bearer saved-session-token\r\n"));
+            let body: serde_json::Value =
+                serde_json::from_slice(&request[header_end + 4..]).unwrap();
+            assert_eq!(body["method"], "PATCH");
+            assert_eq!(body["url"], "https://target.example.test/items/42");
+            assert_eq!(body["body"]["mode"], "raw");
+            assert_eq!(
+                BASE64_STANDARD
+                    .decode(body["body"]["data_base64"].as_str().unwrap())
+                    .unwrap(),
+                br#"{"active":true}"#
+            );
+            assert!(
+                body["headers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|header| { header["name"] == "X-Test" && header["value"] == "yes" })
+            );
+            assert!(body["headers"].as_array().unwrap().iter().any(|header| {
+                header["name"] == "User-Agent"
+                    && header["value"] == concat!("resolved/", env!("CARGO_PKG_VERSION"))
+            }));
+
+            let response_body = serde_json::to_vec(&serde_json::json!({
+                "request_id": "response-1",
+                "success": true,
+                "data": {
+                    "status": 202,
+                    "status_text": "Accepted",
+                    "http_version": "HTTP/2.0",
+                    "final_url": "https://target.example.test/items/42",
+                    "headers": [
+                        {"name": "Content-Type", "value": "application/octet-stream"},
+                        {"name": "X-Target", "value": "proxied"}
+                    ],
+                    "content_type": "application/octet-stream",
+                    "body_base64": BASE64_STANDARD.encode([0_u8, 1, 2, 255]),
+                    "duration_micros": 1250
+                }
+            }))
+            .unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response_body.len()
+            )
+            .unwrap();
+            stream.write_all(&response_body).unwrap();
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = build_upstream_execution_client().unwrap();
+        let local_client = super::super::request::build_client().unwrap();
+        let mut request = RequestDraft::new("PATCH", "https://target.example.test/items/42");
+        request.headers = vec![HeaderEntry::new("X-Test", "yes")];
+        request.body = r#"{"active":true}"#.to_owned();
+        let response = runtime
+            .block_on(send_request_for_upstream_workspace(
+                &client,
+                &local_client,
+                &Url::parse(&format!("http://{address}/")).unwrap(),
+                "saved-session-token",
+                "workspace-1",
+                request,
+            ))
+            .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(response.status, 202);
+        assert_eq!(response.status_text, "Accepted");
+        assert_eq!(response.http_version, "HTTP/2.0");
+        assert_eq!(response.body.as_ref(), &[0, 1, 2, 255]);
+        assert_eq!(response.duration, Duration::from_micros(1250));
+        assert_eq!(
+            response.content_type.as_deref(),
+            Some("application/octet-stream")
+        );
+    }
+
+    #[test]
+    fn local_server_policy_keeps_target_execution_on_the_desktop() {
+        let policy_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let policy_address = policy_listener.local_addr().unwrap();
+        let policy_server = thread::spawn(move || {
+            let (mut stream, _) = policy_listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            let header_end = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .unwrap();
+            let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+            assert!(headers.starts_with("GET /api/v1/request-execution HTTP/1.1\r\n"));
+            assert!(headers.contains("authorization: Bearer saved-session-token\r\n"));
+            let response_body = br#"{"success":true,"data":{"mode":"local"}}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response_body.len()
+            )
+            .unwrap();
+            stream.write_all(response_body).unwrap();
+        });
+
+        let target_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let target_address = target_listener.local_addr().unwrap();
+        let target_server = thread::spawn(move || {
+            let (mut stream, _) = target_listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            let header_end = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .unwrap();
+            let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+            assert!(headers.starts_with("GET /from-desktop HTTP/1.1\r\n"));
+            let response_body = b"local response";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response_body.len()
+            )
+            .unwrap();
+            stream.write_all(response_body).unwrap();
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let upstream_client = build_upstream_execution_client().unwrap();
+        let local_client = super::super::request::build_client().unwrap();
+        let response = runtime
+            .block_on(send_request_for_upstream_workspace(
+                &upstream_client,
+                &local_client,
+                &Url::parse(&format!("http://{policy_address}/")).unwrap(),
+                "saved-session-token",
+                "workspace-1",
+                RequestDraft::new("GET", format!("http://{target_address}/from-desktop")),
+            ))
+            .unwrap();
+
+        policy_server.join().unwrap();
+        target_server.join().unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body.as_ref(), b"local response");
+    }
+
+    #[test]
+    fn missing_policy_route_keeps_older_servers_on_local_execution() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            let header_end = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .unwrap();
+            let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+            assert!(headers.starts_with("GET /api/v1/request-execution HTTP/1.1\r\n"));
+            let response_body = br#"{"success":false,"error":{"message":"not found"}}"#;
+            write!(
+                stream,
+                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response_body.len()
+            )
+            .unwrap();
+            stream.write_all(response_body).unwrap();
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mode = runtime
+            .block_on(get_upstream_execution_policy(
+                &build_upstream_execution_client().unwrap(),
+                &Url::parse(&format!("http://{address}/")).unwrap(),
+                "saved-session-token",
+            ))
+            .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(mode, RequestExecutionMode::Local);
+    }
+
+    #[test]
+    fn multipart_proxy_payload_reads_file_bytes_without_sending_the_local_path() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"private fixture bytes").unwrap();
+        let path = file.path().to_string_lossy().into_owned();
+        let mut request = RequestDraft::new("POST", "https://target.example.test/upload");
+        request.body_mode = BodyMode::MultipartFormData;
+        request.body_fields = vec![
+            BodyField::text("description", "fixture"),
+            BodyField::file("document", path.clone()),
+        ];
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let payload = runtime.block_on(proxy_request_payload(request)).unwrap();
+        let encoded = serde_json::to_value(payload).unwrap();
+
+        assert_eq!(encoded["body"]["mode"], "multipart_form_data");
+        assert_eq!(encoded["body"]["fields"][0]["value"], "fixture");
+        assert_eq!(encoded["body"]["fields"][1]["kind"], "file");
+        assert_eq!(
+            BASE64_STANDARD
+                .decode(
+                    encoded["body"]["fields"][1]["content_base64"]
+                        .as_str()
+                        .unwrap()
+                )
+                .unwrap(),
+            b"private fixture bytes"
+        );
+        assert!(!encoded.to_string().contains(&path));
     }
 
     fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {

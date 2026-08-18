@@ -92,6 +92,18 @@ server and workspace. Switching never uploads or exposes a local workspace. See
 [`docs/upstreams.md`](docs/upstreams.md) for the provider and credential-vault
 design.
 
+Server workspaces use the deployment administrator's request-execution policy.
+The safe default runs requests directly from each user's Mac. When an
+administrator enables server execution, accounts with `requests.execute` run
+the resolved HTTP exchange from that self-hosted server. In that mode, exact
+hostname overrides can connect an origin hostname to another hostname or IP. An
+IP target behaves like DNS and preserves the requested HTTP Host and TLS server
+name; a hostname target becomes the outgoing HTTP Host and TLS server name. The
+original port is preserved. The response returns to the same local viewer,
+history, redaction, and post-response script flow. Multipart file contents are
+uploaded only for server execution; local paths are never sent or stored on the
+server.
+
 ## Code editors
 
 Raw request bodies, pre-request scripts, post-response scripts, and text

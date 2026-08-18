@@ -36,11 +36,32 @@ pub const REQUESTS_READ: &str = "requests.read";
 pub const REQUESTS_CREATE: &str = "requests.create";
 pub const REQUESTS_UPDATE: &str = "requests.update";
 pub const REQUESTS_DELETE: &str = "requests.delete";
+pub const SERVER_SETTINGS_READ: &str = "server_settings.read";
+pub const SERVER_SETTINGS_UPDATE: &str = "server_settings.update";
 pub const ENVIRONMENTS_READ: &str = "environments.read";
 pub const ENVIRONMENTS_CREATE: &str = "environments.create";
 pub const ENVIRONMENTS_UPDATE: &str = "environments.update";
 pub const ENVIRONMENTS_DELETE: &str = "environments.delete";
 pub const ENVIRONMENT_VALUES_UPDATE: &str = "environment_values.update";
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestExecutionMode {
+    Local,
+    Server,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HostnameOverride {
+    pub hostname: String,
+    pub target: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RequestExecutionSettings {
+    pub mode: RequestExecutionMode,
+    pub hostname_overrides: Vec<HostnameOverride>,
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct ManagementPermission {
@@ -98,6 +119,7 @@ pub struct UpstreamManagementSnapshot {
     pub roles: Option<Vec<ManagementRole>>,
     pub permissions: Option<Vec<ManagementPermission>>,
     pub workspaces: Option<Vec<UpstreamWorkspaceView>>,
+    pub request_execution_settings: Option<RequestExecutionSettings>,
 }
 
 impl UpstreamManagementSnapshot {
@@ -231,12 +253,27 @@ pub async fn load_upstream_management(
             Ok(None)
         }
     };
+    let request_execution_settings_request = async {
+        if current_user.has_permission(SERVER_SETTINGS_READ) {
+            get(
+                client,
+                base_url,
+                bearer_token,
+                "api/v1/request-execution/settings",
+            )
+            .await
+            .map(Some)
+        } else {
+            Ok(None)
+        }
+    };
 
-    let (users, roles, permissions, workspaces) = futures::try_join!(
+    let (users, roles, permissions, workspaces, request_execution_settings) = futures::try_join!(
         users_request,
         roles_request,
         permissions_request,
-        workspaces_request
+        workspaces_request,
+        request_execution_settings_request
     )?;
     Ok(UpstreamManagementSnapshot {
         current_user,
@@ -244,7 +281,25 @@ pub async fn load_upstream_management(
         roles,
         permissions,
         workspaces,
+        request_execution_settings,
     })
+}
+
+pub async fn update_request_execution_settings(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    settings: &RequestExecutionSettings,
+) -> Result<RequestExecutionSettings, UpstreamManagementError> {
+    send(
+        client,
+        base_url,
+        bearer_token,
+        Method::PUT,
+        "api/v1/request-execution/settings",
+        settings,
+    )
+    .await
 }
 
 pub async fn create_management_user(
