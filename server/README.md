@@ -141,20 +141,22 @@ requires every user to log in again.
 Request execution defaults to `local`, so selecting a server workspace does not
 automatically move target traffic onto the server. Administrators with
 `server_settings.read` and `server_settings.update` can enable `server` mode and
-manage exact hostname overrides through the desktop's Request execution
-settings. The policy is deployment-wide and persisted in the collaboration
-database.
+manage exact hostname overrides through the desktop's Request proxy workspace.
+The policy is deployment-wide and persisted in the collaboration database.
 
 In `server` mode, `POST /api/v1/workspaces/{workspace_id}/execute` runs an HTTP
 request from the Resolved server and returns the buffered target response. It
 requires both `requests.execute` and access to that workspace. An exact hostname
 override can target an IP or another hostname. IP targets change only the dial
-destination and preserve the requested HTTP Host and TLS server name. Hostname
-targets become the outgoing URL hostname, HTTP Host, and TLS server name. The
-original port is preserved in both cases. Request definitions, headers, bodies,
-uploaded multipart file bytes, and responses are not persisted by the execution
-endpoint. The Resolved bearer token authenticates the outer server call and is
-never forwarded automatically.
+destination and preserve the requested HTTP Host and HTTPS SNI. Hostname targets
+become the outgoing URL hostname, HTTP Host, and HTTPS SNI. A target can include
+an `http://` or `https://` prefix; it then selects the outgoing scheme and lets
+a request with the exact source hostname omit its own scheme. The request's
+original port is preserved in both cases, and override targets cannot define a
+port or path. Request definitions, headers, bodies, uploaded multipart file
+bytes, and responses are not persisted by the execution endpoint. The Resolved
+bearer token authenticates the outer server call and is never forwarded
+automatically.
 
 Grant `requests.execute` carefully. A user with this permission can reach HTTP
 services visible from the server's network, including private services that may

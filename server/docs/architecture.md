@@ -254,12 +254,15 @@ an administrator has returned the deployment to local mode.
 
 Hostname overrides are exact, case-insensitive mappings from the request URL's
 hostname to another hostname or IP. An IP target is DNS-style: it changes only
-the dial address and preserves the requested URL hostname, HTTP Host, and TLS
-server name. A hostname target rewrites the outgoing URL hostname, HTTP Host,
-and TLS server name to that target. Both retain the original port. Overrides
-take precedence over the process's HTTP-proxy selection and apply independently
-to redirect targets. Changing the configuration closes idle target connections
-so the next request cannot reuse an earlier destination.
+the dial address and preserves the requested URL hostname, HTTP Host, and HTTPS
+SNI. A hostname target rewrites the outgoing URL hostname, HTTP Host, and HTTPS
+SNI to that target. A target may carry an `http://` or `https://` prefix. Its
+scheme becomes the outgoing scheme and permits a request URL with the exact
+source hostname to omit a scheme. Both target forms retain the request's
+original port, and targets cannot supply a port or path. Overrides take
+precedence over the process's HTTP-proxy selection and apply independently to
+redirect targets. Changing the configuration closes idle target connections so
+the next request cannot reuse an earlier destination.
 
 This is intentionally a network-capability permission. The target may be any
 HTTP or HTTPS address reachable by the server, including private deployment

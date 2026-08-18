@@ -97,8 +97,10 @@ The safe default runs requests directly from each user's Mac. When an
 administrator enables server execution, accounts with `requests.execute` run
 the resolved HTTP exchange from that self-hosted server. In that mode, exact
 hostname overrides can connect an origin hostname to another hostname or IP. An
-IP target behaves like DNS and preserves the requested HTTP Host and TLS server
-name; a hostname target becomes the outgoing HTTP Host and TLS server name. The
+IP target behaves like DNS and preserves the requested HTTP Host and HTTPS SNI;
+a hostname target becomes the outgoing HTTP Host and HTTPS SNI. A target may be
+prefixed with `http://` or `https://`; that scheme becomes the outgoing scheme
+and lets an exact matching request URL omit its own scheme. The request's
 original port is preserved. The response returns to the same local viewer,
 history, redaction, and post-response script flow. Multipart file contents are
 uploaded only for server execution; local paths are never sent or stored on the

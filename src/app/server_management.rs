@@ -828,7 +828,8 @@ impl ApiTester {
             }
         });
         let target = cx.new(|cx| {
-            let input = InputState::new(window, cx).placeholder("10.0.0.25 or gateway.internal");
+            let input = InputState::new(window, cx)
+                .placeholder("10.0.0.25, gateway.internal, or https://gateway.internal");
             if let Some(existing) = existing.as_ref() {
                 input.default_value(existing.target.clone())
             } else {
@@ -896,7 +897,7 @@ impl ApiTester {
                             Input::new(&dialog_hostname),
                         ))
                         .child(management_dialog_field(
-                            "CONNECT TO HOSTNAME OR IP",
+                            "TARGET HOSTNAME OR IP",
                             Input::new(&dialog_target),
                         ))
                         .child(
@@ -904,7 +905,7 @@ impl ApiTester {
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(
-                                    "An IP target keeps the request hostname for Host and TLS. A hostname target replaces both with the target hostname.",
+                                    "An IP target keeps the request hostname for HTTP Host and HTTPS SNI. A hostname target replaces both. Prefix the target with http:// or https:// to define its scheme and allow matching request URLs to omit one.",
                                 ),
                         ),
                 )

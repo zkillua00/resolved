@@ -264,7 +264,8 @@ func TestRequestProxyExecutesFromServerWithDynamicPermissionAndWorkspaceScope(t 
 	}))
 	defer target.Close()
 	targetPort := target.Listener.Addr().(*net.TCPAddr).Port
-	targetURL := fmt.Sprintf("http://service.internal:%d/resource", targetPort)
+	targetURL := fmt.Sprintf("service.internal:%d/resource", targetPort)
+	expectedTargetURL := "http://" + targetURL
 	settings := request[requestproxy.Settings](
 		t,
 		app,
@@ -274,12 +275,12 @@ func TestRequestProxyExecutesFromServerWithDynamicPermissionAndWorkspaceScope(t 
 		map[string]any{
 			"mode": requestproxy.ModeServer,
 			"hostname_overrides": []map[string]string{
-				{"hostname": "SERVICE.INTERNAL.", "target": "127.0.0.1"},
+				{"hostname": "SERVICE.INTERNAL.", "target": "http://127.0.0.1"},
 			},
 		},
 		fiber.StatusOK,
 	).Data
-	if settings.Mode != requestproxy.ModeServer || len(settings.HostnameOverrides) != 1 || settings.HostnameOverrides[0].Hostname != "service.internal" {
+	if settings.Mode != requestproxy.ModeServer || len(settings.HostnameOverrides) != 1 || settings.HostnameOverrides[0] != (requestproxy.HostnameOverride{Hostname: "service.internal", Target: "http://127.0.0.1"}) {
 		t.Fatalf("normalized request execution settings = %+v", settings)
 	}
 	serverPolicy := request[requestproxy.Policy](
@@ -330,7 +331,7 @@ func TestRequestProxyExecutesFromServerWithDynamicPermissionAndWorkspaceScope(t 
 	if result.Status != http.StatusCreated || result.StatusText != "Created" {
 		t.Fatalf("target status = %d %q", result.Status, result.StatusText)
 	}
-	if result.FinalURL != targetURL || result.HTTPVersion == "" || result.DurationMicros < 0 {
+	if result.FinalURL != expectedTargetURL || result.HTTPVersion == "" || result.DurationMicros < 0 {
 		t.Fatalf("unexpected proxy metadata: %+v", result)
 	}
 	decodedBody, err := base64.StdEncoding.DecodeString(result.BodyBase64)

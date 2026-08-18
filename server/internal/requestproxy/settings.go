@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ const (
 	ModeLocal        = "local"
 	ModeServer       = "server"
 	MaxHostOverrides = 256
+	MaxTargetLength  = 512
 )
 
 type SettingsRecord struct {
@@ -34,7 +36,7 @@ func (SettingsRecord) TableName() string {
 
 type HostnameOverrideRecord struct {
 	Hostname  string    `gorm:"size:253;primaryKey"`
-	Target    string    `gorm:"size:253;not null"`
+	Target    string    `gorm:"size:512;not null"`
 	CreatedAt time.Time `gorm:"not null"`
 	UpdatedAt time.Time `gorm:"not null"`
 }
@@ -45,7 +47,12 @@ func (HostnameOverrideRecord) TableName() string {
 
 type HostnameOverride struct {
 	Hostname string `json:"hostname" validate:"required,max=253"`
-	Target   string `json:"target" validate:"required,max=253"`
+	Target   string `json:"target" validate:"required,max=512"`
+}
+
+type hostnameOverrideTarget struct {
+	Host   string
+	Scheme string
 }
 
 type Settings struct {
@@ -164,22 +171,16 @@ func normalizeSettings(settings Settings) (Settings, error) {
 		}
 		seen[hostname] = struct{}{}
 
-		target := strings.TrimSpace(override.Target)
-		if ip := net.ParseIP(strings.Trim(target, "[]")); ip != nil {
-			target = ip.String()
-		} else {
-			var valid bool
-			target, valid = normalizeDNSHostname(target)
-			if !valid {
-				return Settings{}, invalidField(
-					fmt.Sprintf("hostname_overrides.%d.target", index),
-					"must be a valid hostname or IP address without a scheme or port",
-				)
-			}
+		target, valid := parseHostnameOverrideTarget(override.Target)
+		if !valid {
+			return Settings{}, invalidField(
+				fmt.Sprintf("hostname_overrides.%d.target", index),
+				"must be a hostname or IP, optionally prefixed with http:// or https://, without a port or path",
+			)
 		}
 		normalized.HostnameOverrides = append(normalized.HostnameOverrides, HostnameOverride{
 			Hostname: hostname,
-			Target:   target,
+			Target:   target.String(),
 		})
 	}
 	sort.Slice(normalized.HostnameOverrides, func(left, right int) bool {
@@ -210,10 +211,60 @@ func isASCIIAlphaNumeric(value byte) bool {
 	return value >= 'a' && value <= 'z' || value >= '0' && value <= '9'
 }
 
-func (settings Settings) overrideMap() map[string]string {
-	overrides := make(map[string]string, len(settings.HostnameOverrides))
+func parseHostnameOverrideTarget(value string) (hostnameOverrideTarget, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > MaxTargetLength {
+		return hostnameOverrideTarget{}, false
+	}
+
+	if strings.Contains(value, "://") {
+		parsed, err := url.Parse(value)
+		if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Port() != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Opaque != "" || parsed.Path != "" && parsed.Path != "/" {
+			return hostnameOverrideTarget{}, false
+		}
+		scheme := strings.ToLower(parsed.Scheme)
+		if scheme != "http" && scheme != "https" {
+			return hostnameOverrideTarget{}, false
+		}
+		host, valid := normalizeOverrideHost(parsed.Hostname())
+		if !valid {
+			return hostnameOverrideTarget{}, false
+		}
+		return hostnameOverrideTarget{Host: host, Scheme: scheme}, true
+	}
+
+	host, valid := normalizeOverrideHost(value)
+	if !valid {
+		return hostnameOverrideTarget{}, false
+	}
+	return hostnameOverrideTarget{Host: host}, true
+}
+
+func normalizeOverrideHost(value string) (string, bool) {
+	if ip := net.ParseIP(strings.Trim(value, "[]")); ip != nil {
+		return ip.String(), true
+	}
+	return normalizeDNSHostname(value)
+}
+
+func (target hostnameOverrideTarget) String() string {
+	host := target.Host
+	if target.Scheme != "" && net.ParseIP(host) != nil && strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	if target.Scheme == "" {
+		return host
+	}
+	return target.Scheme + "://" + host
+}
+
+func (settings Settings) overrideMap() map[string]hostnameOverrideTarget {
+	overrides := make(map[string]hostnameOverrideTarget, len(settings.HostnameOverrides))
 	for _, override := range settings.HostnameOverrides {
-		overrides[override.Hostname] = override.Target
+		target, valid := parseHostnameOverrideTarget(override.Target)
+		if valid {
+			overrides[override.Hostname] = target
+		}
 	}
 	return overrides
 }

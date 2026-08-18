@@ -117,8 +117,8 @@ func transportWithHostnameOverrides(base *http.Transport) *http.Transport {
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err == nil {
-			if target, overridden := hostnameOverride(ctx, host); overridden && net.ParseIP(target) != nil {
-				address = net.JoinHostPort(target, port)
+			if target, overridden := hostnameOverride(ctx, host); overridden && net.ParseIP(target.Host) != nil {
+				address = net.JoinHostPort(target.Host, port)
 			}
 		}
 		return baseDialContext(ctx, network, address)
@@ -171,12 +171,10 @@ func (s *Service) Execute(
 		)
 	}
 
-	target, err := url.Parse(strings.TrimSpace(input.URL))
-	if err != nil || target.Host == "" {
-		return ExecuteResult{}, invalidField("url", "must be an absolute HTTP or HTTPS URL")
-	}
-	if target.Scheme != "http" && target.Scheme != "https" {
-		return ExecuteResult{}, invalidField("url", "must use HTTP or HTTPS")
+	overrides := settings.overrideMap()
+	target, err := resolveRequestURL(input.URL, overrides)
+	if err != nil {
+		return ExecuteResult{}, err
 	}
 
 	method := strings.ToUpper(strings.TrimSpace(input.Method))
@@ -188,7 +186,7 @@ func (s *Service) Execute(
 	if err != nil {
 		return ExecuteResult{}, err
 	}
-	requestContext := context.WithValue(ctx, hostnameOverridesContextKey{}, settings.overrideMap())
+	requestContext := context.WithValue(ctx, hostnameOverridesContextKey{}, overrides)
 	request, err := http.NewRequestWithContext(requestContext, method, target.String(), bytes.NewReader(body))
 	if err != nil {
 		return ExecuteResult{}, invalidField("method", "is not a valid HTTP method")
@@ -241,8 +239,38 @@ func (s *Service) Execute(
 	}, nil
 }
 
-func hostnameOverride(ctx context.Context, hostname string) (string, bool) {
-	overrides, _ := ctx.Value(hostnameOverridesContextKey{}).(map[string]string)
+func resolveRequestURL(value string, overrides map[string]hostnameOverrideTarget) (*url.URL, error) {
+	raw := strings.TrimSpace(value)
+	target, err := url.Parse(raw)
+	if err != nil {
+		return nil, invalidField("url", "is not a valid URL")
+	}
+	if target.Host == "" && !strings.Contains(raw, "://") {
+		target, err = url.Parse("//" + strings.TrimPrefix(raw, "//"))
+		if err != nil {
+			return nil, invalidField("url", "is not a valid URL")
+		}
+	}
+	if target.Host == "" {
+		return nil, invalidField("url", "must include a hostname")
+	}
+	if target.Scheme == "" {
+		override, overridden := overrides[normalizedHostname(target.Hostname())]
+		if !overridden || override.Scheme == "" {
+			return nil, invalidField(
+				"url",
+				"must include http:// or https:// unless its hostname override supplies a scheme",
+			)
+		}
+		target.Scheme = override.Scheme
+	} else if target.Scheme != "http" && target.Scheme != "https" {
+		return nil, invalidField("url", "must use HTTP or HTTPS")
+	}
+	return target, nil
+}
+
+func hostnameOverride(ctx context.Context, hostname string) (hostnameOverrideTarget, bool) {
+	overrides, _ := ctx.Value(hostnameOverridesContextKey{}).(map[string]hostnameOverrideTarget)
 	target, ok := overrides[normalizedHostname(hostname)]
 	return target, ok
 }
@@ -252,20 +280,24 @@ func applyHostnameOriginOverride(request *http.Request) {
 	if !overridden {
 		return
 	}
-	if net.ParseIP(target) != nil {
+
+	requestURL := *request.URL
+	request.URL = &requestURL
+	if target.Scheme != "" {
+		request.URL.Scheme = target.Scheme
+	}
+	if net.ParseIP(target.Host) != nil {
 		markProxyBypass(request, request.URL.Hostname())
 		return
 	}
 
-	requestURL := *request.URL
-	request.URL = &requestURL
 	if port := request.URL.Port(); port != "" {
-		request.URL.Host = net.JoinHostPort(target, port)
+		request.URL.Host = net.JoinHostPort(target.Host, port)
 	} else {
-		request.URL.Host = target
+		request.URL.Host = target.Host
 	}
 	request.Host = request.URL.Host
-	markProxyBypass(request, target)
+	markProxyBypass(request, target.Host)
 }
 
 func markProxyBypass(request *http.Request, hostname string) {

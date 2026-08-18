@@ -341,7 +341,7 @@ fn render_request_proxy_settings(
                                         .text_sm()
                                         .text_color(cx.theme().muted_foreground)
                                         .child(
-                                            "Route an exact request hostname to a different hostname or IP without changing request paths or ports.",
+                                            "Route an exact request hostname to another hostname or IP. Prefix the target with http:// or https:// to define its scheme and allow matching request URLs to omit one.",
                                         ),
                                 ),
                         )
@@ -374,9 +374,9 @@ fn render_request_proxy_settings(
                         .font_semibold()
                         .text_color(cx.theme().muted_foreground)
                         .child(div().w(px(220.)).child("REQUEST HOST"))
-                        .child(div().w(px(220.)).child("CONNECT TO"))
+                        .child(div().w(px(220.)).child("CONNECT TO / SCHEME"))
                         .child(div().min_w_0().flex_1().child("ORIGIN BEHAVIOR"))
-                        .child(div().w(px(72.))),
+                        .child(div().w(px(152.)).text_right().child("ACTIONS")),
                 )
                 .child(if rows.is_empty() {
                     v_flex()
@@ -412,12 +412,12 @@ fn render_request_proxy_settings(
                 .gap_4()
                 .child(request_proxy_behavior_card(
                     "Hostname to IP",
-                    "The server connects to the IP while preserving the requested hostname for HTTP Host and TLS SNI. This behaves like a private DNS answer.",
+                    "The server connects to the IP while preserving the requested hostname for HTTP Host and HTTPS SNI. This behaves like a private DNS answer.",
                     cx,
                 ))
                 .child(request_proxy_behavior_card(
                     "Hostname to hostname",
-                    "The target hostname becomes the outgoing URL host, HTTP Host, and TLS SNI. The original request hostname is not sent upstream.",
+                    "The target hostname becomes the outgoing URL host, HTTP Host, and HTTPS SNI. The original request hostname is not sent upstream.",
                     cx,
                 )),
         )
@@ -431,12 +431,35 @@ fn render_hostname_override_row(
     busy: bool,
     cx: &mut App,
 ) -> AnyElement {
-    let target_is_ip = entry.target.parse::<std::net::IpAddr>().is_ok();
+    let parsed_target = url::Url::parse(&entry.target).ok().filter(|target| {
+        matches!(target.scheme(), "http" | "https") && target.host_str().is_some()
+    });
+    let target_host = parsed_target
+        .as_ref()
+        .and_then(url::Url::host_str)
+        .unwrap_or(entry.target.as_str())
+        .to_owned();
+    let target_scheme = parsed_target
+        .as_ref()
+        .map(|target| target.scheme().to_ascii_uppercase());
+    let target_is_ip = target_host.parse::<std::net::IpAddr>().is_ok();
+    let target_badge = match (&target_scheme, target_is_ip) {
+        (Some(scheme), true) => format!("{scheme} · IP TARGET"),
+        (Some(scheme), false) => format!("{scheme} · HOST TARGET"),
+        (None, true) => "IP TARGET".to_owned(),
+        (None, false) => "HOST TARGET".to_owned(),
+    };
+    let scheme_behavior = target_scheme
+        .as_deref()
+        .map(|scheme| format!(" Use {scheme}; matching requests may omit their scheme."))
+        .unwrap_or_default();
     let edit_this = this.clone();
     let edit_entry = entry.clone();
     let delete_this = this.clone();
     let delete_hostname = entry.hostname.clone();
     let row_selector = format!("request-proxy-host-{}", entry.hostname);
+    let edit_selector = format!("edit-hostname-override-{}", entry.hostname);
+    let delete_selector = format!("delete-hostname-override-{}", entry.hostname);
 
     h_flex()
         .debug_selector(move || row_selector.clone())
@@ -481,11 +504,7 @@ fn render_hostname_override_row(
                         .child(entry.target.clone()),
                 )
                 .child(request_proxy_badge(
-                    if target_is_ip {
-                        "IP TARGET"
-                    } else {
-                        "HOST TARGET"
-                    },
+                    target_badge,
                     if target_is_ip {
                         cx.theme().blue
                     } else {
@@ -501,64 +520,71 @@ fn render_hostname_override_row(
                 .text_color(cx.theme().muted_foreground)
                 .child(if target_is_ip {
                     format!(
-                        "Connect to {}; keep {} as Host and TLS SNI.",
-                        entry.target, entry.hostname
+                        "Connect to {}; keep {} as HTTP Host and HTTPS SNI.{}",
+                        target_host, entry.hostname, scheme_behavior
                     )
                 } else {
                     format!(
-                        "Connect to {}; use {} as Host and TLS SNI.",
-                        entry.target, entry.target
+                        "Connect to {}; use it as HTTP Host and HTTPS SNI.{}",
+                        target_host, scheme_behavior
                     )
                 }),
         )
         .child(
             h_flex()
-                .w(px(72.))
+                .w(px(152.))
                 .justify_end()
                 .gap_1()
                 .child(
-                    Button::new(SharedString::from(format!(
-                        "edit-hostname-override-{}",
-                        entry.hostname
-                    )))
-                    .icon(IconName::Settings2)
-                    .xsmall()
-                    .ghost()
-                    .tooltip("Edit override")
-                    .disabled(!can_update || busy)
-                    .on_click(move |_, window, cx| {
-                        if let Some(this) = edit_this.upgrade() {
-                            this.update(cx, |this, cx| {
-                                this.open_hostname_override_dialog(
-                                    Some(edit_entry.clone()),
-                                    window,
-                                    cx,
-                                );
-                            });
-                        }
-                    }),
+                    div().debug_selector(move || edit_selector.clone()).child(
+                        Button::new(SharedString::from(format!(
+                            "edit-hostname-override-{}",
+                            entry.hostname
+                        )))
+                        .icon(IconName::Settings2)
+                        .label("Edit")
+                        .xsmall()
+                        .outline()
+                        .tooltip("Edit override")
+                        .disabled(!can_update || busy)
+                        .on_click(move |_, window, cx| {
+                            if let Some(this) = edit_this.upgrade() {
+                                this.update(cx, |this, cx| {
+                                    this.open_hostname_override_dialog(
+                                        Some(edit_entry.clone()),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                        }),
+                    ),
                 )
                 .child(
-                    Button::new(SharedString::from(format!(
-                        "delete-hostname-override-{}",
-                        entry.hostname
-                    )))
-                    .icon(IconName::Delete)
-                    .xsmall()
-                    .ghost()
-                    .tooltip("Delete override")
-                    .disabled(!can_update || busy)
-                    .on_click(move |_, window, cx| {
-                        if let Some(this) = delete_this.upgrade() {
-                            this.update(cx, |this, cx| {
-                                this.request_delete_hostname_override(
-                                    delete_hostname.clone(),
-                                    window,
-                                    cx,
-                                );
-                            });
-                        }
-                    }),
+                    div().debug_selector(move || delete_selector.clone()).child(
+                        Button::new(SharedString::from(format!(
+                            "delete-hostname-override-{}",
+                            entry.hostname
+                        )))
+                        .icon(IconName::Delete)
+                        .label("Delete")
+                        .xsmall()
+                        .ghost()
+                        .danger()
+                        .tooltip("Delete override")
+                        .disabled(!can_update || busy)
+                        .on_click(move |_, window, cx| {
+                            if let Some(this) = delete_this.upgrade() {
+                                this.update(cx, |this, cx| {
+                                    this.request_delete_hostname_override(
+                                        delete_hostname.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                        }),
+                    ),
                 ),
         )
         .into_any_element()
@@ -717,7 +743,7 @@ mod tests {
                                 },
                                 HostnameOverride {
                                     hostname: "legacy.internal".to_owned(),
-                                    target: "gateway.internal".to_owned(),
+                                    target: "https://gateway.internal".to_owned(),
                                 },
                             ],
                         }),
@@ -737,6 +763,14 @@ mod tests {
         assert!(cx.debug_bounds("request-proxy-host-api.internal").is_some());
         assert!(
             cx.debug_bounds("request-proxy-host-legacy.internal")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("edit-hostname-override-api.internal")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("delete-hostname-override-api.internal")
                 .is_some()
         );
     }

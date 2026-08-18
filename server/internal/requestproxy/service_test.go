@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -13,6 +14,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"resolved-server/internal/problem"
 )
 
 func TestBuildBodyPreservesOrderedFormFields(t *testing.T) {
@@ -125,7 +128,7 @@ func TestNormalizeSettingsCanonicalizesHostnamesAndIPTargets(t *testing.T) {
 	settings, err := normalizeSettings(Settings{
 		Mode: ModeServer,
 		HostnameOverrides: []HostnameOverride{
-			{Hostname: "API.Internal.", Target: "Gateway.Internal."},
+			{Hostname: "API.Internal.", Target: "HTTPS://Gateway.Internal./"},
 			{Hostname: "files.internal", Target: "[2001:0db8::1]"},
 		},
 	})
@@ -135,7 +138,7 @@ func TestNormalizeSettingsCanonicalizesHostnamesAndIPTargets(t *testing.T) {
 	if settings.Mode != ModeServer || len(settings.HostnameOverrides) != 2 {
 		t.Fatalf("normalized settings = %+v", settings)
 	}
-	if settings.HostnameOverrides[0] != (HostnameOverride{Hostname: "api.internal", Target: "gateway.internal"}) {
+	if settings.HostnameOverrides[0] != (HostnameOverride{Hostname: "api.internal", Target: "https://gateway.internal"}) {
 		t.Fatalf("hostname target = %+v", settings.HostnameOverrides[0])
 	}
 	if settings.HostnameOverrides[1] != (HostnameOverride{Hostname: "files.internal", Target: "2001:db8::1"}) {
@@ -161,7 +164,19 @@ func TestNormalizeSettingsRejectsAmbiguousOverrides(t *testing.T) {
 		{
 			Mode: ModeServer,
 			HostnameOverrides: []HostnameOverride{
-				{Hostname: "api.internal", Target: "http://gateway.internal"},
+				{Hostname: "api.internal", Target: "ftp://gateway.internal"},
+			},
+		},
+		{
+			Mode: ModeServer,
+			HostnameOverrides: []HostnameOverride{
+				{Hostname: "api.internal", Target: "https://gateway.internal:8443"},
+			},
+		},
+		{
+			Mode: ModeServer,
+			HostnameOverrides: []HostnameOverride{
+				{Hostname: "api.internal", Target: "https://gateway.internal/path"},
 			},
 		},
 	}
@@ -169,6 +184,52 @@ func TestNormalizeSettingsRejectsAmbiguousOverrides(t *testing.T) {
 		if _, err := normalizeSettings(settings); err == nil {
 			t.Fatalf("case %d accepted invalid settings: %+v", index, settings)
 		}
+	}
+}
+
+func TestResolveRequestURLUsesSchemeFromExactOverride(t *testing.T) {
+	overrides := map[string]hostnameOverrideTarget{
+		"alias.internal": {Host: "gateway.internal", Scheme: "https"},
+	}
+	target, err := resolveRequestURL("alias.internal:8443/items?active=true", overrides)
+	if err != nil {
+		t.Fatalf("resolve scheme-less URL: %v", err)
+	}
+	if target.Scheme != "https" || target.Host != "alias.internal:8443" || target.RequestURI() != "/items?active=true" {
+		t.Fatalf("resolved request URL = %s", target.String())
+	}
+
+	request := &http.Request{URL: target, Header: make(http.Header)}
+	request = request.WithContext(context.WithValue(
+		context.Background(),
+		hostnameOverridesContextKey{},
+		overrides,
+	))
+	applyHostnameOriginOverride(request)
+	if request.URL.String() != "https://gateway.internal:8443/items?active=true" {
+		t.Fatalf("overridden request URL = %s", request.URL)
+	}
+	if request.Host != "gateway.internal:8443" {
+		t.Fatalf("overridden HTTP Host = %q", request.Host)
+	}
+}
+
+func TestResolveRequestURLRejectsMissingSchemeWithoutSchemeAwareOverride(t *testing.T) {
+	_, err := resolveRequestURL(
+		"alias.internal/items",
+		map[string]hostnameOverrideTarget{
+			"alias.internal": {Host: "gateway.internal"},
+		},
+	)
+	if err == nil {
+		t.Fatal("scheme-less URL was accepted without an override scheme")
+	}
+	var validationError *problem.Error
+	if !errors.As(err, &validationError) {
+		t.Fatalf("validation error type = %T", err)
+	}
+	if validationError.Fields["url"] != "must include http:// or https:// unless its hostname override supplies a scheme" {
+		t.Fatalf("URL validation reason = %q", validationError.Fields["url"])
 	}
 }
 
@@ -197,7 +258,7 @@ func TestIPAddressOverrideChangesDialTargetButPreservesHTTPAndTLSOrigin(t *testi
 	ctx := context.WithValue(
 		context.Background(),
 		hostnameOverridesContextKey{},
-		map[string]string{"example.com": "127.0.0.1"},
+		map[string]hostnameOverrideTarget{"example.com": {Host: "127.0.0.1"}},
 	)
 	request, err := http.NewRequestWithContext(
 		ctx,
@@ -253,7 +314,7 @@ func TestHostnameTargetBecomesTheHTTPAndTLSOrigin(t *testing.T) {
 	ctx := context.WithValue(
 		context.Background(),
 		hostnameOverridesContextKey{},
-		map[string]string{"alias.internal": "example.com"},
+		map[string]hostnameOverrideTarget{"alias.internal": {Host: "example.com"}},
 	)
 	request, err := http.NewRequestWithContext(
 		ctx,
@@ -295,7 +356,7 @@ func TestProxyBypassIsScopedToTheOverriddenOrigin(t *testing.T) {
 	ctx := context.WithValue(
 		context.Background(),
 		hostnameOverridesContextKey{},
-		map[string]string{"alias.internal": "127.0.0.1"},
+		map[string]hostnameOverrideTarget{"alias.internal": {Host: "127.0.0.1"}},
 	)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://alias.internal/resource", nil)
 	if err != nil {

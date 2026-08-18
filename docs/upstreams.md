@@ -133,11 +133,14 @@ policy endpoint is treated as `local` for compatibility.
 
 Server administrators with `server_settings.read` and
 `server_settings.update` manage this policy and its exact hostname overrides in
-Settings → Request execution. In server mode, an override maps the hostname in
-a request URL to another hostname or IP. An IP target is DNS-style: only the
-dial destination changes, while the requested HTTP Host and TLS server name stay
-intact. A hostname target becomes the outgoing URL hostname, HTTP Host, and TLS
-server name. Both forms preserve the request's original port.
+the Request proxy workspace. In server mode, an override maps the hostname in a
+request URL to another hostname or IP. An IP target is DNS-style: only the dial
+destination changes, while the requested HTTP Host and HTTPS SNI stay intact. A
+hostname target becomes the outgoing URL hostname, HTTP Host, and HTTPS SNI.
+Targets may include an `http://` or `https://` prefix. A target scheme becomes
+the outgoing scheme and allows a request URL with that exact source hostname to
+omit its own scheme. Both forms preserve the request's original port; override
+targets cannot define a port or path.
 
 Pre-request and post-response scripts, variable resolution, response rendering,
 redaction, and history remain local in both modes. Multipart file contents are
