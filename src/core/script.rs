@@ -51,6 +51,7 @@ const PRELUDE: &str = r#"
   function makeHeaders(source, mutable) {
     const rows = source.map(header => ({
       enabled: header.enabled !== false,
+      shared: header.shared !== false,
       name: String(header.name ?? ""),
       value: String(header.value ?? ""),
     }));
@@ -96,14 +97,14 @@ const PRELUDE: &str = r#"
           }
         }
         if (first === -1) {
-          rows.push({ enabled: true, name: headerName, value: String(value) });
+          rows.push({ enabled: true, shared: true, name: headerName, value: String(value) });
         }
       },
       append(name, value) {
         ensureMutable();
         const headerName = String(name).trim();
         if (!headerName) throw new TypeError("header name cannot be empty");
-        rows.push({ enabled: true, name: headerName, value: String(value) });
+        rows.push({ enabled: true, shared: true, name: headerName, value: String(value) });
       },
       remove(name) {
         ensureMutable();

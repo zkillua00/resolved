@@ -99,7 +99,21 @@ impl ApiTester {
                         }
                         RealtimeSignal::Change(change) => {
                             this.realtime_status = RealtimeConnectionStatus::Connected;
-                            this.queue_realtime_refresh(&upstream_id, Some(&change), window, cx);
+                            if change.is_shared_history_change() {
+                                this.handle_realtime_shared_history_change(
+                                    &upstream_id,
+                                    &change,
+                                    window,
+                                    cx,
+                                );
+                            } else {
+                                this.queue_realtime_refresh(
+                                    &upstream_id,
+                                    Some(&change),
+                                    window,
+                                    cx,
+                                );
+                            }
                             cx.notify();
                         }
                         RealtimeSignal::AuthenticationRequired => {
@@ -150,6 +164,38 @@ impl ApiTester {
             self.refresh_server_management(window, cx);
         }
         cx.notify();
+    }
+
+    fn handle_realtime_shared_history_change(
+        &mut self,
+        upstream_id: &str,
+        change: &RealtimeResourceChange,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let WorkspaceProviderId::Upstream {
+            upstream_id: active_upstream_id,
+            workspace_id,
+        } = self.workspace_providers.active_id()
+        else {
+            return;
+        };
+        if active_upstream_id != upstream_id
+            || !change.affects_workspace(workspace_id)
+            || !self
+                .server_management
+                .is_history_visible_for(&change.resource_id)
+        {
+            return;
+        }
+        tracing::debug!(
+            event_id = %change.event_id,
+            action = %change.action,
+            workspace_id,
+            history_owner_id = %change.resource_id,
+            "refreshing visible shared history after a real-time change"
+        );
+        self.refresh_profile_history_realtime(change.resource_id.clone(), window, cx);
     }
 
     fn queue_realtime_refresh(

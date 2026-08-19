@@ -13,6 +13,7 @@ impl ApiTester {
         name: impl Into<SharedString>,
         value: impl Into<SharedString>,
         enabled: bool,
+        shared: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -64,6 +65,7 @@ impl ApiTester {
             name: name_state,
             value: value_state,
             enabled,
+            shared,
             _subscriptions: vec![name_subscription, value_subscription],
         });
         self.refresh_request_dirty_part(RequestDirtyPart::Headers, cx);
@@ -82,7 +84,7 @@ impl ApiTester {
             return;
         };
         if index + 1 == self.headers.len() {
-            self.push_header_row("", "", true, window, cx);
+            self.push_header_row("", "", true, true, window, cx);
         }
         if let Some(input) = self.headers.get(index + 1).map(|row| row.name.clone()) {
             input.read(cx).focus_handle(cx).focus(window);
@@ -101,7 +103,8 @@ impl ApiTester {
         let name = self.headers[index].name.read(cx).value();
         let value = self.headers[index].value.read(cx).value();
         let enabled = self.headers[index].enabled;
-        self.push_header_row(name, value, enabled, window, cx);
+        let shared = self.headers[index].shared;
+        self.push_header_row(name, value, enabled, shared, window, cx);
         if let Some(duplicate) = self.headers.pop() {
             self.headers.insert(index + 1, duplicate);
         }
@@ -132,7 +135,7 @@ impl ApiTester {
     ) {
         self.headers.retain(|row| row.id != row_id);
         if self.headers.is_empty() {
-            self.push_header_row("", "", true, window, cx);
+            self.push_header_row("", "", true, true, window, cx);
         }
         self.refresh_request_dirty_part(RequestDirtyPart::Headers, cx);
         cx.notify();
@@ -297,6 +300,7 @@ impl ApiTester {
                 }
                 let mut header = HeaderEntry::new(name, value);
                 header.enabled = row.enabled;
+                header.shared = row.shared;
                 Some(header)
             })
             .collect()
@@ -591,12 +595,13 @@ impl ApiTester {
                     header.value
                 },
                 header.enabled && !was_redacted,
+                header.shared,
                 window,
                 cx,
             );
         }
         if self.headers.is_empty() {
-            self.push_header_row("", "", true, window, cx);
+            self.push_header_row("", "", true, true, window, cx);
         }
 
         self.body_fields.clear();

@@ -14,6 +14,7 @@ import (
 	"resolved-server/internal/realtime"
 	"resolved-server/internal/requestproxy"
 	"resolved-server/internal/roles"
+	"resolved-server/internal/sharedhistory"
 	"resolved-server/internal/users"
 	"resolved-server/internal/workspaces"
 
@@ -179,6 +180,16 @@ func WithRequestProxy(authService *auth.Service, handler *requestproxy.Handler) 
 			auth.RequirePermission(identity.PermissionRequestsExecute),
 			handler.ExecuteController(),
 		)
+	}
+}
+
+func WithSharedHistory(authService *auth.Service, handler *sharedhistory.Handler) Modifier {
+	return func(app *fiber.App) {
+		protected := app.Group("/api/v1", authService.Middleware())
+		protected.Get("/profiles", handler.ListProfilesController())
+		protected.Get("/profiles/:user_id/history", handler.ListController())
+		protected.Post("/workspaces/:workspace_id/history", handler.CreateController())
+		protected.Delete("/workspaces/:workspace_id/history", handler.DeleteController())
 	}
 }
 

@@ -729,6 +729,12 @@ mod tests {
                 app.server_management.status = ServerManagementStatus::Ready;
                 app.server_management
                     .set_snapshot(UpstreamManagementSnapshot {
+                        profiles: vec![crate::core::ProfileView {
+                            id: current_user.id.clone(),
+                            email: current_user.email.clone(),
+                            display_name: current_user.display_name.clone(),
+                            active: true,
+                        }],
                         current_user,
                         users: None,
                         roles: None,

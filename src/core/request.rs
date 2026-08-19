@@ -29,6 +29,8 @@ pub const STANDARD_HTTP_METHODS: &[&str] =
 pub struct HeaderEntry {
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
+    #[serde(default = "shared_by_default")]
+    pub shared: bool,
     pub name: String,
     pub value: String,
 }
@@ -37,6 +39,7 @@ impl HeaderEntry {
     pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             enabled: true,
+            shared: true,
             name: name.into(),
             value: value.into(),
         }
@@ -44,6 +47,10 @@ impl HeaderEntry {
 }
 
 fn enabled_by_default() -> bool {
+    true
+}
+
+fn shared_by_default() -> bool {
     true
 }
 
@@ -942,6 +949,7 @@ mod tests {
             headers: vec![
                 HeaderEntry {
                     enabled: false,
+                    shared: true,
                     name: "Authorization".to_owned(),
                     value: "secret".to_owned(),
                 },

@@ -56,6 +56,8 @@ WKWebView through `gpui-wry` only when the Preview tab is selected.
 - Restricted captured-HTML preview
 - Newest-first, persisted request history capped at 100 entries
 - Sanitized history snapshots with URL, body, header, error, and secret redaction
+- Server-member profiles with workspace-scoped shared history and permissioned
+  access to other members' requests
 
 ## Self-hosted servers
 
@@ -91,6 +93,18 @@ The active environment and request-tab drafts remain local and are isolated by
 server and workspace. Switching never uploads or exposes a local workspace. See
 [`docs/upstreams.md`](docs/upstreams.md) for the provider and credential-vault
 design.
+
+Requests run from a selected server workspace also produce a bounded shared
+history entry on that server, whether the target exchange runs locally or on
+the server. Settings → Profiles shows the current member's history; viewing
+another member requires `history.read_others` and access to the selected
+workspace. Request and response headers and bodies are included, but every
+request-header row has an independent Share control. Turning Share off omits
+that header and scrubs its value anywhere it is echoed in the URL, request body,
+response headers, response body, or final URL. Known authentication headers are
+still redacted automatically, and multipart file contents and local paths are
+never placed in shared history. An open profile history updates in real time
+through the existing server WebSocket connection.
 
 Server workspaces use the deployment administrator's request-execution policy.
 The safe default runs requests directly from each user's Mac. When an
@@ -194,6 +208,9 @@ History stores the effective outgoing request as a sanitized sent snapshot,
 redacting known secrets and sensitive fields in URLs, headers, JSON/form bodies,
 and errors. Loading history restores that sent snapshot without scripts; use a
 saved request when placeholder-preserving scripts and templates are required.
+For a server workspace, each new local history entry is also uploaded to that
+workspace's shared history after applying the per-header Share choices and the
+same secret redaction. Existing local history is not backfilled.
 Collection and folder deletion use name-confirmation modals; request,
 environment, and history deletion use explicit confirmation.
 

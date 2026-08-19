@@ -705,6 +705,9 @@ impl ApiTester {
             server_management: server_management::ServerManagementState::default(),
             server_management_generation: 0,
             server_management_abort_handle: None,
+            profile_history_generation: 0,
+            profile_history_abort_handle: None,
+            request_history_target: None,
             upstream_client,
             upstream_execution_client,
             upstream_login_open: false,
@@ -763,7 +766,7 @@ impl ApiTester {
             ],
         };
         this.apply_code_editor_settings(window, cx);
-        this.push_header_row("", "", true, window, cx);
+        this.push_header_row("", "", true, true, window, cx);
         this.refresh_variable_intelligence(cx);
         this.loaded_request_baseline = this.request_template(cx);
         this.request_dirty.clear();

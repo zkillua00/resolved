@@ -25,6 +25,7 @@ const (
 	ResourceWorkspace           Resource = "workspace"
 	ResourceCollection          Resource = "collection"
 	ResourceRequest             Resource = "request"
+	ResourceSharedHistory       Resource = "shared_history"
 	ResourceEnvironment         Resource = "environment"
 	ResourceEnvironmentVariable Resource = "environment_variable"
 )

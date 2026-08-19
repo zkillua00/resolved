@@ -143,10 +143,40 @@ omit its own scheme. Both forms preserve the request's original port; override
 targets cannot define a port or path.
 
 Pre-request and post-response scripts, variable resolution, response rendering,
-redaction, and history remain local in both modes. Multipart file contents are
-materialized only for server execution, while their local paths never leave the
-Mac. The outer bearer session authenticates Resolved and is not forwarded to
-the target request.
+and the full local history flow remain on the Mac in both modes. After a request
+in a server workspace completes or fails, Resolved also uploads a bounded,
+sanitized history snapshot to that workspace. This happens independently of
+whether execution mode is `local` or `server`; existing local entries are not
+backfilled.
+
+Settings → Profiles lists authenticated server members. Everyone can open their
+own shared history. Opening another member's history requires the deployment
+permission `history.read_others`, and the viewer must also have effective access
+to the currently selected workspace. Permission or workspace changes discard
+already loaded cross-user history in the desktop.
+
+Shared entries include the resolved request URL, request and response headers,
+request and response bodies, timing/status metadata, and failures. Every request
+header row has its own Share checkbox, defaulting on and persisted with the
+request. A row with Share off is omitted, and its value is treated as a secret
+when sanitizing the rest of the request and response. This handles arbitrary
+API-specific credential headers rather than relying only on a fixed
+`Authorization` rule. Known sensitive request and response headers are still
+redacted automatically. File body fields retain only their field name; local
+paths and file bytes are never stored as shared history. Request and response
+bodies are capped at 1 MiB each, the server retains the newest 100 entries per
+member and workspace, and each profile view loads the newest 20 entries.
+
+The server emits a `shared_history` WebSocket invalidation after an upload or
+clear. It resolves the audience to the history owner plus users who have both
+effective access to that workspace and `history.read_others`; a permission or
+workspace grant alone is insufficient. When the affected profile history is
+open, Resolved reloads its newest entries through the authorized REST endpoint
+and keeps the selected entry when it still exists. History bodies are never
+placed in the WebSocket message itself.
+
+The outer bearer session authenticates Resolved and is not forwarded to the
+target request.
 
 Request-tab drafts remain device-local and are persisted under their
 server/workspace identity. Forgetting a server removes its encrypted session,

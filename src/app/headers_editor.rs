@@ -82,6 +82,17 @@ impl ApiTester {
                     )
                     .child(
                         div()
+                            .w(px(64.))
+                            .h_full()
+                            .border_l_1()
+                            .border_color(cx.api_outline_variant())
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child("SHARE"),
+                    )
+                    .child(
+                        div()
                             .w(px(44.))
                             .h_full()
                             .border_l_1()
@@ -109,7 +120,7 @@ impl ApiTester {
                                     .small()
                                     .ghost()
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.push_header_row("", "", true, window, cx);
+                                        this.push_header_row("", "", true, true, window, cx);
                                         if let Some(input) =
                                             this.headers.last().map(|row| row.name.clone())
                                         {

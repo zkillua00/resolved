@@ -45,6 +45,10 @@ impl RealtimeResourceChange {
     pub fn is_identity_change(&self) -> bool {
         matches!(self.resource.as_str(), "user" | "role")
     }
+
+    pub fn is_shared_history_change(&self) -> bool {
+        self.resource == "shared_history"
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -285,6 +289,24 @@ mod tests {
         assert_eq!(envelope.data.resource, "request");
         assert!(envelope.data.affects_workspace("workspace-1"));
         assert!(!envelope.data.is_identity_change());
+        assert!(!envelope.data.is_shared_history_change());
+
+        let history: RealtimeEnvelope = serde_json::from_str(
+            r#"{
+                "command":"resource.changed",
+                "data":{
+                    "event_id":"event-history",
+                    "resource":"shared_history",
+                    "action":"updated",
+                    "resource_id":"user-1",
+                    "workspace_id":"workspace-1",
+                    "occurred_at":"2026-08-11T10:00:00Z"
+                }
+            }"#,
+        )
+        .unwrap();
+        assert!(history.data.is_shared_history_change());
+        assert_eq!(history.data.resource_id, "user-1");
     }
 
     #[tokio::test]

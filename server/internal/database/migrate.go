@@ -5,6 +5,7 @@ import (
 
 	"resolved-server/internal/identity"
 	"resolved-server/internal/requestproxy"
+	"resolved-server/internal/sharedhistory"
 	"resolved-server/internal/workspaces"
 
 	"gorm.io/gorm"
@@ -28,6 +29,7 @@ func MigrateAndSeed(db *gorm.DB) error {
 		&workspaces.Environment{},
 		&workspaces.EnvironmentVariable{},
 		&workspaces.EnvironmentVariableValue{},
+		&sharedhistory.Entry{},
 	); err != nil {
 		return fmt.Errorf("migrate server schema: %w", err)
 	}

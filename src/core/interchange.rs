@@ -3674,6 +3674,7 @@ mod tests {
                     HeaderEntry::new("Authorization", "Bearer {{token}}"),
                     HeaderEntry {
                         enabled: false,
+                        shared: true,
                         name: "X-Disabled".to_owned(),
                         value: "kept".to_owned(),
                     },

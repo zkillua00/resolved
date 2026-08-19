@@ -3,12 +3,15 @@ use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::BTreeSet;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, Utc};
 use reqwest::{Client, Method, StatusCode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use url::Url;
 
+use super::history::{request_for_shared_history, response_for_shared_history};
+use super::{BodyFieldKind, RequestDraft, ResponseData};
 use super::{UpstreamCollectionView, UpstreamUserSummary, UpstreamWorkspaceView};
 
 const MANAGEMENT_RESPONSE_LIMIT_BYTES: usize = 32 * 1024 * 1024;
@@ -38,6 +41,7 @@ pub const REQUESTS_UPDATE: &str = "requests.update";
 pub const REQUESTS_DELETE: &str = "requests.delete";
 pub const SERVER_SETTINGS_READ: &str = "server_settings.read";
 pub const SERVER_SETTINGS_UPDATE: &str = "server_settings.update";
+pub const HISTORY_READ_OTHERS: &str = "history.read_others";
 pub const ENVIRONMENTS_READ: &str = "environments.read";
 pub const ENVIRONMENTS_CREATE: &str = "environments.create";
 pub const ENVIRONMENTS_UPDATE: &str = "environments.update";
@@ -55,6 +59,219 @@ pub enum RequestExecutionMode {
 pub struct HostnameOverride {
     pub hostname: String,
     pub target: String,
+}
+
+const MAX_SHARED_HISTORY_BODY_BYTES: usize = 1024 * 1024;
+const MAX_SHARED_HISTORY_HEADER_BYTES: usize = 512 * 1024;
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct ProfileView {
+    pub id: String,
+    pub email: String,
+    pub display_name: String,
+    pub active: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SharedHistoryHeader {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SharedHistoryBodyField {
+    pub enabled: bool,
+    pub name: String,
+    pub value: String,
+    pub kind: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SharedHistoryRequest {
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<SharedHistoryHeader>,
+    pub body: String,
+    pub body_mode: String,
+    pub raw_body_language: String,
+    pub body_fields: Vec<SharedHistoryBodyField>,
+    pub body_truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SharedHistoryResponse {
+    pub status: u16,
+    pub status_text: String,
+    pub http_version: String,
+    pub final_url: String,
+    pub headers: Vec<SharedHistoryHeader>,
+    pub body_base64: String,
+    pub body_truncated: bool,
+    #[serde(default)]
+    pub content_type: String,
+    pub duration_micros: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct SharedHistoryEntry {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+    pub request: SharedHistoryRequest,
+    pub response: Option<SharedHistoryResponse>,
+    #[serde(default)]
+    pub error: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SharedHistoryUpload {
+    client_entry_id: String,
+    created_at: DateTime<Utc>,
+    request: SharedHistoryRequest,
+    response: Option<SharedHistoryResponse>,
+    error: String,
+}
+
+impl SharedHistoryUpload {
+    pub fn completed(
+        client_entry_id: String,
+        created_at: DateTime<Utc>,
+        request: &RequestDraft,
+        response: &ResponseData,
+        sensitive_values: &[String],
+    ) -> Self {
+        let (request, secrets) = request_for_shared_history(request, sensitive_values);
+        let response_body_truncated = response.body.len() > MAX_SHARED_HISTORY_BODY_BYTES;
+        let mut response = response.clone();
+        let redaction_overlap = secrets
+            .iter()
+            .map(|value| value.len().saturating_mul(3))
+            .max()
+            .unwrap_or(0)
+            .saturating_sub(1);
+        let prefix_len = response
+            .body
+            .len()
+            .min(MAX_SHARED_HISTORY_BODY_BYTES.saturating_add(redaction_overlap));
+        response.body = response.body.slice(..prefix_len);
+        let response = response_for_shared_history(&response, &secrets);
+        Self {
+            client_entry_id,
+            created_at,
+            request: shared_request(request),
+            response: Some(shared_response(response, response_body_truncated)),
+            error: String::new(),
+        }
+    }
+
+    pub fn failed(
+        client_entry_id: String,
+        created_at: DateTime<Utc>,
+        request: &RequestDraft,
+        error: &str,
+        sensitive_values: &[String],
+    ) -> Self {
+        let (request, secrets) = request_for_shared_history(request, sensitive_values);
+        Self {
+            client_entry_id,
+            created_at,
+            request: shared_request(request),
+            response: None,
+            error: truncate_shared_text(
+                &super::template::redact_secret_values(error, &secrets),
+                65536,
+            )
+            .0,
+        }
+    }
+}
+
+fn shared_request(mut request: RequestDraft) -> SharedHistoryRequest {
+    let (body, mut body_truncated) =
+        truncate_shared_text(&request.body, MAX_SHARED_HISTORY_BODY_BYTES);
+    let mut remaining = MAX_SHARED_HISTORY_BODY_BYTES;
+    let omitted_fields = request.body_fields.len() > 256;
+    let mut fields = Vec::new();
+    for field in request.body_fields.drain(..).take(256) {
+        let name = truncate_shared_text(&field.name, 4096).0;
+        let (value, truncated) = if field.kind == BodyFieldKind::File {
+            (String::new(), false)
+        } else {
+            truncate_shared_text(&field.value, remaining)
+        };
+        remaining = remaining.saturating_sub(value.len());
+        body_truncated |= truncated;
+        fields.push(SharedHistoryBodyField {
+            enabled: field.enabled,
+            name,
+            value,
+            kind: field.kind.as_db_str().to_owned(),
+        });
+    }
+    body_truncated |= omitted_fields;
+    SharedHistoryRequest {
+        method: truncate_shared_text(&request.method, 64).0,
+        url: truncate_shared_text(&request.url, 16384).0,
+        headers: shared_headers(
+            request
+                .headers
+                .into_iter()
+                .map(|header| (header.name, header.value)),
+        ),
+        body,
+        body_mode: request.body_mode.as_db_str().to_owned(),
+        raw_body_language: request.raw_body_language.as_db_str().to_owned(),
+        body_fields: fields,
+        body_truncated,
+    }
+}
+
+fn shared_response(response: ResponseData, body_was_truncated: bool) -> SharedHistoryResponse {
+    let body_len = response.body.len().min(MAX_SHARED_HISTORY_BODY_BYTES);
+    SharedHistoryResponse {
+        status: response.status,
+        status_text: truncate_shared_text(&response.status_text, 120).0,
+        http_version: truncate_shared_text(&response.http_version, 32).0,
+        final_url: truncate_shared_text(&response.final_url, 16384).0,
+        headers: shared_headers(
+            response
+                .headers
+                .into_iter()
+                .map(|header| (header.name, header.value)),
+        ),
+        body_base64: BASE64_STANDARD.encode(&response.body[..body_len]),
+        body_truncated: body_was_truncated || response.body.len() > body_len,
+        content_type: truncate_shared_text(response.content_type.as_deref().unwrap_or(""), 512).0,
+        duration_micros: response.duration.as_micros().min(i64::MAX as u128) as u64,
+    }
+}
+
+fn shared_headers(headers: impl IntoIterator<Item = (String, String)>) -> Vec<SharedHistoryHeader> {
+    let mut remaining = MAX_SHARED_HISTORY_HEADER_BYTES;
+    let mut shared = Vec::new();
+    for (name, value) in headers.into_iter().take(256) {
+        if remaining == 0 {
+            break;
+        }
+        let name = truncate_shared_text(&name, 4096.min(remaining)).0;
+        remaining = remaining.saturating_sub(name.len());
+        let value = truncate_shared_text(&value, 65536.min(remaining)).0;
+        remaining = remaining.saturating_sub(value.len());
+        if !name.is_empty() {
+            shared.push(SharedHistoryHeader { name, value });
+        }
+    }
+    shared
+}
+
+fn truncate_shared_text(value: &str, max_bytes: usize) -> (String, bool) {
+    if value.len() <= max_bytes {
+        return (value.to_owned(), false);
+    }
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (value[..end].to_owned(), true)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -115,6 +332,7 @@ impl ManagementUser {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpstreamManagementSnapshot {
     pub current_user: ManagementUser,
+    pub profiles: Vec<ProfileView>,
     pub users: Option<Vec<ManagementUser>>,
     pub roles: Option<Vec<ManagementRole>>,
     pub permissions: Option<Vec<ManagementPermission>>,
@@ -223,6 +441,7 @@ pub async fn load_upstream_management(
             Ok(None)
         }
     };
+    let profiles_request = get(client, base_url, bearer_token, "api/v1/profiles");
     let roles_request = async {
         if current_user.has_permission(ROLES_READ) {
             get(client, base_url, bearer_token, "api/v1/roles")
@@ -268,7 +487,8 @@ pub async fn load_upstream_management(
         }
     };
 
-    let (users, roles, permissions, workspaces, request_execution_settings) = futures::try_join!(
+    let (profiles, users, roles, permissions, workspaces, request_execution_settings) = futures::try_join!(
+        profiles_request,
         users_request,
         roles_request,
         permissions_request,
@@ -277,12 +497,71 @@ pub async fn load_upstream_management(
     )?;
     Ok(UpstreamManagementSnapshot {
         current_user,
+        profiles,
         users,
         roles,
         permissions,
         workspaces,
         request_execution_settings,
     })
+}
+
+pub async fn list_shared_history(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    user_id: &str,
+) -> Result<Vec<SharedHistoryEntry>, UpstreamManagementError> {
+    let mut endpoint = endpoint(base_url, &format!("api/v1/profiles/{user_id}/history"))?;
+    endpoint
+        .query_pairs_mut()
+        .append_pair("workspace_id", workspace_id);
+    let response = client
+        .get(endpoint)
+        .bearer_auth(bearer_token)
+        .send()
+        .await
+        .map_err(UpstreamManagementError::Transport)?;
+    parse_response(response).await
+}
+
+pub async fn upload_shared_history(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    upload: &SharedHistoryUpload,
+) -> Result<SharedHistoryEntry, UpstreamManagementError> {
+    send(
+        client,
+        base_url,
+        bearer_token,
+        Method::POST,
+        &format!("api/v1/workspaces/{workspace_id}/history"),
+        upload,
+    )
+    .await
+}
+
+pub async fn delete_shared_history(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+) -> Result<(), UpstreamManagementError> {
+    let endpoint = endpoint(
+        base_url,
+        &format!("api/v1/workspaces/{workspace_id}/history"),
+    )?;
+    let response = client
+        .delete(endpoint)
+        .bearer_auth(bearer_token)
+        .send()
+        .await
+        .map_err(UpstreamManagementError::Transport)?;
+    let _: BTreeMap<String, bool> = parse_response(response).await?;
+    Ok(())
 }
 
 pub async fn update_request_execution_settings(
@@ -572,8 +851,9 @@ fn format_api_error(error: ApiErrorBody) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::time::Duration;
 
+    use super::*;
     #[test]
     fn effective_permissions_are_deduplicated_across_roles() {
         let permission = ManagementPermission {
@@ -621,6 +901,105 @@ mod tests {
         assert_eq!(
             message,
             "request validation failed (email: is required, password: must be at least 12 characters)"
+        );
+    }
+
+    #[test]
+    fn shared_history_upload_preserves_bodies_and_omits_private_headers() {
+        let private_value = "custom-partner-credential";
+        let request = RequestDraft {
+            method: "POST".to_owned(),
+            url: format!("https://example.test/items?echo={private_value}"),
+            headers: vec![super::super::HeaderEntry {
+                enabled: true,
+                shared: false,
+                name: "X-Partner-Credential".to_owned(),
+                value: private_value.to_owned(),
+            }],
+            body: format!(r#"{{"echo":"{private_value}"}}"#),
+            ..RequestDraft::default()
+        };
+        let response = ResponseData {
+            status: 201,
+            status_text: "Created".to_owned(),
+            http_version: "HTTP/2".to_owned(),
+            final_url: "https://example.test/items/1".to_owned(),
+            headers: vec![super::super::request::ResponseHeader {
+                name: "Content-Type".to_owned(),
+                value: "application/json".to_owned(),
+            }],
+            content_type: Some("application/json".to_owned()),
+            body: br#"{"ok":true}"#.to_vec().into(),
+            duration: Duration::from_micros(1250),
+        };
+
+        let upload = SharedHistoryUpload::completed(
+            "entry-1".to_owned(),
+            Utc::now(),
+            &request,
+            &response,
+            &[],
+        );
+        let json = serde_json::to_value(&upload).unwrap();
+
+        assert_eq!(json["client_entry_id"], "entry-1");
+        assert_eq!(json["request"]["headers"], serde_json::json!([]));
+        assert!(!json.to_string().contains(private_value));
+        assert_eq!(json["response"]["status"], 201);
+        assert_eq!(json["response"]["duration_micros"], 1250);
+        assert_eq!(
+            json["response"]["body_base64"],
+            BASE64_STANDARD.encode(br#"{"ok":true}"#)
+        );
+    }
+
+    #[test]
+    fn shared_history_redacts_a_private_header_value_across_the_body_limit() {
+        let private_value = "boundary-private-header-value";
+        let request = RequestDraft {
+            headers: vec![super::super::HeaderEntry {
+                enabled: true,
+                shared: false,
+                name: "X-Partner-Credential".to_owned(),
+                value: private_value.to_owned(),
+            }],
+            ..RequestDraft::default()
+        };
+        let mut body = vec![b'x'; MAX_SHARED_HISTORY_BODY_BYTES - 8];
+        body.extend_from_slice(private_value.as_bytes());
+        let response = ResponseData {
+            status: 200,
+            status_text: "OK".to_owned(),
+            http_version: "HTTP/2".to_owned(),
+            final_url: "https://example.test".to_owned(),
+            headers: Vec::new(),
+            content_type: Some("application/octet-stream".to_owned()),
+            body: body.into(),
+            duration: Duration::from_millis(1),
+        };
+
+        let upload = SharedHistoryUpload::completed(
+            "entry-boundary".to_owned(),
+            Utc::now(),
+            &request,
+            &response,
+            &[],
+        );
+        let shared = upload.response.expect("completed upload has a response");
+        let decoded = BASE64_STANDARD.decode(shared.body_base64).unwrap();
+
+        assert!(shared.body_truncated);
+        assert!(decoded.len() <= MAX_SHARED_HISTORY_BODY_BYTES);
+        assert!(
+            !decoded
+                .windows(private_value.len())
+                .any(|value| value == private_value.as_bytes())
+        );
+        let boundary_prefix = &private_value.as_bytes()[..8];
+        assert!(
+            decoded
+                .windows(boundary_prefix.len())
+                .all(|value| value != boundary_prefix)
         );
     }
 }

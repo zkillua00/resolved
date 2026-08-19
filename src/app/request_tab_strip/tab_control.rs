@@ -217,7 +217,11 @@ impl WorkspaceTabControl {
                 )
             })
             .when(can_reorder, |this| {
-                this.child(render_workspace_tab_drop_overlay(drop_target, self.pane_id, cx))
+                this.child(render_workspace_tab_drop_overlay(
+                    drop_target,
+                    self.pane_id,
+                    cx,
+                ))
             })
             .into_any_element()
     }

@@ -31,12 +31,116 @@ impl ApiTester {
             Ok(()) => {
                 self.history = candidate;
                 self.history_warning = None;
+                self.delete_own_shared_history(cx);
             }
             Err(error) => {
                 self.history_warning = Some(format!("History could not be cleared: {error}"));
             }
         }
         cx.notify();
+    }
+
+    pub(super) fn upload_shared_history_entry(
+        &mut self,
+        upload: SharedHistoryUpload,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = self.request_history_target.take() else {
+            return;
+        };
+        let vault = self.credential_vault.clone();
+        let client = self.upstream_client.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let upstream_id = target.upstream_id.clone();
+        let task = self.runtime.spawn(async move {
+            let credential = runtime
+                .spawn_blocking(move || vault.load_upstream(&upstream_id))
+                .await
+                .map_err(|error| format!("Could not open the saved session: {error}"))?
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Log in to this server again.".to_owned())?;
+            if credential.expires_at <= Utc::now() {
+                return Err("Log in to this server again.".to_owned());
+            }
+            upload_shared_history(
+                &client,
+                &target.base_url,
+                credential.bearer_token(),
+                &target.workspace_id,
+                &upload,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                let error = match result {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(error),
+                    Err(error) => Some(format!("the background task failed: {error}")),
+                };
+                if let Some(error) = error {
+                    this.history_warning = Some(format!(
+                        "History was saved locally but could not be shared: {error}"
+                    ));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn delete_own_shared_history(&mut self, cx: &mut Context<Self>) {
+        let Ok(target) = self.active_upstream_workspace() else {
+            return;
+        };
+        let vault = self.credential_vault.clone();
+        let client = self.upstream_client.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let upstream_id = target.upstream_id.clone();
+        let task = self.runtime.spawn(async move {
+            let credential = runtime
+                .spawn_blocking(move || vault.load_upstream(&upstream_id))
+                .await
+                .map_err(|error| format!("Could not open the saved session: {error}"))?
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Log in to this server again.".to_owned())?;
+            delete_shared_history(
+                &client,
+                &target.base_url,
+                credential.bearer_token(),
+                &target.workspace_id,
+            )
+            .await
+            .map_err(|error| error.to_string())
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                let error = match result {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(error),
+                    Err(error) => Some(format!("the background task failed: {error}")),
+                };
+                if let Some(error) = error {
+                    this.history_warning = Some(format!(
+                        "Local history was cleared, but shared history could not be cleared: {error}"
+                    ));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(super) fn load_history(

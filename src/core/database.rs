@@ -34,7 +34,7 @@ use super::{
 #[cfg(test)]
 use super::request_tabs::RequestTabGroupColor;
 
-const CURRENT_SCHEMA_VERSION: i64 = 8;
+const CURRENT_SCHEMA_VERSION: i64 = 9;
 static NEXT_LOCAL_WORKSPACE_ID: AtomicU64 = AtomicU64::new(0);
 const LEGACY_HISTORY_FILE_VERSION: u32 = 1;
 const LEGACY_HISTORY_IMPORT_MARKER: &str = "history-json-v1";
@@ -380,6 +380,14 @@ CREATE TABLE upstream_request_tab_state (
     version        INTEGER NOT NULL CHECK (version >= 1),
     PRIMARY KEY(upstream_id, workspace_id)
 );
+"#;
+
+const MIGRATION_9: &str = r#"
+ALTER TABLE saved_request_headers
+ADD COLUMN shared INTEGER NOT NULL DEFAULT 1 CHECK (shared IN (0, 1));
+
+ALTER TABLE history_headers
+ADD COLUMN shared INTEGER NOT NULL DEFAULT 1 CHECK (shared IN (0, 1));
 "#;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1243,6 +1251,7 @@ fn migrate(connection: &mut Connection) -> Result<(), DatabaseError> {
             6 => transaction.execute_batch(MIGRATION_6)?,
             7 => transaction.execute_batch(MIGRATION_7)?,
             8 => transaction.execute_batch(MIGRATION_8)?,
+            9 => transaction.execute_batch(MIGRATION_9)?,
             _ => {
                 return Err(DatabaseError::UnsupportedSchemaVersion {
                     found: next,
@@ -1668,11 +1677,12 @@ fn sync_saved_request_headers(
     for (position, header) in headers.iter().enumerate() {
         transaction.execute(
             "INSERT INTO saved_request_headers(
-                saved_request_id, position, enabled, name, value,
+                saved_request_id, position, enabled, shared, name, value,
                 created_at, updated_at, version
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, 1)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 1)
              ON CONFLICT(saved_request_id, position) DO UPDATE SET
                 enabled = excluded.enabled,
+                shared = excluded.shared,
                 name = excluded.name,
                 value = excluded.value,
                 updated_at = excluded.updated_at,
@@ -1681,6 +1691,7 @@ fn sync_saved_request_headers(
                 saved_request_id,
                 to_i64(position, "saved request header position")?,
                 bool_to_i64(header.enabled),
+                bool_to_i64(header.shared),
                 &header.name,
                 &header.value,
                 saved_at,
@@ -1850,7 +1861,7 @@ fn load_workspace_tx(
         {
             let headers = load_headers(
                 transaction,
-                "SELECT enabled, name, value
+                "SELECT enabled, shared, name, value
                  FROM saved_request_headers
                  WHERE saved_request_id = ?1
                  ORDER BY position ASC",
@@ -2147,11 +2158,12 @@ fn sync_history_headers(
     for (position, header) in headers.iter().enumerate() {
         transaction.execute(
             "INSERT INTO history_headers(
-                history_entry_id, position, enabled, name, value,
+                history_entry_id, position, enabled, shared, name, value,
                 created_at, updated_at, version
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, 1)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 1)
              ON CONFLICT(history_entry_id, position) DO UPDATE SET
                 enabled = excluded.enabled,
+                shared = excluded.shared,
                 name = excluded.name,
                 value = excluded.value,
                 updated_at = excluded.updated_at,
@@ -2160,6 +2172,7 @@ fn sync_history_headers(
                 history_entry_id,
                 to_i64(position, "history header position")?,
                 bool_to_i64(header.enabled),
+                bool_to_i64(header.shared),
                 &header.name,
                 &header.value,
                 saved_at,
@@ -2258,7 +2271,7 @@ fn load_history_tx(
     for raw in raw_entries {
         let headers = load_headers(
             transaction,
-            "SELECT enabled, name, value
+            "SELECT enabled, shared, name, value
              FROM history_headers
              WHERE history_entry_id = ?1
              ORDER BY position ASC",
@@ -2361,17 +2374,19 @@ fn load_headers(
             .query_map(params![parent_id], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?
     };
     raw_headers
         .into_iter()
-        .map(|(enabled, name, value)| {
+        .map(|(enabled, shared, name, value)| {
             Ok(HeaderEntry {
                 enabled: bool_from_i64(enabled, bool_field)?,
+                shared: bool_from_i64(shared, "header shared")?,
                 name,
                 value,
             })
@@ -2759,6 +2774,7 @@ mod tests {
                                 HeaderEntry::new("Content-Type", "application/json"),
                                 HeaderEntry {
                                     enabled: false,
+                                    shared: false,
                                     name: "X-Debug".to_owned(),
                                     value: "off".to_owned(),
                                 },
@@ -2860,7 +2876,15 @@ mod tests {
                     request: RequestDraft {
                         method: "POST".to_owned(),
                         url: "https://example.test/users".to_owned(),
-                        headers: vec![HeaderEntry::new("Content-Type", "application/json")],
+                        headers: vec![
+                            HeaderEntry::new("Content-Type", "application/json"),
+                            HeaderEntry {
+                                enabled: true,
+                                shared: false,
+                                name: "X-Private-History".to_owned(),
+                                value: "do-not-share".to_owned(),
+                            },
+                        ],
                         body: r#"{"name":"Ada"}"#.to_owned(),
                         body_mode: BodyMode::FormUrlEncoded,
                         raw_body_language: RawBodyLanguage::Yaml,
@@ -3448,6 +3472,119 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 1, "migration must create {table}");
         }
+    }
+
+    #[test]
+    fn migrates_v8_headers_as_shared_by_default() {
+        let (_directory, store) = database();
+        let connection = Connection::open(store.path()).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE schema_version (
+                    singleton   INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    version     INTEGER NOT NULL CHECK (version >= 0),
+                    updated_at  INTEGER NOT NULL
+                 );
+                 INSERT INTO schema_version(singleton, version, updated_at)
+                 VALUES (1, 8, 1700000000000000);",
+            )
+            .unwrap();
+        for migration in [
+            MIGRATION_1,
+            MIGRATION_2,
+            MIGRATION_3,
+            MIGRATION_4,
+            MIGRATION_5,
+            MIGRATION_6,
+            MIGRATION_7,
+            MIGRATION_8,
+        ] {
+            connection.execute_batch(migration).unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO collections(
+                    id, name, position, created_at, updated_at, version, workspace_id
+                 ) VALUES ('v8-collection', 'V8', 0, ?1, ?1, 1, 'local-default')",
+                params![1_700_000_000_000_001_i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO saved_requests(
+                    id, collection_id, name, position, method, url, body,
+                    pre_request, post_response, created_at, updated_at, version,
+                    body_mode, raw_body_language, folder_id
+                 ) VALUES (
+                    'v8-request', 'v8-collection', 'V8 request', 0, 'GET',
+                    'https://example.test', '', '', '', ?1, ?1, 1, 'none', 'text', NULL
+                 )",
+                params![1_700_000_000_000_002_i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO saved_request_headers(
+                    saved_request_id, position, enabled, name, value,
+                    created_at, updated_at, version
+                 ) VALUES ('v8-request', 0, 1, 'Accept', 'application/json', ?1, ?1, 1)",
+                params![1_700_000_000_000_003_i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO history_entries(
+                    id, position, created_at, method, url, body, error,
+                    response_status, response_status_text, response_duration_ms,
+                    response_size_bytes, response_content_type, updated_at, version,
+                    body_mode, raw_body_language
+                 ) VALUES (
+                    'v8-history', 0, ?1, 'GET', 'https://example.test', '', NULL,
+                    NULL, NULL, NULL, NULL, NULL, ?1, 1, 'none', 'text'
+                 )",
+                params![1_700_000_000_000_004_i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO history_headers(
+                    history_entry_id, position, enabled, name, value,
+                    created_at, updated_at, version
+                 ) VALUES ('v8-history', 0, 1, 'Accept', 'application/json', ?1, ?1, 1)",
+                params![1_700_000_000_000_005_i64],
+            )
+            .unwrap();
+        drop(connection);
+
+        store.initialize().unwrap();
+        let workspace = store.load_workspace().unwrap();
+        let request = &workspace
+            .saved_request("v8-request")
+            .expect("v8 request survives migration")
+            .1
+            .definition
+            .request;
+        assert!(request.headers[0].shared);
+        let history = store.load_history().unwrap();
+        assert!(history.entries()[0].request.headers[0].shared);
+
+        let connection = store.open_connection().unwrap();
+        let saved_shared: i64 = connection
+            .query_row(
+                "SELECT shared FROM saved_request_headers WHERE saved_request_id = 'v8-request'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let history_shared: i64 = connection
+            .query_row(
+                "SELECT shared FROM history_headers WHERE history_entry_id = 'v8-history'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((saved_shared, history_shared), (1, 1));
     }
 
     #[test]

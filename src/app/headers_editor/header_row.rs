@@ -5,6 +5,7 @@ pub(in crate::app) struct HeaderRow {
     pub(in crate::app) name: Entity<InputState>,
     pub(in crate::app) value: Entity<InputState>,
     pub(in crate::app) enabled: bool,
+    pub(in crate::app) shared: bool,
     pub(in crate::app) _subscriptions: Vec<Subscription>,
 }
 
@@ -168,6 +169,35 @@ impl ApiTester {
                             .small()
                             .size_full()
                             .px_3(),
+                    ),
+            )
+            .child(
+                div()
+                    .id(("header-shared-cell", id))
+                    .w(px(64.))
+                    .h_full()
+                    .flex_shrink_0()
+                    .border_l_1()
+                    .border_color(cx.api_outline_variant())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .tooltip(|window, cx| {
+                        Tooltip::new("Include this header in server-shared history")
+                            .build(window, cx)
+                    })
+                    .child(
+                        Checkbox::new(("header-shared", id))
+                            .checked(row.shared)
+                            .small()
+                            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                                if let Some(row) = this.headers.iter_mut().find(|row| row.id == id)
+                                {
+                                    row.shared = *checked;
+                                    this.refresh_request_dirty_part(RequestDirtyPart::Headers, cx);
+                                    cx.notify();
+                                }
+                            })),
                     ),
             )
             .child(

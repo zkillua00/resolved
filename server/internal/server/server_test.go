@@ -24,6 +24,7 @@ import (
 	"resolved-server/internal/roles"
 	"resolved-server/internal/security"
 	"resolved-server/internal/server"
+	"resolved-server/internal/sharedhistory"
 	"resolved-server/internal/users"
 	"resolved-server/internal/workspaces"
 
@@ -458,6 +459,243 @@ func TestAuthenticatedWebsocketPublishesResourceChanges(t *testing.T) {
 		published.Data.Action != resourceevents.ActionCreated ||
 		published.Data.ResourceID != created.ID {
 		t.Fatalf("unexpected resource change: %+v", published.Data)
+	}
+
+	request[sharedhistory.EntryView](
+		t,
+		app,
+		http.MethodPost,
+		"/api/v1/workspaces/"+created.ID+"/history",
+		ownerLogin.Token,
+		map[string]any{
+			"client_entry_id": "realtime-history-1",
+			"created_at":      time.Now().UTC(),
+			"request": map[string]any{
+				"method": "GET", "url": "https://example.test",
+				"body_mode": "none",
+			},
+		},
+		fiber.StatusCreated,
+	)
+	if err := client.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set shared history websocket deadline: %v", err)
+	}
+	if err := client.ReadJSON(&published); err != nil {
+		t.Fatalf("read shared history change: %v", err)
+	}
+	if published.Data.Resource != resourceevents.ResourceSharedHistory ||
+		published.Data.Action != resourceevents.ActionUpdated ||
+		published.Data.ResourceID != owner.ID ||
+		published.Data.WorkspaceID != created.ID {
+		t.Fatalf("unexpected shared history change: %+v", published.Data)
+	}
+}
+
+func TestSharedHistoryProfilesAndAuthorization(t *testing.T) {
+	app, usersService, _, closeDatabase := newTestServer(t)
+	t.Cleanup(closeDatabase)
+
+	owner, err := usersService.BootstrapOwner(t.Context(), users.CreateInput{
+		Email:       "owner",
+		DisplayName: "Owner",
+		Password:    ownerPassword,
+	})
+	if err != nil {
+		t.Fatalf("bootstrap owner: %v", err)
+	}
+	ownerLogin := login(t, app, owner.Email, ownerPassword)
+	workspace := request[[]workspaces.WorkspaceView](
+		t, app, http.MethodGet, "/api/v1/workspaces", ownerLogin.Token, nil, fiber.StatusOK,
+	).Data[0]
+
+	role := request[identity.RoleView](t, app, http.MethodPost, "/api/v1/roles", ownerLogin.Token, map[string]any{
+		"name":            "History member",
+		"description":     "Can use personal shared history",
+		"permission_keys": []string{},
+	}, fiber.StatusCreated).Data
+	member := request[identity.UserView](t, app, http.MethodPost, "/api/v1/users", ownerLogin.Token, map[string]any{
+		"email":        "history-member",
+		"display_name": "History Member",
+		"password":     collaboratorPassword,
+		"role_ids":     []string{role.ID},
+	}, fiber.StatusCreated).Data
+	request[workspaces.WorkspaceView](
+		t,
+		app,
+		http.MethodPut,
+		"/api/v1/workspaces/"+workspace.ID+"/users",
+		ownerLogin.Token,
+		map[string]any{"user_ids": []string{owner.ID, member.ID}},
+		fiber.StatusOK,
+	)
+	memberLogin := login(t, app, member.Email, collaboratorPassword)
+
+	profiles := request[[]sharedhistory.ProfileView](
+		t, app, http.MethodGet, "/api/v1/profiles", memberLogin.Token, nil, fiber.StatusOK,
+	).Data
+	if len(profiles) != 2 {
+		t.Fatalf("profiles = %+v, want owner and member", profiles)
+	}
+
+	responseBody := []byte{0, 1, 2, 255}
+	created := request[sharedhistory.EntryView](
+		t,
+		app,
+		http.MethodPost,
+		"/api/v1/workspaces/"+workspace.ID+"/history",
+		memberLogin.Token,
+		map[string]any{
+			"client_entry_id": "desktop-entry-1",
+			"created_at":      time.Now().UTC(),
+			"request": map[string]any{
+				"method":            "POST",
+				"url":               "https://api.example.test/widgets",
+				"headers":           []map[string]any{{"name": "Content-Type", "value": "application/json"}},
+				"body":              `{"name":"shared"}`,
+				"body_mode":         "multipart_form_data",
+				"raw_body_language": "json",
+				"body_fields": []map[string]any{
+					{"enabled": true, "name": "note", "value": "visible", "kind": "text"},
+					{"enabled": true, "name": "upload", "value": "/private/file.txt", "kind": "file"},
+				},
+				"body_truncated": false,
+			},
+			"response": map[string]any{
+				"status":          201,
+				"status_text":     "Created",
+				"http_version":    "HTTP/2",
+				"final_url":       "https://api.example.test/widgets/1",
+				"headers":         []map[string]any{{"name": "Content-Type", "value": "application/octet-stream"}},
+				"body_base64":     base64.StdEncoding.EncodeToString(responseBody),
+				"body_truncated":  false,
+				"content_type":    "application/octet-stream",
+				"duration_micros": 1250,
+			},
+		},
+		fiber.StatusCreated,
+	).Data
+	if created.Request.Body != "" || len(created.Request.BodyFields) != 2 || created.Request.BodyFields[0].Value != "visible" {
+		t.Fatalf("created shared request = %+v", created.Request)
+	}
+	if created.Request.BodyFields[1].Value != "" {
+		t.Fatalf("file path was persisted in shared history: %+v", created.Request.BodyFields[1])
+	}
+	if created.Response == nil || created.Response.BodyBase64 != base64.StdEncoding.EncodeToString(responseBody) {
+		t.Fatalf("created shared response = %+v", created.Response)
+	}
+	invalid := request[sharedhistory.EntryView](
+		t,
+		app,
+		http.MethodPost,
+		"/api/v1/workspaces/"+workspace.ID+"/history",
+		memberLogin.Token,
+		map[string]any{
+			"client_entry_id": "invalid-duration",
+			"created_at":      time.Now().UTC(),
+			"request": map[string]any{
+				"method": "GET", "url": "https://api.example.test/widgets",
+				"headers": []any{}, "body": "", "body_mode": "none",
+				"raw_body_language": "text", "body_fields": []any{}, "body_truncated": false,
+			},
+			"response": map[string]any{
+				"status": 200, "status_text": "OK", "http_version": "HTTP/2",
+				"final_url": "https://api.example.test/widgets", "headers": []any{},
+				"body_base64": "", "body_truncated": false, "duration_micros": -1,
+			},
+		},
+		fiber.StatusUnprocessableEntity,
+	)
+	if invalid.Error.Fields["response.duration_micros"] == "" {
+		t.Fatalf("shared history validation error lost its field reason: %+v", invalid.Error)
+	}
+
+	personal := request[[]sharedhistory.EntryView](
+		t,
+		app,
+		http.MethodGet,
+		"/api/v1/profiles/"+member.ID+"/history?workspace_id="+workspace.ID,
+		memberLogin.Token,
+		nil,
+		fiber.StatusOK,
+	).Data
+	if len(personal) != 1 || personal[0].ID != created.ID {
+		t.Fatalf("personal history = %+v, want created entry", personal)
+	}
+
+	denied := request[[]sharedhistory.EntryView](
+		t,
+		app,
+		http.MethodGet,
+		"/api/v1/profiles/"+owner.ID+"/history?workspace_id="+workspace.ID,
+		memberLogin.Token,
+		nil,
+		fiber.StatusForbidden,
+	)
+	if denied.Error.Code != "history_access_denied" {
+		t.Fatalf("other-user history error = %+v, want history_access_denied", denied.Error)
+	}
+
+	request[identity.RoleView](
+		t,
+		app,
+		http.MethodPut,
+		"/api/v1/roles/"+role.ID+"/permissions",
+		ownerLogin.Token,
+		map[string]any{"permission_keys": []string{identity.PermissionHistoryReadOthers}},
+		fiber.StatusOK,
+	)
+	request[[]sharedhistory.EntryView](
+		t,
+		app,
+		http.MethodGet,
+		"/api/v1/profiles/"+owner.ID+"/history?workspace_id="+workspace.ID,
+		memberLogin.Token,
+		nil,
+		fiber.StatusOK,
+	)
+
+	privateWorkspace := request[workspaces.WorkspaceView](
+		t,
+		app,
+		http.MethodPost,
+		"/api/v1/workspaces",
+		ownerLogin.Token,
+		map[string]any{"name": "Private history"},
+		fiber.StatusCreated,
+	).Data
+	scopeDenied := request[[]sharedhistory.EntryView](
+		t,
+		app,
+		http.MethodGet,
+		"/api/v1/profiles/"+owner.ID+"/history?workspace_id="+privateWorkspace.ID,
+		memberLogin.Token,
+		nil,
+		fiber.StatusForbidden,
+	)
+	if scopeDenied.Error.Code != "workspace_access_denied" {
+		t.Fatalf("private workspace error = %+v, want workspace_access_denied", scopeDenied.Error)
+	}
+
+	request[map[string]bool](
+		t,
+		app,
+		http.MethodDelete,
+		"/api/v1/workspaces/"+workspace.ID+"/history",
+		memberLogin.Token,
+		nil,
+		fiber.StatusOK,
+	)
+	cleared := request[[]sharedhistory.EntryView](
+		t,
+		app,
+		http.MethodGet,
+		"/api/v1/profiles/"+member.ID+"/history?workspace_id="+workspace.ID,
+		memberLogin.Token,
+		nil,
+		fiber.StatusOK,
+	).Data
+	if len(cleared) != 0 {
+		t.Fatalf("history after clear = %+v, want empty", cleared)
 	}
 }
 
@@ -1181,6 +1419,11 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, *gorm.DB, func()) 
 		workspacesService,
 		requestproxy.NewSettingsRepository(db),
 	))
+	sharedHistoryHandler := sharedhistory.NewHandler(sharedhistory.NewService(
+		sharedhistory.NewRepository(db),
+		workspacesService,
+		sharedhistory.WithEvents(events),
+	))
 	httpServer := server.New(
 		"127.0.0.1:0",
 		io.Discard,
@@ -1192,6 +1435,7 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, *gorm.DB, func()) 
 		),
 		server.WithWorkspaces(authService, workspaces.NewHandler(workspacesService)),
 		server.WithRequestProxy(authService, requestProxyHandler),
+		server.WithSharedHistory(authService, sharedHistoryHandler),
 		server.WithRealtime(authService, realtimePublisher),
 	)
 	return httpServer.App, usersService, db, func() {

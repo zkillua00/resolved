@@ -121,6 +121,22 @@ impl ResolvedRequest {
 }
 
 pub(crate) fn redact_secret_values(text: &str, sensitive_values: &[String]) -> String {
+    secret_variants(sensitive_values)
+        .into_iter()
+        .fold(text.to_owned(), |text, value| {
+            text.replace(&value, REDACTED_VALUE)
+        })
+}
+
+pub(crate) fn redact_secret_bytes(bytes: &[u8], sensitive_values: &[String]) -> Vec<u8> {
+    secret_variants(sensitive_values)
+        .into_iter()
+        .fold(bytes.to_vec(), |bytes, value| {
+            replace_bytes(&bytes, value.as_bytes(), REDACTED_VALUE.as_bytes())
+        })
+}
+
+fn secret_variants(sensitive_values: &[String]) -> Vec<String> {
     let values = sensitive_values
         .iter()
         .filter(|value| !value.is_empty())
@@ -133,10 +149,26 @@ pub(crate) fn redact_secret_values(text: &str, sensitive_values: &[String]) -> S
         .collect::<Vec<_>>();
     variants.sort_by_key(|value| std::cmp::Reverse(value.len()));
     variants.dedup();
+    variants
+}
 
-    variants.into_iter().fold(text.to_owned(), |text, value| {
-        text.replace(&value, REDACTED_VALUE)
-    })
+fn replace_bytes(bytes: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+    if needle.is_empty() {
+        return bytes.to_vec();
+    }
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut cursor = 0;
+    while let Some(position) = bytes[cursor..]
+        .windows(needle.len())
+        .position(|candidate| candidate == needle)
+    {
+        let position = cursor + position;
+        output.extend_from_slice(&bytes[cursor..position]);
+        output.extend_from_slice(replacement);
+        cursor = position + needle.len();
+    }
+    output.extend_from_slice(&bytes[cursor..]);
+    output
 }
 
 fn secret_spellings(value: &str) -> Vec<String> {

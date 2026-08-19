@@ -16,7 +16,8 @@ The server currently provides:
 - workspace-wide environment names and variable keys with encrypted,
   per-user values;
 - authenticated request execution from the server network for authorized
-  workspace members.
+  workspace members;
+- authenticated member profiles and workspace-scoped shared request history.
 
 There is no hosted control plane, telemetry, or deployment registration.
 
@@ -78,9 +79,9 @@ Driver-specific DSN examples and the security model are documented in
 ## API
 
 All routes use the `/api/v1` prefix. `POST /auth/login` is the only public
-route. Every management and collaboration route requires a bearer token and a
-matching RBAC permission. Workspace, collection, and saved-request routes
-additionally enforce the authenticated user's resource scope.
+route. Every other route requires a bearer token. Management mutations require
+their matching RBAC permissions, while workspace-scoped routes additionally
+enforce the authenticated user's resource scope.
 
 ```sh
 curl -sS http://127.0.0.1:8787/api/v1/auth/login \
@@ -116,7 +117,8 @@ resource and its scope:
 The message signals that affected state should be fetched again through the
 REST API; it is not a replacement for the resource representation. Events are
 sent only to authenticated connections whose current grants or permissions
-cover the affected resource.
+cover the affected resource. Shared-history changes use `resource` value
+`shared_history` and identify the history owner in `resource_id`.
 
 `GET /api/v1/workspaces` returns the workspaces visible to the authenticated
 user. A direct workspace grant exposes its complete collection tree. A direct
@@ -137,6 +139,25 @@ has no value column. No environment key, derivation salt, or wrapped/encrypted
 copy of a key is stored in the database. Derived keys exist only in server
 memory for the lifetime of an authenticated session, so restarting the server
 requires every user to log in again.
+
+`GET /api/v1/profiles` exposes basic member profiles to authenticated users so
+history is reached through its author. A member can always read and clear their
+own shared history inside an accessible workspace. Reading another member's
+history additionally requires `history.read_others`; that permission never
+bypasses the viewer's workspace access check.
+
+The desktop uploads sanitized request results after new runs in a server
+workspace. Shared entries contain request and response headers and bodies,
+status/timing metadata, and failures. Request headers disabled for sharing are
+omitted before upload, their values are scrubbed from the rest of the request
+and response, and known sensitive headers are redacted independently. File
+paths and file bytes are rejected from shared body fields. Bodies are limited
+to 1 MiB, the newest 100 entries are retained per member and workspace, and a
+profile read returns the newest 20. Clearing local history while a server
+workspace is active also clears that member's shared history for the workspace.
+Uploads and clears emit metadata-only WebSocket invalidations to the history
+owner and to users who have both workspace access and `history.read_others`.
+Clients then reload the authorized profile history through REST.
 
 Request execution defaults to `local`, so selecting a server workspace does not
 automatically move target traffic onto the server. Administrators with

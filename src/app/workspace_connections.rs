@@ -1376,6 +1376,11 @@ impl ApiTester {
             self.settings_notice = Some(error.to_string());
             return;
         }
+        if let Some(abort_handle) = self.profile_history_abort_handle.take() {
+            abort_handle.abort();
+        }
+        self.profile_history_generation = self.profile_history_generation.wrapping_add(1);
+        self.server_management.reset_profile_history();
         let workspace_tabs = WorkspaceTabs::from_request_tabs(&request_tabs);
         let active_workspace_tab = workspace_tabs.active_tab(&request_tabs);
         let visible_workspace_tabs = workspace_tabs.visible_tabs(&request_tabs);

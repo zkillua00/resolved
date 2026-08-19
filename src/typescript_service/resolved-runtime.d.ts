@@ -36,6 +36,8 @@ declare namespace Resolved {
 
   interface HeaderEntry {
     enabled: boolean;
+    /** Whether this row may be included in server-shared request history. */
+    shared: boolean;
     name: string;
     value: string;
   }

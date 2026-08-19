@@ -115,6 +115,40 @@ All environment values are encrypted at rest, including variables whose
 `secret` display flag is false. The flag is shared UI metadata and is not a
 switch for database encryption.
 
+## Profiles and shared history
+
+Authenticated users may list basic deployment member profiles without the
+broader `users.read` administration permission. Shared request history is
+addressed through those profiles and is always scoped to a workspace the viewer
+can access. A user may read their own history; reading a different user's
+history additionally requires `history.read_others`. The Owner role receives
+that permission through the normal complete-catalog reconciliation. RBAC is
+reloaded for every request, so revocation takes effect immediately.
+
+The desktop creates shared entries only for new requests run while a server
+workspace is selected. An entry contains the resolved request, response, and
+failure, while the local database keeps its independent history. Request-header
+sharing is explicit per row. A header marked not to share is omitted, and its
+value is added to the redaction set used for the request URL/body and response
+headers/body/final URL. This lets users protect arbitrary API credential headers
+without relying on a fixed authentication-header list. Known sensitive headers
+are also redacted automatically. Multipart file paths and bytes are never
+stored in shared history.
+
+Each request and response body is limited to 1 MiB and header data to 512 KiB.
+The repository retains the newest 100 entries for each `(workspace, user)` and
+returns the newest 20 for a profile view. The client entry ID makes retries
+idempotent. Deleting a workspace or user cascades to its history; users may
+clear only their own workspace history.
+
+Creating or clearing shared history emits a metadata-only `shared_history`
+resource invalidation. Before the database mutation, the server resolves the
+exact audience: the history owner, plus active users who have both effective
+workspace access and `history.read_others`. This intersection is materialized
+as user-scoped WebSocket recipients so neither history content nor workspace
+activity metadata is broadcast through a permission-only channel. The client
+uses the signal to reload the visible profile through the authorized REST API.
+
 ## Bootstrap and built-in data
 
 Migrations seed a fixed permission catalog and an immutable `Owner` system
@@ -138,6 +172,7 @@ Permissions in the initial catalog are:
 - `requests.read`, `requests.create`, `requests.update`, `requests.delete`
 - `requests.execute`
 - `server_settings.read`, `server_settings.update`
+- `history.read_others`
 - `environments.read`, `environments.create`, `environments.update`,
   `environments.delete`
 - `environment_values.update`
@@ -164,6 +199,10 @@ Permissions in the initial catalog are:
 | `GET` | `/api/v1/request-execution` | authenticated |
 | `GET` | `/api/v1/request-execution/settings` | `server_settings.read` |
 | `PUT` | `/api/v1/request-execution/settings` | `server_settings.update` |
+| `GET` | `/api/v1/profiles` | authenticated |
+| `GET` | `/api/v1/profiles/:user_id/history?workspace_id=:workspace_id` | self, or `history.read_others`; plus workspace access |
+| `POST` | `/api/v1/workspaces/:workspace_id/history` | authenticated user plus workspace access |
+| `DELETE` | `/api/v1/workspaces/:workspace_id/history` | authenticated user plus workspace access; clears own entries only |
 | `GET` | `/api/v1/workspaces` | `workspaces.read`, `collections.read`, `requests.read` |
 | `POST` | `/api/v1/workspaces` | `workspaces.create` |
 | `GET` | `/api/v1/workspaces/:workspace_id` | `workspaces.read`, `collections.read`, `requests.read` |
@@ -194,10 +233,11 @@ Permissions in the initial catalog are:
 
 The WebSocket endpoint and REST API share one Fiber application and listener.
 It publishes access-scoped `resource.changed` invalidations for user, role,
-workspace, collection, request, environment, and environment-variable
-mutations. Each event contains identifiers and scope, while the REST resource
-remains authoritative. User or role mutations close affected connections so a
-reconnect reloads the current account, role, permission, and session state.
+workspace, collection, request, shared-history, environment, and
+environment-variable mutations. Each event contains identifiers and scope,
+while the REST resource remains authoritative. User or role mutations close
+affected connections so a reconnect reloads the current account, role,
+permission, and session state.
 
 Role and permission assignment endpoints use replacement semantics: the sent
 set becomes the complete set. That makes administration deterministic and
@@ -268,8 +308,11 @@ This is intentionally a network-capability permission. The target may be any
 HTTP or HTTPS address reachable by the server, including private deployment
 services. Administrators should grant it only to accounts allowed to make such
 connections. Request and response bodies are buffered up to 64 MiB each, and
-the target exchange has a 60-second deadline. Target payloads and responses are
-not written to the collaboration database or emitted through realtime events.
+the target exchange has a 60-second deadline. The execution endpoint itself
+does not persist target payloads or responses or emit them through realtime
+events. Independently, the desktop uploads the sanitized shared-history
+representation described above after the request completes; that upload emits
+only a scoped metadata invalidation.
 
 ## Not provided
 

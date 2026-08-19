@@ -5,19 +5,21 @@ use gpui_component::switch::Switch;
 use zeroize::Zeroizing;
 
 use crate::core::{
-    COLLECTIONS_ASSIGN_USERS, ManagementRole, ManagementUser, ROLES_ASSIGN_PERMISSIONS,
-    ROLES_CREATE, ROLES_UPDATE, USERS_ASSIGN_ROLES, USERS_CREATE, USERS_UPDATE,
-    UpstreamCollectionView, UpstreamManagementSnapshot, UpstreamSavedRequestView,
-    UpstreamUserSummary, UpstreamWorkspaceView, WORKSPACES_ASSIGN_USERS, create_management_role,
-    create_management_user, load_upstream_management, replace_management_collection_users,
-    replace_management_role_permissions, replace_management_user_roles,
-    replace_management_workspace_users, update_management_role, update_management_user,
+    COLLECTIONS_ASSIGN_USERS, HISTORY_READ_OTHERS, ManagementRole, ManagementUser,
+    ROLES_ASSIGN_PERMISSIONS, ROLES_CREATE, ROLES_UPDATE, SharedHistoryEntry, USERS_ASSIGN_ROLES,
+    USERS_CREATE, USERS_UPDATE, UpstreamCollectionView, UpstreamManagementSnapshot,
+    UpstreamSavedRequestView, UpstreamUserSummary, UpstreamWorkspaceView, WORKSPACES_ASSIGN_USERS,
+    create_management_role, create_management_user, list_shared_history, load_upstream_management,
+    replace_management_collection_users, replace_management_role_permissions,
+    replace_management_user_roles, replace_management_workspace_users, update_management_role,
+    update_management_user,
 };
 
 use super::*;
 
 mod discord_views;
 mod network_views;
+mod profile_views;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) enum ServerManagementStatus {
@@ -26,6 +28,15 @@ pub(super) enum ServerManagementStatus {
     Loading,
     Ready,
     Saving,
+    Error(String),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) enum ProfileHistoryStatus {
+    #[default]
+    Idle,
+    Loading,
+    Ready,
     Error(String),
 }
 
@@ -41,6 +52,10 @@ pub(super) struct ServerManagementState {
     pub status: ServerManagementStatus,
     pub snapshot: Option<UpstreamManagementSnapshot>,
     selected_user_id: Option<String>,
+    selected_profile_id: Option<String>,
+    selected_profile_history_id: Option<String>,
+    profile_history_status: ProfileHistoryStatus,
+    profile_history: Vec<SharedHistoryEntry>,
     selected_role_id: Option<String>,
     selected_resource: Option<ManagementResourceSelection>,
 }
@@ -53,7 +68,42 @@ enum ManagementResourceSelection {
 }
 
 impl ServerManagementState {
+    pub(super) fn reset_profile_history(&mut self) {
+        self.profile_history_status = ProfileHistoryStatus::Idle;
+        self.profile_history.clear();
+        self.selected_profile_history_id = None;
+    }
+
+    pub(super) fn is_history_visible_for(&self, user_id: &str) -> bool {
+        if matches!(self.profile_history_status, ProfileHistoryStatus::Idle)
+            || self.selected_profile_id.as_deref() != Some(user_id)
+        {
+            return false;
+        }
+        self.snapshot.as_ref().is_some_and(|snapshot| {
+            user_id == snapshot.current_user.id || snapshot.has_permission(HISTORY_READ_OTHERS)
+        })
+    }
+
     fn set_snapshot(&mut self, snapshot: UpstreamManagementSnapshot) {
+        if !snapshot
+            .profiles
+            .iter()
+            .any(|profile| self.selected_profile_id.as_ref() == Some(&profile.id))
+        {
+            self.selected_profile_id = snapshot
+                .profiles
+                .iter()
+                .find(|profile| profile.id == snapshot.current_user.id)
+                .or_else(|| snapshot.profiles.first())
+                .map(|profile| profile.id.clone());
+            self.reset_profile_history();
+        }
+        if self.selected_profile_id.as_deref() != Some(snapshot.current_user.id.as_str())
+            && !snapshot.has_permission(HISTORY_READ_OTHERS)
+        {
+            self.reset_profile_history();
+        }
         if !snapshot.users.as_ref().is_some_and(|users| {
             self.selected_user_id
                 .as_ref()
@@ -406,6 +456,12 @@ impl ApiTester {
                 this.server_management_abort_handle = None;
                 match result {
                     Ok(Ok(snapshot)) => {
+                        if let Some(abort_handle) = this.profile_history_abort_handle.take() {
+                            abort_handle.abort();
+                        }
+                        this.profile_history_generation =
+                            this.profile_history_generation.wrapping_add(1);
+                        this.server_management.reset_profile_history();
                         this.sync_upstream_profile_permissions(
                             &upstream_id,
                             &snapshot.current_user,
@@ -492,6 +548,12 @@ impl ApiTester {
                 this.server_management_abort_handle = None;
                 match result {
                     Ok(Ok((notice, snapshot))) => {
+                        if let Some(abort_handle) = this.profile_history_abort_handle.take() {
+                            abort_handle.abort();
+                        }
+                        this.profile_history_generation =
+                            this.profile_history_generation.wrapping_add(1);
+                        this.server_management.reset_profile_history();
                         this.sync_upstream_profile_permissions(
                             &upstream_id,
                             &snapshot.current_user,
@@ -540,6 +602,141 @@ impl ApiTester {
                 "roles permissions capabilities access",
                 move |_, _, cx| render_role_management(&this, cx),
             )))
+    }
+
+    pub(super) fn profile_settings_page(&self, cx: &mut Context<Self>) -> SettingPage {
+        let this = cx.entity().downgrade();
+        SettingPage::new("Profiles")
+            .description("Open a server member's profile and authorized shared request history.")
+            .resettable(false)
+            .full_bleed()
+            .group(SettingGroup::new().item(SettingItem::render_searchable(
+                "profiles members shared request history headers bodies",
+                move |_, _, cx| profile_views::render_profiles(&this, cx),
+            )))
+    }
+
+    pub(super) fn load_profile_history(
+        &mut self,
+        user_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.load_profile_history_selecting(user_id, None, window, cx);
+    }
+
+    pub(super) fn refresh_profile_history_realtime(
+        &mut self,
+        user_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected_entry_id = self.server_management.selected_profile_history_id.clone();
+        self.load_profile_history_selecting(user_id, selected_entry_id, window, cx);
+    }
+
+    fn load_profile_history_selecting(
+        &mut self,
+        user_id: String,
+        preferred_entry_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(snapshot) = self.server_management.snapshot.as_ref() else {
+            return;
+        };
+        if user_id != snapshot.current_user.id && !snapshot.has_permission(HISTORY_READ_OTHERS) {
+            if let Some(abort_handle) = self.profile_history_abort_handle.take() {
+                abort_handle.abort();
+            }
+            self.profile_history_generation = self.profile_history_generation.wrapping_add(1);
+            self.server_management.selected_profile_id = Some(user_id);
+            self.server_management.profile_history_status = ProfileHistoryStatus::Error(
+                "You do not have permission to view this member's history.".to_owned(),
+            );
+            self.server_management.profile_history.clear();
+            self.server_management.selected_profile_history_id = None;
+            cx.notify();
+            return;
+        }
+        let Ok(target) = self.active_upstream_workspace() else {
+            self.server_management.profile_history_status = ProfileHistoryStatus::Error(
+                "Select an accessible server workspace to view shared history.".to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        if let Some(abort_handle) = self.profile_history_abort_handle.take() {
+            abort_handle.abort();
+        }
+        self.profile_history_generation = self.profile_history_generation.wrapping_add(1);
+        let generation = self.profile_history_generation;
+        self.server_management.selected_profile_id = Some(user_id.clone());
+        self.server_management.profile_history_status = ProfileHistoryStatus::Loading;
+        self.server_management.profile_history.clear();
+        self.server_management.selected_profile_history_id = None;
+
+        let vault = self.credential_vault.clone();
+        let client = self.upstream_client.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let upstream_id = target.upstream_id.clone();
+        let selected_user_id = user_id.clone();
+        let task = self.runtime.spawn(async move {
+            let credential = runtime
+                .spawn_blocking(move || vault.load_upstream(&upstream_id))
+                .await
+                .map_err(|error| format!("Could not open the saved session: {error}"))?
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Log in to this server again.".to_owned())?;
+            if credential.expires_at <= Utc::now() {
+                return Err("Log in to this server again.".to_owned());
+            }
+            list_shared_history(
+                &client,
+                &target.base_url,
+                credential.bearer_token(),
+                &target.workspace_id,
+                &selected_user_id,
+            )
+            .await
+            .map_err(|error| error.to_string())
+        });
+        self.profile_history_abort_handle = Some(task.abort_handle());
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                if this.profile_history_generation != generation
+                    || this.server_management.selected_profile_id.as_deref()
+                        != Some(user_id.as_str())
+                {
+                    return;
+                }
+                this.profile_history_abort_handle = None;
+                match result {
+                    Ok(Ok(entries)) => {
+                        this.server_management.selected_profile_history_id = preferred_entry_id
+                            .filter(|selected| entries.iter().any(|entry| &entry.id == selected))
+                            .or_else(|| entries.first().map(|entry| entry.id.clone()));
+                        this.server_management.profile_history = entries;
+                        this.server_management.profile_history_status = ProfileHistoryStatus::Ready;
+                    }
+                    Ok(Err(error)) => {
+                        this.server_management.profile_history_status =
+                            ProfileHistoryStatus::Error(error);
+                    }
+                    Err(error) if error.is_cancelled() => return,
+                    Err(error) => {
+                        this.server_management.profile_history_status = ProfileHistoryStatus::Error(
+                            format!("Shared history could not be loaded: {error}"),
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(super) fn resource_management_settings_page(&self, cx: &mut Context<Self>) -> SettingPage {

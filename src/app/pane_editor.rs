@@ -41,11 +41,7 @@ pub(in crate::app) struct PaneEditorState {
 }
 
 impl PaneEditorState {
-    fn new(
-        active_tab_id: RequestTabId,
-        window: &mut Window,
-        cx: &mut Context<ApiTester>,
-    ) -> Self {
+    fn new(active_tab_id: RequestTabId, window: &mut Window, cx: &mut Context<ApiTester>) -> Self {
         let snippet_menu_owner = cx.entity().downgrade();
         let method = cx.new(|cx| {
             InputState::new(window, cx)
@@ -147,13 +143,15 @@ impl PaneEditorState {
 
     fn set_raw_body_language(&mut self, cx: &mut Context<ApiTester>) {
         let language = code_language_for_raw_body(self.raw_body_language);
-        self.body.update(cx, |editor, cx| editor.set_language(language, cx));
+        self.body
+            .update(cx, |editor, cx| editor.set_language(language, cx));
     }
 
     /// Refresh the raw body editor's highlight to match `raw_body_language`.
     fn refresh_raw_body_language(&mut self, cx: &mut Context<ApiTester>) {
         let language = code_language_for_raw_body(self.raw_body_language);
-        self.body.update(cx, |editor, cx| editor.set_language(language, cx));
+        self.body
+            .update(cx, |editor, cx| editor.set_language(language, cx));
     }
 
     fn push_header_row(
@@ -161,6 +159,7 @@ impl PaneEditorState {
         name: impl Into<SharedString>,
         value: impl Into<SharedString>,
         enabled: bool,
+        shared: bool,
         window: &mut Window,
         cx: &mut Context<ApiTester>,
     ) {
@@ -181,6 +180,7 @@ impl PaneEditorState {
             name: name_state,
             value: value_state,
             enabled,
+            shared,
             _subscriptions: Vec::new(),
         });
     }
@@ -253,12 +253,13 @@ impl PaneEditorState {
                     header.value.clone()
                 },
                 header.enabled && !was_redacted,
+                header.shared,
                 window,
                 cx,
             );
         }
         if self.headers.is_empty() {
-            self.push_header_row("", "", true, window, cx);
+            self.push_header_row("", "", true, true, window, cx);
         }
 
         self.body_fields.clear();
@@ -324,6 +325,7 @@ impl PaneEditorState {
                     .iter()
                     .map(|row| HeaderEntry {
                         enabled: row.enabled,
+                        shared: row.shared,
                         name: row.name.read(cx).value().to_string(),
                         value: row.value.read(cx).value().to_string(),
                     })
@@ -462,11 +464,7 @@ impl ApiTester {
     /// Build (or refresh) the request-editor session for `pane_id` so it tracks
     /// the pane's active request tab, and drop sessions for panes that no
     /// longer exist.
-    pub(super) fn reconcile_pane_editors(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn reconcile_pane_editors(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active_workspace_tab = self.workspace_tabs.active_tab(&self.request_tabs);
         let primary_pane_id = self.panes.pane_for_tab(&active_workspace_tab);
         let mut live = std::collections::HashSet::new();
@@ -481,16 +479,14 @@ impl ApiTester {
             if primary_pane_id == Some(pane_id) {
                 continue;
             }
-            let active_tab = self
-                .panes
-                .pane(pane_id)
-                .and_then(|pane| pane.active_tab());
+            let active_tab = self.panes.pane(pane_id).and_then(|pane| pane.active_tab());
             let Some(WorkspaceTab::Request(tab_id)) = active_tab else {
                 continue;
             };
             self.ensure_pane_editor_for(pane_id, tab_id, window, cx);
         }
-        self.pane_editors.retain(|pane_id, _| live.contains(pane_id));
+        self.pane_editors
+            .retain(|pane_id, _| live.contains(pane_id));
     }
 
     fn ensure_pane_editor_for(
@@ -526,7 +522,8 @@ impl ApiTester {
                 if let Some(record) = self.request_tabs.get_mut(&old_id) {
                     record.set_template(template);
                 }
-                self.request_tab_runtime.insert(old_id.as_str().to_owned(), runtime);
+                self.request_tab_runtime
+                    .insert(old_id.as_str().to_owned(), runtime);
             }
             let mut session = PaneEditorState::new(tab_id.clone(), window, cx);
             session.load_template(record.template(), &runtime, window, cx);
@@ -592,19 +589,18 @@ impl ApiTester {
             .flex_1()
             .min_h_0()
             .relative()
-            .can_drop(move |value, _, _| {
-                value.downcast_ref::<WorkspaceTabDrag>().is_some()
-            })
+            .can_drop(move |value, _, _| value.downcast_ref::<WorkspaceTabDrag>().is_some())
             .drag_over::<WorkspaceTabDrag>(move |style, _, _, cx| {
                 style.bg(cx.theme().drop_target.opacity(0.35))
             })
-            .on_drop(cx.listener(move |this, drag: &WorkspaceTabDrag, window, cx| {
-                this.on_workspace_tab_move(drag, pane_id, insert_index, window, cx);
-            }))
+            .on_drop(
+                cx.listener(move |this, drag: &WorkspaceTabDrag, window, cx| {
+                    this.on_workspace_tab_move(drag, pane_id, insert_index, window, cx);
+                }),
+            )
             .child(inner)
             .into_any_element()
     }
-
 
     fn render_secondary_placeholder(&self, pane_id: PaneId) -> AnyElement {
         let _ = pane_id;
@@ -797,6 +793,15 @@ impl ApiTester {
                             .items_center()
                             .child("VALUE"),
                     )
+                    .child(
+                        div()
+                            .w(px(64.))
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child("SHARE"),
+                    )
                     .child(div().w(px(44.))),
             )
             .child(
@@ -819,11 +824,9 @@ impl ApiTester {
                                     .label("Add header")
                                     .small()
                                     .ghost()
-                                    .on_click(
-                                        cx.listener(move |this, _, window, cx| {
-                                            this.pane_push_header(pane_id, window, cx);
-                                        }),
-                                    ),
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.pane_push_header(pane_id, window, cx);
+                                    })),
                             ),
                     ),
             )
@@ -860,11 +863,9 @@ impl ApiTester {
                         Checkbox::new(SharedString::from(format!("{key}-header-enabled-{id}")))
                             .checked(row.enabled)
                             .small()
-                            .on_click(cx.listener(
-                                move |this, checked: &bool, _, cx| {
-                                    this.pane_toggle_header(pane_id, id, *checked, cx);
-                                },
-                            )),
+                            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                                this.pane_toggle_header(pane_id, id, *checked, cx);
+                            })),
                     ),
             )
             .child(
@@ -899,6 +900,30 @@ impl ApiTester {
             )
             .child(
                 div()
+                    .id(SharedString::from(format!("{key}-header-shared-cell-{id}")))
+                    .w(px(64.))
+                    .h_full()
+                    .flex_shrink_0()
+                    .border_l_1()
+                    .border_color(cx.api_outline_variant())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .tooltip(|window, cx| {
+                        Tooltip::new("Include this header in server-shared history")
+                            .build(window, cx)
+                    })
+                    .child(
+                        Checkbox::new(SharedString::from(format!("{key}-header-shared-{id}")))
+                            .checked(row.shared)
+                            .small()
+                            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                                this.pane_toggle_header_sharing(pane_id, id, *checked, cx);
+                            })),
+                    ),
+            )
+            .child(
+                div()
                     .w(px(44.))
                     .h_full()
                     .flex_shrink_0()
@@ -913,11 +938,9 @@ impl ApiTester {
                             .xsmall()
                             .ghost()
                             .tooltip("Delete header")
-                            .on_click(
-                                cx.listener(move |this, _, window, cx| {
-                                    this.pane_remove_header(pane_id, id, window, cx);
-                                }),
-                            ),
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.pane_remove_header(pane_id, id, window, cx);
+                            })),
                     ),
             )
             .into_any_element()
@@ -943,13 +966,12 @@ impl ApiTester {
                         .child("This request has no body"),
                 )
                 .into_any_element(),
-            BodyMode::Raw => div().size_full().child(session.body.clone()).into_any_element(),
-            BodyMode::FormUrlEncoded => {
-                self.render_pane_body_fields(session, pane_id, false, cx)
-            }
-            BodyMode::MultipartFormData => {
-                self.render_pane_body_fields(session, pane_id, true, cx)
-            }
+            BodyMode::Raw => div()
+                .size_full()
+                .child(session.body.clone())
+                .into_any_element(),
+            BodyMode::FormUrlEncoded => self.render_pane_body_fields(session, pane_id, false, cx),
+            BodyMode::MultipartFormData => self.render_pane_body_fields(session, pane_id, true, cx),
         };
 
         v_flex()
@@ -1057,16 +1079,11 @@ impl ApiTester {
                     .px_3()
                     .justify_between()
                     .bg(cx.api_surface_low())
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_semibold()
-                            .child(if multipart {
-                                "form-data"
-                            } else {
-                                "x-www-form-urlencoded"
-                            }),
-                    ),
+                    .child(div().text_sm().font_semibold().child(if multipart {
+                        "form-data"
+                    } else {
+                        "x-www-form-urlencoded"
+                    })),
             )
             .child(
                 v_flex()
@@ -1088,11 +1105,9 @@ impl ApiTester {
                                     .label("Add field")
                                     .small()
                                     .ghost()
-                                    .on_click(
-                                        cx.listener(move |this, _, window, cx| {
-                                            this.pane_push_body_field(pane_id, window, cx);
-                                        }),
-                                    ),
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.pane_push_body_field(pane_id, window, cx);
+                                    })),
                             ),
                     ),
             )
@@ -1133,11 +1148,9 @@ impl ApiTester {
                         Checkbox::new(SharedString::from(format!("{key}-body-field-enabled-{id}")))
                             .checked(row.enabled)
                             .small()
-                            .on_click(cx.listener(
-                                move |this, checked: &bool, _, cx| {
-                                    this.pane_toggle_body_field(pane_id, id, *checked, cx);
-                                },
-                            )),
+                            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                                this.pane_toggle_body_field(pane_id, id, *checked, cx);
+                            })),
                     ),
             )
             .when(multipart, |this| {
@@ -1229,11 +1242,9 @@ impl ApiTester {
                             .xsmall()
                             .ghost()
                             .tooltip("Delete field")
-                            .on_click(
-                                cx.listener(move |this, _, window, cx| {
-                                    this.pane_remove_body_field(pane_id, id, window, cx);
-                                }),
-                            ),
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.pane_remove_body_field(pane_id, id, window, cx);
+                            })),
                     ),
             )
             .into_any_element()
@@ -1378,21 +1389,20 @@ impl ApiTester {
                     .when(session.response_tab == ResponseTab::Headers, |this| {
                         this.child(self.render_pane_response_headers(session, pane_id, cx))
                     })
-                    .when(
-                        session.response_tab == ResponseTab::Preview,
-                        |this| {
-                            this.child(
-                                v_flex()
-                                    .size_full()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(div().text_sm().child(
+                    .when(session.response_tab == ResponseTab::Preview, |this| {
+                        this.child(
+                            v_flex()
+                                .size_full()
+                                .items_center()
+                                .justify_center()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(
+                                    div().text_sm().child(
                                         "Live preview is not available in a secondary pane.",
-                                    )),
-                            )
-                        },
-                    )
+                                    ),
+                                ),
+                        )
+                    })
                     .when(session.response_tab == ResponseTab::Scripts, |this| {
                         this.child(
                             v_flex()
@@ -1418,12 +1428,13 @@ impl ApiTester {
             return div().size_full().into_any_element();
         };
         let content = if is_probably_text(&response.body) {
-            format_body(&response.body, session.pretty_body, &self.settings.formatter)
-        } else {
-            format!(
-                "Binary response ({}).",
-                format_bytes(response.size_bytes())
+            format_body(
+                &response.body,
+                session.pretty_body,
+                &self.settings.formatter,
             )
+        } else {
+            format!("Binary response ({}).", format_bytes(response.size_bytes()))
         };
         div()
             .id(SharedString::from(format!("{key}-response-body")))
@@ -1490,21 +1501,21 @@ fn status_color(status: u16, cx: &App) -> Hsla {
 }
 
 impl ApiTester {
-    fn pane_set_request_pane(&mut self, pane_id: PaneId, pane: RequestPane, cx: &mut Context<Self>) {
+    fn pane_set_request_pane(
+        &mut self,
+        pane_id: PaneId,
+        pane: RequestPane,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(session) = self.pane_editor_mut(pane_id) {
             session.request_pane = pane;
         }
         cx.notify();
     }
 
-    fn pane_push_header(
-        &mut self,
-        pane_id: PaneId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn pane_push_header(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(session) = self.pane_editor_mut(pane_id) {
-            session.push_header_row("", "", true, window, cx);
+            session.push_header_row("", "", true, true, window, cx);
         }
         cx.notify();
     }
@@ -1538,12 +1549,22 @@ impl ApiTester {
         cx.notify();
     }
 
-    fn pane_select_body_mode(
+    fn pane_toggle_header_sharing(
         &mut self,
         pane_id: PaneId,
-        mode: BodyMode,
+        row_id: usize,
+        shared: bool,
         cx: &mut Context<Self>,
     ) {
+        if let Some(session) = self.pane_editor_mut(pane_id)
+            && let Some(row) = session.headers.iter_mut().find(|row| row.id == row_id)
+        {
+            row.shared = shared;
+        }
+        cx.notify();
+    }
+
+    fn pane_select_body_mode(&mut self, pane_id: PaneId, mode: BodyMode, cx: &mut Context<Self>) {
         if let Some(session) = self.pane_editor_mut(pane_id) {
             session.body_mode = mode;
             if mode == BodyMode::Raw {
@@ -1670,7 +1691,7 @@ impl ApiTester {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{TestAppContext, size, px};
+    use gpui::{TestAppContext, px, size};
 
     fn template_with_content() -> RequestTemplate {
         RequestTemplate {
@@ -1680,11 +1701,13 @@ mod tests {
                 headers: vec![
                     HeaderEntry {
                         enabled: true,
+                        shared: true,
                         name: "Content-Type".to_owned(),
                         value: "application/json".to_owned(),
                     },
                     HeaderEntry {
                         enabled: true,
+                        shared: true,
                         name: "X-Trace".to_owned(),
                         value: "abc".to_owned(),
                     },
@@ -1765,13 +1788,12 @@ mod tests {
                     .panes
                     .split_off_pane(primary_id, SplitDirection::Vertical, true)
                     .expect("split the primary pane");
-                app.panes
-                    .move_tab_between_panes(
-                        &WorkspaceTab::Request(second.clone()),
-                        primary_id,
-                        secondary_id,
-                        0,
-                    );
+                app.panes.move_tab_between_panes(
+                    &WorkspaceTab::Request(second.clone()),
+                    primary_id,
+                    secondary_id,
+                    0,
+                );
                 app.reconcile_pane_editors(window, cx);
                 (primary_id, secondary_id)
             })

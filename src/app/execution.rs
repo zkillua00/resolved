@@ -63,6 +63,7 @@ impl ApiTester {
         );
         self.request_generation = self.request_generation.wrapping_add(1);
         let generation = self.request_generation;
+        self.request_history_target = self.active_upstream_workspace().ok();
         self.sending = true;
         self.execution_stage = Some(ExecutionStage::PreRequest);
         self.response = None;
@@ -407,12 +408,21 @@ impl ApiTester {
             }
         }
 
-        self.history.push(HistoryEntry::completed_with_secrets(
+        let history_entry = HistoryEntry::completed_with_secrets(
             &history_request,
             &response,
             &history_sensitive_values,
-        ));
+        );
+        let shared_history = SharedHistoryUpload::completed(
+            history_entry.id.clone(),
+            history_entry.created_at,
+            &history_request,
+            &response,
+            &history_sensitive_values,
+        );
+        self.history.push(history_entry);
         self.persist_history();
+        self.upload_shared_history_entry(shared_history, cx);
         if self.response_tab == ResponseTab::Preview
             && self.workspace_tabs.active() == ActiveWorkspaceTab::Request
             && self.sidebar_tab != SidebarTab::Environments
@@ -440,6 +450,7 @@ impl ApiTester {
         self.execution_stage = None;
         self.abort_handle = None;
         self.script_cancellation = None;
+        self.request_history_target = None;
         self.request_error = Some("Request cancelled".to_owned());
         self.preview_error = None;
         self.hide_preview(cx);
@@ -466,13 +477,19 @@ impl ApiTester {
         self.execution_stage = None;
         self.abort_handle = None;
         self.script_cancellation = None;
-        self.history.push(HistoryEntry::failed_with_secrets(
+        let history_entry =
+            HistoryEntry::failed_with_secrets(request, message.clone(), sensitive_values);
+        let shared_history = SharedHistoryUpload::failed(
+            history_entry.id.clone(),
+            history_entry.created_at,
             request,
-            message.clone(),
+            &message,
             sensitive_values,
-        ));
+        );
+        self.history.push(history_entry);
         self.request_error = Some(message);
         self.persist_history();
+        self.upload_shared_history_entry(shared_history, cx);
         cx.notify();
     }
 

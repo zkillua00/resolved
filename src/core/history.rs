@@ -3,7 +3,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{RequestDraft, ResponseData, template::redact_secret_values};
+use bytes::Bytes;
+
+use super::{
+    BodyMode, RequestDraft, ResponseData,
+    request::ResponseHeader,
+    template::{redact_secret_bytes, redact_secret_values},
+};
 
 pub const DEFAULT_HISTORY_LIMIT: usize = 100;
 pub const REDACTED_VALUE: &str = "[REDACTED]";
@@ -269,22 +275,110 @@ fn temporary_path_for(path: &Path) -> PathBuf {
 }
 
 fn redact_request(request: &RequestDraft, sensitive_values: &[String]) -> RequestDraft {
-    let mut redacted = request.clone();
-    let mut known_secrets = sensitive_values.to_vec();
-    for header in &request.headers {
-        if is_sensitive_header(&header.name) && !header.value.is_empty() {
-            known_secrets.push(header.value.clone());
-            if let Some((scheme, credential)) = header.value.split_once(' ')
-                && matches!(
-                    scheme.to_ascii_lowercase().as_str(),
-                    "bearer" | "basic" | "token"
-                )
-                && !credential.is_empty()
-            {
-                known_secrets.push(credential.to_owned());
+    let known_secrets = request_sensitive_values(request, sensitive_values, false);
+    redact_request_with_known_secrets(request, &known_secrets)
+}
+
+pub(crate) fn request_for_shared_history(
+    request: &RequestDraft,
+    sensitive_values: &[String],
+) -> (RequestDraft, Vec<String>) {
+    let known_secrets = request_sensitive_values(request, sensitive_values, true);
+    let mut redacted = redact_request_with_known_secrets(request, &known_secrets);
+    redacted
+        .headers
+        .retain(|header| header.enabled && header.shared);
+    match redacted.body_mode {
+        BodyMode::None => {
+            redacted.body.clear();
+            redacted.body_fields.clear();
+        }
+        BodyMode::Raw => redacted.body_fields.clear(),
+        BodyMode::FormUrlEncoded | BodyMode::MultipartFormData => {
+            redacted.body.clear();
+            redacted.body_fields.retain(|field| field.enabled);
+            for field in &mut redacted.body_fields {
+                if field.kind == super::BodyFieldKind::File {
+                    field.value.clear();
+                }
             }
         }
     }
+    (redacted, known_secrets)
+}
+
+pub(crate) fn response_for_shared_history(
+    response: &ResponseData,
+    sensitive_values: &[String],
+) -> ResponseData {
+    let mut known_secrets = sensitive_values.to_vec();
+    for header in &response.headers {
+        if is_sensitive_header(&header.name) && !header.value.is_empty() {
+            push_header_secrets(&mut known_secrets, &header.value);
+        }
+    }
+    let headers = response
+        .headers
+        .iter()
+        .map(|header| ResponseHeader {
+            name: redact_secret_values(&header.name, &known_secrets),
+            value: if is_sensitive_header(&header.name) {
+                REDACTED_VALUE.to_owned()
+            } else {
+                redact_secret_values(&header.value, &known_secrets)
+            },
+        })
+        .collect();
+    let body = Bytes::from(redact_secret_bytes(&response.body, &known_secrets));
+    ResponseData {
+        status: response.status,
+        status_text: redact_secret_values(&response.status_text, &known_secrets),
+        http_version: redact_secret_values(&response.http_version, &known_secrets),
+        final_url: redact_url(&response.final_url, &known_secrets),
+        headers,
+        content_type: response
+            .content_type
+            .as_deref()
+            .map(|value| redact_secret_values(value, &known_secrets)),
+        body,
+        duration: response.duration,
+    }
+}
+
+fn request_sensitive_values(
+    request: &RequestDraft,
+    sensitive_values: &[String],
+    include_unshared: bool,
+) -> Vec<String> {
+    let mut known_secrets = sensitive_values.to_vec();
+    for header in &request.headers {
+        if (is_sensitive_header(&header.name) || include_unshared && !header.shared)
+            && !header.value.is_empty()
+        {
+            push_header_secrets(&mut known_secrets, &header.value);
+        }
+    }
+    known_secrets
+}
+
+fn push_header_secrets(known_secrets: &mut Vec<String>, value: &str) {
+    known_secrets.push(value.to_owned());
+    if let Some((scheme, credential)) = value.split_once(' ')
+        && matches!(
+            scheme.to_ascii_lowercase().as_str(),
+            "bearer" | "basic" | "token"
+        )
+        && !credential.is_empty()
+    {
+        known_secrets.push(credential.to_owned());
+    }
+}
+
+fn redact_request_with_known_secrets(
+    request: &RequestDraft,
+    known_secrets: &[String],
+) -> RequestDraft {
+    let mut redacted = request.clone();
 
     redacted.headers = redacted
         .headers
@@ -293,7 +387,7 @@ fn redact_request(request: &RequestDraft, sensitive_values: &[String]) -> Reques
             if is_sensitive_header(&header.name) {
                 header.value = REDACTED_VALUE.to_owned();
             } else {
-                header.value = redact_secret_values(&header.value, &known_secrets);
+                header.value = redact_secret_values(&header.value, known_secrets);
             }
             header
         })
@@ -303,17 +397,17 @@ fn redact_request(request: &RequestDraft, sensitive_values: &[String]) -> Reques
         .into_iter()
         .map(|mut field| {
             let sensitive_name = is_sensitive_field(&field.name);
-            field.name = redact_secret_values(&field.name, &known_secrets);
+            field.name = redact_secret_values(&field.name, known_secrets);
             field.value = if sensitive_name {
                 REDACTED_VALUE.to_owned()
             } else {
-                redact_secret_values(&field.value, &known_secrets)
+                redact_secret_values(&field.value, known_secrets)
             };
             field
         })
         .collect();
-    redacted.url = redact_url(&request.url, &known_secrets);
-    redacted.body = redact_body(request, &known_secrets);
+    redacted.url = redact_url(&request.url, known_secrets);
+    redacted.body = redact_body(request, known_secrets);
     redacted
 }
 
@@ -432,6 +526,9 @@ fn is_sensitive_header(name: &str) -> bool {
             | "x-api-key"
             | "api-key"
             | "x-auth-token"
+            | "set-cookie"
+            | "www-authenticate"
+            | "proxy-authenticate"
     ) || normalized.contains("token")
         || normalized.contains("secret")
         || normalized.ends_with("-api-key")
@@ -578,6 +675,69 @@ mod tests {
         assert!(!serialized.contains("rotated secret"));
         assert_eq!(entry.request.body_fields[1].value, REDACTED_VALUE);
         assert_eq!(entry.request.body_fields[2].value, REDACTED_VALUE);
+    }
+
+    #[test]
+    fn shared_history_omits_explicitly_private_headers_and_scrubs_their_values() {
+        let private_value = "partner-credential-value";
+        let mut disabled_field = BodyField::text("disabled", "not-sent");
+        disabled_field.enabled = false;
+        let request = RequestDraft {
+            method: "POST".to_owned(),
+            url: format!("https://example.com/items?echo={private_value}"),
+            headers: vec![
+                HeaderEntry {
+                    enabled: true,
+                    shared: false,
+                    name: "X-Partner-Credential".to_owned(),
+                    value: private_value.to_owned(),
+                },
+                HeaderEntry::new("Authorization", "Bearer standard-token"),
+                HeaderEntry::new("Accept", "application/json"),
+                HeaderEntry {
+                    enabled: false,
+                    shared: true,
+                    name: "X-Disabled".to_owned(),
+                    value: "not-sent".to_owned(),
+                },
+            ],
+            body: format!(r#"{{"echo":"{private_value}"}}"#),
+            body_mode: BodyMode::MultipartFormData,
+            body_fields: vec![
+                BodyField::text("echo", private_value),
+                BodyField::file("upload", "/private/customer-contract.pdf"),
+                disabled_field,
+            ],
+            ..RequestDraft::default()
+        };
+        let mut response = response(200);
+        response.final_url = format!("https://example.com/items?echo={private_value}");
+        response.headers = vec![ResponseHeader {
+            name: "X-Echo".to_owned(),
+            value: private_value.to_owned(),
+        }];
+        let mut binary_body = vec![0xff, 0x00];
+        binary_body.extend_from_slice(private_value.as_bytes());
+        response.body = Bytes::from(binary_body);
+
+        let (shared_request, secrets) = request_for_shared_history(&request, &[]);
+        let shared_response = response_for_shared_history(&response, &secrets);
+        let serialized = serde_json::to_string(&shared_request).unwrap();
+        let shared_response_text = String::from_utf8_lossy(&shared_response.body);
+
+        assert!(!serialized.contains("X-Partner-Credential"));
+        assert!(!serialized.contains(private_value));
+        assert!(!serialized.contains("standard-token"));
+        assert!(!serialized.contains("/private/customer-contract.pdf"));
+        assert!(!shared_response.final_url.contains(private_value));
+        assert!(!shared_response.headers[0].value.contains(private_value));
+        assert!(!shared_response_text.contains(private_value));
+        assert_eq!(shared_request.headers[0].value, REDACTED_VALUE);
+        assert_eq!(shared_request.headers[1].value, "application/json");
+        assert_eq!(shared_request.headers.len(), 2);
+        assert_eq!(shared_request.body_fields[1].value, "");
+        assert_eq!(shared_request.body_fields.len(), 2);
+        assert!(shared_response_text.contains(REDACTED_VALUE));
     }
 
     #[test]

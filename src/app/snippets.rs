@@ -1982,15 +1982,11 @@ impl ApiTester {
                     .when(selected, |this| this.bg(cx.theme().sidebar_accent))
                     .hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.62)))
                     .child(
-                        div()
-                            .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .child(
-                                Icon::new(IconName::CaseSensitive)
-                                    .small()
-                                    .text_color(leading_icon_color),
-                            ),
+                        div().flex_shrink_0().flex().items_center().child(
+                            Icon::new(IconName::CaseSensitive)
+                                .small()
+                                .text_color(leading_icon_color),
+                        ),
                     )
                     .child(
                         v_flex()

@@ -16,6 +16,7 @@ import (
 	"resolved-server/internal/roles"
 	"resolved-server/internal/security"
 	"resolved-server/internal/server"
+	"resolved-server/internal/sharedhistory"
 	"resolved-server/internal/users"
 	"resolved-server/internal/workspaces"
 
@@ -106,12 +107,18 @@ func New(cfg config.Config, accessLog io.Writer) (*Application, error) {
 		workspacesService,
 		requestproxy.NewSettingsRepository(db),
 	))
+	sharedHistoryHandler := sharedhistory.NewHandler(sharedhistory.NewService(
+		sharedhistory.NewRepository(db),
+		workspacesService,
+		sharedhistory.WithEvents(events),
+	))
 	httpServer := server.New(
 		cfg.Address,
 		accessLog,
 		server.WithIdentity(authService, authHandler, usersHandler, rolesHandler),
 		server.WithWorkspaces(authService, workspacesHandler),
 		server.WithRequestProxy(authService, requestProxyHandler),
+		server.WithSharedHistory(authService, sharedHistoryHandler),
 		server.WithRealtime(authService, realtimePublisher),
 	)
 
