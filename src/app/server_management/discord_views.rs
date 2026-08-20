@@ -401,6 +401,8 @@ pub(super) fn render_role_management(this: &WeakEntity<ApiTester>, cx: &mut App)
             role_navigation_row(
                 role,
                 selected.is_some_and(|selected| selected.id == role.id),
+                management.role_permissions_are_dirty(&role.id),
+                management.role_permission_keys(role).len(),
                 this,
                 cx,
             )
@@ -422,6 +424,7 @@ pub(super) fn render_role_management(this: &WeakEntity<ApiTester>, cx: &mut App)
         Some(role) => render_role_detail(
             role,
             &permissions,
+            &management,
             snapshot.has_permission(ROLES_UPDATE),
             snapshot.has_permission(ROLES_ASSIGN_PERMISSIONS),
             busy,
@@ -436,6 +439,8 @@ pub(super) fn render_role_management(this: &WeakEntity<ApiTester>, cx: &mut App)
 fn role_navigation_row(
     role: &ManagementRole,
     selected: bool,
+    dirty: bool,
+    permission_count: usize,
     this: &WeakEntity<ApiTester>,
     cx: &mut App,
 ) -> AnyElement {
@@ -485,11 +490,12 @@ fn role_navigation_row(
                         .text_color(cx.theme().muted_foreground)
                         .child(format!(
                             "{} permission{}",
-                            role.permissions.len(),
-                            if role.permissions.len() == 1 { "" } else { "s" }
+                            permission_count,
+                            if permission_count == 1 { "" } else { "s" }
                         )),
                 ),
         )
+        .children(dirty.then(|| div().size(px(7.)).rounded_full().bg(cx.theme().warning)))
         .into_any_element()
 }
 
@@ -497,6 +503,7 @@ fn role_navigation_row(
 fn render_role_detail(
     role: &ManagementRole,
     permissions: &[ManagementPermission],
+    management: &ServerManagementState,
     can_update: bool,
     can_assign: bool,
     busy: bool,
@@ -505,11 +512,8 @@ fn render_role_detail(
 ) -> AnyElement {
     let edit_this = this.clone();
     let edit_role = role.clone();
-    let assigned = role
-        .permissions
-        .iter()
-        .map(|permission| permission.key.clone())
-        .collect::<BTreeSet<_>>();
+    let assigned = management.role_permission_keys(role);
+    let dirty = management.role_permissions_are_dirty(&role.id);
     let mut sorted_permissions = permissions.to_vec();
     sorted_permissions.sort_by(|left, right| left.key.cmp(&right.key));
     let mut permission_rows = Vec::new();
@@ -537,15 +541,9 @@ fn render_role_detail(
             );
         }
         let checked = assigned.contains(&permission.key);
-        let mut next = assigned.clone();
-        if checked {
-            next.remove(&permission.key);
-        } else {
-            next.insert(permission.key.clone());
-        }
         let action_this = this.clone();
         let action_role_id = role.id.clone();
-        let action_keys = next.into_iter().collect::<Vec<_>>();
+        let action_permission_key = permission.key.clone();
         permission_rows.push(
             h_flex()
                 .w_full()
@@ -579,17 +577,14 @@ fn render_role_detail(
                     )))
                     .checked(checked)
                     .disabled(role.system || !can_assign || busy)
-                    .on_click(move |_, window, cx| {
+                    .on_click(move |_, _, cx| {
                         if let Some(this) = action_this.upgrade() {
                             this.update(cx, |this, cx| {
-                                this.run_management_mutation(
-                                    ManagementMutation::ReplaceRolePermissions {
-                                        role_id: action_role_id.clone(),
-                                        permission_keys: action_keys.clone(),
-                                    },
-                                    window,
-                                    cx,
+                                this.server_management.toggle_role_permission(
+                                    &action_role_id,
+                                    &action_permission_key,
                                 );
+                                cx.notify();
                             });
                         }
                     }),
@@ -686,6 +681,8 @@ fn render_role_detail(
                         .text_color(cx.theme().muted_foreground)
                         .child(if role.system {
                             "System role permissions are managed by the server."
+                        } else if dirty {
+                            "These changes are local until you save them."
                         } else {
                             "Changes apply to every user assigned this role."
                         }),
@@ -701,6 +698,69 @@ fn render_role_detail(
                         .into_any_element()
                 }),
         )
+        .when(dirty, |detail| {
+            let reset_this = this.clone();
+            let reset_role_id = role.id.clone();
+            let save_this = this.clone();
+            let save_role_id = role.id.clone();
+            detail.child(
+                h_flex()
+                    .id(SharedString::from(format!(
+                        "role-permission-save-bar-{}",
+                        role.id
+                    )))
+                    .w_full()
+                    .gap_3()
+                    .p_3()
+                    .border_t_1()
+                    .border_color(cx.theme().warning.opacity(0.5))
+                    .bg(cx.theme().warning.opacity(0.08))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .text_sm()
+                            .font_semibold()
+                            .child("Careful — you have unsaved permission changes."),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "reset-role-permissions-{}",
+                            role.id
+                        )))
+                        .label("Reset")
+                        .small()
+                        .outline()
+                        .disabled(busy)
+                        .on_click(move |_, _, cx| {
+                            if let Some(this) = reset_this.upgrade() {
+                                this.update(cx, |this, cx| {
+                                    this.server_management
+                                        .reset_role_permission_draft(&reset_role_id);
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "save-role-permissions-{}",
+                            role.id
+                        )))
+                        .label(if busy { "Saving…" } else { "Save changes" })
+                        .small()
+                        .primary()
+                        .disabled(busy || !can_assign)
+                        .on_click(move |_, window, cx| {
+                            if let Some(this) = save_this.upgrade() {
+                                this.update(cx, |this, cx| {
+                                    this.save_role_permission_draft(&save_role_id, window, cx);
+                                });
+                            }
+                        }),
+                    ),
+            )
+        })
         .into_any_element()
 }
 

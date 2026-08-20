@@ -32,6 +32,7 @@ const (
 	PermissionRequestsExecute = "requests.execute"
 
 	PermissionHistoryReadOthers = "history.read_others"
+	PermissionAuditRead         = "audit.read"
 
 	PermissionServerSettingsRead   = "server_settings.read"
 	PermissionServerSettingsUpdate = "server_settings.update"
@@ -69,6 +70,7 @@ var permissionCatalog = []Permission{
 	{Key: PermissionRequestsDelete, Description: "Delete saved requests within accessible collections"},
 	{Key: PermissionRequestsExecute, Description: "Run requests from accessible workspaces through this server"},
 	{Key: PermissionHistoryReadOthers, Description: "View other users' shared request history in accessible workspaces"},
+	{Key: PermissionAuditRead, Description: "View the user and role audit log"},
 	{Key: PermissionServerSettingsRead, Description: "View server request execution and hostname override settings"},
 	{Key: PermissionServerSettingsUpdate, Description: "Update server request execution and hostname override settings"},
 	{Key: PermissionEnvironmentsRead, Description: "View workspace environment definitions and the account's own values"},

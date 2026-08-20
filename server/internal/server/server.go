@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"resolved-server/internal/activitylog"
 	"resolved-server/internal/auth"
 	"resolved-server/internal/httpkit"
 	"resolved-server/internal/identity"
@@ -190,6 +191,24 @@ func WithSharedHistory(authService *auth.Service, handler *sharedhistory.Handler
 		protected.Get("/profiles/:user_id/history", handler.ListController())
 		protected.Post("/workspaces/:workspace_id/history", handler.CreateController())
 		protected.Delete("/workspaces/:workspace_id/history", handler.DeleteController())
+	}
+}
+
+func WithActivityLogs(authService *auth.Service, handler *activitylog.Handler) Modifier {
+	return func(app *fiber.App) {
+		protected := app.Group("/api/v1", authService.Middleware())
+		protected.Get(
+			"/workspaces/:workspace_id/change-log",
+			auth.RequirePermission(identity.PermissionWorkspacesRead),
+			auth.RequirePermission(identity.PermissionCollectionsRead),
+			auth.RequirePermission(identity.PermissionRequestsRead),
+			handler.WorkspaceController(),
+		)
+		protected.Get(
+			"/audit-log",
+			auth.RequirePermission(identity.PermissionAuditRead),
+			handler.AuditController(),
+		)
 	}
 }
 

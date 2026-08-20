@@ -165,9 +165,11 @@ func (h *Handler) UpdateController() fiber.Handler {
 		UpdateRequest,
 	](
 		func(c fiber.Ctx, payload UpdatePayload) httpkit.Response[identity.RoleView] {
+			actorUserID := auth.PrincipalFromContext(c).User.ID
 			result, err := h.service.Update(c.Context(), payload.ID, UpdateInput{
 				Name:        payload.Name,
 				Description: payload.Description,
+				ActorUserID: actorUserID,
 			})
 			if err != nil {
 				return httpkit.NewErrorResponse[identity.RoleView](err)
@@ -184,7 +186,10 @@ func (h *Handler) ReplacePermissionsController() fiber.Handler {
 		ReplacePermissionsRequest,
 	](
 		func(c fiber.Ctx, payload ReplacePermissionsPayload) httpkit.Response[identity.RoleView] {
-			result, err := h.service.ReplacePermissions(c.Context(), payload.ID, payload.PermissionKeys)
+			actorUserID := auth.PrincipalFromContext(c).User.ID
+			result, err := h.service.ReplacePermissions(
+				c.Context(), payload.ID, payload.PermissionKeys, actorUserID,
+			)
 			if err != nil {
 				return httpkit.NewErrorResponse[identity.RoleView](err)
 			}

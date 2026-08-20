@@ -113,7 +113,7 @@ impl ApiTester {
                     ]),
             );
 
-        let mut pages = Vec::with_capacity(if using_server { 9 } else { 5 });
+        let mut pages = Vec::with_capacity(if using_server { 11 } else { 5 });
         pages.push(servers_page);
         if using_server {
             pages.extend([
@@ -121,6 +121,8 @@ impl ApiTester {
                 self.user_management_settings_page(cx),
                 self.role_management_settings_page(cx),
                 self.resource_management_settings_page(cx),
+                self.change_log_settings_page(cx),
+                self.audit_log_settings_page(cx),
             ]);
         }
         pages.extend([editor_page, keyboard_page, appearance_page, developer_page]);

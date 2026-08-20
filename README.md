@@ -58,6 +58,9 @@ WKWebView through `gpui-wry` only when the Preview tab is selected.
 - Sanitized history snapshots with URL, body, header, error, and secret redaction
 - Server-member profiles with workspace-scoped shared history and permissioned
   access to other members' requests
+- Realtime workspace change logs for workspaces, collections, and saved
+  requests, plus permissioned user and role audit logs with explicit field-level
+  before and after values
 
 ## Self-hosted servers
 
@@ -105,6 +108,18 @@ response headers, response body, or final URL. Known authentication headers are
 still redacted automatically, and multipart file contents and local paths are
 never placed in shared history. An open profile history updates in real time
 through the existing server WebSocket connection.
+
+Settings → Change log shows the newest workspace, collection, and saved-request
+mutations for the selected server workspace. Settings → Audit log separately
+shows user and role administration to members with `audit.read`. Every entry
+identifies its actor and renders each changed field as its previous value → new
+value. Saved-request changes use structured definition paths such as
+`definition.request.method`. The server redacts known or explicitly unshared
+header values, omits multipart file paths, and never stores password contents in
+these diffs. Existing access-scoped WebSocket invalidations make an open log
+request only entries newer than its current cursor after a related mutation.
+The tabs make their first request only when opened; older entries load through
+the cursor-based Load older changes control without displacing realtime inserts.
 
 Server workspaces use the deployment administrator's request-execution policy.
 The safe default runs requests directly from each user's Mac. When an

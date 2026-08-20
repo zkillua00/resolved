@@ -3,6 +3,7 @@ package database
 import (
 	"fmt"
 
+	"resolved-server/internal/activitylog"
 	"resolved-server/internal/identity"
 	"resolved-server/internal/requestproxy"
 	"resolved-server/internal/sharedhistory"
@@ -30,6 +31,7 @@ func MigrateAndSeed(db *gorm.DB) error {
 		&workspaces.EnvironmentVariable{},
 		&workspaces.EnvironmentVariableValue{},
 		&sharedhistory.Entry{},
+		&activitylog.Entry{},
 	); err != nil {
 		return fmt.Errorf("migrate server schema: %w", err)
 	}

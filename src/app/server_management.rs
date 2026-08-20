@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use gpui_component::setting::{SettingGroup, SettingItem, SettingPage};
 use gpui_component::switch::Switch;
@@ -17,6 +17,7 @@ use crate::core::{
 
 use super::*;
 
+pub(super) mod activity_views;
 mod discord_views;
 mod network_views;
 mod profile_views;
@@ -40,6 +41,74 @@ pub(super) enum ProfileHistoryStatus {
     Error(String),
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) enum ActivityLogStatus {
+    #[default]
+    Idle,
+    Loading,
+    Ready,
+    Error(String),
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct ActivityLogFeed {
+    upstream_id: Option<String>,
+    workspace_id: Option<String>,
+    status: ActivityLogStatus,
+    entries: Vec<crate::core::ActivityLogEntry>,
+    older_cursor: Option<String>,
+    newer_cursor: Option<String>,
+    loading_more: bool,
+    syncing: bool,
+    sync_pending: bool,
+    error: Option<String>,
+    generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RolePermissionDraft {
+    baseline: BTreeSet<String>,
+    selected: BTreeSet<String>,
+}
+
+impl RolePermissionDraft {
+    fn new(baseline: BTreeSet<String>) -> Self {
+        Self {
+            selected: baseline.clone(),
+            baseline,
+        }
+    }
+
+    fn toggle(&mut self, permission_key: &str) {
+        if !self.selected.remove(permission_key) {
+            self.selected.insert(permission_key.to_owned());
+        }
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.selected != self.baseline
+    }
+
+    fn rebase(&mut self, baseline: BTreeSet<String>) {
+        let added = self
+            .selected
+            .difference(&self.baseline)
+            .cloned()
+            .collect::<Vec<_>>();
+        let removed = self
+            .baseline
+            .difference(&self.selected)
+            .cloned()
+            .collect::<Vec<_>>();
+        self.selected = baseline.clone();
+        self.selected.extend(added);
+        for permission_key in removed {
+            self.selected.remove(&permission_key);
+        }
+        self.baseline = baseline;
+    }
+}
+
 impl ServerManagementStatus {
     fn busy(&self) -> bool {
         matches!(self, Self::Loading | Self::Saving)
@@ -56,7 +125,10 @@ pub(super) struct ServerManagementState {
     selected_profile_history_id: Option<String>,
     profile_history_status: ProfileHistoryStatus,
     profile_history: Vec<SharedHistoryEntry>,
+    change_log: ActivityLogFeed,
+    audit_log: ActivityLogFeed,
     selected_role_id: Option<String>,
+    role_permission_drafts: BTreeMap<String, RolePermissionDraft>,
     selected_resource: Option<ManagementResourceSelection>,
 }
 
@@ -68,6 +140,64 @@ enum ManagementResourceSelection {
 }
 
 impl ServerManagementState {
+    fn role_permission_keys(&self, role: &ManagementRole) -> BTreeSet<String> {
+        self.role_permission_drafts
+            .get(&role.id)
+            .map(|draft| draft.selected.clone())
+            .unwrap_or_else(|| management_role_permission_keys(role))
+    }
+
+    fn role_permissions_are_dirty(&self, role_id: &str) -> bool {
+        self.role_permission_drafts.contains_key(role_id)
+    }
+
+    fn toggle_role_permission(&mut self, role_id: &str, permission_key: &str) {
+        let Some(baseline) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.roles.as_ref())
+            .and_then(|roles| roles.iter().find(|role| role.id == role_id))
+            .filter(|role| !role.system)
+            .map(management_role_permission_keys)
+        else {
+            return;
+        };
+        let draft = self
+            .role_permission_drafts
+            .entry(role_id.to_owned())
+            .or_insert_with(|| RolePermissionDraft::new(baseline));
+        draft.toggle(permission_key);
+        if !draft.is_dirty() {
+            self.role_permission_drafts.remove(role_id);
+        }
+    }
+
+    fn reset_role_permission_draft(&mut self, role_id: &str) {
+        self.role_permission_drafts.remove(role_id);
+    }
+
+    fn reconcile_role_permission_drafts(&mut self, snapshot: &UpstreamManagementSnapshot) {
+        if !snapshot.has_permission(ROLES_ASSIGN_PERMISSIONS) {
+            self.role_permission_drafts.clear();
+            return;
+        }
+        let Some(roles) = snapshot.roles.as_ref() else {
+            self.role_permission_drafts.clear();
+            return;
+        };
+        self.role_permission_drafts.retain(|role_id, draft| {
+            let Some(role) = roles
+                .iter()
+                .find(|role| &role.id == role_id)
+                .filter(|role| !role.system)
+            else {
+                return false;
+            };
+            draft.rebase(management_role_permission_keys(role));
+            draft.is_dirty()
+        });
+    }
+
     pub(super) fn reset_profile_history(&mut self) {
         self.profile_history_status = ProfileHistoryStatus::Idle;
         self.profile_history.clear();
@@ -86,6 +216,16 @@ impl ServerManagementState {
     }
 
     fn set_snapshot(&mut self, snapshot: UpstreamManagementSnapshot) {
+        self.reconcile_role_permission_drafts(&snapshot);
+        if !snapshot.has_permission(crate::core::AUDIT_READ) {
+            self.audit_log = ActivityLogFeed::default();
+        }
+        if !snapshot.has_permission(crate::core::WORKSPACES_READ)
+            || !snapshot.has_permission(crate::core::COLLECTIONS_READ)
+            || !snapshot.has_permission(crate::core::REQUESTS_READ)
+        {
+            self.change_log = ActivityLogFeed::default();
+        }
         if !snapshot
             .profiles
             .iter()
@@ -139,6 +279,13 @@ impl ServerManagementState {
         }
         self.snapshot = Some(snapshot);
     }
+}
+
+fn management_role_permission_keys(role: &ManagementRole) -> BTreeSet<String> {
+    role.permissions
+        .iter()
+        .map(|permission| permission.key.clone())
+        .collect()
 }
 
 enum ManagementMutation {
@@ -420,11 +567,34 @@ impl ApiTester {
             cx.notify();
             return;
         };
-
+        let change_log = if self.server_management.upstream_id.as_deref() == Some(&upstream_id) {
+            self.server_management.change_log.clone()
+        } else {
+            ActivityLogFeed::default()
+        };
+        let audit_log = if self.server_management.upstream_id.as_deref() == Some(&upstream_id) {
+            self.server_management.audit_log.clone()
+        } else {
+            ActivityLogFeed::default()
+        };
+        let role_permission_drafts =
+            if self.server_management.upstream_id.as_deref() == Some(&upstream_id) {
+                self.server_management.role_permission_drafts.clone()
+            } else {
+                BTreeMap::new()
+            };
+        let selected_role_id = (self.server_management.upstream_id.as_deref()
+            == Some(&upstream_id))
+        .then(|| self.server_management.selected_role_id.clone())
+        .flatten();
         self.server_management = ServerManagementState {
             upstream_id: Some(upstream_id.clone()),
             status: ServerManagementStatus::Loading,
             snapshot: None,
+            change_log,
+            audit_log,
+            selected_role_id,
+            role_permission_drafts,
             ..ServerManagementState::default()
         };
         let vault = self.credential_vault.clone();
@@ -507,7 +677,6 @@ impl ApiTester {
             cx.notify();
             return;
         };
-
         if let Some(abort_handle) = self.server_management_abort_handle.take() {
             abort_handle.abort();
         }
@@ -580,6 +749,25 @@ impl ApiTester {
         .detach();
     }
 
+    fn save_role_permission_draft(
+        &mut self,
+        role_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(draft) = self.server_management.role_permission_drafts.get(role_id) else {
+            return;
+        };
+        self.run_management_mutation(
+            ManagementMutation::ReplaceRolePermissions {
+                role_id: role_id.to_owned(),
+                permission_keys: draft.selected.iter().cloned().collect(),
+            },
+            window,
+            cx,
+        );
+    }
+
     pub(super) fn user_management_settings_page(&self, cx: &mut Context<Self>) -> SettingPage {
         let this = cx.entity().downgrade();
         SettingPage::new("Users")
@@ -613,6 +801,30 @@ impl ApiTester {
             .group(SettingGroup::new().item(SettingItem::render_searchable(
                 "profiles members shared request history headers bodies",
                 move |_, _, cx| profile_views::render_profiles(&this, cx),
+            )))
+    }
+
+    pub(super) fn change_log_settings_page(&self, cx: &mut Context<Self>) -> SettingPage {
+        let this = cx.entity().downgrade();
+        SettingPage::new("Change log")
+            .description("Inspect field-level request, collection, and workspace changes.")
+            .resettable(false)
+            .full_bleed()
+            .group(SettingGroup::new().item(SettingItem::render_searchable(
+                "change log diffs requests collections workspaces from to",
+                move |_, window, cx| activity_views::render_change_log(&this, window, cx),
+            )))
+    }
+
+    pub(super) fn audit_log_settings_page(&self, cx: &mut Context<Self>) -> SettingPage {
+        let this = cx.entity().downgrade();
+        SettingPage::new("Audit log")
+            .description("Review permissioned user and role changes with before/after values.")
+            .resettable(false)
+            .full_bleed()
+            .group(SettingGroup::new().item(SettingItem::render_searchable(
+                "audit log users roles permissions before after",
+                move |_, window, cx| activity_views::render_audit_log(&this, window, cx),
             )))
     }
 
@@ -1250,4 +1462,49 @@ fn management_dialog_field(label: &'static str, input: Input) -> AnyElement {
         .child(div().text_xs().font_semibold().child(label))
         .child(input)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn permission_keys(keys: &[&str]) -> BTreeSet<String> {
+        keys.iter().map(|key| (*key).to_owned()).collect()
+    }
+
+    #[test]
+    fn role_permission_draft_only_becomes_dirty_until_returned_to_baseline() {
+        let mut draft = RolePermissionDraft::new(permission_keys(&["requests.read"]));
+
+        draft.toggle("requests.update");
+        assert!(draft.is_dirty());
+        assert_eq!(
+            draft.selected,
+            permission_keys(&["requests.read", "requests.update"])
+        );
+
+        draft.toggle("requests.update");
+        assert!(!draft.is_dirty());
+        assert_eq!(draft.selected, permission_keys(&["requests.read"]));
+    }
+
+    #[test]
+    fn role_permission_draft_preserves_local_intent_across_realtime_rebase() {
+        let mut draft =
+            RolePermissionDraft::new(permission_keys(&["requests.read", "requests.update"]));
+        draft.toggle("requests.update");
+        draft.toggle("requests.execute");
+
+        draft.rebase(permission_keys(&[
+            "collections.read",
+            "requests.read",
+            "requests.update",
+        ]));
+
+        assert_eq!(
+            draft.selected,
+            permission_keys(&["collections.read", "requests.execute", "requests.read",])
+        );
+        assert!(draft.is_dirty());
+    }
 }

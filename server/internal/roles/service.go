@@ -3,6 +3,7 @@ package roles
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -30,6 +31,7 @@ type CreateInput struct {
 type UpdateInput struct {
 	Name        *string
 	Description *string
+	ActorUserID string
 }
 
 func WithEvents(events resourceevents.Emitter) ServiceOption {
@@ -82,13 +84,26 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (identity.Role,
 	if err != nil {
 		return identity.Role{}, mapRepositoryError(err)
 	}
-	s.publishRoleChange(resourceevents.ActionCreated, created.ID)
+	s.publishRoleChange(
+		resourceevents.ActionCreated,
+		created,
+		createdBy(input.CreatedByUserID),
+		[]resourceevents.Diff{
+			{Field: "name", From: nil, To: created.Name},
+			{Field: "description", From: nil, To: created.Description},
+			{Field: "permission_keys", From: nil, To: permissionKeys(created.Permissions)},
+		},
+	)
 	return created, nil
 }
 
 func (s *Service) Update(ctx context.Context, id string, input UpdateInput) (identity.Role, error) {
 	if err := validateRoleID(id); err != nil {
 		return identity.Role{}, err
+	}
+	before, err := s.repository.GetRole(ctx, id)
+	if err != nil {
+		return identity.Role{}, mapRepositoryError(err)
 	}
 	changes := identity.RoleChanges{}
 	if input.Name != nil {
@@ -107,32 +122,79 @@ func (s *Service) Update(ctx context.Context, id string, input UpdateInput) (ide
 	if err != nil {
 		return identity.Role{}, mapRepositoryError(err)
 	}
-	s.publishRoleChange(resourceevents.ActionUpdated, role.ID)
+	diffs := make([]resourceevents.Diff, 0, 2)
+	if input.Name != nil {
+		diffs = append(diffs, resourceevents.Diff{Field: "name", From: before.Name, To: role.Name})
+	}
+	if input.Description != nil {
+		diffs = append(diffs, resourceevents.Diff{Field: "description", From: before.Description, To: role.Description})
+	}
+	s.publishRoleChange(resourceevents.ActionUpdated, role, input.ActorUserID, diffs)
 	return role, nil
 }
 
-func (s *Service) ReplacePermissions(ctx context.Context, id string, keys []string) (identity.Role, error) {
+func (s *Service) ReplacePermissions(
+	ctx context.Context,
+	id string,
+	keys []string,
+	actorUserID string,
+) (identity.Role, error) {
 	if err := validateRoleID(id); err != nil {
 		return identity.Role{}, err
+	}
+	before, err := s.repository.GetRole(ctx, id)
+	if err != nil {
+		return identity.Role{}, mapRepositoryError(err)
 	}
 	role, err := s.repository.ReplaceRolePermissions(ctx, id, normalizePermissionKeys(keys))
 	if err != nil {
 		return identity.Role{}, mapRepositoryError(err)
 	}
-	s.publishRoleChange(resourceevents.ActionUpdated, role.ID)
+	s.publishRoleChange(
+		resourceevents.ActionUpdated,
+		role,
+		actorUserID,
+		[]resourceevents.Diff{{
+			Field: "permission_keys", From: permissionKeys(before.Permissions), To: permissionKeys(role.Permissions),
+		}},
+	)
 	return role, nil
 }
 
-func (s *Service) publishRoleChange(action resourceevents.Action, roleID string) {
+func (s *Service) publishRoleChange(
+	action resourceevents.Action,
+	role identity.Role,
+	actorUserID string,
+	diffs []resourceevents.Diff,
+) {
 	resourceevents.Emit(s.events, resourceevents.Change{
-		Resource:   resourceevents.ResourceRole,
-		Action:     action,
-		ResourceID: roleID,
+		Resource:    resourceevents.ResourceRole,
+		Action:      action,
+		ResourceID:  role.ID,
+		ActorUserID: actorUserID,
+		TargetName:  role.Name,
+		Diffs:       diffs,
 		Audience: resourceevents.Audience{
-			RoleIDs:        []string{roleID},
+			RoleIDs:        []string{role.ID},
 			PermissionKeys: []string{identity.PermissionRolesRead},
 		},
 	})
+}
+
+func createdBy(userID *string) string {
+	if userID == nil {
+		return ""
+	}
+	return *userID
+}
+
+func permissionKeys(permissions []identity.Permission) []string {
+	result := make([]string, 0, len(permissions))
+	for _, permission := range permissions {
+		result = append(result, permission.Key)
+	}
+	slices.Sort(result)
+	return result
 }
 
 func (s *Service) ListPermissions(ctx context.Context) ([]identity.Permission, error) {

@@ -42,6 +42,7 @@ pub const REQUESTS_DELETE: &str = "requests.delete";
 pub const SERVER_SETTINGS_READ: &str = "server_settings.read";
 pub const SERVER_SETTINGS_UPDATE: &str = "server_settings.update";
 pub const HISTORY_READ_OTHERS: &str = "history.read_others";
+pub const AUDIT_READ: &str = "audit.read";
 pub const ENVIRONMENTS_READ: &str = "environments.read";
 pub const ENVIRONMENTS_CREATE: &str = "environments.create";
 pub const ENVIRONMENTS_UPDATE: &str = "environments.update";
@@ -120,6 +121,43 @@ pub struct SharedHistoryEntry {
     pub response: Option<SharedHistoryResponse>,
     #[serde(default)]
     pub error: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct ActivityLogDiff {
+    pub field: String,
+    pub from: serde_json::Value,
+    pub to: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct ActivityLogEntry {
+    pub id: String,
+    pub kind: String,
+    pub resource: String,
+    pub action: String,
+    pub resource_id: String,
+    #[serde(default)]
+    pub workspace_id: String,
+    #[serde(default)]
+    pub collection_id: String,
+    #[serde(default)]
+    pub actor_user_id: String,
+    #[serde(default)]
+    pub actor_email: String,
+    #[serde(default)]
+    pub actor_display_name: String,
+    pub target_name: String,
+    pub diffs: Vec<ActivityLogDiff>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct ActivityLogPage {
+    pub entries: Vec<ActivityLogEntry>,
+    pub older_cursor: Option<String>,
+    pub newer_cursor: Option<String>,
+    pub has_more_newer: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -504,6 +542,71 @@ pub async fn load_upstream_management(
         workspaces,
         request_execution_settings,
     })
+}
+
+pub async fn list_workspace_activity(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    cursor: Option<&str>,
+    after: Option<&str>,
+) -> Result<ActivityLogPage, UpstreamManagementError> {
+    list_activity(
+        client,
+        base_url,
+        bearer_token,
+        &format!("api/v1/workspaces/{workspace_id}/change-log"),
+        cursor,
+        after,
+    )
+    .await
+}
+
+pub async fn list_audit_activity(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    cursor: Option<&str>,
+    after: Option<&str>,
+) -> Result<ActivityLogPage, UpstreamManagementError> {
+    list_activity(
+        client,
+        base_url,
+        bearer_token,
+        "api/v1/audit-log",
+        cursor,
+        after,
+    )
+    .await
+}
+
+async fn list_activity(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    path: &str,
+    cursor: Option<&str>,
+    after: Option<&str>,
+) -> Result<ActivityLogPage, UpstreamManagementError> {
+    let mut endpoint = endpoint(base_url, path)?;
+    {
+        let mut query = endpoint.query_pairs_mut();
+        query.append_pair("limit", "30");
+        if let Some(cursor) = cursor {
+            query.append_pair("cursor", cursor);
+        }
+        if let Some(after) = after {
+            query.append_pair("after", after);
+        }
+    }
+    let response = client
+        .get(endpoint)
+        .bearer_auth(bearer_token)
+        .send()
+        .await
+        .map_err(UpstreamManagementError::Transport)?;
+    parse_response(response).await
 }
 
 pub async fn list_shared_history(

@@ -169,11 +169,13 @@ func (h *Handler) UpdateController() fiber.Handler {
 		UpdateRequest,
 	](
 		func(c fiber.Ctx, payload UpdatePayload) httpkit.Response[identity.UserView] {
+			actorUserID := auth.PrincipalFromContext(c).User.ID
 			result, err := h.service.Update(c.Context(), payload.ID, UpdateInput{
 				Email:       payload.Email,
 				DisplayName: payload.DisplayName,
 				Password:    payload.Password,
 				Active:      payload.Active,
+				ActorUserID: actorUserID,
 			})
 			if err != nil {
 				return httpkit.NewErrorResponse[identity.UserView](err)
@@ -190,7 +192,8 @@ func (h *Handler) ReplaceRolesController() fiber.Handler {
 		ReplaceRolesRequest,
 	](
 		func(c fiber.Ctx, payload ReplaceRolesPayload) httpkit.Response[identity.UserView] {
-			result, err := h.service.ReplaceRoles(c.Context(), payload.ID, payload.RoleIDs)
+			actorUserID := auth.PrincipalFromContext(c).User.ID
+			result, err := h.service.ReplaceRoles(c.Context(), payload.ID, payload.RoleIDs, actorUserID)
 			if err != nil {
 				return httpkit.NewErrorResponse[identity.UserView](err)
 			}

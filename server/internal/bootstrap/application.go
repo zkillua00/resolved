@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"resolved-server/eventsystem"
+	"resolved-server/internal/activitylog"
 	"resolved-server/internal/auth"
 	"resolved-server/internal/config"
 	"resolved-server/internal/database"
@@ -74,6 +75,8 @@ func New(cfg config.Config, accessLog io.Writer) (*Application, error) {
 	for range 3 {
 		events.StartNewEventLoop()
 	}
+	activityRepository := activitylog.NewRepository(db)
+	recordedEvents := activitylog.NewRecorder(activityRepository, events)
 	usersService := users.NewService(
 		repository,
 		hasher,
@@ -88,14 +91,14 @@ func New(cfg config.Config, accessLog io.Writer) (*Application, error) {
 		) error {
 			return workspaces.RekeyEnvironmentVariableValues(ctx, tx, environmentCipher, userID, oldKey, newKey)
 		}),
-		users.WithEvents(events),
+		users.WithEvents(recordedEvents),
 	)
-	rolesService := roles.NewService(repository, roles.WithEvents(events))
+	rolesService := roles.NewService(repository, roles.WithEvents(recordedEvents))
 	workspaceRepository := workspaces.NewRepository(db)
 	workspacesService := workspaces.NewService(
 		workspaceRepository,
 		environmentCipher,
-		workspaces.WithEvents(events),
+		workspaces.WithEvents(recordedEvents),
 	)
 	realtimePublisher := realtime.New(events)
 
@@ -112,6 +115,10 @@ func New(cfg config.Config, accessLog io.Writer) (*Application, error) {
 		workspacesService,
 		sharedhistory.WithEvents(events),
 	))
+	activityHandler := activitylog.NewHandler(activitylog.NewService(
+		activityRepository,
+		workspacesService,
+	))
 	httpServer := server.New(
 		cfg.Address,
 		accessLog,
@@ -119,6 +126,7 @@ func New(cfg config.Config, accessLog io.Writer) (*Application, error) {
 		server.WithWorkspaces(authService, workspacesHandler),
 		server.WithRequestProxy(authService, requestProxyHandler),
 		server.WithSharedHistory(authService, sharedHistoryHandler),
+		server.WithActivityLogs(authService, activityHandler),
 		server.WithRealtime(authService, realtimePublisher),
 	)
 

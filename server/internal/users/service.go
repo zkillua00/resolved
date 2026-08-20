@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"resolved-server/internal/identity"
@@ -42,6 +43,7 @@ type UpdateInput struct {
 	DisplayName *string
 	Password    *string
 	Active      *bool
+	ActorUserID string
 }
 
 func WithFirstOwnerSetup(setup identity.FirstOwnerSetup) ServiceOption {
@@ -90,7 +92,17 @@ func (s *Service) BootstrapOwner(ctx context.Context, input CreateInput) (identi
 	if err != nil {
 		return identity.User{}, mapRepositoryError(err)
 	}
-	s.publishUserChange(resourceevents.ActionCreated, created.ID)
+	s.publishUserChange(
+		resourceevents.ActionCreated,
+		created,
+		createdBy(input.CreatedByUserID),
+		[]resourceevents.Diff{
+			{Field: "email", From: nil, To: created.Email},
+			{Field: "display_name", From: nil, To: created.DisplayName},
+			{Field: "active", From: nil, To: created.Active},
+			{Field: "role_ids", From: nil, To: roleIDs(created.Roles)},
+		},
+	)
 	return created, nil
 }
 
@@ -106,7 +118,17 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (identity.User,
 	if err != nil {
 		return identity.User{}, mapRepositoryError(err)
 	}
-	s.publishUserChange(resourceevents.ActionCreated, created.ID)
+	s.publishUserChange(
+		resourceevents.ActionCreated,
+		created,
+		createdBy(input.CreatedByUserID),
+		[]resourceevents.Diff{
+			{Field: "email", From: nil, To: created.Email},
+			{Field: "display_name", From: nil, To: created.DisplayName},
+			{Field: "active", From: nil, To: created.Active},
+			{Field: "role_ids", From: nil, To: roleIDs(created.Roles)},
+		},
+	)
 	return created, nil
 }
 
@@ -132,6 +154,10 @@ func (s *Service) Get(ctx context.Context, id string) (identity.User, error) {
 func (s *Service) Update(ctx context.Context, id string, input UpdateInput) (identity.User, error) {
 	if err := validateID("id", id); err != nil {
 		return identity.User{}, err
+	}
+	before, err := s.repository.GetUser(ctx, id)
+	if err != nil {
+		return identity.User{}, mapRepositoryError(err)
 	}
 	changes := identity.UserChanges{Active: input.Active}
 	var beforePasswordChange identity.BeforePasswordChange
@@ -196,35 +222,90 @@ func (s *Service) Update(ctx context.Context, id string, input UpdateInput) (ide
 	if input.Password != nil || input.Active != nil && !*input.Active {
 		s.sessionKeys.DeleteUser(id)
 	}
-	s.publishUserChange(resourceevents.ActionUpdated, user.ID)
+	diffs := make([]resourceevents.Diff, 0, 4)
+	if input.Email != nil {
+		diffs = append(diffs, resourceevents.Diff{Field: "email", From: before.Email, To: user.Email})
+	}
+	if input.DisplayName != nil {
+		diffs = append(diffs, resourceevents.Diff{Field: "display_name", From: before.DisplayName, To: user.DisplayName})
+	}
+	if input.Active != nil {
+		diffs = append(diffs, resourceevents.Diff{Field: "active", From: before.Active, To: user.Active})
+	}
+	if input.Password != nil {
+		diffs = append(diffs, resourceevents.Diff{Field: "password", From: "[REDACTED]", To: "[CHANGED]"})
+	}
+	s.publishUserChange(resourceevents.ActionUpdated, user, input.ActorUserID, diffs)
 	return user, nil
 }
 
-func (s *Service) ReplaceRoles(ctx context.Context, id string, roleIDs []string) (identity.User, error) {
+func (s *Service) ReplaceRoles(
+	ctx context.Context,
+	id string,
+	roleIDs []string,
+	actorUserID string,
+) (identity.User, error) {
 	if err := validateID("id", id); err != nil {
 		return identity.User{}, err
 	}
 	if err := validateIDs("role_ids", roleIDs); err != nil {
 		return identity.User{}, err
 	}
+	before, err := s.repository.GetUser(ctx, id)
+	if err != nil {
+		return identity.User{}, mapRepositoryError(err)
+	}
 	user, err := s.repository.ReplaceUserRoles(ctx, id, roleIDs)
 	if err != nil {
 		return identity.User{}, mapRepositoryError(err)
 	}
-	s.publishUserChange(resourceevents.ActionUpdated, user.ID)
+	s.publishUserChange(
+		resourceevents.ActionUpdated,
+		user,
+		actorUserID,
+		[]resourceevents.Diff{{Field: "role_ids", From: roleIDsFromUser(before), To: roleIDsFromUser(user)}},
+	)
 	return user, nil
 }
 
-func (s *Service) publishUserChange(action resourceevents.Action, userID string) {
+func (s *Service) publishUserChange(
+	action resourceevents.Action,
+	user identity.User,
+	actorUserID string,
+	diffs []resourceevents.Diff,
+) {
 	resourceevents.Emit(s.events, resourceevents.Change{
-		Resource:   resourceevents.ResourceUser,
-		Action:     action,
-		ResourceID: userID,
+		Resource:    resourceevents.ResourceUser,
+		Action:      action,
+		ResourceID:  user.ID,
+		ActorUserID: actorUserID,
+		TargetName:  user.DisplayName,
+		Diffs:       diffs,
 		Audience: resourceevents.Audience{
-			UserIDs:        []string{userID},
+			UserIDs:        []string{user.ID},
 			PermissionKeys: []string{identity.PermissionUsersRead, identity.PermissionRolesRead},
 		},
 	})
+}
+
+func createdBy(userID *string) string {
+	if userID == nil {
+		return ""
+	}
+	return *userID
+}
+
+func roleIDs(roles []identity.Role) []string {
+	result := make([]string, 0, len(roles))
+	for _, role := range roles {
+		result = append(result, role.ID)
+	}
+	slices.Sort(result)
+	return result
+}
+
+func roleIDsFromUser(user identity.User) []string {
+	return roleIDs(user.Roles)
 }
 
 func (s *Service) newUser(input CreateInput) (identity.User, error) {

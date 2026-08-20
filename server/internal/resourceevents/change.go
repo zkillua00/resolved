@@ -38,6 +38,12 @@ type Audience struct {
 	PermissionKeys []string `json:"-"`
 }
 
+type Diff struct {
+	Field string `json:"field"`
+	From  any    `json:"from"`
+	To    any    `json:"to"`
+}
+
 type Change struct {
 	EventID       string    `json:"event_id"`
 	Resource      Resource  `json:"resource"`
@@ -48,6 +54,9 @@ type Change struct {
 	EnvironmentID string    `json:"environment_id,omitempty"`
 	OccurredAt    time.Time `json:"occurred_at"`
 	Audience      Audience  `json:"-"`
+	ActorUserID   string    `json:"-"`
+	TargetName    string    `json:"-"`
+	Diffs         []Diff    `json:"-"`
 }
 
 type Emitter interface {
@@ -75,10 +84,51 @@ func cloneChange(change Change) Change {
 	change.WorkspaceID = strings.Clone(change.WorkspaceID)
 	change.CollectionID = strings.Clone(change.CollectionID)
 	change.EnvironmentID = strings.Clone(change.EnvironmentID)
+	change.ActorUserID = strings.Clone(change.ActorUserID)
+	change.TargetName = strings.Clone(change.TargetName)
+	change.Diffs = cloneDiffs(change.Diffs)
 	change.Audience.UserIDs = cloneStrings(change.Audience.UserIDs)
 	change.Audience.RoleIDs = cloneStrings(change.Audience.RoleIDs)
 	change.Audience.PermissionKeys = cloneStrings(change.Audience.PermissionKeys)
 	return change
+}
+
+func cloneDiffs(diffs []Diff) []Diff {
+	if diffs == nil {
+		return nil
+	}
+	cloned := make([]Diff, len(diffs))
+	for index, diff := range diffs {
+		cloned[index] = Diff{
+			Field: strings.Clone(diff.Field),
+			From:  cloneValue(diff.From),
+			To:    cloneValue(diff.To),
+		}
+	}
+	return cloned
+}
+
+func cloneValue(value any) any {
+	switch value := value.(type) {
+	case string:
+		return strings.Clone(value)
+	case []string:
+		return cloneStrings(value)
+	case []any:
+		cloned := make([]any, len(value))
+		for index := range value {
+			cloned[index] = cloneValue(value[index])
+		}
+		return cloned
+	case map[string]any:
+		cloned := make(map[string]any, len(value))
+		for key, nested := range value {
+			cloned[strings.Clone(key)] = cloneValue(nested)
+		}
+		return cloned
+	default:
+		return value
+	}
 }
 
 func cloneStrings(values []string) []string {

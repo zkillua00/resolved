@@ -29,6 +29,11 @@ type Actor struct {
 	EnvironmentKey []byte
 }
 
+type AccessScope struct {
+	AllCollections bool
+	CollectionIDs  []string
+}
+
 type CreateWorkspaceInput struct {
 	Name string
 }
@@ -103,6 +108,32 @@ func (s *Service) Get(ctx context.Context, actor Actor, id string) (Workspace, e
 	return scoped, nil
 }
 
+func (s *Service) ResolveAccessScope(
+	ctx context.Context,
+	actor Actor,
+	workspaceID string,
+) (AccessScope, error) {
+	if err := validateID("workspace_id", workspaceID); err != nil {
+		return AccessScope{}, err
+	}
+	workspace, err := s.repository.GetWorkspace(ctx, workspaceID)
+	if err != nil {
+		return AccessScope{}, mapRepositoryError(err)
+	}
+	if hasWorkspaceGrant(workspace, actor) {
+		return AccessScope{AllCollections: true}, nil
+	}
+	effective := effectiveCollectionIDs(workspace.Collections, actor.UserID, false, nil)
+	if len(effective) == 0 {
+		return AccessScope{}, workspaceAccessDenied()
+	}
+	collectionIDs := make([]string, 0, len(effective))
+	for collectionID := range effective {
+		collectionIDs = append(collectionIDs, collectionID)
+	}
+	return AccessScope{CollectionIDs: sortedLogStrings(collectionIDs)}, nil
+}
+
 func (s *Service) Create(ctx context.Context, actor Actor, input CreateWorkspaceInput) (Workspace, error) {
 	name, err := normalizeName(input.Name)
 	if err != nil {
@@ -120,6 +151,12 @@ func (s *Service) Create(ctx context.Context, actor Actor, input CreateWorkspace
 		ResourceID:  created.ID,
 		WorkspaceID: created.ID,
 		Audience:    ownerScopedAudience(workspaceAudience(created)),
+		ActorUserID: actor.UserID,
+		TargetName:  created.Name,
+		Diffs: []resourceevents.Diff{
+			{Field: "name", From: nil, To: created.Name},
+			{Field: "user_ids", From: nil, To: sortedLogStrings(created.UserIDs)},
+		},
 	})
 	return created, nil
 }
@@ -157,6 +194,11 @@ func (s *Service) Update(
 			workspaceAudience(workspace),
 			workspaceAudience(updated),
 		),
+		ActorUserID: actor.UserID,
+		TargetName:  updated.Name,
+		Diffs: []resourceevents.Diff{
+			{Field: "name", From: workspace.Name, To: updated.Name},
+		},
 	})
 	return updated, nil
 }
@@ -193,6 +235,11 @@ func (s *Service) ReplaceWorkspaceUsers(
 			workspaceAudience(workspace),
 			workspaceAudience(updated),
 		),
+		ActorUserID: actor.UserID,
+		TargetName:  updated.Name,
+		Diffs: []resourceevents.Diff{
+			{Field: "user_ids", From: sortedLogStrings(workspace.UserIDs), To: sortedLogStrings(updated.UserIDs)},
+		},
 	})
 	return updated, nil
 }
@@ -217,6 +264,11 @@ func (s *Service) Delete(ctx context.Context, actor Actor, id string) error {
 		ResourceID:  id,
 		WorkspaceID: id,
 		Audience:    ownerScopedAudience(workspaceAudience(workspace)),
+		ActorUserID: actor.UserID,
+		TargetName:  workspace.Name,
+		Diffs: []resourceevents.Diff{
+			{Field: "name", From: workspace.Name, To: nil},
+		},
 	})
 	return nil
 }
@@ -299,6 +351,12 @@ func (s *Service) CreateCollection(
 		WorkspaceID:  workspaceID,
 		CollectionID: created.ID,
 		Audience:     ownerScopedAudience(audience),
+		ActorUserID:  actor.UserID,
+		TargetName:   created.Name,
+		Diffs: []resourceevents.Diff{
+			{Field: "name", From: nil, To: created.Name},
+			{Field: "parent_collection_id", From: nil, To: created.ParentCollectionID},
+		},
 	})
 	return created, nil
 }
@@ -320,7 +378,8 @@ func (s *Service) UpdateCollection(
 	if err != nil {
 		return Collection{}, mapRepositoryError(err)
 	}
-	if _, exists := findCollection(workspace.Collections, collectionID); !exists {
+	before, exists := findCollection(workspace.Collections, collectionID)
+	if !exists {
 		return Collection{}, mapRepositoryError(ErrCollectionNotFound)
 	}
 	if !hasCollectionGrant(workspace, collectionID, actor) {
@@ -339,6 +398,11 @@ func (s *Service) UpdateCollection(
 		Audience: ownerScopedAudience(
 			collectionAudience(workspace, collectionID, true),
 		),
+		ActorUserID: actor.UserID,
+		TargetName:  updated.Name,
+		Diffs: []resourceevents.Diff{
+			{Field: "name", From: before.Name, To: updated.Name},
+		},
 	})
 	return updated, nil
 }
@@ -361,7 +425,8 @@ func (s *Service) MoveCollection(
 	if err != nil {
 		return Collection{}, mapRepositoryError(err)
 	}
-	if _, exists := findCollection(workspace.Collections, collectionID); !exists {
+	before, exists := findCollection(workspace.Collections, collectionID)
+	if !exists {
 		return Collection{}, mapRepositoryError(ErrCollectionNotFound)
 	}
 	if !hasCollectionGrant(workspace, collectionID, actor) {
@@ -399,6 +464,11 @@ func (s *Service) MoveCollection(
 		WorkspaceID:  workspaceID,
 		CollectionID: moved.ID,
 		Audience:     ownerScopedAudience(audience),
+		ActorUserID:  actor.UserID,
+		TargetName:   moved.Name,
+		Diffs: []resourceevents.Diff{
+			{Field: "parent_collection_id", From: before.ParentCollectionID, To: moved.ParentCollectionID},
+		},
 	})
 	return moved, nil
 }
@@ -419,7 +489,8 @@ func (s *Service) ReplaceCollectionUsers(
 	if err != nil {
 		return Collection{}, mapRepositoryError(err)
 	}
-	if _, exists := findCollection(workspace.Collections, collectionID); !exists {
+	before, exists := findCollection(workspace.Collections, collectionID)
+	if !exists {
 		return Collection{}, mapRepositoryError(ErrCollectionNotFound)
 	}
 	if !hasCollectionGrant(workspace, collectionID, actor) {
@@ -439,6 +510,11 @@ func (s *Service) ReplaceCollectionUsers(
 			collectionAudience(workspace, collectionID, true),
 			userIDs,
 		),
+		ActorUserID: actor.UserID,
+		TargetName:  updated.Name,
+		Diffs: []resourceevents.Diff{
+			{Field: "user_ids", From: sortedLogStrings(before.UserIDs), To: sortedLogStrings(updated.UserIDs)},
+		},
 	})
 	return updated, nil
 }
@@ -455,7 +531,8 @@ func (s *Service) DeleteCollection(
 	if err != nil {
 		return mapRepositoryError(err)
 	}
-	if _, exists := findCollection(workspace.Collections, collectionID); !exists {
+	before, exists := findCollection(workspace.Collections, collectionID)
+	if !exists {
 		return mapRepositoryError(ErrCollectionNotFound)
 	}
 	if !hasCollectionGrant(workspace, collectionID, actor) {
@@ -473,6 +550,12 @@ func (s *Service) DeleteCollection(
 		Audience: ownerScopedAudience(
 			collectionAudience(workspace, collectionID, true),
 		),
+		ActorUserID: actor.UserID,
+		TargetName:  before.Name,
+		Diffs: []resourceevents.Diff{
+			{Field: "name", From: before.Name, To: nil},
+			{Field: "parent_collection_id", From: before.ParentCollectionID, To: nil},
+		},
 	})
 	return nil
 }
@@ -548,6 +631,12 @@ func (s *Service) CreateSavedRequest(
 		Audience: ownerScopedAudience(
 			collectionAudience(workspace, collectionID, false),
 		),
+		ActorUserID: actor.UserID,
+		TargetName:  created.Name,
+		Diffs: []resourceevents.Diff{
+			{Field: "name", From: nil, To: created.Name},
+			requestDefinitionCreatedDiff(created.Definition),
+		},
 	})
 	return created, nil
 }
@@ -579,12 +668,18 @@ func (s *Service) UpdateSavedRequest(
 	if !hasCollectionGrant(workspace, collectionID, actor) {
 		return SavedRequest{}, collectionAccessDenied()
 	}
+	before, err := s.repository.GetSavedRequest(ctx, workspaceID, collectionID, requestID)
+	if err != nil {
+		return SavedRequest{}, mapRepositoryError(err)
+	}
 	updated, err := s.repository.UpdateSavedRequest(
 		ctx, workspaceID, collectionID, requestID, name, definition,
 	)
 	if err != nil {
 		return SavedRequest{}, mapRepositoryError(err)
 	}
+	diffs := []resourceevents.Diff{{Field: "name", From: before.Name, To: updated.Name}}
+	diffs = append(diffs, requestDefinitionDiffs(before.Definition, updated.Definition)...)
 	s.publishChange(resourceevents.Change{
 		Resource:     resourceevents.ResourceRequest,
 		Action:       resourceevents.ActionUpdated,
@@ -594,6 +689,9 @@ func (s *Service) UpdateSavedRequest(
 		Audience: ownerScopedAudience(
 			collectionAudience(workspace, collectionID, false),
 		),
+		ActorUserID: actor.UserID,
+		TargetName:  updated.Name,
+		Diffs:       diffs,
 	})
 	return updated, nil
 }
@@ -623,6 +721,10 @@ func (s *Service) MoveSavedRequest(
 		!hasCollectionGrant(workspace, targetCollectionID, actor) {
 		return SavedRequest{}, collectionAccessDenied()
 	}
+	before, err := s.repository.GetSavedRequest(ctx, workspaceID, collectionID, requestID)
+	if err != nil {
+		return SavedRequest{}, mapRepositoryError(err)
+	}
 	moved, err := s.repository.MoveSavedRequest(
 		ctx, workspaceID, collectionID, requestID, targetCollectionID,
 	)
@@ -639,6 +741,11 @@ func (s *Service) MoveSavedRequest(
 			collectionAudience(workspace, collectionID, false),
 			collectionAudience(workspace, targetCollectionID, false),
 		),
+		ActorUserID: actor.UserID,
+		TargetName:  moved.Name,
+		Diffs: []resourceevents.Diff{
+			{Field: "collection_id", From: before.CollectionID, To: moved.CollectionID},
+		},
 	})
 	return moved, nil
 }
@@ -661,6 +768,10 @@ func (s *Service) DeleteSavedRequest(
 	if !hasCollectionGrant(workspace, collectionID, actor) {
 		return collectionAccessDenied()
 	}
+	before, err := s.repository.GetSavedRequest(ctx, workspaceID, collectionID, requestID)
+	if err != nil {
+		return mapRepositoryError(err)
+	}
 	if err := s.repository.DeleteSavedRequest(ctx, workspaceID, collectionID, requestID); err != nil {
 		return mapRepositoryError(err)
 	}
@@ -673,6 +784,12 @@ func (s *Service) DeleteSavedRequest(
 		Audience: ownerScopedAudience(
 			collectionAudience(workspace, collectionID, false),
 		),
+		ActorUserID: actor.UserID,
+		TargetName:  before.Name,
+		Diffs: []resourceevents.Diff{
+			{Field: "name", From: before.Name, To: nil},
+			{Field: "definition", From: requestDefinitionCreatedDiff(before.Definition).To, To: nil},
+		},
 	})
 	return nil
 }

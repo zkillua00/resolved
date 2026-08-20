@@ -10,10 +10,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"resolved-server/eventsystem"
+	"resolved-server/internal/activitylog"
 	"resolved-server/internal/auth"
 	"resolved-server/internal/config"
 	"resolved-server/internal/database"
@@ -697,6 +700,216 @@ func TestSharedHistoryProfilesAndAuthorization(t *testing.T) {
 	if len(cleared) != 0 {
 		t.Fatalf("history after clear = %+v, want empty", cleared)
 	}
+}
+
+func TestChangeAndAuditLogsExposeDiffsAndEnforceAuditPermission(t *testing.T) {
+	app, usersService, _, closeDatabase := newTestServer(t)
+	t.Cleanup(closeDatabase)
+
+	owner, err := usersService.BootstrapOwner(t.Context(), users.CreateInput{
+		Email: "log-owner", DisplayName: "Log Owner", Password: ownerPassword,
+	})
+	if err != nil {
+		t.Fatalf("bootstrap owner: %v", err)
+	}
+	ownerLogin := login(t, app, owner.Email, ownerPassword)
+	workspace := request[workspaces.WorkspaceView](
+		t, app, http.MethodPost, "/api/v1/workspaces", ownerLogin.Token,
+		map[string]any{"name": "Before workspace"}, fiber.StatusCreated,
+	).Data
+	request[workspaces.WorkspaceView](
+		t, app, http.MethodPatch, "/api/v1/workspaces/"+workspace.ID, ownerLogin.Token,
+		map[string]any{"name": "After workspace"}, fiber.StatusOK,
+	)
+
+	changeLog := request[activitylog.PageView](
+		t, app, http.MethodGet,
+		"/api/v1/workspaces/"+workspace.ID+"/change-log",
+		ownerLogin.Token, nil, fiber.StatusOK,
+	).Data.Entries
+	var workspaceRename *activitylog.EntryView
+	for index := range changeLog {
+		entry := &changeLog[index]
+		if entry.Resource == string(resourceevents.ResourceWorkspace) &&
+			entry.Action == string(resourceevents.ActionUpdated) {
+			workspaceRename = entry
+			break
+		}
+	}
+	if workspaceRename == nil || workspaceRename.ActorUserID != owner.ID ||
+		workspaceRename.ActorDisplayName != owner.DisplayName ||
+		!hasActivityDiff(workspaceRename.Diffs, "name", "Before workspace", "After workspace") {
+		t.Fatalf("workspace rename log = %+v", workspaceRename)
+	}
+	firstPage := request[activitylog.PageView](
+		t, app, http.MethodGet,
+		"/api/v1/workspaces/"+workspace.ID+"/change-log?limit=1",
+		ownerLogin.Token, nil, fiber.StatusOK,
+	).Data
+	if len(firstPage.Entries) != 1 || firstPage.OlderCursor == nil || firstPage.NewerCursor == nil {
+		t.Fatalf("first cursor page = %+v", firstPage)
+	}
+	olderPage := request[activitylog.PageView](
+		t, app, http.MethodGet,
+		"/api/v1/workspaces/"+workspace.ID+"/change-log?limit=1&cursor="+*firstPage.OlderCursor,
+		ownerLogin.Token, nil, fiber.StatusOK,
+	).Data
+	if len(olderPage.Entries) != 1 || olderPage.Entries[0].ID == firstPage.Entries[0].ID {
+		t.Fatalf("older cursor page = %+v", olderPage)
+	}
+	request[workspaces.WorkspaceView](
+		t, app, http.MethodPatch, "/api/v1/workspaces/"+workspace.ID, ownerLogin.Token,
+		map[string]any{"name": "Newest workspace"}, fiber.StatusOK,
+	)
+	newerPage := request[activitylog.PageView](
+		t, app, http.MethodGet,
+		"/api/v1/workspaces/"+workspace.ID+"/change-log?limit=1&after="+*firstPage.NewerCursor,
+		ownerLogin.Token, nil, fiber.StatusOK,
+	).Data
+	if len(newerPage.Entries) != 1 || newerPage.NewerCursor == nil ||
+		!hasActivityDiff(newerPage.Entries[0].Diffs, "name", "After workspace", "Newest workspace") {
+		t.Fatalf("newer cursor page = %+v", newerPage)
+	}
+
+	memberPassword := "audit-member-password"
+	member := request[identity.UserView](
+		t, app, http.MethodPost, "/api/v1/users", ownerLogin.Token,
+		map[string]any{
+			"email": "audit-member", "display_name": "Audit Member",
+			"password": memberPassword, "role_ids": []string{},
+		},
+		fiber.StatusCreated,
+	).Data
+	request[identity.UserView](
+		t, app, http.MethodPatch, "/api/v1/users/"+member.ID, ownerLogin.Token,
+		map[string]any{"display_name": "Renamed Member", "password": "new-audit-member-password"},
+		fiber.StatusOK,
+	)
+	role := request[identity.RoleView](
+		t, app, http.MethodPost, "/api/v1/roles", ownerLogin.Token,
+		map[string]any{
+			"name": "Audit role", "description": "Before", "permission_keys": []string{},
+		},
+		fiber.StatusCreated,
+	).Data
+	request[identity.RoleView](
+		t, app, http.MethodPatch, "/api/v1/roles/"+role.ID, ownerLogin.Token,
+		map[string]any{"description": "After"}, fiber.StatusOK,
+	)
+
+	auditLog := request[activitylog.PageView](
+		t, app, http.MethodGet, "/api/v1/audit-log", ownerLogin.Token, nil, fiber.StatusOK,
+	).Data.Entries
+	var sawUserDiff, sawRoleDiff, sawProtectedPassword bool
+	for _, entry := range auditLog {
+		if entry.Resource == string(resourceevents.ResourceUser) && entry.ResourceID == member.ID {
+			sawUserDiff = sawUserDiff || hasActivityDiff(entry.Diffs, "display_name", "Audit Member", "Renamed Member")
+			sawProtectedPassword = sawProtectedPassword || hasActivityDiff(entry.Diffs, "password", "[REDACTED]", "[CHANGED]")
+		}
+		if entry.Resource == string(resourceevents.ResourceRole) && entry.ResourceID == role.ID {
+			sawRoleDiff = sawRoleDiff || hasActivityDiff(entry.Diffs, "description", "Before", "After")
+		}
+	}
+	if !sawUserDiff || !sawRoleDiff || !sawProtectedPassword {
+		t.Fatalf(
+			"audit diffs user=%v role=%v password=%v log=%+v",
+			sawUserDiff, sawRoleDiff, sawProtectedPassword, auditLog,
+		)
+	}
+	serializedAudit, err := json.Marshal(auditLog)
+	if err != nil {
+		t.Fatalf("marshal audit log: %v", err)
+	}
+	if strings.Contains(string(serializedAudit), memberPassword) ||
+		strings.Contains(string(serializedAudit), "new-audit-member-password") {
+		t.Fatalf("password leaked into audit log: %s", serializedAudit)
+	}
+
+	readerRole := request[identity.RoleView](
+		t, app, http.MethodPost, "/api/v1/roles", ownerLogin.Token,
+		map[string]any{
+			"name": "Change log reader", "description": "Resource scoped",
+			"permission_keys": []string{
+				identity.PermissionWorkspacesRead,
+				identity.PermissionCollectionsRead,
+				identity.PermissionRequestsRead,
+			},
+		},
+		fiber.StatusCreated,
+	).Data
+	request[identity.UserView](
+		t, app, http.MethodPut, "/api/v1/users/"+member.ID+"/roles", ownerLogin.Token,
+		map[string]any{"role_ids": []string{readerRole.ID}}, fiber.StatusOK,
+	)
+	navigationParent := request[workspaces.CollectionView](
+		t, app, http.MethodPost, "/api/v1/workspaces/"+workspace.ID+"/collections", ownerLogin.Token,
+		map[string]any{"name": "Navigation parent"}, fiber.StatusCreated,
+	).Data
+	visibleCollection := request[workspaces.CollectionView](
+		t, app, http.MethodPost, "/api/v1/workspaces/"+workspace.ID+"/collections", ownerLogin.Token,
+		map[string]any{
+			"name": "Visible collection", "parent_collection_id": navigationParent.ID,
+		}, fiber.StatusCreated,
+	).Data
+	hiddenCollection := request[workspaces.CollectionView](
+		t, app, http.MethodPost, "/api/v1/workspaces/"+workspace.ID+"/collections", ownerLogin.Token,
+		map[string]any{"name": "Hidden collection"}, fiber.StatusCreated,
+	).Data
+	request[workspaces.CollectionView](
+		t, app, http.MethodPut,
+		"/api/v1/workspaces/"+workspace.ID+"/collections/"+visibleCollection.ID+"/users",
+		ownerLogin.Token, map[string]any{"user_ids": []string{member.ID}}, fiber.StatusOK,
+	)
+	request[workspaces.CollectionView](
+		t, app, http.MethodPatch,
+		"/api/v1/workspaces/"+workspace.ID+"/collections/"+visibleCollection.ID,
+		ownerLogin.Token, map[string]any{"name": "Visible after"}, fiber.StatusOK,
+	)
+	request[workspaces.CollectionView](
+		t, app, http.MethodPatch,
+		"/api/v1/workspaces/"+workspace.ID+"/collections/"+hiddenCollection.ID,
+		ownerLogin.Token, map[string]any{"name": "Hidden after"}, fiber.StatusOK,
+	)
+	request[workspaces.CollectionView](
+		t, app, http.MethodPatch,
+		"/api/v1/workspaces/"+workspace.ID+"/collections/"+navigationParent.ID,
+		ownerLogin.Token, map[string]any{"name": "Navigation after"}, fiber.StatusOK,
+	)
+
+	memberLogin := login(t, app, member.Email, "new-audit-member-password")
+	memberChangeLog := request[activitylog.PageView](
+		t, app, http.MethodGet, "/api/v1/workspaces/"+workspace.ID+"/change-log",
+		memberLogin.Token, nil, fiber.StatusOK,
+	).Data.Entries
+	var sawVisibleCollection bool
+	for _, entry := range memberChangeLog {
+		if entry.CollectionID == hiddenCollection.ID || entry.CollectionID == navigationParent.ID ||
+			entry.Resource == string(resourceevents.ResourceWorkspace) {
+			t.Fatalf("collection-scoped change log exposed out-of-scope entry: %+v", entry)
+		}
+		sawVisibleCollection = sawVisibleCollection ||
+			entry.CollectionID == visibleCollection.ID &&
+				hasActivityDiff(entry.Diffs, "name", "Visible collection", "Visible after")
+	}
+	if !sawVisibleCollection {
+		t.Fatalf("collection-scoped change log omitted visible rename: %+v", memberChangeLog)
+	}
+
+	denied := request[activitylog.PageView](
+		t, app, http.MethodGet, "/api/v1/audit-log", memberLogin.Token, nil, fiber.StatusForbidden,
+	)
+	if denied.Error.Code != "forbidden" {
+		t.Fatalf("audit permission error = %+v", denied.Error)
+	}
+}
+
+func hasActivityDiff(diffs []activitylog.DiffView, field string, from, to any) bool {
+	for _, diff := range diffs {
+		if diff.Field == field && reflect.DeepEqual(diff.From, from) && reflect.DeepEqual(diff.To, to) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestWorkspaceAndRecursiveCollectionScopes(t *testing.T) {
@@ -1391,6 +1604,8 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, *gorm.DB, func()) 
 	}
 	events := eventsystem.NewEventListener()
 	events.StartNewEventLoop()
+	activityRepository := activitylog.NewRepository(db)
+	recordedEvents := activitylog.NewRecorder(activityRepository, events)
 	usersService := users.NewService(
 		repository,
 		hasher,
@@ -1405,14 +1620,14 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, *gorm.DB, func()) 
 		) error {
 			return workspaces.RekeyEnvironmentVariableValues(ctx, tx, environmentCipher, userID, oldKey, newKey)
 		}),
-		users.WithEvents(events),
+		users.WithEvents(recordedEvents),
 	)
-	rolesService := roles.NewService(repository, roles.WithEvents(events))
+	rolesService := roles.NewService(repository, roles.WithEvents(recordedEvents))
 	workspaceRepository := workspaces.NewRepository(db)
 	workspacesService := workspaces.NewService(
 		workspaceRepository,
 		environmentCipher,
-		workspaces.WithEvents(events),
+		workspaces.WithEvents(recordedEvents),
 	)
 	realtimePublisher := realtime.New(events)
 	requestProxyHandler := requestproxy.NewHandler(requestproxy.NewService(
@@ -1423,6 +1638,10 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, *gorm.DB, func()) 
 		sharedhistory.NewRepository(db),
 		workspacesService,
 		sharedhistory.WithEvents(events),
+	))
+	activityHandler := activitylog.NewHandler(activitylog.NewService(
+		activityRepository,
+		workspacesService,
 	))
 	httpServer := server.New(
 		"127.0.0.1:0",
@@ -1436,6 +1655,7 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, *gorm.DB, func()) 
 		server.WithWorkspaces(authService, workspaces.NewHandler(workspacesService)),
 		server.WithRequestProxy(authService, requestProxyHandler),
 		server.WithSharedHistory(authService, sharedHistoryHandler),
+		server.WithActivityLogs(authService, activityHandler),
 		server.WithRealtime(authService, realtimePublisher),
 	)
 	return httpServer.App, usersService, db, func() {

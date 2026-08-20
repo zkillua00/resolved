@@ -149,6 +149,42 @@ as user-scoped WebSocket recipients so neither history content nor workspace
 activity metadata is broadcast through a permission-only channel. The client
 uses the signal to reload the visible profile through the authorized REST API.
 
+## Change and identity audit logs
+
+Workspace, collection, and saved-request mutations append immutable workspace
+change-log entries. User and role mutations append separate deployment-wide
+audit entries. Each entry snapshots its actor identity and target name at the
+time of the mutation and stores field diffs as explicit `field`, `from`, and
+`to` values. Request updates recursively compare their portable JSON documents,
+producing paths such as `definition.request.method` and indexed array paths.
+
+The workspace log applies both RBAC and current resource scope. An owner or a
+user with a direct workspace grant sees every entry in that workspace. A user
+whose access is limited to collection grants sees entries only when their
+`collection_id` is in a currently visible subtree. The deployment audit route
+is instead protected by `audit.read`; workspace grants do not confer identity
+audit access.
+
+Diff persistence is deliberately bounded. The repository retains the newest
+1,000 change entries per workspace and 5,000 identity audit entries per
+deployment. Endpoints return 30 entries by default and accept limits from 1 to
+100. An entry stores at most 256 field diffs, each encoded value at most 16 KiB,
+and at most 512 KiB of encoded
+diff data. Values exceeding a bound are replaced by an omission marker. Known
+credential headers and request headers marked not to share are redacted
+throughout saved-request definitions, multipart file paths are omitted, and
+password values and hashes are never placed in audit diffs. Password changes
+are represented only by fixed redacted status markers.
+
+The log is written before the existing access-scoped `resource.changed`
+invalidation is delivered. A log page loads only when first opened. It sends
+`older_cursor` back as `cursor` for stable older pagination and sends
+`newer_cursor` as `after` after a WebSocket invalidation or reconnect. Newer
+pages are delivered oldest-first with `has_more_newer`, allowing the client to
+advance through every delta before sorting the merged view newest-first. This
+keeps updates realtime without putting actor or diff contents in WebSocket
+messages.
+
 ## Bootstrap and built-in data
 
 Migrations seed a fixed permission catalog and an immutable `Owner` system
@@ -172,6 +208,7 @@ Permissions in the initial catalog are:
 - `requests.read`, `requests.create`, `requests.update`, `requests.delete`
 - `requests.execute`
 - `server_settings.read`, `server_settings.update`
+- `audit.read`
 - `history.read_others`
 - `environments.read`, `environments.create`, `environments.update`,
   `environments.delete`
@@ -196,6 +233,7 @@ Permissions in the initial catalog are:
 | `PATCH` | `/api/v1/roles/:id` | `roles.update` |
 | `PUT` | `/api/v1/roles/:id/permissions` | `roles.permissions.assign` |
 | `GET` | `/api/v1/permissions` | `permissions.read` |
+| `GET` | `/api/v1/audit-log` | `audit.read` |
 | `GET` | `/api/v1/request-execution` | authenticated |
 | `GET` | `/api/v1/request-execution/settings` | `server_settings.read` |
 | `PUT` | `/api/v1/request-execution/settings` | `server_settings.update` |
@@ -206,6 +244,7 @@ Permissions in the initial catalog are:
 | `GET` | `/api/v1/workspaces` | `workspaces.read`, `collections.read`, `requests.read` |
 | `POST` | `/api/v1/workspaces` | `workspaces.create` |
 | `GET` | `/api/v1/workspaces/:workspace_id` | `workspaces.read`, `collections.read`, `requests.read` |
+| `GET` | `/api/v1/workspaces/:workspace_id/change-log` | `workspaces.read`, `collections.read`, `requests.read`; plus workspace or collection access |
 | `PATCH` | `/api/v1/workspaces/:workspace_id` | `workspaces.update`, `collections.read`, `requests.read` |
 | `DELETE` | `/api/v1/workspaces/:workspace_id` | `workspaces.delete` |
 | `PUT` | `/api/v1/workspaces/:workspace_id/users` | `workspaces.users.assign`, `collections.read`, `requests.read` |

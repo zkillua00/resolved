@@ -116,6 +116,30 @@ the complete portable request template to the collection node represented by
 the selected collection or folder. Server responses are applied to the active
 workspace only after the authenticated write succeeds.
 
+Settings → Change log loads the newest mutations for the active server
+workspace from `GET /api/v1/workspaces/{workspace_id}/change-log`. Workspace,
+collection, and saved-request entries include the actor snapshot and an array of
+field diffs with explicit `from` and `to` values. A collection-only grant sees
+only entries inside the collection subtrees it can currently access; a direct
+workspace grant sees the complete workspace log. Request-definition changes
+are expanded into stable JSON paths such as `definition.request.method`.
+
+Settings → Audit log is deployment-wide and is available only with
+`audit.read`. It records user and role creation, metadata updates, role
+assignments, and permission assignments with the same before → after model.
+Settings → Roles stages permission toggles locally per role. Reset discards the
+draft, while Save changes sends one complete permission replacement to the
+server; realtime management refreshes preserve the user's unsaved intent.
+Password material is never retained: password changes use fixed redacted status
+markers. Saved-request diffs also redact known sensitive and explicitly
+unshared header values and replace multipart file paths with an omission marker.
+The desktop updates either open page when its existing WebSocket connection
+receives the related resource invalidation, requesting only entries after its
+newer cursor. Each log is loaded only when its page is first opened. Older pages
+use the opaque `cursor` returned by the server, so realtime inserts at the head
+cannot shift or duplicate pagination results. Diff contents remain in REST and
+are not broadcast over the socket.
+
 Environment creation, shared-definition edits, and deletion use the workspace
 environment API. Value changes use the dedicated per-user value route. Resolved
 reloads the environment list after every write, including a rejected or

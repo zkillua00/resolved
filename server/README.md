@@ -17,7 +17,9 @@ The server currently provides:
   per-user values;
 - authenticated request execution from the server network for authorized
   workspace members;
-- authenticated member profiles and workspace-scoped shared request history.
+- authenticated member profiles and workspace-scoped shared request history;
+- workspace change logs and permissioned identity audit logs with field-level
+  before and after values.
 
 There is no hosted control plane, telemetry, or deployment registration.
 
@@ -158,6 +160,30 @@ workspace is active also clears that member's shared history for the workspace.
 Uploads and clears emit metadata-only WebSocket invalidations to the history
 owner and to users who have both workspace access and `history.read_others`.
 Clients then reload the authorized profile history through REST.
+
+`GET /api/v1/workspaces/{workspace_id}/change-log` returns the newest page of
+workspace, collection, and saved-request mutations visible in the caller's
+current resource scope. `GET /api/v1/audit-log` returns user and
+role administration events and requires `audit.read`. Each entry snapshots its
+actor and target name and includes `diffs` with `field`, `from`, and `to` values.
+Saved-request definitions use structured JSON paths for updates. Sensitive or
+explicitly unshared header values are redacted, multipart file paths are
+omitted, and passwords are represented only by fixed status markers. The
+server retains the newest 1,000 change entries per workspace and newest 5,000
+audit entries per deployment.
+
+Both endpoints use opaque cursor pagination. The default page contains 30
+entries and `limit` may select 1–100. Send the returned `older_cursor` as
+`cursor` to read the next older page. Realtime clients retain `newer_cursor` and
+send it as `after`; those results are returned oldest-first so a client can
+advance the cursor without gaps. `has_more_newer` tells it to continue until it
+has caught up.
+
+The same access-scoped `resource.changed` signal emitted after a mutation tells
+an open desktop log to request its newer cursor through REST. Diff content is
+never embedded in the WebSocket event. A direct workspace grant can read the
+complete workspace log; collection-scoped access filters the result to
+currently visible collection subtrees.
 
 Request execution defaults to `local`, so selecting a server workspace does not
 automatically move target traffic onto the server. Administrators with

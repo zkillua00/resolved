@@ -90,6 +90,16 @@ impl ApiTester {
                     match signal {
                         RealtimeSignal::Connected => {
                             this.realtime_status = RealtimeConnectionStatus::Connected;
+                            this.sync_activity_log_realtime(
+                                server_management::activity_views::ActivityLogKind::Change,
+                                window,
+                                cx,
+                            );
+                            this.sync_activity_log_realtime(
+                                server_management::activity_views::ActivityLogKind::Audit,
+                                window,
+                                cx,
+                            );
                             this.queue_realtime_refresh(&upstream_id, None, window, cx);
                             cx.notify();
                         }
@@ -99,6 +109,7 @@ impl ApiTester {
                         }
                         RealtimeSignal::Change(change) => {
                             this.realtime_status = RealtimeConnectionStatus::Connected;
+                            this.handle_realtime_activity_change(&upstream_id, &change, window, cx);
                             if change.is_shared_history_change() {
                                 this.handle_realtime_shared_history_change(
                                     &upstream_id,
