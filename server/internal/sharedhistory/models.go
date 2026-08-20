@@ -22,7 +22,8 @@ type Entry struct {
 	Workspace              workspaces.Workspace `gorm:"foreignKey:WorkspaceID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
 	UserID                 string               `gorm:"type:char(36);not null;index;uniqueIndex:idx_history_origin,priority:2"`
 	User                   identity.User        `gorm:"foreignKey:UserID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
-	ClientEntryID          string               `gorm:"size:128;not null;uniqueIndex:idx_history_origin,priority:3"`
+	ClientEntryID          string               `gorm:"size:128;not null"`
+	ClientEntryLookup      *string              `gorm:"size:64;uniqueIndex:idx_history_origin,priority:3"`
 	Method                 string               `gorm:"size:64;not null"`
 	URL                    string               `gorm:"type:text;not null"`
 	RequestHeadersJSON     []byte               `gorm:"not null"`
@@ -37,10 +38,11 @@ type Entry struct {
 	ResponseFinalURL       string               `gorm:"type:text;not null;default:''"`
 	ResponseHeadersJSON    []byte               `gorm:"not null"`
 	ResponseBody           []byte
-	ResponseBodyTruncated  bool      `gorm:"not null;default:false"`
-	ResponseContentType    string    `gorm:"size:512;not null;default:''"`
-	ResponseDurationMicros *int64    `gorm:"index"`
-	Error                  string    `gorm:"type:text;not null;default:''"`
+	ResponseBodyTruncated  bool   `gorm:"not null;default:false"`
+	ResponseContentType    string `gorm:"size:512;not null;default:''"`
+	ResponseDurationMicros *int64 `gorm:"index"`
+	Error                  string `gorm:"type:text;not null;default:''"`
+	EncryptedPayload       []byte
 	CreatedAt              time.Time `gorm:"not null;index"`
 	UpdatedAt              time.Time `gorm:"not null"`
 }

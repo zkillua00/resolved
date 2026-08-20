@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"resolved-server/internal/identity"
+	"resolved-server/internal/security"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -19,7 +20,16 @@ const initialWorkspaceBootstrapKey = "initial-workspace"
 // transaction as the first owner, so bootstrap cannot leave a partially
 // initialized deployment.
 func SetupFirstOwnerWorkspace(ctx context.Context, tx *gorm.DB, owner identity.User) error {
-	return createInitialWorkspace(ctx, tx, owner.ID)
+	return createInitialWorkspace(ctx, tx, owner.ID, nil)
+}
+
+func SetupFirstOwnerWorkspaceEncrypted(
+	ctx context.Context,
+	tx *gorm.DB,
+	owner identity.User,
+	dataCipher *security.DataCipher,
+) error {
+	return createInitialWorkspace(ctx, tx, owner.ID, dataCipher)
 }
 
 // EnsureInitialWorkspace upgrades deployments bootstrapped before the initial
@@ -57,12 +67,17 @@ func EnsureInitialWorkspace(ctx context.Context, db *gorm.DB) error {
 		case err != nil:
 			return err
 		default:
-			return createInitialWorkspace(ctx, tx, owner.ID)
+			return createInitialWorkspace(ctx, tx, owner.ID, nil)
 		}
 	})
 }
 
-func createInitialWorkspace(ctx context.Context, tx *gorm.DB, ownerID string) error {
+func createInitialWorkspace(
+	ctx context.Context,
+	tx *gorm.DB,
+	ownerID string,
+	dataCipher *security.DataCipher,
+) error {
 	marker := identity.BootstrapState{Key: initialWorkspaceBootstrapKey}
 	result := tx.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&marker)
 	if result.Error != nil {
@@ -73,6 +88,21 @@ func createInitialWorkspace(ctx context.Context, tx *gorm.DB, ownerID string) er
 	}
 
 	workspace := Workspace{ID: uuid.NewString(), Name: DefaultWorkspaceName, CreatedByUserID: &ownerID}
+	if dataCipher != nil {
+		encryptedName, err := dataCipher.Encrypt(
+			ctx,
+			tx,
+			security.WorkspaceDataScope(workspace.ID),
+			"workspace_name",
+			workspace.ID,
+			[]byte(workspace.Name),
+		)
+		if err != nil {
+			return err
+		}
+		workspace.Name = ""
+		workspace.EncryptedName = encryptedName
+	}
 	if err := tx.WithContext(ctx).Create(&workspace).Error; err != nil {
 		return err
 	}

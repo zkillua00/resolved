@@ -18,18 +18,19 @@ const (
 )
 
 type Entry struct {
-	ID               string    `gorm:"type:char(36);primaryKey"`
-	Kind             string    `gorm:"size:16;not null;index"`
-	Resource         string    `gorm:"size:32;not null;index"`
-	Action           string    `gorm:"size:32;not null"`
-	ResourceID       string    `gorm:"type:char(36);not null;index"`
-	WorkspaceID      string    `gorm:"type:char(36);not null;default:'';index"`
-	CollectionID     string    `gorm:"type:char(36);not null;default:'';index"`
-	ActorUserID      string    `gorm:"type:char(36);not null;default:'';index"`
-	ActorEmail       string    `gorm:"size:254;not null;default:''"`
-	ActorDisplayName string    `gorm:"size:120;not null;default:''"`
-	TargetName       string    `gorm:"size:256;not null;default:''"`
-	DiffsJSON        []byte    `gorm:"not null"`
+	ID               string `gorm:"type:char(36);primaryKey"`
+	Kind             string `gorm:"size:16;not null;index"`
+	Resource         string `gorm:"size:32;not null;index"`
+	Action           string `gorm:"size:32;not null"`
+	ResourceID       string `gorm:"type:char(36);not null;index"`
+	WorkspaceID      string `gorm:"type:char(36);not null;default:'';index"`
+	CollectionID     string `gorm:"type:char(36);not null;default:'';index"`
+	ActorUserID      string `gorm:"type:char(36);not null;default:'';index"`
+	ActorEmail       string `gorm:"size:254;not null;default:''"`
+	ActorDisplayName string `gorm:"size:120;not null;default:''"`
+	TargetName       string `gorm:"size:256;not null;default:''"`
+	DiffsJSON        []byte `gorm:"not null"`
+	EncryptedPayload []byte
 	CreatedAt        time.Time `gorm:"not null;index"`
 }
 

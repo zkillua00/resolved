@@ -2,6 +2,7 @@ package requestproxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"resolved-server/internal/problem"
+	"resolved-server/internal/security"
 
 	"gorm.io/gorm"
 )
@@ -24,10 +26,11 @@ const (
 )
 
 type SettingsRecord struct {
-	ID        string    `gorm:"size:50;primaryKey"`
-	Mode      string    `gorm:"size:20;not null;default:local"`
-	CreatedAt time.Time `gorm:"not null"`
-	UpdatedAt time.Time `gorm:"not null"`
+	ID                  string `gorm:"size:50;primaryKey"`
+	Mode                string `gorm:"size:20;not null;default:local"`
+	OverridesCiphertext []byte
+	CreatedAt           time.Time `gorm:"not null"`
+	UpdatedAt           time.Time `gorm:"not null"`
 }
 
 func (SettingsRecord) TableName() string {
@@ -65,11 +68,16 @@ type Policy struct {
 }
 
 type SettingsRepository struct {
-	db *gorm.DB
+	db         *gorm.DB
+	dataCipher *security.DataCipher
 }
 
-func NewSettingsRepository(db *gorm.DB) *SettingsRepository {
-	return &SettingsRepository{db: db}
+func NewSettingsRepository(db *gorm.DB, dataCipher ...*security.DataCipher) *SettingsRepository {
+	repository := &SettingsRepository{db: db}
+	if len(dataCipher) > 0 {
+		repository.dataCipher = dataCipher[0]
+	}
+	return repository
 }
 
 func (r *SettingsRepository) Get(ctx context.Context) (Settings, error) {
@@ -83,6 +91,26 @@ func (r *SettingsRepository) Get(ctx context.Context) (Settings, error) {
 			return err
 		}
 		settings.Mode = record.Mode
+		if len(record.OverridesCiphertext) > 0 {
+			if r.dataCipher == nil {
+				return security.ErrDataKeyUnavailable
+			}
+			plaintext, err := r.dataCipher.Decrypt(
+				ctx, tx, security.DeploymentDataScope(), "request_hostname_overrides", record.ID,
+				record.OverridesCiphertext,
+			)
+			if err != nil {
+				return fmt.Errorf("decrypt request hostname overrides: %w", err)
+			}
+			defer clear(plaintext)
+			if err := json.Unmarshal(plaintext, &settings.HostnameOverrides); err != nil {
+				return fmt.Errorf("decode request hostname overrides: %w", err)
+			}
+			if settings.HostnameOverrides == nil {
+				settings.HostnameOverrides = []HostnameOverride{}
+			}
+			return nil
+		}
 
 		var records []HostnameOverrideRecord
 		if err := tx.Order("hostname ASC").Find(&records).Error; err != nil {
@@ -109,22 +137,40 @@ func (r *SettingsRepository) Replace(ctx context.Context, settings Settings) (Se
 		return Settings{}, err
 	}
 	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var overridesCiphertext []byte
+		if r.dataCipher != nil {
+			plaintext, marshalErr := json.Marshal(normalized.HostnameOverrides)
+			if marshalErr != nil {
+				return fmt.Errorf("encode request hostname overrides: %w", marshalErr)
+			}
+			defer clear(plaintext)
+			overridesCiphertext, marshalErr = r.dataCipher.Encrypt(
+				ctx, tx, security.DeploymentDataScope(), "request_hostname_overrides", SettingsRecordID, plaintext,
+			)
+			if marshalErr != nil {
+				return fmt.Errorf("encrypt request hostname overrides: %w", marshalErr)
+			}
+		}
 		var record SettingsRecord
 		if err := tx.First(&record, "id = ?", SettingsRecordID).Error; err != nil {
 			if !errors.Is(err, gorm.ErrRecordNotFound) {
 				return err
 			}
-			record = SettingsRecord{ID: SettingsRecordID, Mode: normalized.Mode}
+			record = SettingsRecord{
+				ID: SettingsRecordID, Mode: normalized.Mode, OverridesCiphertext: overridesCiphertext,
+			}
 			if err := tx.Create(&record).Error; err != nil {
 				return err
 			}
-		} else if err := tx.Model(&record).Update("mode", normalized.Mode).Error; err != nil {
+		} else if err := tx.Model(&record).Updates(map[string]any{
+			"mode": normalized.Mode, "overrides_ciphertext": overridesCiphertext,
+		}).Error; err != nil {
 			return err
 		}
 		if err := tx.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&HostnameOverrideRecord{}).Error; err != nil {
 			return err
 		}
-		if len(normalized.HostnameOverrides) == 0 {
+		if r.dataCipher != nil || len(normalized.HostnameOverrides) == 0 {
 			return nil
 		}
 		records := make([]HostnameOverrideRecord, 0, len(normalized.HostnameOverrides))
@@ -140,6 +186,29 @@ func (r *SettingsRepository) Replace(ctx context.Context, settings Settings) (Se
 		return Settings{}, problem.Wrap(err, "save request execution settings")
 	}
 	return normalized, nil
+}
+
+func (r *SettingsRepository) EncryptLegacyOverrides(ctx context.Context) error {
+	if r.dataCipher == nil {
+		return security.ErrDataKeyUnavailable
+	}
+	var record SettingsRecord
+	if err := r.db.WithContext(ctx).First(&record, "id = ?", SettingsRecordID).Error; err != nil {
+		return err
+	}
+	if len(record.OverridesCiphertext) > 0 {
+		return nil
+	}
+	var records []HostnameOverrideRecord
+	if err := r.db.WithContext(ctx).Order("hostname ASC").Find(&records).Error; err != nil {
+		return err
+	}
+	overrides := make([]HostnameOverride, 0, len(records))
+	for _, override := range records {
+		overrides = append(overrides, HostnameOverride{Hostname: override.Hostname, Target: override.Target})
+	}
+	_, err := r.Replace(ctx, Settings{Mode: record.Mode, HostnameOverrides: overrides})
+	return err
 }
 
 func normalizeSettings(settings Settings) (Settings, error) {

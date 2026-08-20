@@ -2,12 +2,14 @@ package workspaces
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"time"
 
 	"resolved-server/internal/identity"
+	"resolved-server/internal/security"
 
 	"gorm.io/gorm"
 )
@@ -15,11 +17,16 @@ import (
 const databaseBatchSize = 200
 
 type Repository struct {
-	db *gorm.DB
+	db         *gorm.DB
+	dataCipher *security.DataCipher
 }
 
-func NewRepository(db *gorm.DB) *Repository {
-	return &Repository{db: db}
+func NewRepository(db *gorm.DB, dataCipher ...*security.DataCipher) *Repository {
+	repository := &Repository{db: db}
+	if len(dataCipher) > 0 {
+		repository.dataCipher = dataCipher[0]
+	}
+	return repository
 }
 
 func (r *Repository) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
@@ -28,10 +35,13 @@ func (r *Repository) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
 		return nil, err
 	}
 	for index := range workspaces {
-		if err := hydrateCreator(r.db.WithContext(ctx), workspaces[index].CreatedByUserID, &workspaces[index].CreatedByUser); err != nil {
+		if err := r.decryptResourceName(ctx, r.db.WithContext(ctx), workspaces[index].ID, "workspace_name", workspaces[index].ID, workspaces[index].EncryptedName, &workspaces[index].Name); err != nil {
 			return nil, err
 		}
-		if err := hydrateWorkspace(r.db.WithContext(ctx), &workspaces[index]); err != nil {
+		if err := r.hydrateCreator(r.db.WithContext(ctx), workspaces[index].CreatedByUserID, &workspaces[index].CreatedByUser); err != nil {
+			return nil, err
+		}
+		if err := r.hydrateWorkspace(r.db.WithContext(ctx), &workspaces[index]); err != nil {
 			return nil, err
 		}
 	}
@@ -46,10 +56,13 @@ func (r *Repository) GetWorkspace(ctx context.Context, id string) (Workspace, er
 		}
 		return Workspace{}, err
 	}
-	if err := hydrateCreator(r.db.WithContext(ctx), workspace.CreatedByUserID, &workspace.CreatedByUser); err != nil {
+	if err := r.decryptResourceName(ctx, r.db.WithContext(ctx), workspace.ID, "workspace_name", workspace.ID, workspace.EncryptedName, &workspace.Name); err != nil {
 		return Workspace{}, err
 	}
-	if err := hydrateWorkspace(r.db.WithContext(ctx), &workspace); err != nil {
+	if err := r.hydrateCreator(r.db.WithContext(ctx), workspace.CreatedByUserID, &workspace.CreatedByUser); err != nil {
+		return Workspace{}, err
+	}
+	if err := r.hydrateWorkspace(r.db.WithContext(ctx), &workspace); err != nil {
 		return Workspace{}, err
 	}
 	return workspace, nil
@@ -59,6 +72,9 @@ func (r *Repository) CreateWorkspace(ctx context.Context, workspace Workspace, u
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		userIDs = uniqueStrings(userIDs)
 		if err := ensureUsersExist(tx, userIDs); err != nil {
+			return err
+		}
+		if err := r.encryptResourceName(ctx, tx, workspace.ID, "workspace_name", workspace.ID, &workspace.Name, &workspace.EncryptedName); err != nil {
 			return err
 		}
 		if err := tx.Create(&workspace).Error; err != nil {
@@ -73,7 +89,15 @@ func (r *Repository) CreateWorkspace(ctx context.Context, workspace Workspace, u
 }
 
 func (r *Repository) UpdateWorkspaceName(ctx context.Context, id, name string) (Workspace, error) {
-	result := r.db.WithContext(ctx).Model(&Workspace{}).Where("id = ?", id).Update("name", name)
+	var encryptedName []byte
+	if err := r.encryptResourceName(ctx, r.db.WithContext(ctx), id, "workspace_name", id, &name, &encryptedName); err != nil {
+		return Workspace{}, err
+	}
+	updates := map[string]any{"name": name}
+	if r.dataCipher != nil {
+		updates = map[string]any{"name": "", "encrypted_name": encryptedName}
+	}
+	result := r.db.WithContext(ctx).Model(&Workspace{}).Where("id = ?", id).Updates(updates)
 	if result.Error != nil {
 		return Workspace{}, result.Error
 	}
@@ -153,6 +177,9 @@ func (r *Repository) CreateCollection(ctx context.Context, collection Collection
 				return err
 			}
 		}
+		if err := r.encryptResourceName(ctx, tx, collection.WorkspaceID, "collection_name", collection.ID, &collection.Name, &collection.EncryptedName); err != nil {
+			return err
+		}
 		if err := tx.Create(&collection).Error; err != nil {
 			return err
 		}
@@ -166,9 +193,17 @@ func (r *Repository) CreateCollection(ctx context.Context, collection Collection
 
 func (r *Repository) UpdateCollectionName(ctx context.Context, workspaceID, id, name string) (Collection, error) {
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var encryptedName []byte
+		if err := r.encryptResourceName(ctx, tx, workspaceID, "collection_name", id, &name, &encryptedName); err != nil {
+			return err
+		}
+		updates := map[string]any{"name": name}
+		if r.dataCipher != nil {
+			updates = map[string]any{"name": "", "encrypted_name": encryptedName}
+		}
 		result := tx.Model(&Collection{}).
 			Where("workspace_id = ? AND id = ?", workspaceID, id).
-			Update("name", name)
+			Updates(updates)
 		if result.Error != nil {
 			return result.Error
 		}
@@ -189,7 +224,7 @@ func (r *Repository) MoveCollection(
 	parentCollectionID *string,
 ) (Collection, error) {
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		collections, err := loadFlatCollections(tx, workspaceID)
+		collections, err := r.loadFlatCollections(tx, workspaceID)
 		if err != nil {
 			return err
 		}
@@ -269,7 +304,7 @@ func (r *Repository) ReplaceCollectionUsers(
 
 func (r *Repository) DeleteCollection(ctx context.Context, workspaceID, id string) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		collections, err := loadFlatCollections(tx, workspaceID)
+		collections, err := r.loadFlatCollections(tx, workspaceID)
 		if err != nil {
 			return err
 		}
@@ -322,6 +357,9 @@ func (r *Repository) CreateSavedRequest(
 		if err := ensureCollectionExists(tx, workspaceID, request.CollectionID); err != nil {
 			return err
 		}
+		if err := r.encryptSavedRequest(ctx, tx, workspaceID, &request); err != nil {
+			return err
+		}
 		if err := tx.Create(&request).Error; err != nil {
 			return err
 		}
@@ -353,7 +391,10 @@ func (r *Repository) GetSavedRequest(
 		return SavedRequest{}, ErrSavedRequestNotFound
 	}
 	if err == nil {
-		err = hydrateCreator(r.db.WithContext(ctx), request.CreatedByUserID, &request.CreatedByUser)
+		err = r.decryptSavedRequest(ctx, r.db.WithContext(ctx), workspaceID, &request)
+	}
+	if err == nil {
+		err = r.hydrateCreator(r.db.WithContext(ctx), request.CreatedByUserID, &request.CreatedByUser)
 	}
 	return request, err
 }
@@ -363,9 +404,19 @@ func (r *Repository) UpdateSavedRequest(
 	workspaceID, collectionID, requestID, name, definition string,
 ) (SavedRequest, error) {
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		request := SavedRequest{ID: requestID, CollectionID: collectionID, Name: name, Definition: definition}
+		if err := r.encryptSavedRequest(ctx, tx, workspaceID, &request); err != nil {
+			return err
+		}
+		updates := map[string]any{"name": name, "definition": definition}
+		if r.dataCipher != nil {
+			updates = map[string]any{
+				"name": "", "definition": "", "encrypted_payload": request.EncryptedPayload,
+			}
+		}
 		result := tx.Model(&SavedRequest{}).
 			Where("collection_id = ? AND id = ?", collectionID, requestID).
-			Updates(map[string]any{"name": name, "definition": definition})
+			Updates(updates)
 		if result.Error != nil {
 			return result.Error
 		}
@@ -443,7 +494,7 @@ func (r *Repository) getCollection(ctx context.Context, workspaceID, id string) 
 	return collection, nil
 }
 
-func hydrateWorkspace(db *gorm.DB, workspace *Workspace) error {
+func (r *Repository) hydrateWorkspace(db *gorm.DB, workspace *Workspace) error {
 	var workspaceUsers []WorkspaceUser
 	if err := db.Where("workspace_id = ?", workspace.ID).Order("user_id ASC").Find(&workspaceUsers).Error; err != nil {
 		return err
@@ -453,7 +504,7 @@ func hydrateWorkspace(db *gorm.DB, workspace *Workspace) error {
 		workspace.UserIDs = append(workspace.UserIDs, grant.UserID)
 	}
 
-	collections, err := loadFlatCollections(db, workspace.ID)
+	collections, err := r.loadFlatCollections(db, workspace.ID)
 	if err != nil {
 		return err
 	}
@@ -479,7 +530,7 @@ func hydrateWorkspace(db *gorm.DB, workspace *Workspace) error {
 		collections[index].SubCollections = []Collection{}
 		collections[index].Requests = []SavedRequest{}
 	}
-	requests, err := loadSavedRequests(db, workspace.ID)
+	requests, err := r.loadSavedRequests(db, workspace.ID)
 	if err != nil {
 		return err
 	}
@@ -501,7 +552,7 @@ func hydrateWorkspace(db *gorm.DB, workspace *Workspace) error {
 	return nil
 }
 
-func loadSavedRequests(db *gorm.DB, workspaceID string) ([]SavedRequest, error) {
+func (r *Repository) loadSavedRequests(db *gorm.DB, workspaceID string) ([]SavedRequest, error) {
 	var requests []SavedRequest
 	err := db.Model(&SavedRequest{}).
 		Select("saved_requests.*").
@@ -512,7 +563,10 @@ func loadSavedRequests(db *gorm.DB, workspaceID string) ([]SavedRequest, error) 
 		Find(&requests).Error
 	if err == nil {
 		for index := range requests {
-			if hydrateErr := hydrateCreator(db, requests[index].CreatedByUserID, &requests[index].CreatedByUser); hydrateErr != nil {
+			if decryptErr := r.decryptSavedRequest(db.Statement.Context, db, workspaceID, &requests[index]); decryptErr != nil {
+				return nil, decryptErr
+			}
+			if hydrateErr := r.hydrateCreator(db, requests[index].CreatedByUserID, &requests[index].CreatedByUser); hydrateErr != nil {
 				return nil, hydrateErr
 			}
 		}
@@ -520,14 +574,219 @@ func loadSavedRequests(db *gorm.DB, workspaceID string) ([]SavedRequest, error) 
 	return requests, err
 }
 
-func loadFlatCollections(db *gorm.DB, workspaceID string) ([]Collection, error) {
+type savedRequestPayload struct {
+	Name       string `json:"name"`
+	Definition string `json:"definition"`
+}
+
+func (r *Repository) encryptSavedRequest(
+	ctx context.Context,
+	db *gorm.DB,
+	workspaceID string,
+	request *SavedRequest,
+) error {
+	if r.dataCipher == nil {
+		return nil
+	}
+	plaintext, err := json.Marshal(savedRequestPayload{Name: request.Name, Definition: request.Definition})
+	if err != nil {
+		return fmt.Errorf("encode saved request encryption payload: %w", err)
+	}
+	defer clear(plaintext)
+	encrypted, err := r.dataCipher.Encrypt(
+		ctx, db, security.WorkspaceDataScope(workspaceID), "saved_request", request.ID, plaintext,
+	)
+	if err != nil {
+		return fmt.Errorf("encrypt saved request: %w", err)
+	}
+	request.EncryptedPayload = encrypted
+	request.Name = ""
+	request.Definition = ""
+	return nil
+}
+
+func (r *Repository) decryptSavedRequest(
+	ctx context.Context,
+	db *gorm.DB,
+	workspaceID string,
+	request *SavedRequest,
+) error {
+	if len(request.EncryptedPayload) == 0 {
+		return nil
+	}
+	if r.dataCipher == nil {
+		return security.ErrDataKeyUnavailable
+	}
+	plaintext, err := r.dataCipher.Decrypt(
+		ctx, db, security.WorkspaceDataScope(workspaceID), "saved_request", request.ID, request.EncryptedPayload,
+	)
+	if err != nil {
+		return fmt.Errorf("decrypt saved request: %w", err)
+	}
+	defer clear(plaintext)
+	var payload savedRequestPayload
+	if err := json.Unmarshal(plaintext, &payload); err != nil {
+		return fmt.Errorf("decode saved request encryption payload: %w", err)
+	}
+	request.Name = payload.Name
+	request.Definition = payload.Definition
+	return nil
+}
+
+func (r *Repository) EncryptLegacySavedRequests(ctx context.Context) error {
+	if r.dataCipher == nil {
+		return security.ErrDataKeyUnavailable
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var rows []struct {
+			ID           string
+			CollectionID string
+			WorkspaceID  string
+			Name         string
+			Definition   string
+		}
+		if err := tx.Table("saved_requests").
+			Select("saved_requests.id, saved_requests.collection_id, collections.workspace_id, saved_requests.name, saved_requests.definition").
+			Joins("JOIN collections ON collections.id = saved_requests.collection_id").
+			Where("saved_requests.encrypted_payload IS NULL").
+			Scan(&rows).Error; err != nil {
+			return err
+		}
+		for _, row := range rows {
+			request := SavedRequest{
+				ID: row.ID, CollectionID: row.CollectionID, Name: row.Name, Definition: row.Definition,
+			}
+			if err := r.encryptSavedRequest(ctx, tx, row.WorkspaceID, &request); err != nil {
+				return err
+			}
+			if err := tx.Model(&SavedRequest{}).Where("id = ?", row.ID).Updates(map[string]any{
+				"name": "", "definition": "", "encrypted_payload": request.EncryptedPayload,
+			}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (r *Repository) encryptResourceName(
+	ctx context.Context,
+	db *gorm.DB,
+	workspaceID, domain, recordID string,
+	name *string,
+	encryptedName *[]byte,
+) error {
+	if r.dataCipher == nil {
+		return nil
+	}
+	encrypted, err := r.dataCipher.Encrypt(
+		ctx, db, security.WorkspaceDataScope(workspaceID), domain, recordID, []byte(*name),
+	)
+	if err != nil {
+		return fmt.Errorf("encrypt %s: %w", domain, err)
+	}
+	*encryptedName = encrypted
+	*name = ""
+	return nil
+}
+
+func (r *Repository) decryptResourceName(
+	ctx context.Context,
+	db *gorm.DB,
+	workspaceID, domain, recordID string,
+	encryptedName []byte,
+	name *string,
+) error {
+	if len(encryptedName) == 0 {
+		return nil
+	}
+	if r.dataCipher == nil {
+		return security.ErrDataKeyUnavailable
+	}
+	plaintext, err := r.dataCipher.Decrypt(
+		ctx, db, security.WorkspaceDataScope(workspaceID), domain, recordID, encryptedName,
+	)
+	if err != nil {
+		return fmt.Errorf("decrypt %s: %w", domain, err)
+	}
+	defer clear(plaintext)
+	*name = string(plaintext)
+	return nil
+}
+
+func (r *Repository) EncryptLegacyResourceNames(ctx context.Context) error {
+	if r.dataCipher == nil {
+		return security.ErrDataKeyUnavailable
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var workspaceRows []Workspace
+		if err := tx.Where("encrypted_name IS NULL").Find(&workspaceRows).Error; err != nil {
+			return err
+		}
+		for index := range workspaceRows {
+			if err := r.encryptResourceName(
+				ctx, tx, workspaceRows[index].ID, "workspace_name", workspaceRows[index].ID,
+				&workspaceRows[index].Name, &workspaceRows[index].EncryptedName,
+			); err != nil {
+				return err
+			}
+			if err := tx.Model(&Workspace{}).Where("id = ?", workspaceRows[index].ID).Updates(map[string]any{
+				"name": "", "encrypted_name": workspaceRows[index].EncryptedName,
+			}).Error; err != nil {
+				return err
+			}
+		}
+
+		var collectionRows []Collection
+		if err := tx.Where("encrypted_name IS NULL").Find(&collectionRows).Error; err != nil {
+			return err
+		}
+		for index := range collectionRows {
+			if err := r.encryptResourceName(
+				ctx, tx, collectionRows[index].WorkspaceID, "collection_name", collectionRows[index].ID,
+				&collectionRows[index].Name, &collectionRows[index].EncryptedName,
+			); err != nil {
+				return err
+			}
+			if err := tx.Model(&Collection{}).Where("id = ?", collectionRows[index].ID).Updates(map[string]any{
+				"name": "", "encrypted_name": collectionRows[index].EncryptedName,
+			}).Error; err != nil {
+				return err
+			}
+		}
+
+		var environmentRows []Environment
+		if err := tx.Where("encrypted_name IS NULL").Find(&environmentRows).Error; err != nil {
+			return err
+		}
+		for index := range environmentRows {
+			if err := r.encryptResourceName(
+				ctx, tx, environmentRows[index].WorkspaceID, "environment_name", environmentRows[index].ID,
+				&environmentRows[index].Name, &environmentRows[index].EncryptedName,
+			); err != nil {
+				return err
+			}
+			if err := tx.Model(&Environment{}).Where("id = ?", environmentRows[index].ID).Updates(map[string]any{
+				"name": "", "encrypted_name": environmentRows[index].EncryptedName,
+			}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (r *Repository) loadFlatCollections(db *gorm.DB, workspaceID string) ([]Collection, error) {
 	var collections []Collection
 	err := db.Where("workspace_id = ?", workspaceID).
 		Order("created_at ASC").Order("id ASC").
 		Find(&collections).Error
 	if err == nil {
 		for index := range collections {
-			if hydrateErr := hydrateCreator(db, collections[index].CreatedByUserID, &collections[index].CreatedByUser); hydrateErr != nil {
+			if decryptErr := r.decryptResourceName(db.Statement.Context, db, workspaceID, "collection_name", collections[index].ID, collections[index].EncryptedName, &collections[index].Name); decryptErr != nil {
+				return nil, decryptErr
+			}
+			if hydrateErr := r.hydrateCreator(db, collections[index].CreatedByUserID, &collections[index].CreatedByUser); hydrateErr != nil {
 				return nil, hydrateErr
 			}
 		}
@@ -535,13 +794,16 @@ func loadFlatCollections(db *gorm.DB, workspaceID string) ([]Collection, error) 
 	return collections, err
 }
 
-func hydrateCreator(db *gorm.DB, id *string, target **identity.User) error {
+func (r *Repository) hydrateCreator(db *gorm.DB, id *string, target **identity.User) error {
 	if id == nil {
 		*target = nil
 		return nil
 	}
 	var creator identity.User
-	if err := db.Select("id", "email", "display_name").First(&creator, "id = ?", *id).Error; err != nil {
+	if err := db.Select("id", "email", "display_name", "encrypted_profile").First(&creator, "id = ?", *id).Error; err != nil {
+		return err
+	}
+	if err := identity.DecryptUserProfile(db.Statement.Context, db, r.dataCipher, &creator); err != nil {
 		return err
 	}
 	*target = &creator

@@ -7,6 +7,7 @@ import (
 )
 
 func TestMissingEncryptionSecretIsReportedWithoutPanicking(t *testing.T) {
+	t.Setenv("RESOLVED_DATA_ENCRYPTION_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
 	t.Setenv("RESOLVED_DATABASE_DRIVER", "sqlite")
 	t.Setenv("RESOLVED_DATABASE_DSN", "resolved-test.db")
 	t.Setenv("RESOLVED_SERVER_ADDRESS", "127.0.0.1:8787")

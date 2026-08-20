@@ -1578,8 +1578,26 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, *gorm.DB, func()) 
 		_ = sqlDatabase.Close()
 		t.Fatalf("migrate test database: %v", err)
 	}
+	dataKeyProvider, err := security.NewStaticKeyProvider(
+		"server-test-v1",
+		base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x45}, security.DataKeyLength)),
+	)
+	if err != nil {
+		_ = sqlDatabase.Close()
+		t.Fatalf("create data key provider: %v", err)
+	}
+	dataCipher, err := security.NewDataCipher(dataKeyProvider)
+	if err != nil {
+		_ = sqlDatabase.Close()
+		t.Fatalf("create data cipher: %v", err)
+	}
 
-	repository := identity.NewRepository(db)
+	repository := identity.NewRepository(db, dataCipher)
+	if err := repository.EncryptLegacyRoles(t.Context()); err != nil {
+		dataCipher.Close()
+		_ = sqlDatabase.Close()
+		t.Fatalf("encrypt seeded roles: %v", err)
+	}
 	passwordParams := security.PasswordParams{
 		Memory:      8 * 1024,
 		Iterations:  1,
@@ -1604,14 +1622,16 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, *gorm.DB, func()) 
 	}
 	events := eventsystem.NewEventListener()
 	events.StartNewEventLoop()
-	activityRepository := activitylog.NewRepository(db)
+	activityRepository := activitylog.NewRepository(db, dataCipher)
 	recordedEvents := activitylog.NewRecorder(activityRepository, events)
 	usersService := users.NewService(
 		repository,
 		hasher,
 		environmentCipher,
 		sessionKeys,
-		users.WithFirstOwnerSetup(workspaces.SetupFirstOwnerWorkspace),
+		users.WithFirstOwnerSetup(func(ctx context.Context, tx *gorm.DB, owner identity.User) error {
+			return workspaces.SetupFirstOwnerWorkspaceEncrypted(ctx, tx, owner, dataCipher)
+		}),
 		users.WithPasswordChangeSetup(func(
 			ctx context.Context,
 			tx *gorm.DB,
@@ -1623,7 +1643,7 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, *gorm.DB, func()) 
 		users.WithEvents(recordedEvents),
 	)
 	rolesService := roles.NewService(repository, roles.WithEvents(recordedEvents))
-	workspaceRepository := workspaces.NewRepository(db)
+	workspaceRepository := workspaces.NewRepository(db, dataCipher)
 	workspacesService := workspaces.NewService(
 		workspaceRepository,
 		environmentCipher,
@@ -1632,10 +1652,10 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, *gorm.DB, func()) 
 	realtimePublisher := realtime.New(events)
 	requestProxyHandler := requestproxy.NewHandler(requestproxy.NewService(
 		workspacesService,
-		requestproxy.NewSettingsRepository(db),
+		requestproxy.NewSettingsRepository(db, dataCipher),
 	))
 	sharedHistoryHandler := sharedhistory.NewHandler(sharedhistory.NewService(
-		sharedhistory.NewRepository(db),
+		sharedhistory.NewRepository(db, dataCipher),
 		workspacesService,
 		sharedhistory.WithEvents(events),
 	))
@@ -1660,6 +1680,7 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, *gorm.DB, func()) 
 	)
 	return httpServer.App, usersService, db, func() {
 		events.Stop()
+		dataCipher.Close()
 		_ = sqlDatabase.Close()
 	}
 }

@@ -6,6 +6,7 @@ import (
 )
 
 func TestLoadDefaultsToLocalSQLite(t *testing.T) {
+	setDataEncryptionKey(t)
 	t.Setenv("RESOLVED_SERVER_ADDRESS", "")
 	t.Setenv("RESOLVED_DATABASE_DRIVER", "")
 	t.Setenv("RESOLVED_DATABASE_DSN", "")
@@ -31,6 +32,7 @@ func TestLoadDefaultsToLocalSQLite(t *testing.T) {
 }
 
 func TestLoadAcceptsMSSQLAlias(t *testing.T) {
+	setDataEncryptionKey(t)
 	t.Setenv("RESOLVED_SERVER_ADDRESS", "127.0.0.1:9000")
 	t.Setenv("RESOLVED_DATABASE_DRIVER", "mssql")
 	t.Setenv("RESOLVED_DATABASE_DSN", "sqlserver://example")
@@ -47,6 +49,7 @@ func TestLoadAcceptsMSSQLAlias(t *testing.T) {
 }
 
 func TestLoadRequiresDSNForRemoteDatabase(t *testing.T) {
+	setDataEncryptionKey(t)
 	t.Setenv("RESOLVED_DATABASE_DRIVER", "postgres")
 	t.Setenv("RESOLVED_DATABASE_DSN", "")
 	t.Setenv("RESOLVED_ENCRYPTION_SECRET", "test deployment encryption secret with enough bytes")
@@ -57,6 +60,7 @@ func TestLoadRequiresDSNForRemoteDatabase(t *testing.T) {
 }
 
 func TestLoadRequiresEncryptionSecret(t *testing.T) {
+	setDataEncryptionKey(t)
 	t.Setenv("RESOLVED_DATABASE_DRIVER", "sqlite")
 	t.Setenv("RESOLVED_DATABASE_DSN", ":memory:")
 	t.Setenv("RESOLVED_ENCRYPTION_SECRET", "too short")
@@ -64,4 +68,40 @@ func TestLoadRequiresEncryptionSecret(t *testing.T) {
 	if _, err := Load(); err == nil {
 		t.Fatal("expected a short encryption secret to fail")
 	}
+}
+
+func TestLoadRequiresDataEncryptionKey(t *testing.T) {
+	t.Setenv("RESOLVED_DATA_KEY_PROVIDER", "static")
+	t.Setenv("RESOLVED_DATABASE_DRIVER", "sqlite")
+	t.Setenv("RESOLVED_DATABASE_DSN", ":memory:")
+	t.Setenv("RESOLVED_ENCRYPTION_SECRET", "test deployment encryption secret with enough bytes")
+	t.Setenv("RESOLVED_DATA_ENCRYPTION_KEY", "")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected a missing data encryption key to fail")
+	}
+}
+
+func TestLoadAcceptsVaultDataKeyProvider(t *testing.T) {
+	t.Setenv("RESOLVED_DATABASE_DRIVER", "sqlite")
+	t.Setenv("RESOLVED_DATABASE_DSN", ":memory:")
+	t.Setenv("RESOLVED_ENCRYPTION_SECRET", "test deployment encryption secret with enough bytes")
+	t.Setenv("RESOLVED_DATA_KEY_PROVIDER", "vault")
+	t.Setenv("RESOLVED_VAULT_ADDRESS", "https://vault.example.test")
+	t.Setenv("RESOLVED_VAULT_TOKEN", "test-token")
+	t.Setenv("RESOLVED_VAULT_TRANSIT_KEY", "resolved-server")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load Vault config: %v", err)
+	}
+	if cfg.DataEncryption.Provider != "vault" || cfg.DataEncryption.VaultMount != defaultVaultMount {
+		t.Fatalf("data encryption config = %+v", cfg.DataEncryption)
+	}
+}
+
+func setDataEncryptionKey(t *testing.T) {
+	t.Helper()
+	t.Setenv("RESOLVED_DATA_KEY_PROVIDER", "static")
+	t.Setenv("RESOLVED_DATA_ENCRYPTION_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
 }

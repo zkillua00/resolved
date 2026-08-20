@@ -58,6 +58,51 @@ deployment secret has no default, must contain at least 32 bytes, and must be
 kept stable and backed up. Losing or replacing it prevents future logins from
 deriving keys for existing values.
 
+## Server data encryption
+
+User-generated server content is encrypted in the application before GORM
+writes it. This includes user login identifiers and display names; workspace,
+collection, environment, and saved-request names; environment-variable keys;
+custom role names and descriptions; saved-request definitions; shared request
+history, including client entry identifiers; human-readable activity-log
+content; and request hostname overrides. Passwords remain Argon2id hashes and
+bearer tokens remain SHA-256 digests rather than being reversibly encrypted.
+
+Relational metadata needed to enforce access and operate the service remains
+plaintext: opaque record IDs, ownership and membership relationships, role and
+permission assignments, enabled/secret flags, ordering, timestamps, and audit
+resource/action categories. A database leak therefore cannot disclose content,
+but it can disclose this structural and traffic metadata.
+
+The database stores a random key for the deployment scope and one random key
+per workspace only after that key has been wrapped by the configured root key
+provider. The static provider uses an independent base64-encoded 32-byte AES-GCM
+root key. The Vault provider uses a Vault Transit symmetric key, so its root key
+does not leave Vault. The existing `RESOLVED_ENCRYPTION_SECRET` is not reused as
+the server-data root key.
+
+Each encrypted value carries a format version and scope-key generation. AES-256-
+GCM associated data binds the ciphertext to its scope, content domain, record
+ID, and key generation, so moving ciphertext between rows, columns, or
+workspaces fails authentication. Equality checks needed for login, role-name
+and environment-variable-key uniqueness, and shared-history idempotency use
+keyed blind indexes. Those indexes reveal equality but not plaintext and
+deliberately remain stable across normal payload-key rotation.
+
+The server unwraps scoped keys only at runtime and caches them in process memory
+for five minutes. A missing provider, unknown root-key identifier, unavailable
+Vault, missing wrapped key, or failed authentication is fatal for the affected
+operation; there is no plaintext fallback. Vault or application-process
+compromise can still expose data the running service is authorized to decrypt.
+This design protects a database-only leak, not a fully compromised live server.
+
+Startup performs an idempotent backfill for older plaintext rows and clears the
+plaintext columns. On SQLite, the first completed backfill truncates the WAL and
+rebuilds the database with `VACUUM` before recording the migration marker.
+PostgreSQL, MySQL, and SQL Server operators must use their database's page-
+rewrite/compaction procedure and retire older plaintext backups; logical column
+updates cannot guarantee physical erasure from historical pages or snapshots.
+
 ## Workspace and collection access
 
 Deployment-wide RBAC and resource access are separate checks. A role permission
@@ -306,6 +351,10 @@ be disabled outside a trusted local network.
 `RESOLVED_ENCRYPTION_SECRET` is independent of the database DSN password. Use a
 random deployment secret of at least 32 bytes, inject it through the process
 environment or secret manager, and include it in encrypted deployment backups.
+The server-data root wrapping key is separate again. Do not put a static
+`RESOLVED_DATA_ENCRYPTION_KEY` in the database directory or the same database
+backup set. Back it up through an independently authorized recovery path, or use
+Vault Transit and back up Vault according to its own recovery procedure.
 
 ## Request execution boundary
 

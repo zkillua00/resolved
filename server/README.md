@@ -37,6 +37,7 @@ owner.
 
 ```sh
 export RESOLVED_ENCRYPTION_SECRET="$(openssl rand -base64 32)"
+export RESOLVED_DATA_ENCRYPTION_KEY="$(openssl rand -base64 32)"
 go run ./cmd/resolved-server bootstrap-admin \
   --email owner \
   --name "Deployment owner"
@@ -50,6 +51,12 @@ go run ./cmd/resolved-server serve
 
 Keep `RESOLVED_ENCRYPTION_SECRET` stable and backed up. Losing or replacing it
 makes existing encrypted environment values impossible to decrypt after login.
+
+`RESOLVED_DATA_ENCRYPTION_KEY` is the static-provider root wrapping key, not a
+database password. Keep it outside the database directory, database volume, and
+database backup set. Production deployments should prefer Vault Transit so the
+root key is not present on the database host. Losing access to the configured
+root key makes encrypted server content unreadable.
 
 The safe default listen address is `127.0.0.1:8787`. Put the service behind a
 TLS reverse proxy before exposing it to a network.
@@ -65,6 +72,14 @@ Configuration is read from the process environment.
 | `RESOLVED_DATABASE_DSN` | `./data/resolved-server.db?...` | GORM driver data source name |
 | `RESOLVED_SESSION_TTL` | `24h` | Bearer-session lifetime |
 | `RESOLVED_ENCRYPTION_SECRET` | none | Required deployment secret with at least 32 bytes; combines with each user's password to derive their environment key at login |
+| `RESOLVED_DATA_KEY_PROVIDER` | `static` | Root key provider: `static` or `vault` |
+| `RESOLVED_DATA_ENCRYPTION_KEY` | none | Static provider only: base64-encoded 32-byte root wrapping key |
+| `RESOLVED_DATA_ENCRYPTION_KEY_ID` | `local-v1` | Stable identifier for the static root key; changing it alone makes existing wrapped keys unavailable and does not rotate them |
+| `RESOLVED_VAULT_ADDRESS` | none | Vault provider only: HTTPS Vault URL; loopback HTTP is accepted for local development |
+| `RESOLVED_VAULT_TOKEN` | none | Vault provider only: token allowed to use the configured Transit key |
+| `RESOLVED_VAULT_NAMESPACE` | none | Optional Vault namespace |
+| `RESOLVED_VAULT_TRANSIT_MOUNT` | `transit` | Vault Transit mount name |
+| `RESOLVED_VAULT_TRANSIT_KEY` | none | Vault Transit symmetric key name |
 
 Example PostgreSQL configuration:
 
@@ -72,7 +87,17 @@ Example PostgreSQL configuration:
 export RESOLVED_DATABASE_DRIVER=postgres
 export RESOLVED_DATABASE_DSN='host=127.0.0.1 user=resolved password=secret dbname=resolved port=5432 sslmode=require'
 export RESOLVED_ENCRYPTION_SECRET="$(openssl rand -base64 32)"
+export RESOLVED_DATA_ENCRYPTION_KEY="$(openssl rand -base64 32)"
 go run ./cmd/resolved-server serve
+```
+
+Example Vault configuration:
+
+```sh
+export RESOLVED_DATA_KEY_PROVIDER=vault
+export RESOLVED_VAULT_ADDRESS=https://vault.internal.example
+export RESOLVED_VAULT_TOKEN='short-lived-workload-token'
+export RESOLVED_VAULT_TRANSIT_KEY=resolved-server
 ```
 
 Driver-specific DSN examples and the security model are documented in

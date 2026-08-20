@@ -12,6 +12,8 @@ const (
 	defaultDriver     = "sqlite"
 	defaultSQLiteDSN  = "./data/resolved-server.db?_busy_timeout=5000&_journal_mode=WAL&_foreign_keys=on"
 	defaultSessionTTL = 24 * time.Hour
+	defaultDataKeyID  = "local-v1"
+	defaultVaultMount = "transit"
 )
 
 type Config struct {
@@ -19,6 +21,18 @@ type Config struct {
 	Database         Database
 	SessionTTL       time.Duration
 	EncryptionSecret string
+	DataEncryption   DataEncryption
+}
+
+type DataEncryption struct {
+	Provider       string
+	KeyID          string
+	EncodedKey     string
+	VaultAddress   string
+	VaultToken     string
+	VaultNamespace string
+	VaultMount     string
+	VaultKeyName   string
 }
 
 type Database struct {
@@ -54,6 +68,29 @@ func Load() (Config, error) {
 	if len([]byte(encryptionSecret)) < 32 {
 		return Config{}, fmt.Errorf("RESOLVED_ENCRYPTION_SECRET must contain at least 32 bytes")
 	}
+	dataEncryption := DataEncryption{Provider: strings.ToLower(strings.TrimSpace(envOrDefault("RESOLVED_DATA_KEY_PROVIDER", "static")))}
+	switch dataEncryption.Provider {
+	case "static":
+		dataEncryption.EncodedKey = strings.TrimSpace(os.Getenv("RESOLVED_DATA_ENCRYPTION_KEY"))
+		if dataEncryption.EncodedKey == "" {
+			return Config{}, fmt.Errorf("RESOLVED_DATA_ENCRYPTION_KEY is required for the static data key provider")
+		}
+		dataEncryption.KeyID = strings.TrimSpace(envOrDefault("RESOLVED_DATA_ENCRYPTION_KEY_ID", defaultDataKeyID))
+		if dataEncryption.KeyID == "" || len(dataEncryption.KeyID) > 255 {
+			return Config{}, fmt.Errorf("RESOLVED_DATA_ENCRYPTION_KEY_ID must contain at most 255 characters")
+		}
+	case "vault":
+		dataEncryption.VaultAddress = strings.TrimSpace(os.Getenv("RESOLVED_VAULT_ADDRESS"))
+		dataEncryption.VaultToken = os.Getenv("RESOLVED_VAULT_TOKEN")
+		dataEncryption.VaultNamespace = strings.TrimSpace(os.Getenv("RESOLVED_VAULT_NAMESPACE"))
+		dataEncryption.VaultMount = strings.TrimSpace(envOrDefault("RESOLVED_VAULT_TRANSIT_MOUNT", defaultVaultMount))
+		dataEncryption.VaultKeyName = strings.TrimSpace(os.Getenv("RESOLVED_VAULT_TRANSIT_KEY"))
+		if dataEncryption.VaultAddress == "" || dataEncryption.VaultToken == "" || dataEncryption.VaultKeyName == "" {
+			return Config{}, fmt.Errorf("RESOLVED_VAULT_ADDRESS, RESOLVED_VAULT_TOKEN, and RESOLVED_VAULT_TRANSIT_KEY are required for the Vault data key provider")
+		}
+	default:
+		return Config{}, fmt.Errorf("RESOLVED_DATA_KEY_PROVIDER must be static or vault")
+	}
 
 	return Config{
 		Address: address,
@@ -63,6 +100,7 @@ func Load() (Config, error) {
 		},
 		SessionTTL:       ttl,
 		EncryptionSecret: encryptionSecret,
+		DataEncryption:   dataEncryption,
 	}, nil
 }
 

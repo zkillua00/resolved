@@ -10,8 +10,9 @@ import (
 // Workspace is the top-level collaboration boundary. UserIDs and Collections
 // are hydrated aggregates and are not stored as columns on the workspace row.
 type Workspace struct {
-	ID              string         `gorm:"type:char(36);primaryKey"`
-	Name            string         `gorm:"size:120;not null"`
+	ID              string `gorm:"type:char(36);primaryKey"`
+	Name            string `gorm:"size:120;not null"`
+	EncryptedName   []byte
 	UserIDs         []string       `gorm:"-"`
 	Collections     []Collection   `gorm:"-"`
 	CreatedByUserID *string        `gorm:"type:char(36);index"`
@@ -23,11 +24,12 @@ type Workspace struct {
 // Collection is one node in a workspace collection tree. A nil
 // ParentCollectionID places the node at the workspace root.
 type Collection struct {
-	ID                 string         `gorm:"type:char(36);primaryKey"`
-	WorkspaceID        string         `gorm:"type:char(36);not null;index"`
-	Workspace          Workspace      `gorm:"foreignKey:WorkspaceID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
-	ParentCollectionID *string        `gorm:"type:char(36);index"`
-	Name               string         `gorm:"size:120;not null"`
+	ID                 string    `gorm:"type:char(36);primaryKey"`
+	WorkspaceID        string    `gorm:"type:char(36);not null;index"`
+	Workspace          Workspace `gorm:"foreignKey:WorkspaceID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	ParentCollectionID *string   `gorm:"type:char(36);index"`
+	Name               string    `gorm:"size:120;not null"`
+	EncryptedName      []byte
 	UserIDs            []string       `gorm:"-"`
 	SubCollections     []Collection   `gorm:"-"`
 	Requests           []SavedRequest `gorm:"-"`
@@ -41,15 +43,16 @@ type Collection struct {
 // Definition stores the application's portable request-template JSON without
 // coupling the server schema to individual editor fields.
 type SavedRequest struct {
-	ID              string         `gorm:"type:char(36);primaryKey"`
-	CollectionID    string         `gorm:"type:char(36);not null;index"`
-	Collection      Collection     `gorm:"foreignKey:CollectionID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
-	Name            string         `gorm:"size:120;not null"`
-	Definition      string         `gorm:"type:text;not null"`
-	CreatedByUserID *string        `gorm:"type:char(36);index"`
-	CreatedByUser   *identity.User `gorm:"-"`
-	CreatedAt       time.Time      `gorm:"not null"`
-	UpdatedAt       time.Time      `gorm:"not null"`
+	ID               string     `gorm:"type:char(36);primaryKey"`
+	CollectionID     string     `gorm:"type:char(36);not null;index"`
+	Collection       Collection `gorm:"foreignKey:CollectionID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	Name             string     `gorm:"size:120;not null"`
+	Definition       string     `gorm:"type:text;not null"`
+	EncryptedPayload []byte
+	CreatedByUserID  *string        `gorm:"type:char(36);index"`
+	CreatedByUser    *identity.User `gorm:"-"`
+	CreatedAt        time.Time      `gorm:"not null"`
+	UpdatedAt        time.Time      `gorm:"not null"`
 }
 
 // WorkspaceUser is a direct workspace grant. Collection grants are not

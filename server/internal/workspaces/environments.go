@@ -10,10 +10,11 @@ import (
 // deliberately contain no persisted value field: values live in
 // EnvironmentVariableValue and are scoped to one user.
 type Environment struct {
-	ID              string                `gorm:"type:char(36);primaryKey"`
-	WorkspaceID     string                `gorm:"type:char(36);not null;index:environment_workspace_position,priority:1"`
-	Workspace       Workspace             `gorm:"foreignKey:WorkspaceID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
-	Name            string                `gorm:"size:120;not null"`
+	ID              string    `gorm:"type:char(36);primaryKey"`
+	WorkspaceID     string    `gorm:"type:char(36);not null;index:environment_workspace_position,priority:1"`
+	Workspace       Workspace `gorm:"foreignKey:WorkspaceID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	Name            string    `gorm:"size:120;not null"`
+	EncryptedName   []byte
 	Position        int                   `gorm:"not null;index:environment_workspace_position,priority:2"`
 	Variables       []EnvironmentVariable `gorm:"-"`
 	CreatedByUserID *string               `gorm:"type:char(36);index"`
@@ -23,10 +24,12 @@ type Environment struct {
 }
 
 type EnvironmentVariable struct {
-	ID              string         `gorm:"type:char(36);primaryKey"`
-	EnvironmentID   string         `gorm:"type:char(36);not null;uniqueIndex:environment_variable_key,priority:1;index:environment_variable_position,priority:1"`
-	Environment     Environment    `gorm:"foreignKey:EnvironmentID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
-	Key             string         `gorm:"size:256;not null;uniqueIndex:environment_variable_key,priority:2"`
+	ID              string      `gorm:"type:char(36);primaryKey"`
+	EnvironmentID   string      `gorm:"type:char(36);not null;uniqueIndex:environment_variable_key,priority:1;index:environment_variable_position,priority:1"`
+	Environment     Environment `gorm:"foreignKey:EnvironmentID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	Key             string      `gorm:"size:256;not null"`
+	KeyLookup       *string     `gorm:"size:64;uniqueIndex:environment_variable_key,priority:2"`
+	EncryptedKey    []byte
 	Position        int            `gorm:"not null;index:environment_variable_position,priority:2"`
 	Enabled         bool           `gorm:"not null;default:true"`
 	Secret          bool           `gorm:"not null;default:false"`
