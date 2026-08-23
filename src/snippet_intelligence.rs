@@ -20,12 +20,12 @@ use gpui::{App, AppContext as _, Context, Task, Window};
 use gpui_component::input::{CompletionProvider, HoverProvider, InputState, Rope};
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit,
-    Diagnostic, Documentation, Hover, HoverContents, MarkupContent, MarkupKind, Position, Range,
-    TextEdit,
+    Diagnostic, Documentation, Hover, HoverContents, MarkupContent, MarkupKind, TextEdit,
 };
 
 use crate::{
     core::{GENERATOR_WRAPPER_PREFIX, GENERATOR_WRAPPER_SUFFIX},
+    editor_util::{clipped_char_boundary, source_range},
     script_intelligence::ScriptEditorPhase,
     typescript_service::{TypeScriptDocumentKind, TypeScriptScriptPhase, TypeScriptServiceHandle},
 };
@@ -1260,34 +1260,10 @@ fn is_code_position(prefix: &str) -> bool {
     state == LexicalState::Code
 }
 
-fn clipped_char_boundary(source: &str, requested_offset: usize) -> usize {
-    let mut offset = requested_offset.min(source.len());
-    while !source.is_char_boundary(offset) {
-        offset = offset.saturating_sub(1);
-    }
-    offset
-}
-
-fn source_range(source: &str, start: usize, end: usize) -> Range {
-    Range::new(source_position(source, start), source_position(source, end))
-}
-
-// gpui-component maps an LSP column as a Unicode scalar index in its Rope.
-// Keep fallback edits aligned with the TypeScript-service conversion.
-fn source_position(source: &str, requested_offset: usize) -> Position {
-    let offset = clipped_char_boundary(source, requested_offset);
-    let prefix = &source[..offset];
-    let line = prefix.bytes().filter(|byte| *byte == b'\n').count();
-    let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
-    Position::new(
-        u32::try_from(line).unwrap_or(u32::MAX),
-        u32::try_from(source[line_start..offset].chars().count()).unwrap_or(u32::MAX),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lsp_types::{Position, Range};
 
     fn labels(items: Vec<CompletionItem>) -> Vec<String> {
         items.into_iter().map(|item| item.label).collect()

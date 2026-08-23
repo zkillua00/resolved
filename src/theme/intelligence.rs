@@ -12,7 +12,7 @@ use gpui_component::{
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit,
     DiagnosticSeverity, Documentation, Hover, HoverContents, MarkupContent, MarkupKind,
-    NumberOrString, Position, Range, TextEdit,
+    NumberOrString, TextEdit,
 };
 
 use super::{
@@ -23,6 +23,7 @@ use super::{
         theme_property,
     },
 };
+use crate::editor_util::{clipped_char_boundary, source_range};
 
 const DIAGNOSTIC_SOURCE: &str = "Resolved theme";
 const DIAGNOSTIC_CODE: &str = "api-theme-css";
@@ -1203,31 +1204,6 @@ fn token_range_at(
 
 fn is_custom_property_character(character: char) -> bool {
     character.is_alphanumeric() || matches!(character, '-' | '_')
-}
-
-fn source_range(source: &str, start: usize, end: usize) -> Range {
-    Range::new(source_position(source, start), source_position(source, end))
-}
-
-// gpui-component 0.5.1 interprets LSP columns as Unicode scalar indices.
-fn source_position(source: &str, requested_offset: usize) -> Position {
-    let offset = clipped_char_boundary(source, requested_offset);
-    let prefix = &source[..offset];
-    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() as u32;
-    let column = prefix
-        .rsplit_once('\n')
-        .map_or(prefix, |(_, line)| line)
-        .chars()
-        .count() as u32;
-    Position::new(line, column)
-}
-
-fn clipped_char_boundary(source: &str, requested_offset: usize) -> usize {
-    let mut offset = requested_offset.min(source.len());
-    while !source.is_char_boundary(offset) {
-        offset -= 1;
-    }
-    offset
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ mod brand;
 mod code_editor;
 mod core;
 mod debug_overlay;
+mod editor_util;
 mod instance_guard;
 mod request_dirty;
 mod script_intelligence;

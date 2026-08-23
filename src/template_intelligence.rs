@@ -12,10 +12,11 @@ use gpui::{Context, HighlightStyle, Hsla, Task, Window};
 use gpui_component::input::{CompletionProvider, InputState, Rope};
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit,
-    Documentation, Position, Range, TextEdit,
+    Documentation, Range, TextEdit,
 };
 
 use crate::core::Environment;
+use crate::editor_util::{clipped_char_boundary, source_range};
 
 const COMPLETION_CONTEXT_PADDING: usize = 32;
 
@@ -465,33 +466,6 @@ fn completion_context(source: &str, requested_offset: usize) -> Option<TemplateC
         typed_prefix,
         replace_range: span.name_range,
     })
-}
-
-fn source_range(source: &str, start: usize, end: usize) -> Range {
-    Range::new(source_position(source, start), source_position(source, end))
-}
-
-// gpui-component 0.5.1 treats an LSP column as a Unicode scalar index when it
-// maps ranges back into its Rope, so this intentionally does not use UTF-16
-// columns.
-fn source_position(source: &str, requested_offset: usize) -> Position {
-    let offset = clipped_char_boundary(source, requested_offset);
-    let prefix = &source[..offset];
-    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() as u32;
-    let column = prefix
-        .rsplit_once('\n')
-        .map_or(prefix, |(_, line)| line)
-        .chars()
-        .count() as u32;
-    Position::new(line, column)
-}
-
-fn clipped_char_boundary(source: &str, requested_offset: usize) -> usize {
-    let mut offset = requested_offset.min(source.len());
-    while !source.is_char_boundary(offset) {
-        offset -= 1;
-    }
-    offset
 }
 
 #[cfg(test)]

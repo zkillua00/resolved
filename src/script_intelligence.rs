@@ -19,11 +19,12 @@ use gpui_component::input::{CompletionProvider, HoverProvider, InputState, Rope}
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit,
     Diagnostic, DiagnosticSeverity, Documentation, Hover, HoverContents, MarkupContent, MarkupKind,
-    NumberOrString, Position, Range, TextEdit,
+    NumberOrString, TextEdit,
 };
 
 use crate::{
     core::{BodyFieldKind, BodyMode, RawBodyLanguage, STANDARD_HTTP_METHODS},
+    editor_util::{clipped_char_boundary, source_range},
     typescript_service::{TypeScriptDocumentKind, TypeScriptScriptPhase, TypeScriptServiceHandle},
 };
 
@@ -1980,33 +1981,6 @@ fn variable_diagnostic(
     }
 }
 
-fn source_range(source: &str, start: usize, end: usize) -> Range {
-    Range::new(source_position(source, start), source_position(source, end))
-}
-
-// gpui-component currently treats an LSP Position column as a Unicode scalar
-// index when mapping diagnostics and completion edits back into its Rope. Keep
-// this conversion aligned with that editor contract.
-fn source_position(source: &str, requested_offset: usize) -> Position {
-    let offset = clipped_char_boundary(source, requested_offset);
-    let prefix = &source[..offset];
-    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() as u32;
-    let column = prefix
-        .rsplit_once('\n')
-        .map_or(prefix, |(_, line)| line)
-        .chars()
-        .count() as u32;
-    Position::new(line, column)
-}
-
-fn clipped_char_boundary(source: &str, requested_offset: usize) -> usize {
-    let mut offset = requested_offset.min(source.len());
-    while !source.is_char_boundary(offset) {
-        offset -= 1;
-    }
-    offset
-}
-
 #[derive(Clone, Debug)]
 struct Token {
     kind: TokenKind,
@@ -2398,6 +2372,7 @@ fn skip_regex(source: &str, start: usize) -> (usize, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lsp_types::{Position, Range};
 
     fn labels(items: Vec<CompletionItem>) -> Vec<String> {
         items.into_iter().map(|item| item.label).collect()

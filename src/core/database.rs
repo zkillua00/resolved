@@ -1668,28 +1668,63 @@ fn save_secure_value_tx(
     Ok(())
 }
 
-fn sync_saved_request_headers(
+/// Describes a parent-ordered child-row table so the upsert loop and tail-trim
+/// `DELETE` live in one place instead of being copied per table.
+struct ChildTable {
+    name: &'static str,
+    parent_column: &'static str,
+    position_field: &'static str,
+    count_field: &'static str,
+}
+
+const SAVED_REQUEST_HEADER_ROWS: ChildTable = ChildTable {
+    name: "saved_request_headers",
+    parent_column: "saved_request_id",
+    position_field: "saved request header position",
+    count_field: "saved request header count",
+};
+const SAVED_REQUEST_BODY_FIELD_ROWS: ChildTable = ChildTable {
+    name: "saved_request_body_fields",
+    parent_column: "saved_request_id",
+    position_field: "saved request body field position",
+    count_field: "saved request body field count",
+};
+const HISTORY_HEADER_ROWS: ChildTable = ChildTable {
+    name: "history_headers",
+    parent_column: "history_entry_id",
+    position_field: "history header position",
+    count_field: "history header count",
+};
+const HISTORY_BODY_FIELD_ROWS: ChildTable = ChildTable {
+    name: "history_body_fields",
+    parent_column: "history_entry_id",
+    position_field: "history body field position",
+    count_field: "history body field count",
+};
+
+fn sync_header_rows(
     transaction: &Transaction<'_>,
-    saved_request_id: &str,
+    table: ChildTable,
+    parent_id: &str,
     headers: &[HeaderEntry],
     saved_at: i64,
 ) -> Result<(), DatabaseError> {
     for (position, header) in headers.iter().enumerate() {
+        let sql = format!(
+            "INSERT INTO {name}({parent}, position, enabled, shared, name, value, \
+             created_at, updated_at, version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 1) \
+             ON CONFLICT({parent}, position) DO UPDATE SET \
+                enabled = excluded.enabled, shared = excluded.shared, \
+                name = excluded.name, value = excluded.value, \
+                updated_at = excluded.updated_at, version = {name}.version + 1",
+            name = table.name,
+            parent = table.parent_column,
+        );
         transaction.execute(
-            "INSERT INTO saved_request_headers(
-                saved_request_id, position, enabled, shared, name, value,
-                created_at, updated_at, version
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 1)
-             ON CONFLICT(saved_request_id, position) DO UPDATE SET
-                enabled = excluded.enabled,
-                shared = excluded.shared,
-                name = excluded.name,
-                value = excluded.value,
-                updated_at = excluded.updated_at,
-                version = saved_request_headers.version + 1",
+            &sql,
             params![
-                saved_request_id,
-                to_i64(position, "saved request header position")?,
+                parent_id,
+                to_i64(position, table.position_field)?,
                 bool_to_i64(header.enabled),
                 bool_to_i64(header.shared),
                 &header.name,
@@ -1698,39 +1733,41 @@ fn sync_saved_request_headers(
             ],
         )?;
     }
+    let sql = format!(
+        "DELETE FROM {name} WHERE {parent} = ?1 AND position >= ?2",
+        name = table.name,
+        parent = table.parent_column,
+    );
     transaction.execute(
-        "DELETE FROM saved_request_headers
-         WHERE saved_request_id = ?1 AND position >= ?2",
-        params![
-            saved_request_id,
-            to_i64(headers.len(), "saved request header count")?
-        ],
+        &sql,
+        params![parent_id, to_i64(headers.len(), table.count_field)?],
     )?;
     Ok(())
 }
 
-fn sync_saved_request_body_fields(
+fn sync_body_field_rows(
     transaction: &Transaction<'_>,
-    saved_request_id: &str,
+    table: ChildTable,
+    parent_id: &str,
     body_fields: &[BodyField],
     saved_at: i64,
 ) -> Result<(), DatabaseError> {
     for (position, field) in body_fields.iter().enumerate() {
+        let sql = format!(
+            "INSERT INTO {name}({parent}, position, enabled, name, value, kind, \
+             created_at, updated_at, version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 1) \
+             ON CONFLICT({parent}, position) DO UPDATE SET \
+                enabled = excluded.enabled, name = excluded.name, \
+                value = excluded.value, kind = excluded.kind, \
+                updated_at = excluded.updated_at, version = {name}.version + 1",
+            name = table.name,
+            parent = table.parent_column,
+        );
         transaction.execute(
-            "INSERT INTO saved_request_body_fields(
-                saved_request_id, position, enabled, name, value, kind,
-                created_at, updated_at, version
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 1)
-             ON CONFLICT(saved_request_id, position) DO UPDATE SET
-                enabled = excluded.enabled,
-                name = excluded.name,
-                value = excluded.value,
-                kind = excluded.kind,
-                updated_at = excluded.updated_at,
-                version = saved_request_body_fields.version + 1",
+            &sql,
             params![
-                saved_request_id,
-                to_i64(position, "saved request body field position")?,
+                parent_id,
+                to_i64(position, table.position_field)?,
                 bool_to_i64(field.enabled),
                 &field.name,
                 &field.value,
@@ -1739,15 +1776,46 @@ fn sync_saved_request_body_fields(
             ],
         )?;
     }
+    let sql = format!(
+        "DELETE FROM {name} WHERE {parent} = ?1 AND position >= ?2",
+        name = table.name,
+        parent = table.parent_column,
+    );
     transaction.execute(
-        "DELETE FROM saved_request_body_fields
-         WHERE saved_request_id = ?1 AND position >= ?2",
-        params![
-            saved_request_id,
-            to_i64(body_fields.len(), "saved request body field count")?
-        ],
+        &sql,
+        params![parent_id, to_i64(body_fields.len(), table.count_field)?],
     )?;
     Ok(())
+}
+
+fn sync_saved_request_headers(
+    transaction: &Transaction<'_>,
+    saved_request_id: &str,
+    headers: &[HeaderEntry],
+    saved_at: i64,
+) -> Result<(), DatabaseError> {
+    sync_header_rows(
+        transaction,
+        SAVED_REQUEST_HEADER_ROWS,
+        saved_request_id,
+        headers,
+        saved_at,
+    )
+}
+
+fn sync_saved_request_body_fields(
+    transaction: &Transaction<'_>,
+    saved_request_id: &str,
+    body_fields: &[BodyField],
+    saved_at: i64,
+) -> Result<(), DatabaseError> {
+    sync_body_field_rows(
+        transaction,
+        SAVED_REQUEST_BODY_FIELD_ROWS,
+        saved_request_id,
+        body_fields,
+        saved_at,
+    )
 }
 
 fn sync_snippet_requirements(
@@ -2155,39 +2223,13 @@ fn sync_history_headers(
     headers: &[HeaderEntry],
     saved_at: i64,
 ) -> Result<(), DatabaseError> {
-    for (position, header) in headers.iter().enumerate() {
-        transaction.execute(
-            "INSERT INTO history_headers(
-                history_entry_id, position, enabled, shared, name, value,
-                created_at, updated_at, version
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 1)
-             ON CONFLICT(history_entry_id, position) DO UPDATE SET
-                enabled = excluded.enabled,
-                shared = excluded.shared,
-                name = excluded.name,
-                value = excluded.value,
-                updated_at = excluded.updated_at,
-                version = history_headers.version + 1",
-            params![
-                history_entry_id,
-                to_i64(position, "history header position")?,
-                bool_to_i64(header.enabled),
-                bool_to_i64(header.shared),
-                &header.name,
-                &header.value,
-                saved_at,
-            ],
-        )?;
-    }
-    transaction.execute(
-        "DELETE FROM history_headers
-         WHERE history_entry_id = ?1 AND position >= ?2",
-        params![
-            history_entry_id,
-            to_i64(headers.len(), "history header count")?
-        ],
-    )?;
-    Ok(())
+    sync_header_rows(
+        transaction,
+        HISTORY_HEADER_ROWS,
+        history_entry_id,
+        headers,
+        saved_at,
+    )
 }
 
 fn sync_history_body_fields(
@@ -2196,39 +2238,13 @@ fn sync_history_body_fields(
     body_fields: &[BodyField],
     saved_at: i64,
 ) -> Result<(), DatabaseError> {
-    for (position, field) in body_fields.iter().enumerate() {
-        transaction.execute(
-            "INSERT INTO history_body_fields(
-                history_entry_id, position, enabled, name, value, kind,
-                created_at, updated_at, version
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 1)
-             ON CONFLICT(history_entry_id, position) DO UPDATE SET
-                enabled = excluded.enabled,
-                name = excluded.name,
-                value = excluded.value,
-                kind = excluded.kind,
-                updated_at = excluded.updated_at,
-                version = history_body_fields.version + 1",
-            params![
-                history_entry_id,
-                to_i64(position, "history body field position")?,
-                bool_to_i64(field.enabled),
-                &field.name,
-                &field.value,
-                field.kind.as_db_str(),
-                saved_at,
-            ],
-        )?;
-    }
-    transaction.execute(
-        "DELETE FROM history_body_fields
-         WHERE history_entry_id = ?1 AND position >= ?2",
-        params![
-            history_entry_id,
-            to_i64(body_fields.len(), "history body field count")?
-        ],
-    )?;
-    Ok(())
+    sync_body_field_rows(
+        transaction,
+        HISTORY_BODY_FIELD_ROWS,
+        history_entry_id,
+        body_fields,
+        saved_at,
+    )
 }
 
 fn load_history_tx(

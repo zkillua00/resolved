@@ -765,6 +765,62 @@ impl ApiTester {
             .into_any_element()
     }
 
+    /// Shared chrome for an ordered row editor (headers or body fields): the
+    /// bordered container, title bar, optional column-heading row, scrollable
+    /// row list and add-row footer. The two editors differ only in their
+    /// title, optional column headings, rows and add control, so the
+    /// scaffolding lives here once rather than being copied per editor.
+    fn render_row_editor(
+        &self,
+        scroll_id: SharedString,
+        title: impl IntoElement,
+        columns: Option<AnyElement>,
+        rows: Vec<AnyElement>,
+        add_control: impl IntoElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut editor = v_flex()
+            .size_full()
+            .min_h_0()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.api_outline_variant())
+            .overflow_hidden()
+            .bg(cx.api_surface())
+            .child(
+                h_flex()
+                    .h(px(42.))
+                    .w_full()
+                    .flex_shrink_0()
+                    .px_3()
+                    .justify_between()
+                    .bg(cx.api_surface_low())
+                    .child(title),
+            );
+        if let Some(columns) = columns {
+            editor = editor.child(columns);
+        }
+        editor
+            .child(
+                v_flex()
+                    .id(scroll_id)
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children(rows)
+                    .child(
+                        h_flex()
+                            .h(px(42.))
+                            .flex_shrink_0()
+                            .px_3()
+                            .border_t_1()
+                            .border_color(cx.api_outline_variant())
+                            .child(add_control),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_pane_headers_editor(
         &self,
         session: &PaneEditorState,
@@ -783,92 +839,153 @@ impl ApiTester {
             .filter(|row| row.enabled && !input_text_is_blank(&row.name, cx))
             .count();
 
-        v_flex()
-            .size_full()
-            .min_h_0()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.api_outline_variant())
-            .overflow_hidden()
-            .bg(cx.api_surface())
+        let columns = h_flex()
+            .h(px(34.))
+            .w_full()
+            .flex_shrink_0()
+            .bg(cx.api_surface_low())
+            .text_xs()
+            .font_semibold()
+            .text_color(cx.theme().muted_foreground)
+            .child(div().w(px(44.)).child(""))
             .child(
-                h_flex()
-                    .h(px(42.))
-                    .w_full()
-                    .flex_shrink_0()
-                    .px_3()
-                    .justify_between()
-                    .bg(cx.api_surface_low())
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_semibold()
-                            .child(format!("{enabled_count} enabled")),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .h(px(34.))
-                    .w_full()
-                    .flex_shrink_0()
-                    .bg(cx.api_surface_low())
-                    .text_xs()
-                    .font_semibold()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(div().w(px(44.)).child(""))
-                    .child(
-                        div()
-                            .flex_1()
-                            .h_full()
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .child("KEY"),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .h_full()
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .child("VALUE"),
-                    )
-                    .child(
-                        div()
-                            .w(px(64.))
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child("SHARE"),
-                    )
-                    .child(div().w(px(44.))),
-            )
-            .child(
-                v_flex()
-                    .id(SharedString::from(format!("{key}-headers-scroll")))
+                div()
                     .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .children(rows)
+                    .h_full()
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .child("KEY"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .child("VALUE"),
+            )
+            .child(
+                div()
+                    .w(px(64.))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child("SHARE"),
+            )
+            .child(div().w(px(44.)));
+
+        let add_control = Button::new("add-pane-header")
+            .icon(IconName::Plus)
+            .label("Add header")
+            .small()
+            .ghost()
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.pane_push_header(pane_id, window, cx);
+            }));
+
+        self.render_row_editor(
+            SharedString::from(format!("{key}-headers-scroll")),
+            div()
+                .text_sm()
+                .font_semibold()
+                .child(format!("{enabled_count} enabled")),
+            Some(columns.into_any_element()),
+            rows,
+            add_control,
+            cx,
+        )
+    }
+
+    /// Shared per-row layout for the header and body-field editors: an
+    /// enabled checkbox, an optional kind/flag cell, the name/value inputs and
+    /// the delete control. Both row types render identically except for the
+    /// middle cell and their toggle/remove actions, so the scaffolding lives
+    /// here once.
+    #[allow(clippy::too_many_arguments)]
+    fn render_pane_row(
+        &self,
+        row_id: SharedString,
+        height: f32,
+        enabled: bool,
+        enabled_id: SharedString,
+        delete_id: SharedString,
+        delete_tooltip: &'static str,
+        middle: Option<AnyElement>,
+        name_input: impl IntoElement,
+        value_input: impl IntoElement,
+        on_toggle: impl Fn(&mut Self, bool, &mut Window, &mut Context<Self>) + 'static,
+        on_delete: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut row = h_flex()
+            .id(row_id)
+            .w_full()
+            .h(px(height))
+            .flex_shrink_0()
+            .border_t_1()
+            .border_color(cx.api_outline_variant())
+            .bg(cx.api_surface())
+            .when(!enabled, |this| this.opacity(0.55))
+            .child(
+                div()
+                    .w(px(44.))
+                    .h_full()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .child(
-                        h_flex()
-                            .h(px(42.))
-                            .flex_shrink_0()
-                            .px_3()
-                            .border_t_1()
-                            .border_color(cx.api_outline_variant())
-                            .child(
-                                Button::new("add-pane-header")
-                                    .icon(IconName::Plus)
-                                    .label("Add header")
-                                    .small()
-                                    .ghost()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.pane_push_header(pane_id, window, cx);
-                                    })),
-                            ),
+                        Checkbox::new(enabled_id)
+                            .checked(enabled)
+                            .small()
+                            .on_click(cx.listener(move |this, checked: &bool, window, cx| {
+                                on_toggle(this, *checked, window, cx);
+                            })),
+                    ),
+            );
+        if let Some(middle) = middle {
+            row = row.child(middle);
+        }
+        row.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .border_l_1()
+                    .border_color(cx.api_outline_variant())
+                    .child(name_input),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .border_l_1()
+                    .border_color(cx.api_outline_variant())
+                    .child(value_input),
+            )
+            .child(
+                div()
+                    .w(px(44.))
+                    .h_full()
+                    .flex_shrink_0()
+                    .border_l_1()
+                    .border_color(cx.api_outline_variant())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        Button::new(delete_id)
+                            .icon(IconName::Delete)
+                            .xsmall()
+                            .ghost()
+                            .tooltip(delete_tooltip)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                on_delete(this, window, cx);
+                            })),
                     ),
             )
             .into_any_element()
@@ -883,108 +1000,51 @@ impl ApiTester {
     ) -> AnyElement {
         let id = row.id;
         let key = session.dom_key(pane_id);
-        h_flex()
-            .id(SharedString::from(format!("{key}-header-row-{id}")))
-            .w_full()
-            .h(px(44.))
+
+        let middle = div()
+            .id(SharedString::from(format!("{key}-header-shared-cell-{id}")))
+            .w(px(64.))
+            .h_full()
             .flex_shrink_0()
-            .border_t_1()
+            .border_l_1()
             .border_color(cx.api_outline_variant())
-            .bg(cx.api_surface())
-            .when(!row.enabled, |this| this.opacity(0.55))
+            .flex()
+            .items_center()
+            .justify_center()
+            .tooltip(|window, cx| {
+                Tooltip::new("Include this header in server-shared history").build(window, cx)
+            })
             .child(
-                div()
-                    .w(px(44.))
-                    .h_full()
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        Checkbox::new(SharedString::from(format!("{key}-header-enabled-{id}")))
-                            .checked(row.enabled)
-                            .small()
-                            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                                this.pane_toggle_header(pane_id, id, *checked, cx);
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .border_l_1()
-                    .border_color(cx.api_outline_variant())
-                    .child(
-                        Input::new(&row.name)
-                            .appearance(false)
-                            .small()
-                            .size_full()
-                            .px_3(),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .border_l_1()
-                    .border_color(cx.api_outline_variant())
-                    .child(
-                        Input::new(&row.value)
-                            .appearance(false)
-                            .small()
-                            .size_full()
-                            .px_3(),
-                    ),
-            )
-            .child(
-                div()
-                    .id(SharedString::from(format!("{key}-header-shared-cell-{id}")))
-                    .w(px(64.))
-                    .h_full()
-                    .flex_shrink_0()
-                    .border_l_1()
-                    .border_color(cx.api_outline_variant())
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .tooltip(|window, cx| {
-                        Tooltip::new("Include this header in server-shared history")
-                            .build(window, cx)
-                    })
-                    .child(
-                        Checkbox::new(SharedString::from(format!("{key}-header-shared-{id}")))
-                            .checked(row.shared)
-                            .small()
-                            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                                this.pane_toggle_header_sharing(pane_id, id, *checked, cx);
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .w(px(44.))
-                    .h_full()
-                    .flex_shrink_0()
-                    .border_l_1()
-                    .border_color(cx.api_outline_variant())
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        Button::new(SharedString::from(format!("{key}-header-delete-{id}")))
-                            .icon(IconName::Delete)
-                            .xsmall()
-                            .ghost()
-                            .tooltip("Delete header")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.pane_remove_header(pane_id, id, window, cx);
-                            })),
-                    ),
-            )
-            .into_any_element()
+                Checkbox::new(SharedString::from(format!("{key}-header-shared-{id}")))
+                    .checked(row.shared)
+                    .small()
+                    .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                        this.pane_toggle_header_sharing(pane_id, id, *checked, cx);
+                    })),
+            );
+
+        self.render_pane_row(
+            SharedString::from(format!("{key}-header-row-{id}")),
+            44.,
+            row.enabled,
+            SharedString::from(format!("{key}-header-enabled-{id}")),
+            SharedString::from(format!("{key}-header-delete-{id}")),
+            "Delete header",
+            Some(middle.into_any_element()),
+            Input::new(&row.name)
+                .appearance(false)
+                .small()
+                .size_full()
+                .px_3(),
+            Input::new(&row.value)
+                .appearance(false)
+                .small()
+                .size_full()
+                .px_3(),
+            move |this, enabled, _, cx| this.pane_toggle_header(pane_id, id, enabled, cx),
+            move |this, window, cx| this.pane_remove_header(pane_id, id, window, cx),
+            cx,
+        )
     }
 
     fn render_pane_body_editor(
@@ -1104,55 +1164,27 @@ impl ApiTester {
             .collect::<Vec<_>>();
         let key = session.dom_key(pane_id);
 
-        v_flex()
-            .size_full()
-            .min_h_0()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.api_outline_variant())
-            .overflow_hidden()
-            .bg(cx.api_surface())
-            .child(
-                h_flex()
-                    .h(px(42.))
-                    .w_full()
-                    .flex_shrink_0()
-                    .px_3()
-                    .justify_between()
-                    .bg(cx.api_surface_low())
-                    .child(div().text_sm().font_semibold().child(if multipart {
-                        "form-data"
-                    } else {
-                        "x-www-form-urlencoded"
-                    })),
-            )
-            .child(
-                v_flex()
-                    .id(SharedString::from(format!("{key}-body-fields-scroll")))
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .children(rows)
-                    .child(
-                        h_flex()
-                            .h(px(42.))
-                            .flex_shrink_0()
-                            .px_3()
-                            .border_t_1()
-                            .border_color(cx.api_outline_variant())
-                            .child(
-                                Button::new("add-pane-body-field")
-                                    .icon(IconName::Plus)
-                                    .label("Add field")
-                                    .small()
-                                    .ghost()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.pane_push_body_field(pane_id, window, cx);
-                                    })),
-                            ),
-                    ),
-            )
-            .into_any_element()
+        let add_control = Button::new("add-pane-body-field")
+            .icon(IconName::Plus)
+            .label("Add field")
+            .small()
+            .ghost()
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.pane_push_body_field(pane_id, window, cx);
+            }));
+
+        self.render_row_editor(
+            SharedString::from(format!("{key}-body-fields-scroll")),
+            div().text_sm().font_semibold().child(if multipart {
+                "form-data"
+            } else {
+                "x-www-form-urlencoded"
+            }),
+            None,
+            rows,
+            add_control,
+            cx,
+        )
     }
 
     fn render_pane_body_field_row(
@@ -1168,127 +1200,71 @@ impl ApiTester {
         let selected_kind = row.kind;
         let kind_owner = cx.entity().downgrade();
 
-        h_flex()
-            .id(SharedString::from(format!("{key}-body-field-row-{id}")))
-            .w_full()
-            .h(px(46.))
-            .flex_shrink_0()
-            .border_t_1()
-            .border_color(cx.api_outline_variant())
-            .bg(cx.api_surface())
-            .when(!row.enabled, |this| this.opacity(0.55))
-            .child(
-                div()
-                    .w(px(44.))
-                    .h_full()
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        Checkbox::new(SharedString::from(format!("{key}-body-field-enabled-{id}")))
-                            .checked(row.enabled)
-                            .small()
-                            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                                this.pane_toggle_body_field(pane_id, id, *checked, cx);
-                            })),
-                    ),
-            )
-            .when(multipart, |this| {
-                this.child(
-                    div()
-                        .w(px(96.))
-                        .h_full()
-                        .flex_shrink_0()
-                        .border_l_1()
-                        .border_color(cx.api_outline_variant())
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            Button::new(SharedString::from(format!("{key}-body-field-kind-{id}")))
-                                .label(selected_kind.label())
-                                .dropdown_caret(true)
-                                .xsmall()
-                                .ghost()
-                                .w(px(82.))
-                                .dropdown_menu(move |menu, _, _| {
-                                    let owner = kind_owner.clone();
-                                    BodyFieldKind::all().iter().copied().fold(
-                                        menu.min_w(px(150.)),
-                                        |menu, kind| {
-                                            let owner = owner.clone();
-                                            menu.item(
-                                                PopupMenuItem::new(kind.label())
-                                                    .checked(kind == selected_kind)
-                                                    .on_click(move |_, _, cx| {
-                                                        if let Some(this) = owner.upgrade() {
-                                                            this.update(cx, |this, cx| {
-                                                                this.pane_set_body_field_kind(
-                                                                    pane_id, id, kind, cx,
-                                                                );
-                                                            });
-                                                        }
-                                                    }),
-                                            )
-                                        },
+        let middle = multipart.then(|| {
+            div()
+                .w(px(96.))
+                .h_full()
+                .flex_shrink_0()
+                .border_l_1()
+                .border_color(cx.api_outline_variant())
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    Button::new(SharedString::from(format!("{key}-body-field-kind-{id}")))
+                        .label(selected_kind.label())
+                        .dropdown_caret(true)
+                        .xsmall()
+                        .ghost()
+                        .w(px(82.))
+                        .dropdown_menu(move |menu, _, _| {
+                            let owner = kind_owner.clone();
+                            BodyFieldKind::all().iter().copied().fold(
+                                menu.min_w(px(150.)),
+                                |menu, kind| {
+                                    let owner = owner.clone();
+                                    menu.item(
+                                        PopupMenuItem::new(kind.label())
+                                            .checked(kind == selected_kind)
+                                            .on_click(move |_, _, cx| {
+                                                if let Some(this) = owner.upgrade() {
+                                                    this.update(cx, |this, cx| {
+                                                        this.pane_set_body_field_kind(
+                                                            pane_id, id, kind, cx,
+                                                        );
+                                                    });
+                                                }
+                                            }),
                                     )
-                                }),
-                        ),
+                                },
+                            )
+                        }),
                 )
-            })
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .border_l_1()
-                    .border_color(cx.api_outline_variant())
-                    .child(
-                        Input::new(&row.name)
-                            .appearance(false)
-                            .small()
-                            .size_full()
-                            .px_3(),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .border_l_1()
-                    .border_color(cx.api_outline_variant())
-                    .child(
-                        Input::new(&row.value)
-                            .appearance(false)
-                            .small()
-                            .size_full()
-                            .px_3(),
-                    ),
-            )
-            .child(
-                div()
-                    .w(px(44.))
-                    .h_full()
-                    .flex_shrink_0()
-                    .border_l_1()
-                    .border_color(cx.api_outline_variant())
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        Button::new(SharedString::from(format!("{key}-body-field-delete-{id}")))
-                            .icon(IconName::Delete)
-                            .xsmall()
-                            .ghost()
-                            .tooltip("Delete field")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.pane_remove_body_field(pane_id, id, window, cx);
-                            })),
-                    ),
-            )
-            .into_any_element()
+                .into_any_element()
+        });
+
+        self.render_pane_row(
+            SharedString::from(format!("{key}-body-field-row-{id}")),
+            46.,
+            row.enabled,
+            SharedString::from(format!("{key}-body-field-enabled-{id}")),
+            SharedString::from(format!("{key}-body-field-delete-{id}")),
+            "Delete field",
+            middle,
+            Input::new(&row.name)
+                .appearance(false)
+                .small()
+                .size_full()
+                .px_3(),
+            Input::new(&row.value)
+                .appearance(false)
+                .small()
+                .size_full()
+                .px_3(),
+            move |this, enabled, _, cx| this.pane_toggle_body_field(pane_id, id, enabled, cx),
+            move |this, window, cx| this.pane_remove_body_field(pane_id, id, window, cx),
+            cx,
+        )
     }
 
     fn render_pane_response_panel(&self, pane_id: PaneId, cx: &mut Context<Self>) -> AnyElement {
