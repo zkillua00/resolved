@@ -55,6 +55,12 @@ impl ApiTester {
             .preview
             .get_or_insert_with(|| cx.new(|cx| HtmlPreview::new(window, cx)))
             .clone();
+        if !preview.read(cx).is_available() {
+            self.preview_error =
+                Some("The response preview could not be created.".to_owned());
+            self.hide_preview(cx);
+            return;
+        }
         let result = preview.update(cx, |preview, cx| preview.load_html(&html, cx));
         match result {
             Ok(()) => self.preview_error = None,

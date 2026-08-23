@@ -1,8 +1,10 @@
-# Generated GPUI dependency sources
+# Generated dependency sources
 
 `gpui-0.2.2/` and `gpui-component-0.5.1/` are generated and ignored by Git.
 Run `scripts/prepare-gpui.sh` to extract their verified crates.io archives and
-apply the corresponding files under `patches/`.
+apply the corresponding files under `patches/`. `typescript-service-6.0.2/` is
+generated and ignored by Git too; run `scripts/prepare-typescript-service.sh`
+to extract it.
 
 On Apple GPUs, the four-sample path rasterization target now uses Metal's
 `Memoryless` storage mode. The target is only read as a multisample resolve

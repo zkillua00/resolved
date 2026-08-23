@@ -22,6 +22,13 @@ pub(super) fn render_workspace_tool_tab(
             IconName::Globe,
             false,
         ),
+        WorkspaceToolTab::ServerTools => (
+            "workspace-tool-tab-server-tools".to_owned(),
+            "workspace-server-tools-tab-drag-handle",
+            "Server Tools".to_owned(),
+            IconName::Inspector,
+            false,
+        ),
         WorkspaceToolTab::Settings => (
             "workspace-tool-tab-settings".to_owned(),
             "workspace-settings-tab-drag-handle",
@@ -41,6 +48,7 @@ pub(super) fn render_workspace_tool_tab(
     };
     let row_debug_selector = match &tool {
         WorkspaceToolTab::RequestProxy => Some("workspace-request-proxy-tab"),
+        WorkspaceToolTab::ServerTools => Some("workspace-server-tools-tab"),
         WorkspaceToolTab::Settings => Some("workspace-settings-tab"),
         WorkspaceToolTab::Snippets | WorkspaceToolTab::ThemeCss(_) => None,
     };

@@ -406,6 +406,7 @@ impl ApiTester {
                 baseline,
                 dirty: recovered,
                 disk_source,
+                validation: crate::theme::parse_css(&source),
                 validation_task: None,
                 persist_task: None,
                 _subscription: subscription,
@@ -1408,11 +1409,27 @@ impl ApiTester {
             session.dirty = dirty;
             cx.notify();
         }
+        let validation_editor_id = editor_id.to_owned();
         session.validation_task = Some(cx.spawn(async move |this, cx| {
             Timer::after(THEME_EDITOR_VALIDATION_DEBOUNCE).await;
-            if let Some(this) = this.upgrade() {
-                this.update(cx, |_, cx| cx.notify()).ok();
-            }
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                // Refresh the cached parse on the debounce boundary instead of
+                // re-parsing the whole document on every keystroke/render.
+                let validation = this
+                    .theme_editors
+                    .get(&validation_editor_id)
+                    .map(|session| crate::theme::parse_css(&session.editor.read(cx).value(cx)));
+                if let Some(validation) = validation
+                    && let Some(session) = this.theme_editors.get_mut(&validation_editor_id)
+                {
+                    session.validation = validation;
+                }
+                cx.notify();
+            })
+            .ok();
         }));
         let persist_editor_id = editor_id.to_owned();
         session.persist_task = Some(cx.spawn(async move |this, cx| {

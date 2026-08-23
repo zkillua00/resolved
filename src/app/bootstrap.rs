@@ -1,6 +1,18 @@
 use super::request_tab_reconciliation::reconcile_restored_request_tabs;
 use super::*;
 
+/// Fatal-startup convenience: exit cleanly with a message instead of panicking
+/// when an invariant the app cannot run without fails to construct.
+fn startup_or_exit<T, E: std::fmt::Display>(what: &str, result: Result<T, E>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("{} could not start: {what}: {error}", env!("CARGO_PKG_NAME"));
+            std::process::exit(1);
+        }
+    }
+}
+
 fn embedded_typescript_service() -> Option<TypeScriptServiceHandle> {
     static SERVICE: OnceLock<Option<TypeScriptServiceHandle>> = OnceLock::new();
 
@@ -350,8 +362,11 @@ impl ApiTester {
             );
             tracing::error!("{warning}");
             settings_warning = Some(warning);
-            shortcuts::apply_key_bindings(cx, &base_key_bindings, &AppSettings::default())
-                .expect("built-in shortcuts must be valid");
+            if let Err(error) =
+                shortcuts::apply_key_bindings(cx, &base_key_bindings, &AppSettings::default())
+            {
+                tracing::error!("built-in shortcuts could not be applied: {error}");
+            }
         }
         if let Some(css_source) = settings.theme.css_source.as_deref()
             && let Err(error) = crate::theme::parse_and_apply(css_source, cx)
@@ -493,19 +508,23 @@ impl ApiTester {
                 .masked(true)
         });
 
-        let client = build_client().expect("failed to create the HTTP client");
-        let upstream_client =
-            build_upstream_client().expect("failed to create the upstream login client");
-        let upstream_execution_client = build_upstream_execution_client()
-            .expect("failed to create the upstream request client");
-        let runtime = Arc::new(
+        let client = startup_or_exit("failed to create the HTTP client", build_client());
+        let upstream_client = startup_or_exit(
+            "failed to create the upstream login client",
+            build_upstream_client(),
+        );
+        let upstream_execution_client = startup_or_exit(
+            "failed to create the upstream request client",
+            build_upstream_execution_client(),
+        );
+        let runtime = Arc::new(startup_or_exit(
+            "failed to create the network runtime",
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .thread_name("api-tester-network")
                 .enable_all()
-                .build()
-                .expect("failed to create the network runtime"),
-        );
+                .build(),
+        ));
         let snippet_editor = Self::create_snippet_editor_session(
             &workspace,
             workspace_writable,
@@ -747,6 +766,9 @@ impl ApiTester {
             focused_template_input: None,
             debug_overlay,
             preview: None,
+            theme_parse_cache: RefCell::new(HashMap::new()),
+            workspace_version: 0,
+            collection_folder_index_cache: RefCell::new(HashMap::new()),
             _subscriptions: vec![
                 url_subscription,
                 method_subscription,

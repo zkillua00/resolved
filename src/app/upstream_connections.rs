@@ -1224,6 +1224,73 @@ mod tests {
     }
 
     #[gpui::test]
+    fn server_tools_only_exist_while_an_upstream_workspace_is_active(cx: &mut TestAppContext) {
+        let (app, cx, _directory) = mount_app(cx);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("rail-server-tools").is_none());
+
+        let local_workspace_id = cx.update(|_, cx| {
+            let app = app.read(cx);
+            let WorkspaceProviderId::Local(workspace_id) = app.workspace_providers.active_id()
+            else {
+                panic!("the test app must start on a local workspace")
+            };
+            workspace_id.clone()
+        });
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                let workspace = Workspace::default();
+                let request_tabs = RequestTabs::default();
+                let provider = RemoteWorkspaceProvider::new(
+                    app.database_store.clone(),
+                    "server-1".to_owned(),
+                    "workspace-1".to_owned(),
+                    workspace.clone(),
+                );
+                let provider_id = provider.id();
+                app.workspace_providers.register(Arc::new(provider));
+                app.activate_loaded_workspace(
+                    provider_id,
+                    workspace,
+                    request_tabs,
+                    false,
+                    true,
+                    window,
+                    cx,
+                );
+                app.workspace_tabs.open_tool(WorkspaceToolTab::ServerTools);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("rail-server-tools").is_some());
+        assert!(cx.debug_bounds("workspace-server-tools-tab").is_some());
+        assert!(cx.debug_bounds("server-tools-workspace").is_some());
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.switch_to_local_workspace(local_workspace_id.clone(), window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let (active_provider, notice) = cx.update(|_, cx| {
+            let app = app.read(cx);
+            (
+                app.workspace_providers.active_id().clone(),
+                app.settings_notice.clone(),
+            )
+        });
+        assert_eq!(
+            active_provider,
+            WorkspaceProviderId::Local(local_workspace_id),
+            "local switch failed: {notice:?}"
+        );
+        assert!(cx.update(|_, cx| !app.read(cx).workspace_tabs.server_tools_open()));
+    }
+
+    #[gpui::test]
     fn local_workspace_switch_replaces_the_active_workspace(cx: &mut TestAppContext) {
         let (app, cx, _directory) = mount_app(cx);
         let (default_id, second_id) = cx.update(|window, cx| {

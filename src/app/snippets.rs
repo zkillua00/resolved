@@ -1329,8 +1329,10 @@ fn capture_editor_selection<C>(
 ) -> CapturedEditorSelection {
     let input = editor.read(cx).input_state();
     let (range, document, selected) = input.update(cx, |input, cx| {
-        let selection = EntityInputHandler::selected_text_range(input, true, window, cx)
-            .expect("InputState always provides a selection");
+        let Some(selection) = EntityInputHandler::selected_text_range(input, true, window, cx)
+        else {
+            return (0..0, None, None);
+        };
         if selection.range.is_empty() {
             return (selection.range, None, None);
         }

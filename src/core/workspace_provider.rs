@@ -272,6 +272,15 @@ impl WorkspaceProviderRegistry {
                 } if candidate == upstream_id
             )
         });
+        // Defensive: if the removed upstream was the active provider, keep
+        // `active()`'s "must remain registered" invariant by falling back to
+        // another registered provider instead of leaving a dangling id that
+        // would panic on the next `active()` call.
+        if !self.providers.contains_key(&self.active) {
+            if let Some(first) = self.providers.keys().next().cloned() {
+                self.active = first;
+            }
+        }
     }
 }
 

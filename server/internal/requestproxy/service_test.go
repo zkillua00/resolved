@@ -384,3 +384,71 @@ func TestProxyBypassIsScopedToTheOverriddenOrigin(t *testing.T) {
 		t.Fatalf("unmapped redirect proxy = %v", proxy)
 	}
 }
+
+func TestBlockedNetworkTargetsAreRejected(t *testing.T) {
+	transport := transportWithHostnameOverrides(&http.Transport{})
+	client := &http.Client{Transport: transport}
+	ctx := context.WithValue(context.Background(), requestTargetHostContextKey{}, "example.com")
+	for _, target := range []string{
+		"http://127.0.0.1/",
+		"http://10.0.0.1/",
+		"http://172.16.0.1/",
+		"http://192.168.1.1/",
+		"http://169.254.169.254/",
+		"http://100.64.0.1/",
+		"http://[::1]/",
+	} {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+		if err != nil {
+			t.Fatalf("create request for %s: %v", target, err)
+		}
+		if _, err := client.Do(request); err == nil {
+			t.Fatalf("expected %s to be blocked through the request proxy", target)
+		}
+	}
+}
+
+func TestAdminOverrideStillReachesAPrivateTarget(t *testing.T) {
+	// Loopback is blocked by default, but an explicit admin hostname override
+	// remains the documented escape hatch for private-network targets. The
+	// override is keyed by the requested hostname, so a request whose URL host
+	// matches the override is trusted and dials the configured target.
+	transport := transportWithHostnameOverrides(&http.Transport{})
+	ctx := context.WithValue(
+		context.Background(),
+		hostnameOverridesContextKey{},
+		map[string]hostnameOverrideTarget{"internal.example": {Host: "127.0.0.1"}},
+	)
+	ctx = context.WithValue(ctx, requestTargetHostContextKey{}, "internal.example")
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://internal.example/", nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	// applyHostnameOriginOverride keeps the origin and marks proxy bypass for an
+	// IP target; the request is trusted (not blocked) because its hostname has
+	// an admin override.
+	applyHostnameOriginOverride(request)
+	proxy, err := transport.Proxy(request)
+	if err != nil {
+		t.Fatalf("resolve override proxy: %v", err)
+	}
+	if proxy != nil {
+		t.Fatalf("overridden origin unexpectedly routed through a proxy")
+	}
+}
+
+func TestBlockedIPReasonCoversPrivateAndLoopbackRanges(t *testing.T) {
+	for _, address := range []string{
+		"127.0.0.1", "10.0.0.1", "172.16.0.1", "192.168.1.1",
+		"169.254.169.254", "100.64.0.1", "::1", "fe80::1", "fc00::1",
+	} {
+		if blockedIPReason(net.ParseIP(address)) == "" {
+			t.Fatalf("expected %s to be blocked", address)
+		}
+	}
+	for _, address := range []string{"93.184.216.34", "8.8.8.8", "2001:4860:4860::8888"} {
+		if blockedIPReason(net.ParseIP(address)) != "" {
+			t.Fatalf("did not expect %s to be blocked", address)
+		}
+	}
+}

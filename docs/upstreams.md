@@ -116,7 +116,7 @@ the complete portable request template to the collection node represented by
 the selected collection or folder. Server responses are applied to the active
 workspace only after the authenticated write succeeds.
 
-Settings → Change log loads the newest mutations for the active server
+Server Tools → Change log loads the newest mutations for the active server
 workspace from `GET /api/v1/workspaces/{workspace_id}/change-log`. Workspace,
 collection, and saved-request entries include the actor snapshot and an array of
 field diffs with explicit `from` and `to` values. A collection-only grant sees
@@ -124,11 +124,11 @@ only entries inside the collection subtrees it can currently access; a direct
 workspace grant sees the complete workspace log. Request-definition changes
 are expanded into stable JSON paths such as `definition.request.method`.
 
-Settings → Audit log is deployment-wide and is available only with
+Server Tools → Audit log is deployment-wide and is available only with
 `audit.read`. It records user and role creation, metadata updates, role
 assignments, and permission assignments with the same before → after model.
-Settings → Roles stages permission toggles locally per role. Reset discards the
-draft, while Save changes sends one complete permission replacement to the
+Server Tools → Roles stages permission toggles locally per role. Reset discards
+the draft, while Save changes sends one complete permission replacement to the
 server; realtime management refreshes preserve the user's unsaved intent.
 Password material is never retained: password changes use fixed redacted status
 markers. Saved-request diffs also redact known sensitive and explicitly
@@ -173,11 +173,12 @@ sanitized history snapshot to that workspace. This happens independently of
 whether execution mode is `local` or `server`; existing local entries are not
 backfilled.
 
-Settings → Profiles lists authenticated server members. Everyone can open their
-own shared history. Opening another member's history requires the deployment
-permission `history.read_others`, and the viewer must also have effective access
-to the currently selected workspace. Permission or workspace changes discard
-already loaded cross-user history in the desktop.
+Server Tools → Profiles lists authenticated server members. The Server Tools
+workspace is available only while an upstream server workspace is active.
+Everyone can open their own shared history. Opening another member's history
+requires the deployment permission `history.read_others`, and the viewer must
+also have effective access to the currently selected workspace. Permission or
+workspace changes discard already loaded cross-user history in the desktop.
 
 Shared entries include the resolved request URL, request and response headers,
 request and response bodies, timing/status metadata, and failures. Every request

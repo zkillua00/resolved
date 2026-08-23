@@ -307,8 +307,8 @@ semantic runtime fallback.
 
 ### Optional-token omission fallbacks
 
-The values above are template defaults. If an optional token is removed, API
-Tester uses the following semantic runtime fallback:
+The values above are template defaults. If an optional token is removed,
+Resolved uses the following semantic runtime fallback:
 
 | Optional token | Runtime fallback |
 | --- | --- |

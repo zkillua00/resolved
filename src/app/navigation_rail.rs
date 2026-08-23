@@ -9,6 +9,8 @@ impl ApiTester {
         );
         let request_proxy_workspace_active =
             self.workspace_tabs.active() == ActiveWorkspaceTab::RequestProxy;
+        let server_tools_workspace_active =
+            self.workspace_tabs.active() == ActiveWorkspaceTab::ServerTools;
         let snippets_workspace_active =
             self.workspace_tabs.active() == ActiveWorkspaceTab::Snippets;
         let using_server = matches!(
@@ -185,6 +187,40 @@ impl ApiTester {
                     .child(gpui_component::Icon::new(IconName::Globe).with_size(px(18.)))
                     .when(!compact, |this| {
                         this.child(div().text_size(px(10.5)).font_semibold().child("Proxy"))
+                    })
+                    .into_any_element()
+            }))
+            .children(using_server.then(|| {
+                v_flex()
+                    .id("rail-server-tools")
+                    .debug_selector(|| "rail-server-tools".to_owned())
+                    .w(item_width)
+                    .h(item_height)
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .rounded_lg()
+                    .cursor_pointer()
+                    .text_color(cx.theme().muted_foreground)
+                    .when(server_tools_workspace_active, |this| {
+                        this.bg(cx.theme().sidebar_accent)
+                            .text_color(cx.theme().foreground)
+                    })
+                    .hover(|style| style.bg(cx.theme().sidebar_accent))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_workspace_tool_tab(WorkspaceToolTab::ServerTools, window, cx);
+                    }))
+                    .when(compact, |this| {
+                        this.tooltip(|window, cx| Tooltip::new("Server Tools").build(window, cx))
+                    })
+                    .child(gpui_component::Icon::new(IconName::Inspector).with_size(px(18.)))
+                    .when(!compact, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(10.5))
+                                .font_semibold()
+                                .child("Server Tools"),
+                        )
                     })
                     .into_any_element()
             }))

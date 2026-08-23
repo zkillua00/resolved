@@ -102,3 +102,31 @@ func TestServiceEmitsRealtimeChangesToResolvedViewers(t *testing.T) {
 		}
 	}
 }
+
+func TestRedactSensitiveHeadersCoversCredentialCarryingNames(t *testing.T) {
+	input := []Header{
+		{Name: "Authorization", Value: "Bearer abc"},
+		{Name: "Cookie", Value: "session=secret"},
+		{Name: "X-Api-Key", Value: "key-123"},
+		{Name: "X-Request-Id", Value: "req-1"},
+		{Name: "Content-Type", Value: "application/json"},
+		{Name: "X-Auth-Token", Value: "tok"},
+		{Name: "X-Amz-Security-Token", Value: "sts"},
+	}
+	redacted := redactSensitiveHeaders(input)
+	for _, header := range redacted {
+		if isSensitiveHeader(header.Name) && header.Value != redactedHeaderValue {
+			t.Fatalf("sensitive header %q was not redacted: %q", header.Name, header.Value)
+		}
+		if !isSensitiveHeader(header.Name) && header.Value == redactedHeaderValue {
+			t.Fatalf("non-sensitive header %q was redacted", header.Name)
+		}
+	}
+	// Idempotent: re-redacting an already-redacted entry keeps the marker.
+	again := redactSensitiveHeaders(redacted)
+	for _, header := range again {
+		if isSensitiveHeader(header.Name) && header.Value != redactedHeaderValue {
+			t.Fatalf("second redaction pass missed %q", header.Name)
+		}
+	}
+}

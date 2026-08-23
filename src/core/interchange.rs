@@ -3137,26 +3137,66 @@ fn string_literals(source: &str) -> Vec<StringLiteral> {
                 index += 1;
                 let escaped = bytes[index];
                 match escaped {
-                    b'n' => value.push('\n'),
-                    b'r' => value.push('\r'),
-                    b't' => value.push('\t'),
-                    b'b' => value.push('\u{8}'),
-                    b'f' => value.push('\u{c}'),
-                    b'\\' => value.push('\\'),
-                    b'\'' => value.push('\''),
-                    b'"' => value.push('"'),
+                    b'n' => {
+                        value.push('\n');
+                        index += 1;
+                    }
+                    b'r' => {
+                        value.push('\r');
+                        index += 1;
+                    }
+                    b't' => {
+                        value.push('\t');
+                        index += 1;
+                    }
+                    b'b' => {
+                        value.push('\u{8}');
+                        index += 1;
+                    }
+                    b'f' => {
+                        value.push('\u{c}');
+                        index += 1;
+                    }
+                    b'\\' => {
+                        value.push('\\');
+                        index += 1;
+                    }
+                    b'\'' => {
+                        value.push('\'');
+                        index += 1;
+                    }
+                    b'"' => {
+                        value.push('"');
+                        index += 1;
+                    }
                     b'u' if index + 4 < bytes.len() => {
                         let hex = &source[index + 1..index + 5];
                         if let Ok(code) = u32::from_str_radix(hex, 16)
                             && let Some(character) = char::from_u32(code)
                         {
                             value.push(character);
-                            index += 4;
+                            index += 5;
+                        } else {
+                            index += 1;
                         }
                     }
-                    other => value.push(other as char),
+                    // An escaped non-ASCII byte is the leading byte of a multi-byte
+                    // UTF-8 sequence. Decode the whole character instead of pushing
+                    // the raw byte (which corrupted the value) and then stepping onto
+                    // a continuation byte (which used to panic on the next slice).
+                    other if !other.is_ascii() => {
+                        if let Some(character) = source[index..].chars().next() {
+                            value.push(character);
+                            index += character.len_utf8();
+                        } else {
+                            index += 1;
+                        }
+                    }
+                    other => {
+                        value.push(other as char);
+                        index += 1;
+                    }
                 }
-                index += 1;
                 continue;
             }
             let Some(character) = source[index..].chars().next() else {
@@ -4062,6 +4102,18 @@ axios.get(endpoint);"#,
         ));
         let oversized = "x".repeat(MAX_INTERCHANGE_BYTES + 1);
         assert_eq!(import_requests(&oversized), Err(InterchangeError::TooLarge));
+    }
+
+    #[test]
+    fn escaped_non_ascii_characters_do_not_panic_or_corrupt_the_literal() {
+        // `\é` used to step one byte past the leading byte of a multi-byte
+        // character, panicking on the next non-char-boundary slice (and pushing
+        // mojibake before that). The full character must be preserved instead,
+        // with the backslash dropped like any other non-special escape.
+        let literals = string_literals(r#"curl "https://e.test/\é?x=\😀" -H 'a=\中'"#);
+        assert_eq!(literals.len(), 2);
+        assert_eq!(literals[0].value, "https://e.test/é?x=😀");
+        assert_eq!(literals[1].value, "a=中");
     }
 
     #[test]

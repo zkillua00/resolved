@@ -86,7 +86,13 @@ func (request *DeleteRequest) Validate() httpkit.ValidationErrors {
 func (h *Handler) ListProfilesController() fiber.Handler {
 	return httpkit.WithProcessedPayload[[]ProfileView, httpkit.EmptyPayload, httpkit.EmptyRequest](
 		func(c fiber.Ctx, _ httpkit.EmptyPayload) httpkit.Response[[]ProfileView] {
-			profiles, err := h.service.ListProfiles(c.Context())
+			principal := auth.PrincipalFromContext(c)
+			profiles, err := h.service.ListProfiles(
+				c.Context(),
+				actorFromContext(c),
+				principal.HasPermission(identity.PermissionUsersRead) ||
+					principal.HasPermission(identity.PermissionHistoryReadOthers),
+			)
 			if err != nil {
 				return httpkit.NewErrorResponse[[]ProfileView](err)
 			}

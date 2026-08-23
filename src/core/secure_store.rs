@@ -215,13 +215,22 @@ impl CredentialVault {
             .fill(&mut nonce_bytes)
             .map_err(|_| CredentialVaultError::Random)?;
         let nonce = Nonce::assume_unique_for_key(nonce_bytes);
-        let mut ciphertext = plaintext.to_vec();
-        key.seal_in_place_append_tag(
-            nonce,
-            Aad::from(aad(namespace, name).as_bytes()),
-            &mut ciphertext,
-        )
-        .map_err(|_| CredentialVaultError::Encrypt)?;
+        // Wrap the working buffer so a failed encryption leaves no plaintext
+        // copy behind: `Zeroizing` wipes the buffer on drop (success and error
+        // paths alike). `seal_in_place_separate_tag` encrypts in place and
+        // returns the tag separately; the tag is appended afterwards.
+        let mut ciphertext = Zeroizing::new(plaintext.to_vec());
+        let tag = key
+            .seal_in_place_separate_tag(
+                nonce,
+                Aad::from(aad(namespace, name).as_bytes()),
+                &mut ciphertext,
+            )
+            .map_err(|_| CredentialVaultError::Encrypt)?;
+        ciphertext.extend_from_slice(tag.as_ref());
+        // The plaintext has been overwritten in place, so this copy holds only
+        // ciphertext (no longer secret); the `Zeroizing` wrapper still wipes it.
+        let ciphertext = ciphertext.to_vec();
         Ok(EncryptedValueRecord {
             algorithm: ALGORITHM.to_owned(),
             key_version: KEY_VERSION,

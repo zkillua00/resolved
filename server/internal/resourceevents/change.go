@@ -15,6 +15,7 @@ const (
 	ActionCreated Action = "created"
 	ActionUpdated Action = "updated"
 	ActionDeleted Action = "deleted"
+	ActionExecuted Action = "executed"
 )
 
 type Resource string
@@ -28,6 +29,7 @@ const (
 	ResourceSharedHistory       Resource = "shared_history"
 	ResourceEnvironment         Resource = "environment"
 	ResourceEnvironmentVariable Resource = "environment_variable"
+	ResourceRequestExecution    Resource = "request_execution"
 )
 
 type Audience struct {

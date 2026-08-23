@@ -42,16 +42,41 @@ func NewService(
 	return service
 }
 
-func (s *Service) ListProfiles(ctx context.Context) ([]ProfileView, error) {
+// ListProfiles returns the user directory. Privileged callers (users.read or
+// history.read_others) see the full directory with email and active status;
+// everyone else sees only users they share a workspace with, with no email or
+// active flag, to avoid exposing the whole account directory (and enabling
+// email enumeration) to any authenticated account.
+func (s *Service) ListProfiles(ctx context.Context, actor workspaces.Actor, privileged bool) ([]ProfileView, error) {
 	users, err := s.repository.ListProfiles(ctx)
 	if err != nil {
 		return nil, problem.Wrap(err, "list profiles")
 	}
+	if privileged {
+		profiles := make([]ProfileView, 0, len(users))
+		for _, user := range users {
+			profiles = append(profiles, ProfileView{
+				ID: user.ID, Email: user.Email, DisplayName: user.DisplayName, Active: user.Active,
+			})
+		}
+		return profiles, nil
+	}
+	visible := map[string]struct{}{actor.UserID: {}}
+	accessible, err := s.workspaces.List(ctx, actor)
+	if err != nil {
+		return nil, problem.Wrap(err, "list accessible workspaces")
+	}
+	for _, workspace := range accessible {
+		for _, memberID := range workspace.UserIDs {
+			visible[memberID] = struct{}{}
+		}
+	}
 	profiles := make([]ProfileView, 0, len(users))
 	for _, user := range users {
-		profiles = append(profiles, ProfileView{
-			ID: user.ID, Email: user.Email, DisplayName: user.DisplayName, Active: user.Active,
-		})
+		if _, ok := visible[user.ID]; !ok {
+			continue
+		}
+		profiles = append(profiles, ProfileView{ID: user.ID, DisplayName: user.DisplayName})
 	}
 	return profiles, nil
 }
@@ -223,6 +248,11 @@ func normalizeInput(input CreateInput) (CreateInput, []byte, error) {
 	if input.Request.BodyFields == nil {
 		input.Request.BodyFields = []BodyField{}
 	}
+	// Defense-in-depth: redact sensitive header values server-side so a client
+	// bug (or a non-sanitizing client) cannot persist credentials visible to
+	// every authorized history reader. Redaction is idempotent with the
+	// client-side pass.
+	input.Request.Headers = redactSensitiveHeaders(input.Request.Headers)
 	switch input.Request.BodyMode {
 	case "none":
 		input.Request.Body = ""
@@ -279,6 +309,7 @@ func normalizeInput(input CreateInput) (CreateInput, []byte, error) {
 		if input.Response.Headers == nil {
 			input.Response.Headers = []Header{}
 		}
+		input.Response.Headers = redactSensitiveHeaders(input.Response.Headers)
 		if input.Response.Status < 100 || input.Response.Status > 999 {
 			return CreateInput{}, nil, invalidField("response.status", "must be between 100 and 999")
 		}
@@ -369,6 +400,34 @@ func validHeaders(headers []Header) bool {
 		}
 	}
 	return true
+}
+
+const redactedHeaderValue = "[REDACTED]"
+
+// redactSensitiveHeaders replaces the values of known credential-carrying
+// header names with a fixed marker. Names are matched like the desktop client's
+// history redaction so both sides agree on what is sensitive.
+func redactSensitiveHeaders(headers []Header) []Header {
+	redacted := make([]Header, 0, len(headers))
+	for _, header := range headers {
+		if isSensitiveHeader(header.Name) {
+			header.Value = redactedHeaderValue
+		}
+		redacted = append(redacted, header)
+	}
+	return redacted
+}
+
+func isSensitiveHeader(name string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	switch normalized {
+	case "authorization", "proxy-authorization", "cookie", "x-api-key", "api-key",
+		"x-auth-token", "set-cookie", "www-authenticate", "proxy-authenticate":
+		return true
+	}
+	return strings.Contains(normalized, "token") ||
+		strings.Contains(normalized, "secret") ||
+		strings.HasSuffix(normalized, "-api-key")
 }
 
 func validateUUID(field, value string) error {

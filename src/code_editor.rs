@@ -551,13 +551,14 @@ impl CodeEditor {
 
         cx.stop_propagation();
         let position = event.position;
-        let (selection, clicked) = self.input.update(cx, |input, cx| {
-            (
-                EntityInputHandler::selected_text_range(input, true, window, cx)
-                    .expect("InputState always provides a selection"),
+        let Some((selection, clicked)) = self.input.update(cx, |input, cx| {
+            Some((
+                EntityInputHandler::selected_text_range(input, true, window, cx)?,
                 EntityInputHandler::character_index_for_point(input, position, window, cx),
-            )
-        });
+            ))
+        }) else {
+            return;
+        };
         if let Some(clicked_utf16) = clicked
             && !selection.range.contains(&clicked_utf16)
         {
@@ -579,8 +580,10 @@ impl CodeEditor {
         let focus = self.input.read(cx).focus_handle(cx);
         let editor = cx.entity();
         let (range, document, selected_text) = self.input.update(cx, |input, cx| {
-            let selection = EntityInputHandler::selected_text_range(input, true, window, cx)
-                .expect("InputState always provides a selection");
+            let Some(selection) = EntityInputHandler::selected_text_range(input, true, window, cx)
+            else {
+                return (0..0, input.value(), String::new());
+            };
             let mut adjusted = None;
             let selected_text = EntityInputHandler::text_for_range(
                 input,
@@ -778,9 +781,11 @@ fn apply_pair_edit(
         return true;
     }
 
-    let selection = EntityInputHandler::selected_text_range(input, true, window, cx)
-        .expect("InputState always provides a selection");
     let cursor = input.cursor();
+    let Some(selection) = EntityInputHandler::selected_text_range(input, true, window, cx) else {
+        // Without a selection the platform path types the character normally.
+        return false;
+    };
     let typed_char = typed.chars().next().expect("one typed character");
     let is_quote = matches!(typed_char, '\'' | '"' | '`');
     let has_odd_escape = is_quote && has_odd_escape_prefix(input, cursor);
@@ -869,8 +874,9 @@ pub(crate) fn apply_template_pair_edit(
         return false;
     }
 
-    let selection = EntityInputHandler::selected_text_range(input, true, window, cx)
-        .expect("InputState always provides a selection");
+    let Some(selection) = EntityInputHandler::selected_text_range(input, true, window, cx) else {
+        return false;
+    };
     if !selection.range.is_empty() {
         return false;
     }

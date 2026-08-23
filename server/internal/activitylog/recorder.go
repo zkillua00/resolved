@@ -71,7 +71,8 @@ func logKind(resource resourceevents.Resource) string {
 		resourceevents.ResourceCollection,
 		resourceevents.ResourceRequest:
 		return KindChange
-	case resourceevents.ResourceUser, resourceevents.ResourceRole:
+	case resourceevents.ResourceUser, resourceevents.ResourceRole,
+		resourceevents.ResourceRequestExecution:
 		return KindAudit
 	default:
 		return ""

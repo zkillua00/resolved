@@ -481,8 +481,11 @@ impl<'de> Deserialize<'de> for MetricsPosition {
     where
         D: serde::Deserializer<'de>,
     {
-        let key = String::deserialize(deserializer)?;
-        Ok(Self::from_key(&key).unwrap_or_default())
+        // Lenient like the sibling formatter enums: an unknown, null, or
+        // non-string persisted value falls back to the default instead of
+        // bricking the whole settings row on load.
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(value.as_str().and_then(Self::from_key).unwrap_or_default())
     }
 }
 

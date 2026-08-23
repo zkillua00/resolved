@@ -6,12 +6,19 @@ import (
 	"log"
 	"net/http"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 	gorillaWebsocket "github.com/gorilla/websocket"
 )
 
 const gorillaWriteBufferSize = 4096
+
+// ReadIdleTimeout bounds how long a single read may block. The deadline is
+// refreshed by incoming data and by ping/pong control frames, so a healthy peer
+// that stays silent for longer than this is treated as dead instead of holding
+// its goroutine and buffers indefinitely.
+const ReadIdleTimeout = 75 * time.Second
 
 type messageWithHandlers struct {
 	message  []byte
@@ -67,9 +74,14 @@ func (g *GorillaWebsocketConnection) ReadMessage(ctx context.Context) ([]byte, e
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
-		_, m, e := g.con.ReadMessage()
-		return m, e
 	}
+	// Bound the block so a vanished/silent peer cannot pin this goroutine
+	// forever; the deadline is refreshed by each read and by control frames.
+	if err := g.con.SetReadDeadline(time.Now().Add(ReadIdleTimeout)); err != nil {
+		return nil, err
+	}
+	_, m, e := g.con.ReadMessage()
+	return m, e
 }
 
 func (g *GorillaWebsocketConnection) tryTearingConnection() bool {

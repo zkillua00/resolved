@@ -4,7 +4,7 @@ mod collection_tree_row;
 mod folder_tree_row;
 mod saved_request_tree_row;
 
-struct CollectionFolderRenderIndex {
+pub(in crate::app) struct CollectionFolderRenderIndex {
     child_indices: HashMap<String, Vec<usize>>,
     request_indices: HashMap<String, Vec<usize>>,
     request_counts: HashMap<String, usize>,
@@ -241,6 +241,25 @@ impl ApiTester {
         }
     }
 
+    /// Memoized folder index for `collection`, invalidated whenever the
+    /// workspace is replaced (see `replace_workspace`).
+    fn folder_render_index(
+        &self,
+        collection: &Collection,
+        query: &str,
+    ) -> Rc<CollectionFolderRenderIndex> {
+        let key = (
+            self.workspace_version,
+            collection.id.clone(),
+            query.to_owned(),
+        );
+        let mut cache = self.collection_folder_index_cache.borrow_mut();
+        cache
+            .entry(key)
+            .or_insert_with(|| Rc::new(CollectionFolderRenderIndex::new(collection, query)))
+            .clone()
+    }
+
     pub(super) fn render_collections(&self, cx: &mut Context<Self>) -> AnyElement {
         let query = self
             .collection_search
@@ -263,8 +282,9 @@ impl ApiTester {
                 || self
                     .expanded_collection_ids
                     .contains(collection.id.as_str());
-            let folder_index = (searching || expanded)
-                .then(|| CollectionFolderRenderIndex::new(collection, &query));
+            let folder_index = (searching || expanded).then(|| {
+                self.folder_render_index(collection, &query)
+            });
             let folder_matches = folder_index
                 .as_ref()
                 .is_some_and(|index| !index.matching_folder_ids.is_empty());

@@ -45,8 +45,8 @@ release work:
 scripts/version.sh bump
 scripts/cargo.sh test --all-targets --all-features
 git add Cargo.toml Cargo.lock
-git commit -m "chore(release): v0.2.0"
-git tag -a v0.2.0 -m "Resolved 0.2.0"
+git commit -m "chore(release): v0.4.0"
+git tag -a v0.4.0 -m "Resolved 0.4.0"
 ```
 
 Release tags must point at their matching release commit. Tags are the boundary

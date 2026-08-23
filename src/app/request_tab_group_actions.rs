@@ -247,9 +247,10 @@ impl ApiTester {
         self.snapshot_active_request_tab(cx);
         let _ = self.request_tabs.set_group_collapsed(&group_id, false);
         let tab_id = if self.selected_collection_id.is_none() {
-            self.request_tabs
-                .open_new_in_group(&group_id)
-                .expect("the tab group was validated before opening")
+            let Some(tab_id) = self.request_tabs.open_new_in_group(&group_id) else {
+                return;
+            };
+            tab_id
         } else {
             let tab_id = self.request_tabs.open_unsaved(
                 DEFAULT_REQUEST_TAB_TITLE,

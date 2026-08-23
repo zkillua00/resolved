@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"slices"
+	"sync"
 	"sync/atomic"
 
 	"github.com/gofiber/fiber/v3"
@@ -105,6 +106,18 @@ type baseWebsocketServer struct {
 	readLimit                    int64
 
 	atomicCounters counters.AtomicCounters
+
+	// Client-controlled log lines (unknown commands, malformed JSON) are
+	// emitted once per distinct message instead of once per message, so a
+	// misbehaving client cannot flood the server log.
+	rateLimitedLogs sync.Map
+}
+
+// logOnce emits `format` the first time `key` is seen.
+func (base *baseWebsocketServer) logOnce(key, format string, args ...any) {
+	if _, loaded := base.rateLimitedLogs.LoadOrStore(key, struct{}{}); !loaded {
+		log.Printf(format, args...)
+	}
 }
 
 type Metrics map[string]uint64
@@ -416,7 +429,7 @@ func (base *baseWebsocketServer) IncomingCommand(gcon connection.WebsocketConnec
 				log.Println("connection closed:", err)
 			} else if isJsonError(err) {
 				base.AtomicCounter(TotalJsonErrorMessagesReceived).Increase(1)
-				log.Println("json error:", err)
+				base.logOnce("json-error", "json error: %v", err)
 				continue
 			} else {
 				base.AtomicCounter(TotalReadErrorMessagesReceived).Increase(1)
@@ -431,7 +444,7 @@ func (base *baseWebsocketServer) IncomingCommand(gcon connection.WebsocketConnec
 			base.AtomicCounter(TotalHandledCommands).Increase(1)
 		} else {
 			base.AtomicCounter(TotalUnknownCommands).Increase(1)
-			log.Println("unknown command:", msg.Command)
+			base.logOnce("unknown-command-"+msg.Command, "unknown command: %s", msg.Command)
 		}
 	}
 }

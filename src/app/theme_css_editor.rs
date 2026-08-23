@@ -72,7 +72,9 @@ impl ApiTester {
             })
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "Saved in Resolved".to_owned());
-        let validation = crate::theme::parse_css(&source);
+        // Cached by the debounced validation task; re-parsing the full document
+        // on every render made typing in large themes re-parse on each keystroke.
+        let validation = &session.validation;
         let valid = validation.is_ok();
         let editing_saved_theme = theme_id
             .as_deref()

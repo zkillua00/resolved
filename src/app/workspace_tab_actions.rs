@@ -12,6 +12,14 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if matches!(tab, WorkspaceToolTab::ServerTools)
+            && !matches!(
+                self.workspace_providers.active_id(),
+                WorkspaceProviderId::Upstream { .. }
+            )
+        {
+            return;
+        }
         self.dismiss_template_variable_popover();
         if self.workspace_tabs.active() == ActiveWorkspaceTab::Request {
             self.snapshot_active_request_tab(cx);
@@ -24,7 +32,7 @@ impl ApiTester {
 
         let opening_server_management = matches!(
             tab,
-            WorkspaceToolTab::RequestProxy | WorkspaceToolTab::Settings
+            WorkspaceToolTab::RequestProxy | WorkspaceToolTab::ServerTools
         );
         self.workspace_tabs.open_tool(tab);
         if opening_server_management {
@@ -90,6 +98,9 @@ impl ApiTester {
                 WorkspaceToolTab::RequestProxy => {
                     self.open_workspace_tool_tab(WorkspaceToolTab::RequestProxy, window, cx);
                 }
+                WorkspaceToolTab::ServerTools => {
+                    self.open_workspace_tool_tab(WorkspaceToolTab::ServerTools, window, cx);
+                }
                 WorkspaceToolTab::Settings => {
                     self.open_workspace_tool_tab(WorkspaceToolTab::Settings, window, cx);
                 }
@@ -125,6 +136,7 @@ impl ApiTester {
         let closed = match &tab {
             WorkspaceToolTab::Snippets => self.workspace_tabs.close_tool(&tab),
             WorkspaceToolTab::RequestProxy => self.workspace_tabs.close_tool(&tab),
+            WorkspaceToolTab::ServerTools => self.workspace_tabs.close_tool(&tab),
             WorkspaceToolTab::Settings => {
                 self.cancel_shortcut_recording(cx);
                 self.workspace_tabs.close_tool(&tab)
@@ -287,6 +299,7 @@ impl ApiTester {
             let closed = match &tool {
                 WorkspaceToolTab::Snippets => self.workspace_tabs.close_tool(&tool),
                 WorkspaceToolTab::RequestProxy => self.workspace_tabs.close_tool(&tool),
+                WorkspaceToolTab::ServerTools => self.workspace_tabs.close_tool(&tool),
                 WorkspaceToolTab::Settings => {
                     self.cancel_shortcut_recording(cx);
                     self.workspace_tabs.close_tool(&tool)
@@ -330,6 +343,9 @@ impl ApiTester {
             ActiveWorkspaceTab::RequestProxy => {
                 self.close_workspace_tool_tab(WorkspaceToolTab::RequestProxy, window, cx);
             }
+            ActiveWorkspaceTab::ServerTools => {
+                self.close_workspace_tool_tab(WorkspaceToolTab::ServerTools, window, cx);
+            }
             ActiveWorkspaceTab::Settings => {
                 self.close_workspace_tool_tab(WorkspaceToolTab::Settings, window, cx);
             }
@@ -367,6 +383,7 @@ impl ApiTester {
             }
             ActiveWorkspaceTab::Snippets
             | ActiveWorkspaceTab::RequestProxy
+            | ActiveWorkspaceTab::ServerTools
             | ActiveWorkspaceTab::Settings
             | ActiveWorkspaceTab::ThemeCss => {
                 self.hide_preview(cx);

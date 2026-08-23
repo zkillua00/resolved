@@ -17,37 +17,49 @@ const SAFE_EMPTY: &str = r#"<!doctype html>
 const CSP_META: &str = r#"<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'"><meta name="color-scheme" content="light dark">"#;
 
 pub struct HtmlPreview {
-    webview: Entity<GpuiWebView>,
+    webview: Option<Entity<GpuiWebView>>,
 }
 
 impl HtmlPreview {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let webview = cx.new(|cx| {
-            let raw = WebViewBuilder::new()
-                .with_html(SAFE_EMPTY)
-                .with_incognito(true)
-                .with_javascript_disabled()
-                .with_devtools(false)
-                .with_autoplay(false)
-                .with_allow_link_preview(false)
-                .with_drag_drop_handler(|_| true)
-                .with_navigation_handler(|url| url.starts_with("about:blank"))
-                .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
-                .with_download_started_handler(|_, _| false)
-                .build_as_child(window)
-                .expect("failed to create the WKWebView response preview");
-
-            let mut view = GpuiWebView::new(raw, window, cx);
-            view.hide();
-            view
-        });
+        // Build the WKWebView before creating the entity so a creation failure
+        // (rare but real: window-server/display errors) degrades to an unavailable
+        // preview instead of panicking the whole app on a user action.
+        let webview = WebViewBuilder::new()
+            .with_html(SAFE_EMPTY)
+            .with_incognito(true)
+            .with_javascript_disabled()
+            .with_devtools(false)
+            .with_autoplay(false)
+            .with_allow_link_preview(false)
+            .with_drag_drop_handler(|_| true)
+            .with_navigation_handler(|url| url.starts_with("about:blank"))
+            .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
+            .with_download_started_handler(|_, _| false)
+            .build_as_child(window)
+            .ok()
+            .map(|raw| {
+                cx.new(|cx| {
+                    let mut view = GpuiWebView::new(raw, window, cx);
+                    view.hide();
+                    view
+                })
+            });
 
         Self { webview }
     }
 
+    pub fn is_available(&self) -> bool {
+        self.webview.is_some()
+    }
+
     pub fn load_html(&mut self, html: &str, cx: &mut Context<Self>) -> wry::Result<()> {
+        let Some(webview) = &self.webview else {
+            // Creation failed; the caller has already surfaced the error.
+            return Ok(());
+        };
         let document = safe_html_document(html);
-        let result = self.webview.update(cx, |view, _| {
+        let result = webview.update(cx, |view, _| {
             view.raw().load_html(&document)?;
             view.show();
             Ok(())
@@ -57,14 +69,20 @@ impl HtmlPreview {
     }
 
     pub fn hide(&mut self, cx: &mut Context<Self>) {
-        self.webview.update(cx, |view, _| view.hide());
+        if let Some(webview) = &self.webview {
+            webview.update(cx, |view, _| view.hide());
+        }
         cx.notify();
     }
 }
 
 impl Render for HtmlPreview {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().child(self.webview.clone())
+        let mut root = div().size_full();
+        if let Some(webview) = self.webview.clone() {
+            root = root.child(webview);
+        }
+        root
     }
 }
 

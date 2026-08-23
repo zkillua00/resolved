@@ -6,6 +6,7 @@ impl ApiTester {
             ActiveWorkspaceTab::Welcome => return self.render_welcome_title_bar(cx),
             ActiveWorkspaceTab::Snippets => return self.render_snippets_title_bar(cx),
             ActiveWorkspaceTab::RequestProxy => return self.render_request_proxy_title_bar(cx),
+            ActiveWorkspaceTab::ServerTools => return self.render_server_tools_title_bar(cx),
             ActiveWorkspaceTab::Settings => return self.render_settings_title_bar(cx),
             ActiveWorkspaceTab::ThemeCss => return self.render_theme_css_title_bar(cx),
             ActiveWorkspaceTab::Request => {}

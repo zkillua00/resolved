@@ -99,9 +99,10 @@ design.
 
 Requests run from a selected server workspace also produce a bounded shared
 history entry on that server, whether the target exchange runs locally or on
-the server. Settings → Profiles shows the current member's history; viewing
-another member requires `history.read_others` and access to the selected
-workspace. Request and response headers and bodies are included, but every
+the server. The dedicated Server Tools workspace appears only while a server
+workspace is active. Server Tools → Profiles shows the current member's
+history; viewing another member requires `history.read_others` and access to
+the selected workspace. Request and response headers and bodies are included, but every
 request-header row has an independent Share control. Turning Share off omits
 that header and scrubs its value anywhere it is echoed in the URL, request body,
 response headers, response body, or final URL. Known authentication headers are
@@ -109,11 +110,11 @@ still redacted automatically, and multipart file contents and local paths are
 never placed in shared history. An open profile history updates in real time
 through the existing server WebSocket connection.
 
-Settings → Change log shows the newest workspace, collection, and saved-request
-mutations for the selected server workspace. Settings → Audit log separately
-shows user and role administration to members with `audit.read`. Every entry
-identifies its actor and renders each changed field as its previous value → new
-value. Saved-request changes use structured definition paths such as
+Server Tools → Change log shows the newest workspace, collection, and
+saved-request mutations for the selected server workspace. Server Tools → Audit
+log separately shows user and role administration to members with `audit.read`.
+Every entry identifies its actor and renders each changed field as its previous
+value → new value. Saved-request changes use structured definition paths such as
 `definition.request.method`. The server redacts known or explicitly unshared
 header values, omits multipart file paths, and never stores password contents in
 these diffs. Existing access-scoped WebSocket invalidations make an open log
@@ -655,6 +656,7 @@ destroys it when Preview is left, the response is cleared, or loading fails.
 scripts/cargo.sh fmt --all -- --check
 scripts/cargo.sh test --all-features
 scripts/cargo.sh clippy --all-targets --all-features -- -D warnings
+scripts/check-rustsec.sh   # audits Cargo.lock; requires `cargo audit`
 ```
 
 The test suite covers request validation, raw/none/URL-encoded/multipart wire

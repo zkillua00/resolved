@@ -1,6 +1,13 @@
 use super::*;
 
 impl ApiTester {
+    /// Replace the active workspace and bump the derived-cache version so the
+    /// collections sidebar doesn't render a stale folder index.
+    pub(super) fn replace_workspace(&mut self, workspace: Workspace) {
+        self.workspace = workspace;
+        self.workspace_version = self.workspace_version.wrapping_add(1);
+    }
+
     pub(super) fn persist_history(&mut self) {
         if !self.history_writable {
             self.history_warning.get_or_insert_with(|| {
@@ -21,7 +28,7 @@ impl ApiTester {
         }
         match self.workspace_providers.active().save_workspace(&candidate) {
             Ok(()) => {
-                self.workspace = candidate;
+                self.replace_workspace(candidate);
                 self.workspace_warning = None;
                 Ok(())
             }
@@ -52,7 +59,7 @@ impl ApiTester {
             .save_workspace_and_request_tabs(&candidate_workspace, &candidate_request_tabs)
         {
             Ok(()) => {
-                self.workspace = candidate_workspace;
+                self.replace_workspace(candidate_workspace);
                 self.request_tabs = candidate_request_tabs;
                 self.last_persisted_request_tabs = self.request_tabs.clone();
                 self.workspace_warning = None;

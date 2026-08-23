@@ -31,6 +31,11 @@ pub(in crate::app) struct PaneEditorState {
     response: Option<ResponseData>,
     response_request: Option<RequestDraft>,
     response_sensitive_values: Vec<String>,
+    /// Pre-formatted response body for the Body/Preview tabs. Rebuilt only when
+    /// the response or the pretty toggle changes, never per frame (the primary
+    /// surface caches this in its response editor; rendering the raw body every
+    /// repaint re-parsed/re-copied up to 64 MiB on each frame).
+    formatted_body: Option<SharedString>,
     request_error: Option<String>,
     script_diagnostic: Option<ScriptDiagnostic>,
     pre_script_report: Option<ScriptReport>,
@@ -129,6 +134,7 @@ impl PaneEditorState {
             response: None,
             response_request: None,
             response_sensitive_values: Vec::new(),
+            formatted_body: None,
             request_error: None,
             script_diagnostic: None,
             pre_script_report: None,
@@ -221,6 +227,7 @@ impl PaneEditorState {
         &mut self,
         template: &RequestTemplate,
         runtime: &RequestTabRuntime,
+        formatter: &FormatterSettings,
         window: &mut Window,
         cx: &mut Context<ApiTester>,
     ) {
@@ -286,6 +293,10 @@ impl PaneEditorState {
         self.response_tab = runtime.response_tab;
         self.pretty_body = runtime.pretty_body;
         self.response = runtime.response.clone();
+        self.formatted_body = self.response.as_ref().and_then(|response| {
+            is_probably_text(&response.body)
+                .then(|| SharedString::from(format_body(&response.body, self.pretty_body, formatter)))
+        });
         self.response_request = runtime.response_request.clone();
         self.response_sensitive_values = runtime.response_sensitive_values.clone();
         self.request_error = runtime.request_error.clone();
@@ -454,7 +465,13 @@ impl ApiTester {
                 continue;
             };
             if !record.is_dirty() {
-                session.load_template(record.template(), &runtime, window, cx);
+                session.load_template(
+                    record.template(),
+                    &runtime,
+                    &self.settings.formatter,
+                    window,
+                    cx,
+                );
             } else if conflicts.contains(&tab_id) {
                 session.request_notice = runtime.request_notice.clone();
             }
@@ -526,7 +543,21 @@ impl ApiTester {
                     .insert(old_id.as_str().to_owned(), runtime);
             }
             let mut session = PaneEditorState::new(tab_id.clone(), window, cx);
-            session.load_template(record.template(), &runtime, window, cx);
+            session.load_template(
+                record.template(),
+                &runtime,
+                &self.settings.formatter,
+                window,
+                cx,
+            );
+            // Secondary-pane editors are built with defaults; apply the
+            // persisted editor preferences so they match the primary surface.
+            let editor_settings = self.settings.editor.clone();
+            for editor in session.code_editors() {
+                editor.update(cx, |editor, cx| {
+                    editor.apply_editor_settings(&editor_settings, window, cx);
+                });
+            }
             session.active_tab_id = Some(tab_id);
             self.pane_editors.insert(pane_id, session);
         }
@@ -536,6 +567,16 @@ impl ApiTester {
 impl PaneEditorState {
     fn dom_key(&self, pane_id: PaneId) -> SharedString {
         format!("pane-{}", pane_id.0).into()
+    }
+
+    /// The session's code editors, for applying persisted editor settings.
+    pub(in crate::app) fn code_editors(&self) -> Vec<Entity<CodeEditor>> {
+        vec![
+            self.body.clone(),
+            self.pre_request_script.clone(),
+            self.post_response_script.clone(),
+            self.response_editor.clone(),
+        ]
     }
 }
 
@@ -1427,15 +1468,16 @@ impl ApiTester {
         let Some(response) = &session.response else {
             return div().size_full().into_any_element();
         };
-        let content = if is_probably_text(&response.body) {
-            format_body(
-                &response.body,
-                session.pretty_body,
-                &self.settings.formatter,
+        // The formatted text is precomputed when the response arrives or the
+        // pretty toggle changes; only binary bodies fall through to the cheap
+        // size label here.
+        let content = session.formatted_body.clone().unwrap_or_else(|| {
+            format!(
+                "Binary response ({}).",
+                format_bytes(response.size_bytes())
             )
-        } else {
-            format!("Binary response ({}).", format_bytes(response.size_bytes()))
-        };
+            .into()
+        });
         div()
             .id(SharedString::from(format!("{key}-response-body")))
             .size_full()
@@ -1652,9 +1694,15 @@ impl ApiTester {
     }
 
     fn pane_toggle_pretty(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
+        let formatter = self.settings.formatter.clone();
         if let Some(session) = self.pane_editor_mut(pane_id) {
             session.pretty_body = !session.pretty_body;
             session.copied = false;
+            session.formatted_body = session.response.as_ref().and_then(|response| {
+                is_probably_text(&response.body).then(|| {
+                    SharedString::from(format_body(&response.body, session.pretty_body, &formatter))
+                })
+            });
         }
         cx.notify();
     }

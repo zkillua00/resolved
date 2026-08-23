@@ -7,6 +7,30 @@ use gpui_component::switch::Switch;
 use super::*;
 
 impl ApiTester {
+    /// Memoized parse of a theme's CSS source. Parsing happens once per
+    /// distinct source instead of once per saved theme per frame.
+    fn theme_parse_cached(
+        &self,
+        source: &str,
+    ) -> Rc<Result<crate::theme::ApiTheme, crate::theme::ThemeError>> {
+        let mut cache = self.theme_parse_cache.borrow_mut();
+        if cache.len() >= 64 {
+            cache.clear();
+        }
+        cache
+            .entry(source.to_owned())
+            .or_insert_with(|| Rc::new(crate::theme::parse_css(source)))
+            .clone()
+    }
+
+    fn theme_parse_name(&self, source: &str) -> Option<String> {
+        self.theme_parse_cached(source)
+            .as_ref()
+            .as_ref()
+            .ok()
+            .map(|theme| theme.name.to_string())
+    }
+
     pub(super) fn render_settings_title_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         h_flex()
             .h(px(APP_TITLE_BAR_HEIGHT))
@@ -34,10 +58,6 @@ impl ApiTester {
     }
 
     pub(super) fn render_settings_workspace(&self, cx: &mut Context<Self>) -> AnyElement {
-        let using_server = matches!(
-            self.workspace_providers.active_id(),
-            WorkspaceProviderId::Upstream { .. }
-        );
         let servers_page = self.upstream_settings_page(cx);
         let editor_page = SettingPage::new("Editor")
             .description(
@@ -113,24 +133,9 @@ impl ApiTester {
                     ]),
             );
 
-        let mut pages = Vec::with_capacity(if using_server { 11 } else { 5 });
+        let mut pages = Vec::with_capacity(5);
         pages.push(servers_page);
-        if using_server {
-            pages.extend([
-                self.profile_settings_page(cx),
-                self.user_management_settings_page(cx),
-                self.role_management_settings_page(cx),
-                self.resource_management_settings_page(cx),
-                self.change_log_settings_page(cx),
-                self.audit_log_settings_page(cx),
-            ]);
-        }
         pages.extend([editor_page, keyboard_page, appearance_page, developer_page]);
-        let settings_view_id = if using_server {
-            "api-tester-settings-server"
-        } else {
-            "api-tester-settings-local"
-        };
 
         v_flex()
             .size_full()
@@ -144,7 +149,7 @@ impl ApiTester {
             })
             .child(
                 div().flex_1().min_h_0().child(
-                    SettingsView::new(settings_view_id)
+                    SettingsView::new("api-tester-settings")
                         .sidebar_width(px(220.))
                         .with_group_variant(GroupBoxVariant::Outline)
                         .pages(pages),
@@ -1102,8 +1107,7 @@ impl ApiTester {
                     .theme
                     .css_source
                     .as_deref()
-                    .and_then(|source| crate::theme::parse_css(source).ok())
-                    .map(|theme| theme.name.to_string())
+                    .and_then(|source| state.theme_parse_name(source))
                     .unwrap_or_else(|| "Unsaved theme".to_owned());
                 let edit_this = this.clone();
                 let external_this = this.clone();
@@ -1187,7 +1191,7 @@ impl ApiTester {
                     && state.settings.theme.css_source.as_deref()
                         == Some(theme.css_source.as_str())
                     && state.settings.theme.source_path == theme.source_path;
-                let valid = crate::theme::parse_css(&theme.css_source).is_ok();
+                let valid = state.theme_parse_cached(&theme.css_source).is_ok();
                 let active = projected && valid && !ambiguous_id;
                 let editor_open = state.theme_editor_is_open_for(&theme_id);
                 let theme_pending = theme.draft_source.is_some()

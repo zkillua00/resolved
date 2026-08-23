@@ -459,7 +459,7 @@ impl ApiTester {
             );
             return;
         }
-        self.workspace = candidate.clone();
+        self.replace_workspace(candidate.clone());
         self.workspace_providers
             .register(Arc::new(RemoteWorkspaceProvider::new(
                 self.database_store.clone(),
@@ -683,7 +683,7 @@ impl ApiTester {
             .active()
             .save_request_tabs(&candidate_request_tabs)
             .err();
-        self.workspace = candidate.clone();
+        self.replace_workspace(candidate.clone());
         self.request_tabs = candidate_request_tabs;
         self.last_persisted_request_tabs = self.request_tabs.clone();
         self.workspace_providers
@@ -1000,15 +1000,13 @@ impl ApiTester {
             window,
             cx,
         );
+        // `activate_loaded_workspace` rebuilds `WorkspaceTabs` from the loaded
+        // request tabs, so every tool tab (including ServerTools) is closed and
+        // the active tab is a request or the welcome page by construction; no
+        // explicit tool teardown or management refresh is needed here.
         self.workspace_switch_status = WorkspaceSwitchStatus::Idle;
         self.stop_realtime();
         self.settings_notice = Some(format!("Opened {}.", self.active_workspace_name()));
-        if matches!(
-            self.workspace_tabs.active(),
-            ActiveWorkspaceTab::RequestProxy | ActiveWorkspaceTab::Settings
-        ) {
-            self.refresh_server_management(window, cx);
-        }
         cx.notify();
     }
 
@@ -1333,12 +1331,8 @@ impl ApiTester {
         self.workspace_switch_status = WorkspaceSwitchStatus::Idle;
         self.settings_notice = Some(format!("Opened {workspace_name}."));
         self.start_realtime_for_active_upstream(window, cx);
-        if matches!(
-            self.workspace_tabs.active(),
-            ActiveWorkspaceTab::RequestProxy | ActiveWorkspaceTab::Settings
-        ) {
-            self.refresh_server_management(window, cx);
-        }
+        // The workspace tabs were reset by `activate_loaded_workspace`; opening
+        // ServerTools/RequestProxy afterwards loads its own management snapshot.
         cx.notify();
     }
 
@@ -1362,7 +1356,7 @@ impl ApiTester {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn activate_loaded_workspace(
+    pub(super) fn activate_loaded_workspace(
         &mut self,
         provider_id: WorkspaceProviderId,
         workspace: Workspace,
@@ -1374,6 +1368,7 @@ impl ApiTester {
     ) {
         if let Err(error) = self.workspace_providers.switch(provider_id) {
             self.settings_notice = Some(error.to_string());
+            cx.notify();
             return;
         }
         if let Some(abort_handle) = self.profile_history_abort_handle.take() {
@@ -1443,7 +1438,7 @@ impl ApiTester {
             .unwrap_or_default();
 
         self.hide_preview(cx);
-        self.workspace = workspace;
+        self.replace_workspace(workspace);
         self.workspace_warning = None;
         self.workspace_writable = workspace_writable;
         self.request_tabs = request_tabs;

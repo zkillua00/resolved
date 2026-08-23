@@ -46,8 +46,9 @@ use crate::{
         AppSettings, BodyField, BodyFieldKind, BodyMode, COLLECTIONS_CREATE, COLLECTIONS_DELETE,
         COLLECTIONS_UPDATE, Collection, CollectionFolder, CredentialVault,
         DEFAULT_REQUEST_TAB_TITLE, DatabaseStore, ENVIRONMENT_VALUES_UPDATE, ENVIRONMENTS_CREATE,
-        ENVIRONMENTS_DELETE, ENVIRONMENTS_READ, ENVIRONMENTS_UPDATE, Environment,
-        EnvironmentMutation, HeaderEntry, HistoryEntry, HostnameOverride, ImportBundle,
+        ENVIRONMENTS_DELETE, ENVIRONMENTS_READ, ENVIRONMENTS_UPDATE,         Environment,
+        EnvironmentMutation, FormatterSettings, HeaderEntry, HistoryEntry, HostnameOverride,
+        ImportBundle,
         InterchangeFormat, LocalWorkspace, LocalWorkspaceProvider, MAX_INTERCHANGE_BYTES,
         MAX_SNIPPET_NAME_BYTES, PostResponseResult, PreRequestResult, REDACTED_VALUE,
         REQUESTS_CREATE, REQUESTS_DELETE, REQUESTS_UPDATE, RawBodyLanguage, RealtimeResourceChange,
@@ -193,6 +194,9 @@ struct ThemeEditorSession {
     baseline: String,
     dirty: bool,
     disk_source: Option<String>,
+    /// Cached parse of the editor source, refreshed by the debounced validation
+    /// task (not on every render/keystroke).
+    validation: Result<crate::theme::ApiTheme, crate::theme::ThemeError>,
     validation_task: Option<Task<()>>,
     persist_task: Option<Task<()>>,
     _subscription: Subscription,
@@ -354,6 +358,23 @@ pub struct ApiTester {
     focused_template_input: Option<Entity<InputState>>,
     debug_overlay: Entity<DebugOverlay>,
     preview: Option<Entity<HtmlPreview>>,
+    /// Bumped whenever `self.workspace` is replaced so derived per-workspace
+    /// caches can invalidate.
+    workspace_version: u64,
+    /// Memoized folder render indexes for the collections sidebar, keyed by
+    /// (workspace version, collection id, query) so expanded collections aren't
+    /// re-indexed on every frame.
+    collection_folder_index_cache: RefCell<
+        HashMap<
+            (u64, String, String),
+            Rc<collections_page::CollectionFolderRenderIndex>,
+        >,
+    >,
+    /// Memoized `parse_css` results for the Settings Appearance page, keyed by
+    /// exact source text so per-frame theme rendering doesn't re-parse the full
+    /// CSS document for every saved theme on every repaint.
+    theme_parse_cache:
+        RefCell<HashMap<String, Rc<Result<crate::theme::ApiTheme, crate::theme::ThemeError>>>>,
     _subscriptions: Vec<Subscription>,
 }
 

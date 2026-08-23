@@ -186,6 +186,7 @@ func New(cfg config.Config, accessLog io.Writer) (*Application, error) {
 	requestProxyHandler := requestproxy.NewHandler(requestproxy.NewService(
 		workspacesService,
 		settingsRepository,
+		requestproxy.WithEvents(recordedEvents),
 	))
 	sharedHistoryHandler := sharedhistory.NewHandler(sharedhistory.NewService(
 		sharedHistoryRepository,

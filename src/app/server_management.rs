@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use gpui_component::setting::{SettingGroup, SettingItem, SettingPage};
+use gpui_component::group_box::GroupBoxVariant;
+use gpui_component::setting::{SettingGroup, SettingItem, SettingPage, Settings as SettingsView};
 use gpui_component::switch::Switch;
 use zeroize::Zeroizing;
 
@@ -766,6 +767,76 @@ impl ApiTester {
             window,
             cx,
         );
+    }
+
+    pub(super) fn render_server_tools_title_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .h(px(APP_TITLE_BAR_HEIGHT))
+            .flex_shrink_0()
+            .pl(px(92.))
+            .pr_6()
+            .border_b_1()
+            .border_color(cx.theme().title_bar_border)
+            .bg(cx.theme().title_bar)
+            .justify_between()
+            .child(
+                h_flex().gap_6().child(resolved_brand_lockup(cx)).child(
+                    h_flex()
+                        .h_full()
+                        .items_center()
+                        .border_b_2()
+                        .border_color(cx.theme().primary)
+                        .px_1()
+                        .text_sm()
+                        .font_semibold()
+                        .child("Server Tools"),
+                ),
+            )
+            .into_any_element()
+    }
+
+    pub(super) fn render_server_tools_workspace(&self, cx: &mut Context<Self>) -> AnyElement {
+        if !matches!(
+            self.workspace_providers.active_id(),
+            WorkspaceProviderId::Upstream { .. }
+        ) {
+            return management_empty("Open a server workspace to use Server Tools.", cx);
+        }
+        let pages = [
+            self.profile_settings_page(cx),
+            self.user_management_settings_page(cx),
+            self.role_management_settings_page(cx),
+            self.resource_management_settings_page(cx),
+            self.change_log_settings_page(cx),
+            self.audit_log_settings_page(cx),
+        ];
+
+        v_flex()
+            .debug_selector(|| "server-tools-workspace".to_owned())
+            .size_full()
+            .min_h_0()
+            .bg(cx.theme().background)
+            .when_some(self.settings_warning.clone(), |this, warning| {
+                this.child(super::settings_page::settings_message(
+                    warning,
+                    cx.theme().danger,
+                ))
+            })
+            .when_some(self.settings_notice.clone(), |this, notice| {
+                this.child(super::settings_page::settings_message(
+                    notice,
+                    cx.theme().info,
+                ))
+            })
+            .child(
+                div().flex_1().min_h_0().child(
+                    SettingsView::new("api-tester-server-tools")
+                        .sidebar_width(px(220.))
+                        .with_group_variant(GroupBoxVariant::Outline)
+                        .pages(pages),
+                ),
+            )
+            .into_any_element()
     }
 
     pub(super) fn user_management_settings_page(&self, cx: &mut Context<Self>) -> SettingPage {

@@ -2,16 +2,24 @@ package eventsystem
 
 import (
 	"context"
+	"log"
 	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
 )
 
 const stoppedBit uint64 = 1 << 63
 const countMask uint64 = ^stoppedBit
+
+// eventSendTimeout bounds how long a fire operation may block when the event
+// loop buffer is full. Fire runs synchronously inside mutation request
+// handlers; an unbounded send would pin those HTTP goroutines indefinitely if
+// a handler (e.g. the audit recorder's database write) stalls.
+const eventSendTimeout = 2 * time.Second
 
 type EventHandler func(Event)
 
@@ -133,14 +141,26 @@ func (e *EventListener) StartNewEventLoop() {
 }
 
 // fireEvent pushes the event and its handlers into the event loop channel if the listener is accepting events.
-// Will block if the internal eventLoopChan buffer is full.
+// Blocks for at most eventSendTimeout when the buffer is full, then drops the
+// event (with a log) rather than pinning the caller's goroutine indefinitely.
 func (e *EventListener) fireEvent(event Event, handlers []EventHandler) {
 	if !e.tryEnterFire() {
 		return
 	}
 	defer e.leaveFire()
 
-	e.eventLoopChan <- eventPair{event, handlers}
+	select {
+	case e.eventLoopChan <- eventPair{event, handlers}:
+		return
+	default:
+	}
+	timer := time.NewTimer(eventSendTimeout)
+	defer timer.Stop()
+	select {
+	case e.eventLoopChan <- eventPair{event, handlers}:
+	case <-timer.C:
+		log.Printf("event loop buffer full; dropping %s event", Name(event))
+	}
 }
 
 // stopped checks if the listener has been marked to stop accepting new events.

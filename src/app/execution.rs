@@ -441,6 +441,14 @@ impl ApiTester {
         if let Some(abort_handle) = self.abort_handle.take() {
             abort_handle.abort();
         }
+        if self.response.is_some() && self.execution_stage == Some(ExecutionStage::PostResponse) {
+            // The network request already completed and the response is shown; only the
+            // post-response script is pending. Letting `finish_post_response` observe the
+            // Cancelled script error records the completed history entry (labeled
+            // "post-response script cancelled") instead of relabeling the received response
+            // as "Request cancelled" and silently dropping the history entry.
+            return;
+        }
         self.request_generation = self.request_generation.wrapping_add(1);
         self.finish_cancelled(cx);
     }

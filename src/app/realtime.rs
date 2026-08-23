@@ -170,7 +170,7 @@ impl ApiTester {
         self.settings_notice = Some(format!("Log in to {label} again."));
         if matches!(
             self.workspace_tabs.active(),
-            ActiveWorkspaceTab::RequestProxy | ActiveWorkspaceTab::Settings
+            ActiveWorkspaceTab::RequestProxy | ActiveWorkspaceTab::ServerTools
         ) {
             self.refresh_server_management(window, cx);
         }
@@ -312,7 +312,7 @@ impl ApiTester {
                         if !outcome.switched_workspace
                             && matches!(
                                 this.workspace_tabs.active(),
-                                ActiveWorkspaceTab::RequestProxy | ActiveWorkspaceTab::Settings
+                                ActiveWorkspaceTab::RequestProxy | ActiveWorkspaceTab::ServerTools
                             )
                         {
                             this.refresh_server_management(window, cx);
@@ -460,7 +460,7 @@ impl ApiTester {
             workspace.clone(),
         );
         self.workspace_providers.register(Arc::new(provider));
-        self.workspace = workspace;
+        self.replace_workspace(workspace);
         self.workspace_warning = None;
 
         self.selected_collection_id = self

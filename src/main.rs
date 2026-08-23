@@ -198,7 +198,7 @@ fn main() {
     #[cfg(target_os = "macos")]
     if let Err(error) = require_app_bundle() {
         eprintln!("{error}");
-        return;
+        std::process::exit(1);
     }
 
     tracing_subscriber::fmt()
@@ -215,10 +215,13 @@ fn main() {
             eprintln!("{PRODUCT_NAME} is already running.");
             return;
         }
-        Err(error) => panic!(
-            "failed to lock {PRODUCT_NAME} workspace at {}: {error}",
-            lock_path.display()
-        ),
+        Err(error) => {
+            eprintln!(
+                "{PRODUCT_NAME} could not lock its workspace at {}: {error}",
+                lock_path.display()
+            );
+            std::process::exit(1);
+        }
     };
 
     Application::new()
@@ -237,7 +240,7 @@ fn main() {
             .detach();
 
             let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
-            cx.open_window(
+            match cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(1100.0), px(720.0))),
@@ -256,26 +259,40 @@ fn main() {
                     window.on_window_should_close(cx, move |_, cx| {
                         view_for_close
                             .update(cx, |view, cx| view.flush_local_state(cx))
-                            .unwrap_or(true)
+                            .unwrap_or_else(|error| {
+                                tracing::error!(
+                                    "could not flush local state before close: {error}"
+                                );
+                                true
+                            })
                     });
                     let view_for_quit = view.downgrade();
                     cx.on_action(move |_: &QuitApp, cx| {
                         let saved = view_for_quit
                             .update(cx, |view, cx| view.flush_local_state(cx))
-                            .unwrap_or(true);
+                            .unwrap_or_else(|error| {
+                                tracing::error!(
+                                    "could not flush local state before quit: {error}"
+                                );
+                                true
+                            });
                         if saved {
                             cx.quit();
                         }
                     });
                     cx.new(|cx| Root::new(view, window, cx))
                 },
-            )
-            .expect("failed to open main window");
+            ) {
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("{PRODUCT_NAME} could not open its main window: {error}");
+                    std::process::exit(1);
+                }
+            }
 
             cx.activate(true);
         });
 }
-
 #[cfg(all(test, target_os = "macos"))]
 mod launch_tests {
     use super::*;

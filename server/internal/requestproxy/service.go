@@ -13,11 +13,15 @@ import (
 	"net/textproto"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"resolved-server/internal/problem"
+	"resolved-server/internal/resourceevents"
 	"resolved-server/internal/workspaces"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -31,6 +35,15 @@ type Service struct {
 	workspaces *workspaces.Service
 	settings   *SettingsRepository
 	client     *http.Client
+	events     resourceevents.Emitter
+}
+
+type ServiceOption func(*Service)
+
+func WithEvents(events resourceevents.Emitter) ServiceOption {
+	return func(service *Service) {
+		service.events = events
+	}
 }
 
 type ExecuteInput struct {
@@ -73,10 +86,15 @@ type ExecuteResult struct {
 
 type hostnameOverridesContextKey struct{}
 type bypassProxyContextKey struct{}
+type requestTargetHostContextKey struct{}
 
-func NewService(workspaceService *workspaces.Service, settingsRepository *SettingsRepository) *Service {
+func NewService(
+	workspaceService *workspaces.Service,
+	settingsRepository *SettingsRepository,
+	options ...ServiceOption,
+) *Service {
 	transport := transportWithHostnameOverrides(http.DefaultTransport.(*http.Transport))
-	return &Service{
+	service := &Service{
 		workspaces: workspaceService,
 		settings:   settingsRepository,
 		client: &http.Client{
@@ -91,6 +109,10 @@ func NewService(workspaceService *workspaces.Service, settingsRepository *Settin
 			},
 		},
 	}
+	for _, option := range options {
+		option(service)
+	}
+	return service
 }
 
 func transportWithHostnameOverrides(base *http.Transport) *http.Transport {
@@ -116,14 +138,83 @@ func transportWithHostnameOverrides(base *http.Transport) *http.Transport {
 	}
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
-		if err == nil {
-			if target, overridden := hostnameOverride(ctx, host); overridden && net.ParseIP(target.Host) != nil {
-				address = net.JoinHostPort(target.Host, port)
+		if err != nil {
+			return baseDialContext(ctx, network, address)
+		}
+		originalHost, _ := ctx.Value(requestTargetHostContextKey{}).(string)
+		if originalHost != "" {
+			if _, overridden := hostnameOverride(ctx, originalHost); overridden {
+				// An admin-configured hostname override is the documented way to
+				// reach private-network destinations; trust the configured target.
+				if target, rewritten := hostnameOverride(ctx, host); rewritten && net.ParseIP(target.Host) != nil {
+					address = net.JoinHostPort(target.Host, port)
+				}
+				return baseDialContext(ctx, network, address)
 			}
+			// No override: enforce egress restrictions. Literal targets are
+			// checked directly; hostnames are resolved and every address
+			// validated, then the validated address is dialed so the destination
+			// cannot change between the check and the connection (DNS rebinding).
+			if dialAddress, reason := validatedDestination(ctx, host, port); reason != "" {
+				return nil, errors.New(reason)
+			} else if dialAddress != "" {
+				address = dialAddress
+			}
+			return baseDialContext(ctx, network, address)
+		}
+		// Requests that did not originate from Execute (e.g. transport-level
+		// tests) keep the legacy override-only behavior.
+		if target, overridden := hostnameOverride(ctx, host); overridden && net.ParseIP(target.Host) != nil {
+			address = net.JoinHostPort(target.Host, port)
 		}
 		return baseDialContext(ctx, network, address)
 	}
 	return transport
+}
+
+// validatedDestination returns the concrete "host:port" to dial plus an empty
+// reason when the destination is allowed, or an empty address plus a non-empty
+// reason when it must be blocked.
+func validatedDestination(ctx context.Context, host, port string) (string, string) {
+	if ip := net.ParseIP(host); ip != nil {
+		if reason := blockedIPReason(ip); reason != "" {
+			return "", reason
+		}
+		return net.JoinHostPort(ip.String(), port), ""
+	}
+	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil || len(addresses) == 0 {
+		// Resolution errors surface from the dialer; nothing to block here.
+		return "", ""
+	}
+	for _, resolved := range addresses {
+		if reason := blockedIPReason(resolved.IP); reason != "" {
+			return "", fmt.Sprintf("destination %q resolves to a blocked address (%s)", host, reason)
+		}
+	}
+	// Dial a validated address directly so a second resolution cannot change it.
+	return net.JoinHostPort(addresses[0].IP.String(), port), ""
+}
+
+// blockedIPReason returns a description when `ip` must not be reachable through
+// the request proxy, or "" when it is allowed.
+func blockedIPReason(ip net.IP) string {
+	if ip.IsLoopback() {
+		return "loopback addresses"
+	}
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return "link-local addresses"
+	}
+	if ip.IsPrivate() {
+		return "private-network addresses"
+	}
+	if ip.IsUnspecified() || ip.IsMulticast() {
+		return "unspecified or multicast addresses"
+	}
+	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+		return "shared-address-space (CGNAT) addresses"
+	}
+	return ""
 }
 
 func (s *Service) Policy(ctx context.Context) (Policy, error) {
@@ -176,6 +267,15 @@ func (s *Service) Execute(
 	if err != nil {
 		return ExecuteResult{}, err
 	}
+	// Reject literal loopback/link-local/private destinations up front (hostname
+	// targets are enforced at dial time) unless an admin override covers them.
+	if ip := net.ParseIP(target.Hostname()); ip != nil {
+		if _, overridden := overrides[normalizedHostname(target.Hostname())]; !overridden {
+			if reason := blockedIPReason(ip); reason != "" {
+				return ExecuteResult{}, invalidField("url", reason)
+			}
+		}
+	}
 
 	method := strings.ToUpper(strings.TrimSpace(input.Method))
 	if method == "" {
@@ -187,6 +287,11 @@ func (s *Service) Execute(
 		return ExecuteResult{}, err
 	}
 	requestContext := context.WithValue(ctx, hostnameOverridesContextKey{}, overrides)
+	requestContext = context.WithValue(
+		requestContext,
+		requestTargetHostContextKey{},
+		normalizedHostname(target.Hostname()),
+	)
 	request, err := http.NewRequestWithContext(requestContext, method, target.String(), bytes.NewReader(body))
 	if err != nil {
 		return ExecuteResult{}, invalidField("method", "is not a valid HTTP method")
@@ -204,11 +309,13 @@ func (s *Service) Execute(
 	startedAt := time.Now()
 	response, err := s.client.Do(request)
 	if err != nil {
+		s.recordExecution(requestContext, actor, workspaceID, method, target, 0, time.Since(startedAt))
 		return ExecuteResult{}, proxyTransportError(err)
 	}
 	defer response.Body.Close()
 
 	if response.ContentLength > MaxResponseBodyBytes {
+		s.recordExecution(requestContext, actor, workspaceID, method, target, response.StatusCode, time.Since(startedAt))
 		return ExecuteResult{}, problem.New(
 			problem.KindPayloadTooLarge,
 			"proxy_response_too_large",
@@ -217,9 +324,11 @@ func (s *Service) Execute(
 	}
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, MaxResponseBodyBytes+1))
 	if err != nil {
+		s.recordExecution(requestContext, actor, workspaceID, method, target, response.StatusCode, time.Since(startedAt))
 		return ExecuteResult{}, proxyTransportError(err)
 	}
 	if len(responseBody) > MaxResponseBodyBytes {
+		s.recordExecution(requestContext, actor, workspaceID, method, target, response.StatusCode, time.Since(startedAt))
 		return ExecuteResult{}, problem.New(
 			problem.KindPayloadTooLarge,
 			"proxy_response_too_large",
@@ -227,6 +336,7 @@ func (s *Service) Execute(
 		)
 	}
 
+	s.recordExecution(requestContext, actor, workspaceID, method, target, response.StatusCode, time.Since(startedAt))
 	return ExecuteResult{
 		Status:         response.StatusCode,
 		StatusText:     http.StatusText(response.StatusCode),
@@ -451,6 +561,10 @@ func applyHeaders(request *http.Request, headers []Header) error {
 			request.Host = header.Value
 		case "content-length":
 			continue
+		case "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "forwarded":
+			// Clients must not spoof internal routing headers; the server sets
+			// these itself when needed.
+			continue
 		default:
 			request.Header.Add(name, header.Value)
 		}
@@ -477,6 +591,37 @@ func proxyTransportError(err error) error {
 		return problem.New(problem.KindGatewayTimeout, "proxy_timeout", "the proxied request timed out")
 	}
 	return problem.New(problem.KindBadGateway, "proxy_request_failed", fmt.Sprintf("the proxied request failed: %v", err))
+}
+
+// recordExecution writes an audit entry for a proxied request: actor, method,
+// destination host, status, and duration. Payloads and headers are never
+// recorded.
+func (s *Service) recordExecution(
+	ctx context.Context,
+	actor workspaces.Actor,
+	workspaceID string,
+	method string,
+	target *url.URL,
+	status int,
+	duration time.Duration,
+) {
+	if s.events == nil {
+		return
+	}
+	resourceevents.Emit(s.events, resourceevents.Change{
+		Resource:    resourceevents.ResourceRequestExecution,
+		Action:      resourceevents.ActionExecuted,
+		ResourceID:  uuid.NewString(),
+		WorkspaceID: workspaceID,
+		ActorUserID: actor.UserID,
+		TargetName:  target.Host,
+		Diffs: []resourceevents.Diff{
+			{Field: "method", From: "", To: method},
+			{Field: "host", From: "", To: target.Host},
+			{Field: "status", From: "", To: strconv.Itoa(status)},
+			{Field: "duration_micros", From: "", To: strconv.FormatInt(duration.Microseconds(), 10)},
+		},
+	})
 }
 
 func requestBodyTooLarge() error {

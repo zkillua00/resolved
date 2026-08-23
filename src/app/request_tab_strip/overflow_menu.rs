@@ -43,6 +43,9 @@ pub(super) fn render_open_tabs_menu(app: &ApiTester, cx: &mut Context<ApiTester>
                 WorkspaceTab::Tool(WorkspaceToolTab::RequestProxy) => {
                     ("Request proxy".to_owned(), Some(IconName::Globe), None)
                 }
+                WorkspaceTab::Tool(WorkspaceToolTab::ServerTools) => {
+                    ("Server Tools".to_owned(), Some(IconName::Inspector), None)
+                }
                 WorkspaceTab::Tool(WorkspaceToolTab::Settings) => {
                     ("Settings".to_owned(), Some(IconName::Settings2), None)
                 }

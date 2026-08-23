@@ -615,10 +615,9 @@ impl ApiTester {
                 .iter()
                 .find(|variable| variable.id == row.id)
             {
-                let variable = draft
-                    .variables
-                    .last_mut()
-                    .expect("add_variable must append");
+                let Some(variable) = draft.variables.last_mut() else {
+                    continue;
+                };
                 variable.id = row.id.clone();
                 variable.created_by = existing.created_by.clone();
             }
@@ -657,7 +656,7 @@ impl ApiTester {
         else {
             return;
         };
-        self.workspace = workspace.clone();
+        self.replace_workspace(workspace.clone());
         self.workspace_providers
             .register(Arc::new(RemoteWorkspaceProvider::new(
                 self.database_store.clone(),

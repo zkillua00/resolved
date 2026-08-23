@@ -23,6 +23,11 @@ impl ApiTester {
                 .values()
                 .map(|session| session.editor.clone()),
         );
+        editors.extend(
+            self.pane_editors
+                .values()
+                .flat_map(|session| session.code_editors()),
+        );
 
         for editor in editors {
             editor.update(cx, |editor, cx| {

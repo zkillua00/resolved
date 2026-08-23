@@ -349,10 +349,13 @@ impl ApiTester {
             cx.notify();
             return;
         }
-        let environment_id = popover
-            .expected_environment_id
-            .as_deref()
-            .expect("mutation blocker requires an active environment");
+        let Some(environment_id) = popover.expected_environment_id.as_deref() else {
+            if let Some(current) = self.template_variable_popover.as_mut() {
+                current.error = Some("The active environment is no longer available.".to_owned());
+            }
+            cx.notify();
+            return;
+        };
         let mut candidate = self.workspace.clone();
         let result = apply_template_variable_mutation(
             &mut candidate,
@@ -369,15 +372,18 @@ impl ApiTester {
             return;
         }
         if !self.workspace_writable {
-            let baseline = self
-                .workspace
-                .environment(environment_id)
-                .cloned()
-                .expect("mutation blocker requires an active environment");
-            let draft = candidate
-                .environment(environment_id)
-                .cloned()
-                .expect("template variable mutation must preserve its environment");
+            let Some(baseline) = self.workspace.environment(environment_id).cloned() else {
+                self.workspace_warning =
+                    Some("The active environment is no longer available.".to_owned());
+                cx.notify();
+                return;
+            };
+            let Some(draft) = candidate.environment(environment_id).cloned() else {
+                self.workspace_warning =
+                    Some("The environment could not be preserved for saving.".to_owned());
+                cx.notify();
+                return;
+            };
             self.dismiss_template_variable_popover();
             self.mutate_environment_on_upstream(
                 UpstreamEnvironmentMutation::Save {

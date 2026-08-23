@@ -482,7 +482,7 @@ impl ApiTester {
 
         let previous_collection_id = self.selected_collection_id.clone();
         let previous_folder_id = self.selected_folder_id.clone();
-        self.workspace = workspace.clone();
+        self.replace_workspace(workspace.clone());
         self.request_tabs = request_tabs;
         self.last_persisted_request_tabs = self.request_tabs.clone();
         self.workspace_providers
