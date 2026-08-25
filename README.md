@@ -521,6 +521,17 @@ because the awaited chain completed before that statement ran. If the awaited
 request's chain fails, the `await` rejects and the rest of the script is skipped.
 Calling `execute` without `await` keeps the scheduled-after-the-phase behavior.
 
+Multiple awaited chains composed with `Promise.all` (or started as promises and
+awaited together) run **concurrently**: each runs its own pipeline on its own
+thread, so their network calls genuinely overlap — `Promise.all([execute(A),
+execute(B)])` issues A's and B's HTTP requests in parallel, not back-to-back.
+A lone `await execute(...)` or a sequence of separate `await`s still runs each
+chain to completion before the next, so ordering stays deterministic. Only
+environment mutations from a chain's **own** pipeline are visible to the
+statements that follow its `await`; mutations from sibling concurrent chains
+are applied as their promises settle (in FIFO order), so read-after-write
+between two concurrent chains is not synchronized.
+
 The scripting editor's completion, hover, and diagnostics reflect the active
 workspace's collection tree so the editor and runtime can never drift: typing
 `ChatAdmin.` suggests `Login`, `Logout`, and folder names; `ChatAdmin.Users.`

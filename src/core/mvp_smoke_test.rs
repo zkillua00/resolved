@@ -8,9 +8,9 @@ use std::{
 
 use super::{
     DatabaseStore, Environment, EnvironmentMutation, HeaderEntry, HistoryEntry, RequestDraft,
-    RequestHistory, RequestScripts, RequestTemplate, ScriptCancellation, ScriptEnvironment,
-    ScriptScope, Workspace, build_client, execute_post_response, execute_pre_request,
-    resolve_request, spawn_request, RequestNamespaceCatalog,
+    RequestHistory, RequestNamespaceCatalog, RequestScripts, RequestTemplate, ScriptCancellation,
+    ScriptEnvironment, ScriptScope, Workspace, build_client, execute_post_response_with_chain,
+    execute_pre_request_with_chain, resolve_request, spawn_request,
 };
 
 const INITIAL_SECRET: &str = "initial-test-secret";
@@ -128,12 +128,13 @@ fn sqlite_backed_mvp_request_flow_persists_scripts_mutations_and_redacted_histor
     );
 
     let pre_scope = script_scope(workspace.active_environment());
-    let pre_result = execute_pre_request(
+    let pre_result = execute_pre_request_with_chain(
         &persisted_template.scripts.pre_request,
         &persisted_template.request,
         &pre_scope,
         &RequestNamespaceCatalog::default(),
         &ScriptCancellation::new(),
+        None,
     )
     .expect("pre-request script succeeds");
     assert_eq!(pre_result.request.method, "POST");
@@ -203,13 +204,14 @@ fn sqlite_backed_mvp_request_flow_persists_scripts_mutations_and_redacted_histor
     assert!(captured_request.ends_with(&resolved.request.body));
 
     let post_scope = script_scope(workspace.active_environment());
-    let post_result = execute_post_response(
+    let post_result = execute_post_response_with_chain(
         &persisted_template.scripts.post_response,
         &resolved.request,
         &response,
         &post_scope,
         &RequestNamespaceCatalog::default(),
         &ScriptCancellation::new(),
+        None,
     )
     .expect("post-response script succeeds");
     assert_eq!(post_result.report.tests.len(), 1);

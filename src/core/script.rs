@@ -22,7 +22,8 @@ use rquickjs::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    RequestDraft, ResponseData, chain::ChainRun,
+    RequestDraft, ResponseData,
+    chain::ChainRun,
     request_namespace::{RequestNamespaceCatalog, RuntimeNamespaceSpec},
     template::redact_secret_values,
 };
@@ -31,7 +32,7 @@ use super::{
 /// scripts, the HTTP exchange, and nested chains) to completion and returns
 /// the resulting run so its environment mutations can be applied live. The
 /// provider is responsible for actually performing the (blocking) execution.
-pub type InlineChainer<'a> = dyn Fn(&ChainedRequest) -> Result<ChainRun, String> + 'a;
+pub type InlineChainer<'a> = dyn Fn(&ChainedRequest) -> Result<ChainRun, String> + Sync + 'a;
 
 pub const SCRIPT_MEMORY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 pub const SCRIPT_STACK_LIMIT_BYTES: usize = 256 * 1024;
@@ -850,7 +851,14 @@ pub fn execute_pre_request(
     request_namespace: &RequestNamespaceCatalog,
     cancellation: &ScriptCancellation,
 ) -> Result<PreRequestResult, ScriptError> {
-    execute_pre_request_inner(source, request, scope, request_namespace, cancellation, None)
+    execute_pre_request_inner(
+        source,
+        request,
+        scope,
+        request_namespace,
+        cancellation,
+        None,
+    )
 }
 
 /// Like [`execute_pre_request`], but supports `await api.requests.execute(...)`:
@@ -864,7 +872,14 @@ pub fn execute_pre_request_with_chain(
     cancellation: &ScriptCancellation,
     chain_inline: Option<&InlineChainer<'_>>,
 ) -> Result<PreRequestResult, ScriptError> {
-    execute_pre_request_inner(source, request, scope, request_namespace, cancellation, chain_inline)
+    execute_pre_request_inner(
+        source,
+        request,
+        scope,
+        request_namespace,
+        cancellation,
+        chain_inline,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1285,119 +1300,147 @@ fn run_engine(
         }
 
         // If the script is blocked awaiting `api.requests.execute(...)`, run the
-        // referenced saved request's full pipeline inline now.
+        // referenced saved requests' pipelines concurrently so their network
+        // calls overlap (true Promise.all semantics). Each awaited op runs on
+        // its own thread; ops left pending are carried to `scheduledRequests`
+        // by __API_TESTER_FINISH so non-awaited execute() still runs after the
+        // phase.
         match chain_inline {
             None => break,
             Some(chain_inline) => {
-                let pending = context.with(|ctx| -> Result<Option<(String, String)>, ScriptError> {
-                    if ctx
-                        .eval::<bool, _>("globalThis.__API_TESTER_SETTLED.done")
-                        .unwrap_or(false)
-                    {
-                        return Ok(None);
-                    }
-                    let json = ctx
-                        .eval::<String, _>(
-                            "(function(){ \
-                             var ops = globalThis.__API_TESTER_NATIVE_OPS || []; \
-                             for (var i = 0; i < ops.length; i++) { \
-                               if (ops[i].state === 'pending') { \
-                                 ops[i].state = 'running'; \
-                                 return JSON.stringify([ops[i].id, ops[i].path]); \
-                               } \
-                             } \
-                             return 'null'; })()",
-                        )
-                        .map_err(|error| {
-                            engine_error(
-                                phase,
-                                ScriptErrorKind::Engine,
-                                format!("could not read pending request scripts: {error}"),
-                                started.elapsed(),
-                                redactor,
-                            )
-                        })?;
-                    if json == "null" {
-                        return Ok(None);
-                    }
-                    let (id, path) = serde_json::from_str(&json).map_err(|error| {
-                        engine_error(
-                            phase,
-                            ScriptErrorKind::Engine,
-                            format!("pending request scripts had an unexpected shape: {error}"),
-                            started.elapsed(),
-                            redactor,
-                        )
-                    })?;
-                    Ok(Some((id, path)))
-                })?;
-
-                match pending {
-                    None => break,
-                    Some((id, path)) => {
-                        let result = chain_inline(&ChainedRequest { id, path });
-                        match result {
-                            Ok(run) => {
-                                let mutations_json = serde_json::to_string(
-                                    &run.environment_mutations,
-                                )
-                                .unwrap_or_else(|_| "[]".to_owned());
-                                context
-                                    .with(|ctx| {
-                                        let js = format!(
-                                            "__API_TESTER_APPLY_CHAIN({mutations_json}); \
-                                             (function(){{ var ops = globalThis.__API_TESTER_NATIVE_OPS || []; \
-                                               for (var i = 0; i < ops.length; i++) {{ \
-                                                 if (ops[i].state === 'running') {{ \
-                                                   ops[i].state = 'resolved'; \
-                                                   ops[i].resolve(); \
-                                                 }} \
-                                               }} }})();"
-                                        );
-                                        ctx.eval::<(), _>(js.as_str())
-                                    })
-                                    .map_err(|error| {
-                                        engine_error(
-                                            phase,
-                                            ScriptErrorKind::Engine,
-                                            format!("could not finalize awaited request: {error}"),
-                                            started.elapsed(),
-                                            redactor,
-                                        )
-                                    })?;
-                            }
-                            Err(message) => {
-                                let message_json =
-                                    serde_json::to_string(&message).unwrap_or_else(|_| {
-                                        "\"awaited request failed\"".to_owned()
-                                    });
-                                context
-                                    .with(|ctx| {
-                                        let js = format!(
-                                            "(function(){{ var ops = globalThis.__API_TESTER_NATIVE_OPS || []; \
-                                               for (var i = 0; i < ops.length; i++) {{ \
-                                                 if (ops[i].state === 'running') {{ \
-                                                   ops[i].state = 'rejected'; \
-                                                   ops[i].reject({message_json}); \
-                                                 }} \
-                                               }} }})();"
-                                        );
-                                        ctx.eval::<(), _>(js.as_str())
-                                    })
-                                    .map_err(|error| {
-                                        engine_error(
-                                            phase,
-                                            ScriptErrorKind::Engine,
-                                            format!("could not reject awaited request: {error}"),
-                                            started.elapsed(),
-                                            redactor,
-                                        )
-                                    })?;
-                            }
+                let pending = context.with(
+                    |ctx| -> Result<Option<Vec<(String, String)>>, ScriptError> {
+                        if ctx
+                            .eval::<bool, _>("globalThis.__API_TESTER_SETTLED.done")
+                            .unwrap_or(false)
+                        {
+                            return Ok(None);
                         }
-                        continue;
+                        let json = ctx
+                            .eval::<String, _>(
+                                "(function(){ \
+                                 var ops = globalThis.__API_TESTER_NATIVE_OPS || []; \
+                                 var found = []; \
+                                 for (var i = 0; i < ops.length; i++) { \
+                                   if (ops[i].state === 'pending') { \
+                                     ops[i].state = 'running'; \
+                                     found.push([ops[i].id, ops[i].path]); \
+                                   } \
+                                 } \
+                                 return JSON.stringify(found); })()",
+                            )
+                            .map_err(|error| {
+                                engine_error(
+                                    phase,
+                                    ScriptErrorKind::Engine,
+                                    format!("could not read pending request scripts: {error}"),
+                                    started.elapsed(),
+                                    redactor,
+                                )
+                            })?;
+                        if json == "[]" {
+                            return Ok(None);
+                        }
+                        let ops: Vec<(String, String)> =
+                            serde_json::from_str(&json).map_err(|error| {
+                                engine_error(
+                                    phase,
+                                    ScriptErrorKind::Engine,
+                                    format!(
+                                        "pending request scripts had an unexpected shape: {error}"
+                                    ),
+                                    started.elapsed(),
+                                    redactor,
+                                )
+                            })?;
+                        Ok(Some(ops))
+                    },
+                )?;
+
+                let Some(pending) = pending else { break };
+
+                // Run each awaited request's full pipeline on its own thread so
+                // their network calls genuinely overlap.
+                let outcomes: Vec<std::result::Result<crate::core::ChainRun, String>> =
+                    std::thread::scope(|scope| {
+                        let mut handles = Vec::with_capacity(pending.len());
+                        for (id, path) in &pending {
+                            let id = id.clone();
+                            let path = path.clone();
+                            handles.push(
+                                scope.spawn(move || chain_inline(&ChainedRequest { id, path })),
+                            );
+                        }
+                        handles
+                            .into_iter()
+                            .map(|handle| match handle.join() {
+                                Ok(outcome) => outcome,
+                                Err(_) => {
+                                    Err("awaited request execution thread panicked".to_owned())
+                                }
+                            })
+                            .collect()
+                    });
+
+                for ((id, _path), outcome) in pending.iter().zip(outcomes) {
+                    let id_json = serde_json::to_string(id).unwrap_or_else(|_| "\"\"".to_owned());
+                    match outcome {
+                        Ok(run) => {
+                            let mutations_json = serde_json::to_string(&run.environment_mutations)
+                                .unwrap_or_else(|_| "[]".to_owned());
+                            context
+                                .with(|ctx| {
+                                    let js = format!(
+                                        "__API_TESTER_APPLY_CHAIN({mutations_json}); \
+                                         (function(){{ var ops = globalThis.__API_TESTER_NATIVE_OPS || []; \
+                                           for (var i = 0; i < ops.length; i++) {{ \
+                                             if (ops[i].id === {id_json} && ops[i].state === 'running') {{ \
+                                               ops[i].state = 'resolved'; \
+                                               ops[i].resolve(); \
+                                             }} \
+                                           }} }})();"
+                                    );
+                                    ctx.eval::<(), _>(js.as_str())
+                                })
+                                .map_err(|error| {
+                                    engine_error(
+                                        phase,
+                                        ScriptErrorKind::Engine,
+                                        format!("could not finalize awaited request: {error}"),
+                                        started.elapsed(),
+                                        redactor,
+                                    )
+                                })?;
+                        }
+                        Err(message) => {
+                            let message_json = serde_json::to_string(&message)
+                                .unwrap_or_else(|_| "\"awaited request failed\"".to_owned());
+                            context
+                                .with(|ctx| {
+                                    let js = format!(
+                                        "(function(){{ var ops = globalThis.__API_TESTER_NATIVE_OPS || []; \
+                                           for (var i = 0; i < ops.length; i++) {{ \
+                                             if (ops[i].id === {id_json} && ops[i].state === 'running') {{ \
+                                               ops[i].state = 'rejected'; \
+                                               ops[i].reject({message_json}); \
+                                             }} \
+                                           }} }})();"
+                                    );
+                                    ctx.eval::<(), _>(js.as_str())
+                                })
+                                .map_err(|error| {
+                                    engine_error(
+                                        phase,
+                                        ScriptErrorKind::Engine,
+                                        format!("could not reject awaited request: {error}"),
+                                        started.elapsed(),
+                                        redactor,
+                                    )
+                                })?;
+                        }
                     }
                 }
+                continue;
             }
         }
     }
@@ -1427,8 +1470,10 @@ fn run_engine(
     // will never settle".
     let settle = context.with(|ctx| {
         (
-            ctx.eval::<bool, _>("globalThis.__API_TESTER_SETTLED.done").unwrap_or(false),
-            ctx.eval::<bool, _>("globalThis.__API_TESTER_SETTLED.rejected").unwrap_or(false),
+            ctx.eval::<bool, _>("globalThis.__API_TESTER_SETTLED.done")
+                .unwrap_or(false),
+            ctx.eval::<bool, _>("globalThis.__API_TESTER_SETTLED.rejected")
+                .unwrap_or(false),
         )
     });
     if !settle.0 {
@@ -1467,7 +1512,8 @@ fn run_engine(
             capture_top_level_rejection(&ctx, phase, started.elapsed(), &caught_redactor)
         });
         if let Some(output) = caught_output {
-            error.report = report_from_output(phase, &output, started.elapsed(), false, &caught_redactor);
+            error.report =
+                report_from_output(phase, &output, started.elapsed(), false, &caught_redactor);
         }
         return Err(error);
     }
@@ -1779,8 +1825,8 @@ mod tests {
     use std::thread;
 
     use super::*;
+    use crate::core::Workspace;
     use crate::core::request::ResponseHeader;
-    use crate::core::{RequestTemplate, Workspace};
 
     fn request() -> RequestDraft {
         let mut request = RequestDraft::new("GET", "https://example.test/{{path}}");
@@ -1814,7 +1860,8 @@ console.log("prepared", api.request.method);
 "#,
             &original,
             &scope,
-            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
         )
         .expect("pre-request script should succeed");
 
@@ -1866,7 +1913,8 @@ api.request.bodyFields.push({
 "#,
             &original,
             &ScriptScope::default(),
-            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
         )
         .expect("structured body mutations should succeed");
 
@@ -1913,7 +1961,8 @@ console.info(api.response.durationMs);
             &request(),
             &response,
             &ScriptScope::default(),
-            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
         )
         .expect("post-response script should succeed");
 
@@ -1935,7 +1984,8 @@ console.info(api.response.durationMs);
             "const = ;",
             &request(),
             &ScriptScope::default(),
-            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
         )
         .expect_err("invalid JavaScript must fail");
         assert_eq!(syntax.diagnostic.kind, ScriptErrorKind::Syntax);
@@ -1945,7 +1995,8 @@ console.info(api.response.durationMs);
             "throw new Error('broken');",
             &request(),
             &ScriptScope::default(),
-            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
         )
         .expect_err("thrown error must fail");
         assert_eq!(runtime.diagnostic.kind, ScriptErrorKind::Runtime);
@@ -1970,7 +2021,8 @@ throw new Error("broken");
 "#,
             &request(),
             &scope,
-            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
         )
         .expect_err("thrown error must fail");
 
@@ -1989,7 +2041,8 @@ throw new Error("broken");
             "try { while (true) {} } catch (_) {}",
             &request(),
             &ScriptScope::default(),
-            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
         )
         .expect_err("interrupt must be uncatchable");
 
@@ -2006,7 +2059,8 @@ throw new Error("broken");
                 "while (true) {}",
                 &request(),
                 &ScriptScope::default(),
-                &RequestNamespaceCatalog::default(), &worker_cancellation,
+                &RequestNamespaceCatalog::default(),
+                &worker_cancellation,
             )
         });
 
@@ -2025,7 +2079,8 @@ throw new Error("broken");
             "Array.prototype.leaked = true;",
             &request(),
             &ScriptScope::default(),
-            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
         )
         .expect("first script should succeed");
 
@@ -2040,7 +2095,8 @@ console.log(api.environment.get("token"));
 "#,
             &request(),
             &scope,
-            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
         )
         .expect("second script should have a fresh runtime");
         assert_eq!(result.report.logs[0].message, "[REDACTED]");
@@ -2049,7 +2105,8 @@ console.log(api.environment.get("token"));
             r#"throw new Error(api.environment.get("token"));"#,
             &request(),
             &scope,
-            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
         )
         .expect_err("script should throw");
         assert!(!error.diagnostic.message.contains("very-secret-token"));
@@ -2067,7 +2124,8 @@ console.log("old", "42", "new", api.environment.get("pin"));
 "#,
             &request(),
             &scope,
-            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
         )
         .expect("secret rotation should succeed");
 
@@ -2083,7 +2141,8 @@ throw new Error("rotated=a%20b/c");
 "#,
             &request(),
             &scope,
-            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
         )
         .expect_err("rotated secret must remain scrubbed when the script throws");
         assert_eq!(error.diagnostic.message, "rotated=[REDACTED]");
@@ -2096,7 +2155,8 @@ throw new Error("rotated=a%20b/c");
             r#"console.log("url=https://example.test/a%20b/c");"#,
             &request(),
             &encoded_scope,
-            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
         )
         .expect("encoded secret log should be scrubbed");
         assert_eq!(
@@ -2115,7 +2175,8 @@ throw new Error("rotated=a%20b/c");
             &source,
             &request(),
             &ScriptScope::default(),
-            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
         )
         .expect_err("a pre-script must not bypass the request-body limit");
 
@@ -2136,7 +2197,8 @@ throw new Error("rotated=a%20b/c");
             "",
             &oversized,
             &ScriptScope::default(),
-            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
         )
         .expect("blank pre-script should not inspect the body");
         assert_eq!(pre.request.body.len(), MAX_SCRIPT_BODY_BYTES + 1);
@@ -2156,7 +2218,8 @@ throw new Error("rotated=a%20b/c");
             &oversized,
             &response,
             &ScriptScope::default(),
-            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
         )
         .expect("blank post-script should not inspect the request body");
     }
@@ -2178,7 +2241,8 @@ throw new Error("rotated=a%20b/c");
             &request(),
             &response,
             &ScriptScope::default(),
-            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
         )
         .expect("unsupported async test should be recorded as a failed test");
 
@@ -2208,7 +2272,8 @@ throw new Error("rotated=a%20b/c");
             &request(),
             &response,
             &ScriptScope::default(),
-            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
         )
         .expect("binary response should be available to script");
         assert!(result.report.response_body_truncated);
@@ -2262,10 +2327,7 @@ api.requests.execute(Payments.Login);
         assert_eq!(result.chained_requests[0].path, "ChatAdmin.Login");
         assert_eq!(result.chained_requests[1].path, "Payments.Login");
         // The two refs carry distinct stable ids.
-        assert_ne!(
-            result.chained_requests[0].id,
-            result.chained_requests[1].id
-        );
+        assert_ne!(result.chained_requests[0].id, result.chained_requests[1].id);
         assert!(!result.chained_requests[0].id.is_empty());
     }
 
@@ -2282,7 +2344,12 @@ api.requests.execute(Payments.Login);
             &ScriptCancellation::new(),
         )
         .expect_err("a string must be rejected");
-        assert!(primitive.diagnostic.message.contains("saved request reference"));
+        assert!(
+            primitive
+                .diagnostic
+                .message
+                .contains("saved request reference")
+        );
 
         // A namespace object (a folder/collection) is not a request leaf.
         let namespace = execute_pre_request(
@@ -2490,10 +2557,12 @@ api.request.headers.set("Authorization", "Bearer " + api.environment.get("AUTH_T
 
         // The statement after the await must have observed the refreshed token.
         assert!(
-            result.environment_mutations.contains(&EnvironmentMutation::Set {
-                key: "saw".to_owned(),
-                value: "tok-123".to_owned(),
-            }),
+            result
+                .environment_mutations
+                .contains(&EnvironmentMutation::Set {
+                    key: "saw".to_owned(),
+                    value: "tok-123".to_owned(),
+                }),
             "mutations: {:?}",
             result.environment_mutations
         );
@@ -2531,6 +2600,59 @@ api.request.headers.set("Authorization", "Bearer SHOULD-NOT-RUN");
             error.diagnostic.message.contains("chained login failed"),
             "message: {}",
             error.diagnostic.message
+        );
+    }
+
+    #[test]
+    fn promise_all_executes_chained_requests_concurrently() {
+        let (_workspace, catalog) = chaining_workspace();
+        // Shared probe: the engine dispatches each awaited chain on its own
+        // thread, so if two requests awaited together actually overlap their
+        // HTTP windows, max in-flight reaches 2. A serialized pump (running one
+        // chain fully before the next) would only ever observe 1.
+        let in_flight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_in_flight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probe_in_flight = in_flight.clone();
+        let probe_max = max_in_flight.clone();
+        let chainer =
+            move |_scheduled: &crate::core::ChainedRequest| -> Result<crate::core::ChainRun, String> {
+                let current =
+                    probe_in_flight.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                probe_max.fetch_max(current, std::sync::atomic::Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(120));
+                probe_in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(crate::core::ChainRun::default())
+            };
+        let result = execute_pre_request_with_chain(
+            r#"
+await Promise.all([
+  api.requests.execute(ChatAdmin.Login),
+  api.requests.execute(Payments.Login),
+]);
+api.environment.set("done", "yes");
+"#,
+            &request(),
+            &ScriptScope::default(),
+            &catalog,
+            &ScriptCancellation::new(),
+            Some(&chainer),
+        )
+        .expect("Promise.all over execute() should settle");
+
+        assert_eq!(
+            max_in_flight.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "awaited chains must run concurrently (Promise.all semantics)"
+        );
+        assert!(
+            result
+                .environment_mutations
+                .contains(&EnvironmentMutation::Set {
+                    key: "done".to_owned(),
+                    value: "yes".to_owned(),
+                }),
+            "script did not continue after Promise.all settled: {:?}",
+            result.environment_mutations
         );
     }
 }

@@ -86,18 +86,16 @@ impl ApiTester {
         self.chain_budget.store(0, Ordering::Relaxed);
         let tape_environment = environment_id.clone();
         let chainer = self.build_inline_chainer(&tape_environment);
-        let task = self
-            .runtime
-            .spawn_blocking(move || {
-                crate::core::execute_pre_request_with_chain(
-                    &source,
-                    &request,
-                    &scope,
-                    &namespace,
-                    &cancellation,
-                    Some(&chainer),
-                )
-            });
+        let task = self.runtime.spawn_blocking(move || {
+            crate::core::execute_pre_request_with_chain(
+                &source,
+                &request,
+                &scope,
+                &namespace,
+                &cancellation,
+                Some(&chainer),
+            )
+        });
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
@@ -268,13 +266,9 @@ impl ApiTester {
         scheduled: Vec<crate::core::ChainedRequest>,
         window: &mut Window,
         cx: &mut Context<Self>,
-        on_complete: impl FnOnce(
-                &mut Self,
-                crate::core::ChainRun,
-                &mut Window,
-                &mut Context<Self>,
-            ) + Send
-            + 'static,
+        on_complete: impl FnOnce(&mut Self, crate::core::ChainRun, &mut Window, &mut Context<Self>)
+        + Send
+        + 'static,
     ) {
         let workspace = self.workspace.clone();
         let namespace = self.request_namespace.clone();
@@ -392,7 +386,10 @@ impl ApiTester {
     fn build_inline_chainer(
         &self,
         environment_id: &Option<String>,
-    ) -> impl Fn(&crate::core::ChainedRequest) -> Result<crate::core::ChainRun, String> + Send + 'static {
+    ) -> impl Fn(&crate::core::ChainedRequest) -> Result<crate::core::ChainRun, String>
+    + Send
+    + Sync
+    + 'static {
         let workspace = self.workspace.clone();
         let namespace = self.request_namespace.clone();
         let environment_id = environment_id.clone();
@@ -436,77 +433,74 @@ impl ApiTester {
                     ));
                 }
             };
-            blocking_runtime
-                .block_on(async move {
-                    let sender = move |request: crate::core::RequestDraft| {
-                        let local_client = local_client.clone();
-                        let upstream_client = upstream_client.clone();
-                        let vault = vault.clone();
-                        let runtime = Arc::clone(&runtime);
-                        let target = target.clone();
-                        async move {
-                            match target {
-                                None => crate::core::send_request(&local_client, request).await,
-                                Some((upstream_id, workspace_id, base_url)) => {
-                                    let credential = runtime
-                                        .spawn_blocking(move || vault.load_upstream(&upstream_id))
-                                        .await
-                                        .map_err(|error| {
-                                            crate::core::RequestError::TaskFailed(
-                                                error.to_string(),
-                                            )
-                                        })?
-                                        .map_err(|error| {
-                                            crate::core::RequestError::Upstream(error.to_string())
-                                        })?
-                                        .ok_or_else(|| {
-                                            crate::core::RequestError::Upstream(
-                                                "Log in to this server again.".to_owned(),
-                                            )
-                                        })?;
-                                    if credential.expires_at <= Utc::now() {
-                                        return Err(crate::core::RequestError::Upstream(
-                                            "Log in to this server again.".to_owned(),
-                                        ));
-                                    }
-                                    crate::core::send_request_for_upstream_workspace(
-                                        &upstream_client,
-                                        &local_client,
-                                        &base_url,
-                                        credential.bearer_token(),
-                                        &workspace_id,
-                                        request,
-                                    )
+            blocking_runtime.block_on(async move {
+                let sender = move |request: crate::core::RequestDraft| {
+                    let local_client = local_client.clone();
+                    let upstream_client = upstream_client.clone();
+                    let vault = vault.clone();
+                    let runtime = Arc::clone(&runtime);
+                    let target = target.clone();
+                    async move {
+                        match target {
+                            None => crate::core::send_request(&local_client, request).await,
+                            Some((upstream_id, workspace_id, base_url)) => {
+                                let credential = runtime
+                                    .spawn_blocking(move || vault.load_upstream(&upstream_id))
                                     .await
+                                    .map_err(|error| {
+                                        crate::core::RequestError::TaskFailed(error.to_string())
+                                    })?
+                                    .map_err(|error| {
+                                        crate::core::RequestError::Upstream(error.to_string())
+                                    })?
+                                    .ok_or_else(|| {
+                                        crate::core::RequestError::Upstream(
+                                            "Log in to this server again.".to_owned(),
+                                        )
+                                    })?;
+                                if credential.expires_at <= Utc::now() {
+                                    return Err(crate::core::RequestError::Upstream(
+                                        "Log in to this server again.".to_owned(),
+                                    ));
                                 }
+                                crate::core::send_request_for_upstream_workspace(
+                                    &upstream_client,
+                                    &local_client,
+                                    &base_url,
+                                    credential.bearer_token(),
+                                    &workspace_id,
+                                    request,
+                                )
+                                .await
                             }
                         }
-                    };
-                    let run = match tokio::time::timeout(
-                        crate::core::SCRIPT_TIMEOUT,
-                        crate::core::run_chain(
-                            &workspace,
-                            environment_id.as_deref(),
-                            &requested,
-                            &namespace,
-                            &chain_cancellation,
-                            sender,
-                            limits,
-                            &budget,
-                        ),
-                    )
-                    .await
-                    {
-                        Ok(run) => run,
-                        Err(_) => {
-                            return Err("awaited request exceeded its execution limit".to_owned());
-                        }
-                    };
-                    if let Some(failure) = run.error {
-                        return Err(failure.message);
                     }
-                    Ok(run)
-                })
+                };
+                let run = match tokio::time::timeout(
+                    crate::core::SCRIPT_TIMEOUT,
+                    crate::core::run_chain(
+                        &workspace,
+                        environment_id.as_deref(),
+                        &requested,
+                        &namespace,
+                        &chain_cancellation,
+                        sender,
+                        limits,
+                        &budget,
+                    ),
+                )
+                .await
+                {
+                    Ok(run) => run,
+                    Err(_) => {
+                        return Err("awaited request exceeded its execution limit".to_owned());
+                    }
+                };
+                if let Some(failure) = run.error {
+                    return Err(failure.message);
+                }
+                Ok(run)
+            })
         }
     }
 
@@ -1075,4 +1069,3 @@ impl ApiTester {
         Ok(())
     }
 }
-
