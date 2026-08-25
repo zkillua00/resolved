@@ -550,7 +550,11 @@ and Cancel interrupts the pre-script, network request, or post-script.
 
 Each invocation has these bounds:
 
-- 1-second execution deadline
+- Configurable execution deadline (default 30 s; set `script.timeout_ms` in app
+  settings). Each script phase — pre-request, post-response, and every chained
+  request's own scripts — plus the full-awaited-chain execution, is bounded by
+  this per-phase budget. A built-in floor of 1 ms keeps a mistyped `0` from
+  timing everything out instantly.
 - 32 MiB engine heap and 256 KiB engine stack
 - 256 KiB script source
 - 5 MiB script-visible request or response body

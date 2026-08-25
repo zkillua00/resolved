@@ -57,11 +57,12 @@ impl ApiTester {
         self.request_notice = None;
         let template = self.request_template(cx);
         let environment_id = self.workspace.active_environment_id.clone();
-        let scope = Self::script_scope(
+        let mut scope = Self::script_scope(
             environment_id
                 .as_deref()
                 .and_then(|id| self.workspace.environment(id)),
         );
+        scope.script_timeout = self.settings.script.timeout();
         self.request_generation = self.request_generation.wrapping_add(1);
         let generation = self.request_generation;
         self.request_history_target = self.active_upstream_workspace().ok();
@@ -299,7 +300,8 @@ impl ApiTester {
         };
         let vault = self.credential_vault.clone();
         let runtime = Arc::clone(&self.runtime);
-        let limits = crate::core::ChainLimits::default();
+        let mut limits = crate::core::ChainLimits::default();
+        limits.script_timeout = self.settings.script.timeout();
 
         let task = self.runtime.spawn(async move {
             let sender = move |request: crate::core::RequestDraft| {
@@ -411,7 +413,8 @@ impl ApiTester {
                 Err(_) => None,
             },
         };
-        let limits = crate::core::ChainLimits::default();
+        let mut limits = crate::core::ChainLimits::default();
+        limits.script_timeout = self.settings.script.timeout();
         move |requested: &[crate::core::ChainedRequest]| {
             let futures = requested
                 .iter()
@@ -477,7 +480,7 @@ impl ApiTester {
                             }
                         };
                         match tokio::time::timeout(
-                            crate::core::SCRIPT_TIMEOUT,
+                            limits.script_timeout,
                             crate::core::run_chain(
                                 &workspace,
                                 environment_id.as_deref(),
@@ -673,11 +676,12 @@ impl ApiTester {
         self.update_response_editor(&display_response, window, cx);
 
         self.execution_stage = Some(ExecutionStage::PostResponse);
-        let scope = Self::script_scope(
+        let mut scope = Self::script_scope(
             environment_id
                 .as_deref()
                 .and_then(|id| self.workspace.environment(id)),
         );
+        scope.script_timeout = self.settings.script.timeout();
         let source = template.scripts.post_response.clone();
         let request = resolved.request.clone();
         let history_request = resolved.request.clone();

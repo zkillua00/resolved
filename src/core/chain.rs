@@ -27,7 +27,7 @@ use super::{
     request::{RequestDraft, RequestError, ResponseData},
     request_namespace::{CHAIN_MAX_DEPTH, CHAIN_MAX_TOTAL, RequestNamespaceCatalog},
     script::{
-        ChainedRequest, EnvironmentMutation, ScriptCancellation, ScriptScope,
+        ChainedRequest, EnvironmentMutation, SCRIPT_TIMEOUT, ScriptCancellation, ScriptScope,
         execute_post_response, execute_pre_request,
     },
     template::resolve_request,
@@ -61,6 +61,9 @@ pub struct ChainFailure {
 pub struct ChainLimits {
     pub max_depth: usize,
     pub max_total: usize,
+    /// Execution budget for each chained request's own pre/post-response
+    /// scripts, inherited from the caller's configured script timeout.
+    pub script_timeout: std::time::Duration,
 }
 
 impl Default for ChainLimits {
@@ -68,6 +71,7 @@ impl Default for ChainLimits {
         Self {
             max_depth: CHAIN_MAX_DEPTH,
             max_total: CHAIN_MAX_TOTAL,
+            script_timeout: SCRIPT_TIMEOUT,
         }
     }
 }
@@ -196,7 +200,7 @@ where
         budget.fetch_add(1, Ordering::Relaxed);
 
         // Pre-request script (may itself schedule more requests).
-        let scope = scope_from_workspace(workspace, environment_id);
+        let scope = scope_from_workspace(workspace, environment_id, limits.script_timeout);
         let pre = match execute_pre_request(
             &template.scripts.pre_request,
             &template.request,
@@ -302,7 +306,7 @@ where
         push_history(run, &request, &response, &sensitive_values);
 
         // Post-response script (may itself schedule more requests).
-        let post_scope = scope_from_workspace(workspace, environment_id);
+        let post_scope = scope_from_workspace(workspace, environment_id, limits.script_timeout);
         let post = match execute_post_response(
             &template.scripts.post_response,
             &request,
@@ -373,8 +377,13 @@ fn cycle_display(paths: &[String]) -> String {
 }
 
 /// Build a `ScriptScope` from the active environment of a workspace snapshot.
-fn scope_from_workspace(workspace: &Workspace, environment_id: Option<&str>) -> ScriptScope {
+fn scope_from_workspace(
+    workspace: &Workspace,
+    environment_id: Option<&str>,
+    script_timeout: std::time::Duration,
+) -> ScriptScope {
     let mut scope = ScriptScope::default();
+    scope.script_timeout = script_timeout;
     if let Some(environment) = environment_id.and_then(|id| workspace.environment(id)) {
         for variable in environment
             .variables
@@ -816,6 +825,7 @@ mod tests {
         let limits = ChainLimits {
             max_depth: 5,
             max_total: 2,
+            ..Default::default()
         };
         let run = run_with_limits(&workspace, &catalog, scheduled, limits).await;
         let error = run.error.expect("total limit must trip");
@@ -871,6 +881,7 @@ mod tests {
         let limits = ChainLimits {
             max_depth: 2,
             max_total: 10,
+            ..Default::default()
         };
         let run = run_with_limits(&workspace, &catalog, vec![schedule(&x1, "C.X1")], limits).await;
         let error = run.error.expect("depth limit must trip");

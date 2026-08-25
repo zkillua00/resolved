@@ -22,6 +22,7 @@ pub struct AppSettings {
     pub theme: ThemeSettings,
     pub editor: EditorSettings,
     pub formatter: FormatterSettings,
+    pub script: ScriptSettings,
     pub navigation_compact: bool,
     pub metrics_position: MetricsPosition,
     pub upstreams: UpstreamSettings,
@@ -38,6 +39,48 @@ const MIN_INDENT_SIZE: u64 = 1;
 const MAX_INDENT_SIZE: u64 = 16;
 const MIN_FORMATTER_LINE_WIDTH: u64 = 40;
 const MAX_FORMATTER_LINE_WIDTH: u64 = 240;
+const DEFAULT_SCRIPT_TIMEOUT_MS: u64 = 30_000;
+
+fn default_script_timeout_ms() -> u64 {
+    DEFAULT_SCRIPT_TIMEOUT_MS
+}
+
+/// Preferences for running request pre/post-response scripts, including any
+/// awaited `api.requests.execute(...)` chains.
+///
+/// The timeout is a per-phase execution budget (with a generous default), not a
+/// hard-coded cap: a phase that legitimately takes longer than a second — e.g.
+/// a login chain that refreshes a token over the network — is no longer killed
+/// at 1s.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ScriptSettings {
+    /// Maximum time a script phase (and anything it `await`s, including the
+    /// full awaited request pipeline and its own pre/post scripts) may run, in
+    /// milliseconds.
+    #[serde(default = "default_script_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Preserve fields written by a newer application version.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl ScriptSettings {
+    /// The effective script deadline; never zero, so a mistyped setting
+    /// cannot cause scripts to time out instantly.
+    pub fn timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.timeout_ms.max(1))
+    }
+}
+
+impl Default for ScriptSettings {
+    fn default() -> Self {
+        Self {
+            timeout_ms: DEFAULT_SCRIPT_TIMEOUT_MS,
+            extra: BTreeMap::new(),
+        }
+    }
+}
 
 /// Preferences shared by every native code-editor surface.
 ///
@@ -908,5 +951,28 @@ mod tests {
         let decoded: SavedTheme = serde_json::from_str(&encoded).unwrap();
 
         assert_eq!(decoded, theme);
+    }
+
+    #[test]
+    fn script_settings_default_and_clamp() {
+        let default = ScriptSettings::default();
+        assert_eq!(default.timeout_ms, DEFAULT_SCRIPT_TIMEOUT_MS);
+        assert_eq!(
+            default.timeout(),
+            std::time::Duration::from_millis(DEFAULT_SCRIPT_TIMEOUT_MS)
+        );
+        // A mistyped zero must not make scripts time out instantly.
+        let zero = ScriptSettings {
+            timeout_ms: 0,
+            ..Default::default()
+        };
+        assert_eq!(zero.timeout(), std::time::Duration::from_millis(1));
+        // Round-trips through JSON with serde defaults intact.
+        let enc = serde_json::to_string(&default).unwrap();
+        let dec: ScriptSettings = serde_json::from_str(&enc).unwrap();
+        assert_eq!(dec, default);
+        // An old settings file with no `script` key still loads with defaults.
+        let from_old: ScriptSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(from_old, default);
     }
 }

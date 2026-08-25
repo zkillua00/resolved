@@ -539,11 +539,26 @@ impl ScriptEnvironment {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScriptScope {
     pub environment: ScriptEnvironment,
     pub collection_variables: BTreeMap<String, String>,
     pub extra_secrets: Vec<String>,
+    /// Per-phase execution budget, including anything the phase `await`s (the
+    /// full awaited request pipeline and its own pre/post scripts). Defaults to
+    /// [`SCRIPT_TIMEOUT`]; the app overrides it from persisted settings.
+    pub script_timeout: std::time::Duration,
+}
+
+impl Default for ScriptScope {
+    fn default() -> Self {
+        Self {
+            environment: ScriptEnvironment::default(),
+            collection_variables: BTreeMap::new(),
+            extra_secrets: Vec::new(),
+            script_timeout: SCRIPT_TIMEOUT,
+        }
+    }
 }
 
 impl ScriptScope {
@@ -815,6 +830,7 @@ fn execute_pre_request_inner(
         input,
         cancellation,
         chain_inline,
+        scope.script_timeout,
         &redactor,
         &scope.environment.secret_names,
     )?;
@@ -922,6 +938,7 @@ fn execute_post_response_inner(
         input,
         cancellation,
         chain_inline,
+        scope.script_timeout,
         &redactor,
         &scope.environment.secret_names,
     )?;
@@ -1046,6 +1063,7 @@ fn run_engine(
     input: EngineInput<'_>,
     cancellation: &ScriptCancellation,
     chain_inline: Option<&InlineChainer<'_>>,
+    timeout: std::time::Duration,
     redactor: &SecretRedactor,
     secret_names: &BTreeSet<String>,
 ) -> Result<EngineRun, ScriptError> {
@@ -1059,7 +1077,7 @@ fn run_engine(
     }
 
     let started = Instant::now();
-    let deadline = started + SCRIPT_TIMEOUT;
+    let deadline = started + timeout;
     let timed_out = Arc::new(AtomicBool::new(false));
     let timed_out_for_interrupt = Arc::clone(&timed_out);
     let cancelled_for_interrupt = Arc::clone(&cancellation.cancelled);
@@ -1156,7 +1174,7 @@ fn run_engine(
                             ScriptErrorKind::TimedOut,
                             format!(
                                 "script exceeded its {} ms execution limit",
-                                SCRIPT_TIMEOUT.as_millis()
+                                timeout.as_millis()
                             ),
                             duration,
                             redactor,
@@ -1250,7 +1268,7 @@ fn run_engine(
                 ScriptErrorKind::TimedOut,
                 format!(
                     "script exceeded its {} ms execution limit",
-                    SCRIPT_TIMEOUT.as_millis()
+                    timeout.as_millis()
                 ),
                 started.elapsed(),
                 redactor,
@@ -1442,7 +1460,7 @@ fn run_engine(
             ScriptErrorKind::TimedOut,
             format!(
                 "script exceeded its {} ms execution limit",
-                SCRIPT_TIMEOUT.as_millis()
+                timeout.as_millis()
             ),
             started.elapsed(),
             redactor,
@@ -2667,6 +2685,33 @@ api.environment.set("done", "yes");
                 }),
             "script did not continue after Promise.all settled: {:?}",
             result.environment_mutations
+        );
+    }
+
+    #[test]
+    fn custom_script_timeout_is_honored() {
+        let mut scope = ScriptScope::default();
+        scope.script_timeout = std::time::Duration::from_millis(250);
+        let started = Instant::now();
+        let error = execute_pre_request(
+            "while (true) {}",
+            &request(),
+            &scope,
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
+        )
+        .expect_err("a CPU-bound script must hit the configured deadline");
+        assert_eq!(error.diagnostic.kind, ScriptErrorKind::TimedOut);
+        assert!(
+            error.diagnostic.message.contains("250 ms execution limit"),
+            "timeout message should reflect the configured 250ms budget: {}",
+            error.diagnostic.message
+        );
+        // A 250ms budget must stop the loop well before the old 1s default.
+        assert!(
+            started.elapsed() < Duration::from_millis(900),
+            "custom timeout not honored; elapsed {:?}",
+            started.elapsed()
         );
     }
 }
