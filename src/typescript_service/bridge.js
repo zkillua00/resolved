@@ -77,6 +77,10 @@
         checkJs: true,
         libReplacement: false,
         module: typescript.ModuleKind.ESNext,
+        // The runtime evaluates scripts as global async code (top-level await
+        // is supported); treat every document as a module so the checker does
+        // not flag top-level `await` as an error.
+        moduleDetection: typescript.ModuleDetectionKind.Force,
         noEmit: true,
         noLib: true,
         noImplicitAny: false,

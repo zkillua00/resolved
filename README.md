@@ -402,7 +402,11 @@ replace the active theme.
 Scripts run as JavaScript in a fresh embedded QuickJS runtime for every phase.
 The pre-request script runs before variable expansion and may change the outgoing
 request. The post-response script runs after the response arrives and may record
-tests or update the active environment.
+tests or update the active environment. Scripts run as **async** code: `await`
+and `async` functions are supported, including **top-level await**; the runtime
+drives the script's promise to completion (honouring the timeout and
+cancellation) before the phase finishes, and surfaces a top-level rejection as
+a normal script error.
 
 Example pre-request script:
 

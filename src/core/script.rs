@@ -960,7 +960,7 @@ fn run_engine(
         )
     })?;
 
-    context.with(|ctx| {
+    context.with(|ctx| -> Result<(), ScriptError> {
         let input_value = rquickjs_serde::to_value(ctx.clone(), &input).map_err(|error| {
             engine_error(
                 phase,
@@ -996,55 +996,255 @@ fn run_engine(
         options.global = true;
         options.strict = true;
         options.backtrace_barrier = true;
-        options.promise = false;
+        // Enable native top-level await (JS_EVAL_FLAG_ASYNC): the script runs
+        // as global async code and evaluation returns a Promise we pump below.
+        options.promise = true;
         options.filename = Some(phase.filename().to_owned());
-        if let Err(caught) = ctx.eval_with_options::<(), _>(source, options).catch(&ctx) {
-            let duration = started.elapsed();
-            if cancellation.is_cancelled() {
-                return Err(engine_error(
-                    phase,
-                    ScriptErrorKind::Cancelled,
-                    "script cancelled",
-                    duration,
-                    redactor,
-                ));
-            }
-            if timed_out.load(Ordering::Acquire) {
-                return Err(engine_error(
-                    phase,
-                    ScriptErrorKind::TimedOut,
-                    format!(
-                        "script exceeded its {} ms execution limit",
-                        SCRIPT_TIMEOUT.as_millis()
-                    ),
-                    duration,
-                    redactor,
-                ));
-            }
-            let mut caught_redactor = redactor.clone();
-            let mut caught_output = None;
-            if let Ok(value) = ctx.eval::<Value<'_>, _>("__API_TESTER_FINISH()")
-                && let Ok(output) = rquickjs_serde::from_value_strict::<EngineOutput>(value)
-            {
-                extend_redactor_with_secret_names(
-                    &mut caught_redactor,
-                    secret_names,
-                    &output.environment_mutations,
-                );
-                if serde_json::to_vec(&output)
-                    .is_ok_and(|encoded| encoded.len() <= MAX_SCRIPT_RESULT_BYTES)
-                {
-                    caught_output = Some(output);
+        let main: Value<'_> =
+            match ctx.eval_with_options::<Value<'_>, _>(source, options).catch(&ctx) {
+                Ok(main) => main,
+                Err(caught) => {
+                    let duration = started.elapsed();
+                    if cancellation.is_cancelled() {
+                        return Err(engine_error(
+                            phase,
+                            ScriptErrorKind::Cancelled,
+                            "script cancelled",
+                            duration,
+                            redactor,
+                        ));
+                    }
+                    if timed_out.load(Ordering::Acquire) {
+                        return Err(engine_error(
+                            phase,
+                            ScriptErrorKind::TimedOut,
+                            format!(
+                                "script exceeded its {} ms execution limit",
+                                SCRIPT_TIMEOUT.as_millis()
+                            ),
+                            duration,
+                            redactor,
+                        ));
+                    }
+                    let mut caught_redactor = redactor.clone();
+                    let mut caught_output = None;
+                    if let Ok(value) = ctx.eval::<Value<'_>, _>("__API_TESTER_FINISH()")
+                        && let Ok(output) = rquickjs_serde::from_value_strict::<EngineOutput>(value)
+                    {
+                        extend_redactor_with_secret_names(
+                            &mut caught_redactor,
+                            secret_names,
+                            &output.environment_mutations,
+                        );
+                        if serde_json::to_vec(&output)
+                            .is_ok_and(|encoded| encoded.len() <= MAX_SCRIPT_RESULT_BYTES)
+                        {
+                            caught_output = Some(output);
+                        }
+                    }
+                    let mut error = caught_error(phase, caught, duration, &caught_redactor);
+                    if let Some(output) = caught_output {
+                        error.report =
+                            report_from_output(phase, &output, duration, false, &caught_redactor);
+                    }
+                    return Err(error);
                 }
-            }
-            let mut error = caught_error(phase, caught, duration, &caught_redactor);
-            if let Some(output) = caught_output {
-                error.report =
-                    report_from_output(phase, &output, duration, false, &caught_redactor);
-            }
-            return Err(error);
-        }
+            };
 
+        // Root the evaluation's promise so it survives the pump below, and
+        // attach a settlement probe. The probe also *handles* the rejection so
+        // QuickJS never reports it as unhandled; we re-throw the captured reason
+        // after the pump when the script rejected.
+        ctx.globals().set("__API_TESTER_MAIN", main).map_err(|error| {
+            engine_error(
+                phase,
+                ScriptErrorKind::Engine,
+                error.to_string(),
+                started.elapsed(),
+                redactor,
+            )
+        })?;
+        ctx.eval::<(), _>(
+            concat!(
+                "globalThis.__API_TESTER_SETTLED = { done: false, rejected: false, reason: undefined };\n",
+                "globalThis.__API_TESTER_MAIN.then(\n",
+                "  function(value) { globalThis.__API_TESTER_SETTLED.done = true; },\n",
+                "  function(reason) {\n",
+                "    globalThis.__API_TESTER_SETTLED.done = true;\n",
+                "    globalThis.__API_TESTER_SETTLED.rejected = true;\n",
+                "    globalThis.__API_TESTER_SETTLED.reason = reason;\n",
+                "  }\n",
+                ");\n",
+            ),
+        )
+        .map_err(|error| {
+            engine_error(
+                phase,
+                ScriptErrorKind::Engine,
+                error.to_string(),
+                started.elapsed(),
+                redactor,
+            )
+        })?;
+        Ok(())
+    })?;
+
+    // Drive the evaluation's promise job queue to settlement. Each ready
+    // microtask collected by execute_pending_job runs the body past an `await`
+    // (including top-level); the interrupt handler covers CPU-bound loops, and
+    // the deadline / cancellation checks cover scripts parked on an await.
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(engine_error(
+                phase,
+                ScriptErrorKind::Cancelled,
+                "script cancelled",
+                started.elapsed(),
+                redactor,
+            ));
+        }
+        if timed_out.load(Ordering::Acquire) || Instant::now() >= deadline {
+            timed_out.store(true, Ordering::Release);
+            return Err(engine_error(
+                phase,
+                ScriptErrorKind::TimedOut,
+                format!(
+                    "script exceeded its {} ms execution limit",
+                    SCRIPT_TIMEOUT.as_millis()
+                ),
+                started.elapsed(),
+                redactor,
+            ));
+        }
+        match runtime.execute_pending_job() {
+            Ok(true) => continue,
+            Ok(false) => break,
+            Err(_job) => {
+                // A continuation threw. Prefer the probe's captured reason; fall
+                // back to whatever the context currently holds.
+                let error = context.with(|ctx| {
+                    if cancellation.is_cancelled() {
+                        return engine_error(
+                            phase,
+                            ScriptErrorKind::Cancelled,
+                            "script cancelled",
+                            started.elapsed(),
+                            redactor,
+                        );
+                    }
+                    if timed_out.load(Ordering::Acquire) {
+                        timed_out.store(true, Ordering::Release);
+                        return engine_error(
+                            phase,
+                            ScriptErrorKind::TimedOut,
+                            format!(
+                                "script exceeded its {} ms execution limit",
+                                SCRIPT_TIMEOUT.as_millis()
+                            ),
+                            started.elapsed(),
+                            redactor,
+                        );
+                    }
+                    if ctx
+                        .eval::<bool, _>("globalThis.__API_TESTER_SETTLED.rejected")
+                        .unwrap_or(false)
+                    {
+                        capture_top_level_rejection(&ctx, phase, started.elapsed(), redactor)
+                    } else if ctx.has_exception() {
+                        let value = ctx.catch();
+                        let caught = match value
+                            .as_object()
+                            .and_then(|object| Exception::from_object(object.clone()))
+                        {
+                            Some(exception) => CaughtError::Exception(exception),
+                            None => CaughtError::Value(value),
+                        };
+                        caught_error(phase, caught, started.elapsed(), redactor)
+                    } else {
+                        simple_error(
+                            phase,
+                            ScriptErrorKind::Runtime,
+                            "script rejected while running",
+                            redactor,
+                        )
+                    }
+                });
+                return Err(error);
+            }
+        }
+    }
+    if timed_out.load(Ordering::Acquire) {
+        return Err(engine_error(
+            phase,
+            ScriptErrorKind::TimedOut,
+            format!(
+                "script exceeded its {} ms execution limit",
+                SCRIPT_TIMEOUT.as_millis()
+            ),
+            started.elapsed(),
+            redactor,
+        ));
+    }
+    if cancellation.is_cancelled() {
+        return Err(engine_error(
+            phase,
+            ScriptErrorKind::Cancelled,
+            "script cancelled",
+            started.elapsed(),
+            redactor,
+        ));
+    }
+
+    // Distinguish "settled cleanly", "rejected", and "parked on an await that
+    // will never settle".
+    let settle = context.with(|ctx| {
+        (
+            ctx.eval::<bool, _>("globalThis.__API_TESTER_SETTLED.done").unwrap_or(false),
+            ctx.eval::<bool, _>("globalThis.__API_TESTER_SETTLED.rejected").unwrap_or(false),
+        )
+    });
+    if !settle.0 {
+        return Err(engine_error(
+            phase,
+            ScriptErrorKind::TimedOut,
+            "script finished without settling its top-level promise (an `await` at the top level never resolved)"
+                .to_owned(),
+            started.elapsed(),
+            redactor,
+        ));
+    }
+    if settle.1 {
+        // Mirrors the synchronous-throw path: include anything the script
+        // logged or mutated before it rejected, and scrub with both the
+        // ambient secrets and any the script just set.
+        let mut caught_redactor = redactor.clone();
+        let mut caught_output = None;
+        let collected = context.with(|ctx| -> Option<EngineOutput> {
+            let value = ctx.eval::<Value<'_>, _>("__API_TESTER_FINISH()").ok()?;
+            rquickjs_serde::from_value_strict::<EngineOutput>(value).ok()
+        });
+        if let Some(output) = collected {
+            extend_redactor_with_secret_names(
+                &mut caught_redactor,
+                secret_names,
+                &output.environment_mutations,
+            );
+            if serde_json::to_vec(&output)
+                .is_ok_and(|encoded| encoded.len() <= MAX_SCRIPT_RESULT_BYTES)
+            {
+                caught_output = Some(output);
+            }
+        }
+        let mut error = context.with(|ctx| {
+            capture_top_level_rejection(&ctx, phase, started.elapsed(), &caught_redactor)
+        });
+        if let Some(output) = caught_output {
+            error.report = report_from_output(phase, &output, started.elapsed(), false, &caught_redactor);
+        }
+        return Err(error);
+    }
+
+    let output: EngineOutput = context.with(|ctx| {
         let value: Value<'_> = ctx.eval("__API_TESTER_FINISH()").map_err(|error| {
             engine_error(
                 phase,
@@ -1054,7 +1254,7 @@ fn run_engine(
                 redactor,
             )
         })?;
-        let output: EngineOutput = rquickjs_serde::from_value_strict(value).map_err(|error| {
+        rquickjs_serde::from_value_strict(value).map_err(|error| {
             engine_error(
                 phase,
                 ScriptErrorKind::Runtime,
@@ -1062,34 +1262,34 @@ fn run_engine(
                 started.elapsed(),
                 redactor,
             )
-        })?;
-
-        let output_size = serde_json::to_vec(&output).map_err(|error| {
-            engine_error(
-                phase,
-                ScriptErrorKind::Engine,
-                format!("could not measure script output: {error}"),
-                started.elapsed(),
-                redactor,
-            )
-        })?;
-        if output_size.len() > MAX_SCRIPT_RESULT_BYTES {
-            return Err(engine_error(
-                phase,
-                ScriptErrorKind::OutputLimit,
-                format!(
-                    "script output is {} bytes; the limit is {MAX_SCRIPT_RESULT_BYTES} bytes",
-                    output_size.len()
-                ),
-                started.elapsed(),
-                redactor,
-            ));
-        }
-
-        Ok(EngineRun {
-            output,
-            duration: started.elapsed(),
         })
+    })?;
+
+    let output_size = serde_json::to_vec(&output).map_err(|error| {
+        engine_error(
+            phase,
+            ScriptErrorKind::Engine,
+            format!("could not measure script output: {error}"),
+            started.elapsed(),
+            redactor,
+        )
+    })?;
+    if output_size.len() > MAX_SCRIPT_RESULT_BYTES {
+        return Err(engine_error(
+            phase,
+            ScriptErrorKind::OutputLimit,
+            format!(
+                "script output is {} bytes; the limit is {MAX_SCRIPT_RESULT_BYTES} bytes",
+                output_size.len()
+            ),
+            started.elapsed(),
+            redactor,
+        ));
+    }
+
+    Ok(EngineRun {
+        output,
+        duration: started.elapsed(),
     })
 }
 
@@ -1230,6 +1430,29 @@ fn simple_error(
     redactor: &SecretRedactor,
 ) -> ScriptError {
     engine_error(phase, kind, message, Duration::ZERO, redactor)
+}
+
+/// Converts a captured top-level rejection into a [`ScriptError`], routing the
+/// reason through the same classification used for synchronous throws so that
+/// error messages, stacks and secret redaction stay consistent.
+fn capture_top_level_rejection(
+    ctx: &rquickjs::Ctx<'_>,
+    phase: ScriptPhase,
+    duration: Duration,
+    redactor: &SecretRedactor,
+) -> ScriptError {
+    match ctx
+        .eval::<(), _>("throw globalThis.__API_TESTER_SETTLED.reason;")
+        .catch(ctx)
+    {
+        Err(caught) => caught_error(phase, caught, duration, redactor),
+        Ok(()) => simple_error(
+            phase,
+            ScriptErrorKind::Runtime,
+            "script rejected its top-level promise",
+            redactor,
+        ),
+    }
 }
 
 fn engine_error(
@@ -1905,5 +2128,105 @@ api.requests.execute(ChatAdmin.Login);
         .expect("post-response scheduling should succeed");
         assert_eq!(result.chained_requests.len(), 1);
         assert_eq!(result.chained_requests[0].path, "Payments.Login");
+    }
+
+    #[test]
+    fn top_level_await_resolves_and_persists() {
+        let result = execute_pre_request(
+            r#"
+const value = await Promise.resolve(41);
+api.environment.set("sum", String(value + 1));
+"#,
+            &request(),
+            &ScriptScope::default(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
+        )
+        .expect("top-level await should run to completion");
+        assert_eq!(
+            result.environment_mutations,
+            vec![EnvironmentMutation::Set {
+                key: "sum".to_owned(),
+                value: "42".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn top_level_await_can_schedule_chained_requests() {
+        let (_workspace, catalog) = chaining_workspace();
+        let result = execute_pre_request(
+            r#"
+await Promise.resolve();
+api.requests.execute(ChatAdmin.Login);
+"#,
+            &request(),
+            &ScriptScope::default(),
+            &catalog,
+            &ScriptCancellation::new(),
+        )
+        .expect("top-level await with scheduling");
+        assert_eq!(result.chained_requests.len(), 1);
+        assert_eq!(result.chained_requests[0].path, "ChatAdmin.Login");
+    }
+
+    #[test]
+    fn top_level_await_rejection_surfaces_error() {
+        let error = execute_pre_request(
+            r#"
+await Promise.reject(new Error("async-broken"));
+"#,
+            &request(),
+            &ScriptScope::default(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
+        )
+        .expect_err("a rejected top-level await must fail the script");
+        assert_eq!(error.diagnostic.kind, ScriptErrorKind::Runtime);
+        assert!(
+            error.diagnostic.message.contains("async-broken"),
+            "rejection message: {}",
+            error.diagnostic.message
+        );
+    }
+
+    #[test]
+    fn never_settling_top_level_await_reports_timeout() {
+        let error = execute_pre_request(
+            r#"
+await new Promise(function(){});
+"#,
+            &request(),
+            &ScriptScope::default(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
+        )
+        .expect_err("a top-level await on a never-resolving promise must not hang");
+        assert_eq!(error.diagnostic.kind, ScriptErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn chained_async_function_and_top_level_await_run_to_completion() {
+        let result = execute_pre_request(
+            r#"
+async function compute() {
+  return await Promise.resolve(7);
+}
+const value = await compute();
+api.environment.set("seven", String(value));
+"#,
+            &request(),
+            &ScriptScope::default(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
+        )
+        .expect("mixed nested async fn + top-level await should run");
+        assert_eq!(
+            result.environment_mutations,
+            vec![EnvironmentMutation::Set {
+                key: "seven".to_owned(),
+                value: "7".to_owned(),
+            }]
+        );
     }
 }

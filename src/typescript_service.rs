@@ -1627,4 +1627,25 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn top_level_await_is_not_flagged_by_the_checker() {
+        run_async(async {
+            let service = TypeScriptServiceHandle::start().expect("embedded TypeScript starts");
+            let diagnostics = service
+                .diagnostics(
+                    TypeScriptScriptPhase::PreRequest,
+                    1,
+                    "await Promise.resolve(); api.environment.set(\"k\", \"v\");".to_owned(),
+                )
+                .await
+                .expect("top-level-await diagnostics");
+            assert!(
+                !diagnostics
+                    .iter()
+                    .any(|d| d.message.contains("Top-level 'await'")),
+                "top-level await must type-check against the runtime's async support: {diagnostics:?}"
+            );
+        });
+    }
 }
