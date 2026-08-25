@@ -22,9 +22,16 @@ use rquickjs::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    RequestDraft, ResponseData, request_namespace::{RequestNamespaceCatalog, RuntimeNamespaceSpec},
+    RequestDraft, ResponseData, chain::ChainRun,
+    request_namespace::{RequestNamespaceCatalog, RuntimeNamespaceSpec},
     template::redact_secret_values,
 };
+
+/// Runs a single awaited chained request's full pipeline (its own pre/post
+/// scripts, the HTTP exchange, and nested chains) to completion and returns
+/// the resulting run so its environment mutations can be applied live. The
+/// provider is responsible for actually performing the (blocking) execution.
+pub type InlineChainer<'a> = dyn Fn(&ChainedRequest) -> Result<ChainRun, String> + 'a;
 
 pub const SCRIPT_MEMORY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 pub const SCRIPT_STACK_LIMIT_BYTES: usize = 256 * 1024;
@@ -47,6 +54,30 @@ const PRELUDE: &str = r#"
   const logs = [];
   const tests = [];
   let logCharacters = 0;
+
+  // Pending `api.requests.execute(...)` operations. When a script *awaits* one,
+  // the native engine runs the referenced saved request's full pipeline inline
+  // and calls resolve(); when it is never awaited (a plain `execute()`), it is
+  // carried into `scheduledRequests` at finish so the request still runs after
+  // the phase. The engine drives this via the bridge below.
+  const nativeOps = [];
+  globalThis.__API_TESTER_NATIVE_OPS = nativeOps;
+  // Applies environment mutations produced by an inline chained request into
+  // the live environment *and* records them so they reach the workspace too.
+  globalThis.__API_TESTER_APPLY_CHAIN = function (mutations) {
+    const list = Array.isArray(mutations) ? mutations : [];
+    for (const mutation of list) {
+      if (mutation && mutation.op === "set") {
+        environmentValues[mutation.key] = String(mutation.value);
+        environmentMutations.push({ op: "set", key: mutation.key, value: String(mutation.value) });
+      } else if (mutation && mutation.op === "unset") {
+        delete environmentValues[mutation.key];
+        environmentMutations.push({ op: "unset", key: mutation.key });
+      }
+    }
+    return list.length;
+  };
+
 
   const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
   const normalizeName = value => String(value).trim().toLowerCase();
@@ -261,9 +292,14 @@ const PRELUDE: &str = r#"
         );
       }
       const metadata = reference[REQUEST_REF_MARKER];
-      scheduledRequests.push({
-        id: String(metadata.id),
-        path: String(metadata.path),
+      return new Promise(function (resolve, reject) {
+        nativeOps.push({
+          id: String(metadata.id),
+          path: String(metadata.path),
+          state: "pending",
+          resolve: resolve,
+          reject: reject,
+        });
       });
     },
   });
@@ -376,8 +412,16 @@ const PRELUDE: &str = r#"
   }
 
   Object.defineProperty(globalThis, "__API_TESTER_FINISH", {
-    value: () => ({
-      request: {
+    value: () => {
+      // Requests that were never awaited still run after the phase: carry any
+      // pending (non-awaited) execute() ops into the scheduled list.
+      for (const op of nativeOps) {
+        if (op.state === "pending") {
+          scheduledRequests.push({ id: op.id, path: op.path });
+        }
+      }
+      return {
+        request: {
         method: String(request.method),
         url: String(request.url),
         headers: request.headers.toArray(),
@@ -395,7 +439,8 @@ const PRELUDE: &str = r#"
       logs,
       tests,
       chainedRequests: scheduledRequests,
-    }),
+    };
+    },
     configurable: false,
     enumerable: false,
     writable: false,
@@ -731,12 +776,13 @@ struct EngineRun {
     duration: Duration,
 }
 
-pub fn execute_pre_request(
+fn execute_pre_request_inner(
     source: &str,
     request: &RequestDraft,
     scope: &ScriptScope,
     request_namespace: &RequestNamespaceCatalog,
     cancellation: &ScriptCancellation,
+    chain_inline: Option<&InlineChainer<'_>>,
 ) -> Result<PreRequestResult, ScriptError> {
     let phase = ScriptPhase::PreRequest;
     if source.trim().is_empty() {
@@ -765,6 +811,7 @@ pub fn execute_pre_request(
         phase,
         input,
         cancellation,
+        chain_inline,
         &redactor,
         &scope.environment.secret_names,
     )?;
@@ -794,13 +841,41 @@ pub fn execute_pre_request(
     })
 }
 
-pub fn execute_post_response(
+/// Runs a pre-request script without inline (awaited) chaining: `execute()`
+/// only schedules requests to run after the phase.
+pub fn execute_pre_request(
+    source: &str,
+    request: &RequestDraft,
+    scope: &ScriptScope,
+    request_namespace: &RequestNamespaceCatalog,
+    cancellation: &ScriptCancellation,
+) -> Result<PreRequestResult, ScriptError> {
+    execute_pre_request_inner(source, request, scope, request_namespace, cancellation, None)
+}
+
+/// Like [`execute_pre_request`], but supports `await api.requests.execute(...)`:
+/// the provided chainer runs the referenced saved request's full pipeline
+/// inline so the script only continues after it completes.
+pub fn execute_pre_request_with_chain(
+    source: &str,
+    request: &RequestDraft,
+    scope: &ScriptScope,
+    request_namespace: &RequestNamespaceCatalog,
+    cancellation: &ScriptCancellation,
+    chain_inline: Option<&InlineChainer<'_>>,
+) -> Result<PreRequestResult, ScriptError> {
+    execute_pre_request_inner(source, request, scope, request_namespace, cancellation, chain_inline)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_post_response_inner(
     source: &str,
     request: &RequestDraft,
     response: &ResponseData,
     scope: &ScriptScope,
     request_namespace: &RequestNamespaceCatalog,
     cancellation: &ScriptCancellation,
+    chain_inline: Option<&InlineChainer<'_>>,
 ) -> Result<PostResponseResult, ScriptError> {
     let phase = ScriptPhase::PostResponse;
     if source.trim().is_empty() {
@@ -829,6 +904,7 @@ pub fn execute_post_response(
         phase,
         input,
         cancellation,
+        chain_inline,
         &redactor,
         &scope.environment.secret_names,
     )?;
@@ -840,6 +916,48 @@ pub fn execute_post_response(
         chained_requests: run.output.chained_requests,
         report,
     })
+}
+
+/// Runs a post-response script without inline (awaited) chaining.
+pub fn execute_post_response(
+    source: &str,
+    request: &RequestDraft,
+    response: &ResponseData,
+    scope: &ScriptScope,
+    request_namespace: &RequestNamespaceCatalog,
+    cancellation: &ScriptCancellation,
+) -> Result<PostResponseResult, ScriptError> {
+    execute_post_response_inner(
+        source,
+        request,
+        response,
+        scope,
+        request_namespace,
+        cancellation,
+        None,
+    )
+}
+
+/// Like [`execute_post_response`], but supports `await api.requests.execute(...)`
+/// via the provided inline chainer.
+pub fn execute_post_response_with_chain(
+    source: &str,
+    request: &RequestDraft,
+    response: &ResponseData,
+    scope: &ScriptScope,
+    request_namespace: &RequestNamespaceCatalog,
+    cancellation: &ScriptCancellation,
+    chain_inline: Option<&InlineChainer<'_>>,
+) -> Result<PostResponseResult, ScriptError> {
+    execute_post_response_inner(
+        source,
+        request,
+        response,
+        scope,
+        request_namespace,
+        cancellation,
+        chain_inline,
+    )
 }
 
 fn extend_redactor_with_secret_mutations(
@@ -910,6 +1028,7 @@ fn run_engine(
     phase: ScriptPhase,
     input: EngineInput<'_>,
     cancellation: &ScriptCancellation,
+    chain_inline: Option<&InlineChainer<'_>>,
     redactor: &SecretRedactor,
     secret_names: &BTreeSet<String>,
 ) -> Result<EngineRun, ScriptError> {
@@ -1089,10 +1208,14 @@ fn run_engine(
         Ok(())
     })?;
 
-    // Drive the evaluation's promise job queue to settlement. Each ready
-    // microtask collected by execute_pending_job runs the body past an `await`
-    // (including top-level); the interrupt handler covers CPU-bound loops, and
-    // the deadline / cancellation checks cover scripts parked on an await.
+    // Drive the evaluation's promise job queue to settlement, interleaving
+    // awaited `api.requests.execute(...)` calls: after draining the available
+    // microtasks, if the script is blocked on an awaited execute() op we run the
+    // referenced saved request's full pipeline inline, apply its environment
+    // mutations to the live environment, and resolve the promise so the script
+    // continues only after the whole sub-chain has finished. The interrupt
+    // handler covers CPU-bound loops; the deadline / cancellation checks cover
+    // everything else, including awaited requests.
     loop {
         if cancellation.is_cancelled() {
             return Err(engine_error(
@@ -1116,60 +1239,165 @@ fn run_engine(
                 redactor,
             ));
         }
-        match runtime.execute_pending_job() {
-            Ok(true) => continue,
-            Ok(false) => break,
-            Err(_job) => {
-                // A continuation threw. Prefer the probe's captured reason; fall
-                // back to whatever the context currently holds.
-                let error = context.with(|ctx| {
-                    if cancellation.is_cancelled() {
-                        return engine_error(
-                            phase,
-                            ScriptErrorKind::Cancelled,
-                            "script cancelled",
-                            started.elapsed(),
-                            redactor,
-                        );
-                    }
-                    if timed_out.load(Ordering::Acquire) {
-                        timed_out.store(true, Ordering::Release);
-                        return engine_error(
-                            phase,
-                            ScriptErrorKind::TimedOut,
-                            format!(
-                                "script exceeded its {} ms execution limit",
-                                SCRIPT_TIMEOUT.as_millis()
-                            ),
-                            started.elapsed(),
-                            redactor,
-                        );
-                    }
+        let drained = loop {
+            if cancellation.is_cancelled() || timed_out.load(Ordering::Acquire) {
+                break false;
+            }
+            if Instant::now() >= deadline {
+                timed_out.store(true, Ordering::Release);
+                break false;
+            }
+            match runtime.execute_pending_job() {
+                Ok(true) => continue,
+                Ok(false) => break true,
+                Err(_job) => {
+                    let error = context.with(|ctx| {
+                        if ctx
+                            .eval::<bool, _>("globalThis.__API_TESTER_SETTLED.rejected")
+                            .unwrap_or(false)
+                        {
+                            capture_top_level_rejection(&ctx, phase, started.elapsed(), redactor)
+                        } else if ctx.has_exception() {
+                            let value = ctx.catch();
+                            let caught = match value
+                                .as_object()
+                                .and_then(|object| Exception::from_object(object.clone()))
+                            {
+                                Some(exception) => CaughtError::Exception(exception),
+                                None => CaughtError::Value(value),
+                            };
+                            caught_error(phase, caught, started.elapsed(), redactor)
+                        } else {
+                            simple_error(
+                                phase,
+                                ScriptErrorKind::Runtime,
+                                "script rejected while running",
+                                redactor,
+                            )
+                        }
+                    });
+                    return Err(error);
+                }
+            }
+        };
+        if !drained {
+            break;
+        }
+
+        // If the script is blocked awaiting `api.requests.execute(...)`, run the
+        // referenced saved request's full pipeline inline now.
+        match chain_inline {
+            None => break,
+            Some(chain_inline) => {
+                let pending = context.with(|ctx| -> Result<Option<(String, String)>, ScriptError> {
                     if ctx
-                        .eval::<bool, _>("globalThis.__API_TESTER_SETTLED.rejected")
+                        .eval::<bool, _>("globalThis.__API_TESTER_SETTLED.done")
                         .unwrap_or(false)
                     {
-                        capture_top_level_rejection(&ctx, phase, started.elapsed(), redactor)
-                    } else if ctx.has_exception() {
-                        let value = ctx.catch();
-                        let caught = match value
-                            .as_object()
-                            .and_then(|object| Exception::from_object(object.clone()))
-                        {
-                            Some(exception) => CaughtError::Exception(exception),
-                            None => CaughtError::Value(value),
-                        };
-                        caught_error(phase, caught, started.elapsed(), redactor)
-                    } else {
-                        simple_error(
+                        return Ok(None);
+                    }
+                    let json = ctx
+                        .eval::<String, _>(
+                            "(function(){ \
+                             var ops = globalThis.__API_TESTER_NATIVE_OPS || []; \
+                             for (var i = 0; i < ops.length; i++) { \
+                               if (ops[i].state === 'pending') { \
+                                 ops[i].state = 'running'; \
+                                 return JSON.stringify([ops[i].id, ops[i].path]); \
+                               } \
+                             } \
+                             return 'null'; })()",
+                        )
+                        .map_err(|error| {
+                            engine_error(
+                                phase,
+                                ScriptErrorKind::Engine,
+                                format!("could not read pending request scripts: {error}"),
+                                started.elapsed(),
+                                redactor,
+                            )
+                        })?;
+                    if json == "null" {
+                        return Ok(None);
+                    }
+                    let (id, path) = serde_json::from_str(&json).map_err(|error| {
+                        engine_error(
                             phase,
-                            ScriptErrorKind::Runtime,
-                            "script rejected while running",
+                            ScriptErrorKind::Engine,
+                            format!("pending request scripts had an unexpected shape: {error}"),
+                            started.elapsed(),
                             redactor,
                         )
+                    })?;
+                    Ok(Some((id, path)))
+                })?;
+
+                match pending {
+                    None => break,
+                    Some((id, path)) => {
+                        let result = chain_inline(&ChainedRequest { id, path });
+                        match result {
+                            Ok(run) => {
+                                let mutations_json = serde_json::to_string(
+                                    &run.environment_mutations,
+                                )
+                                .unwrap_or_else(|_| "[]".to_owned());
+                                context
+                                    .with(|ctx| {
+                                        let js = format!(
+                                            "__API_TESTER_APPLY_CHAIN({mutations_json}); \
+                                             (function(){{ var ops = globalThis.__API_TESTER_NATIVE_OPS || []; \
+                                               for (var i = 0; i < ops.length; i++) {{ \
+                                                 if (ops[i].state === 'running') {{ \
+                                                   ops[i].state = 'resolved'; \
+                                                   ops[i].resolve(); \
+                                                 }} \
+                                               }} }})();"
+                                        );
+                                        ctx.eval::<(), _>(js.as_str())
+                                    })
+                                    .map_err(|error| {
+                                        engine_error(
+                                            phase,
+                                            ScriptErrorKind::Engine,
+                                            format!("could not finalize awaited request: {error}"),
+                                            started.elapsed(),
+                                            redactor,
+                                        )
+                                    })?;
+                            }
+                            Err(message) => {
+                                let message_json =
+                                    serde_json::to_string(&message).unwrap_or_else(|_| {
+                                        "\"awaited request failed\"".to_owned()
+                                    });
+                                context
+                                    .with(|ctx| {
+                                        let js = format!(
+                                            "(function(){{ var ops = globalThis.__API_TESTER_NATIVE_OPS || []; \
+                                               for (var i = 0; i < ops.length; i++) {{ \
+                                                 if (ops[i].state === 'running') {{ \
+                                                   ops[i].state = 'rejected'; \
+                                                   ops[i].reject({message_json}); \
+                                                 }} \
+                                               }} }})();"
+                                        );
+                                        ctx.eval::<(), _>(js.as_str())
+                                    })
+                                    .map_err(|error| {
+                                        engine_error(
+                                            phase,
+                                            ScriptErrorKind::Engine,
+                                            format!("could not reject awaited request: {error}"),
+                                            started.elapsed(),
+                                            redactor,
+                                        )
+                                    })?;
+                            }
+                        }
+                        continue;
                     }
-                });
-                return Err(error);
+                }
             }
         }
     }
@@ -2227,6 +2455,82 @@ api.environment.set("seven", String(value));
                 key: "seven".to_owned(),
                 value: "7".to_owned(),
             }]
+        );
+    }
+
+    #[test]
+    fn awaited_execute_applies_env_mutations_before_continuing() {
+        let (_workspace, catalog) = chaining_workspace();
+        let chainer =
+            |_scheduled: &crate::core::ChainedRequest| -> Result<crate::core::ChainRun, String> {
+                Ok(crate::core::ChainRun {
+                    environment_mutations: vec![EnvironmentMutation::Set {
+                        key: "AUTH_TOKEN".to_owned(),
+                        value: "tok-123".to_owned(),
+                    }],
+                    ..Default::default()
+                })
+            };
+        let result = execute_pre_request_with_chain(
+            r#"
+const token = api.environment.get("AUTH_TOKEN");
+if (!token || token.trim() === "") {
+  await api.requests.execute(ChatAdmin.Login);
+  api.environment.set("saw", api.environment.get("AUTH_TOKEN"));
+}
+api.request.headers.set("Authorization", "Bearer " + api.environment.get("AUTH_TOKEN"));
+"#,
+            &request(),
+            &ScriptScope::default(),
+            &catalog,
+            &ScriptCancellation::new(),
+            Some(&chainer),
+        )
+        .expect("awaited execute should run inline");
+
+        // The statement after the await must have observed the refreshed token.
+        assert!(
+            result.environment_mutations.contains(&EnvironmentMutation::Set {
+                key: "saw".to_owned(),
+                value: "tok-123".to_owned(),
+            }),
+            "mutations: {:?}",
+            result.environment_mutations
+        );
+        assert!(
+            result.request.headers.iter().any(|header| {
+                header.name.eq_ignore_ascii_case("Authorization")
+                    && header.value.contains("tok-123")
+            }),
+            "Authorization header did not carry the refreshed token: {:?}",
+            result.request.headers
+        );
+    }
+
+    #[test]
+    fn awaited_execute_failure_stops_the_script_before_continuing() {
+        let (_workspace, catalog) = chaining_workspace();
+        let chainer =
+            |_scheduled: &crate::core::ChainedRequest| -> Result<crate::core::ChainRun, String> {
+                Err("chained login failed".to_owned())
+            };
+        let error = execute_pre_request_with_chain(
+            r#"
+await api.requests.execute(ChatAdmin.Login);
+api.request.headers.set("Authorization", "Bearer SHOULD-NOT-RUN");
+"#,
+            &request(),
+            &ScriptScope::default(),
+            &catalog,
+            &ScriptCancellation::new(),
+            Some(&chainer),
+        )
+        .expect_err("a failed awaited request must reject the script");
+        assert_eq!(error.diagnostic.kind, ScriptErrorKind::Runtime);
+        assert!(
+            error.diagnostic.message.contains("chained login failed"),
+            "message: {}",
+            error.diagnostic.message
         );
     }
 }

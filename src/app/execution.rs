@@ -84,10 +84,19 @@ impl ApiTester {
         let cancellation = ScriptCancellation::new();
         self.script_cancellation = Some(cancellation.clone());
         self.chain_budget.store(0, Ordering::Relaxed);
+        let tape_environment = environment_id.clone();
+        let chainer = self.build_inline_chainer(&tape_environment);
         let task = self
             .runtime
             .spawn_blocking(move || {
-                execute_pre_request(&source, &request, &scope, &namespace, &cancellation)
+                crate::core::execute_pre_request_with_chain(
+                    &source,
+                    &request,
+                    &scope,
+                    &namespace,
+                    &cancellation,
+                    Some(&chainer),
+                )
             });
         cx.notify();
 
@@ -375,6 +384,132 @@ impl ApiTester {
         .detach();
     }
 
+    /// Builds an inline chainer for awaited `api.requests.execute(...)`. It runs
+    /// the referenced saved request's full pipeline to completion on a dedicated
+    /// current-thread runtime (safe because scripts run on `spawn_blocking`
+    /// threads, where no tokio runtime is active), bounded by the script timeout,
+    /// and returns `Err` on chain failure so the awaiting script rejects.
+    fn build_inline_chainer(
+        &self,
+        environment_id: &Option<String>,
+    ) -> impl Fn(&crate::core::ChainedRequest) -> Result<crate::core::ChainRun, String> + Send + 'static {
+        let workspace = self.workspace.clone();
+        let namespace = self.request_namespace.clone();
+        let environment_id = environment_id.clone();
+        let chain_cancellation = self
+            .script_cancellation
+            .clone()
+            .unwrap_or_else(crate::core::ScriptCancellation::new);
+        let budget = Arc::clone(&self.chain_budget);
+        let local_client = self.client.clone();
+        let upstream_client = self.upstream_execution_client.clone();
+        let vault = self.credential_vault.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let target = match self.workspace_providers.active_id() {
+            WorkspaceProviderId::Local(_) => None,
+            WorkspaceProviderId::Upstream { .. } => match self.active_upstream_workspace() {
+                Ok(target) => Some((target.upstream_id, target.workspace_id, target.base_url)),
+                Err(_) => None,
+            },
+        };
+        let limits = crate::core::ChainLimits::default();
+        move |scheduled: &crate::core::ChainedRequest| {
+            let workspace = workspace.clone();
+            let namespace = namespace.clone();
+            let environment_id = environment_id.clone();
+            let chain_cancellation = chain_cancellation.clone();
+            let budget = budget.clone();
+            let local_client = local_client.clone();
+            let upstream_client = upstream_client.clone();
+            let vault = vault.clone();
+            let runtime = Arc::clone(&runtime);
+            let target = target.clone();
+            let requested = vec![scheduled.clone()];
+            let blocking_runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    return Err(format!(
+                        "could not start runtime for awaited request: {error}"
+                    ));
+                }
+            };
+            blocking_runtime
+                .block_on(async move {
+                    let sender = move |request: crate::core::RequestDraft| {
+                        let local_client = local_client.clone();
+                        let upstream_client = upstream_client.clone();
+                        let vault = vault.clone();
+                        let runtime = Arc::clone(&runtime);
+                        let target = target.clone();
+                        async move {
+                            match target {
+                                None => crate::core::send_request(&local_client, request).await,
+                                Some((upstream_id, workspace_id, base_url)) => {
+                                    let credential = runtime
+                                        .spawn_blocking(move || vault.load_upstream(&upstream_id))
+                                        .await
+                                        .map_err(|error| {
+                                            crate::core::RequestError::TaskFailed(
+                                                error.to_string(),
+                                            )
+                                        })?
+                                        .map_err(|error| {
+                                            crate::core::RequestError::Upstream(error.to_string())
+                                        })?
+                                        .ok_or_else(|| {
+                                            crate::core::RequestError::Upstream(
+                                                "Log in to this server again.".to_owned(),
+                                            )
+                                        })?;
+                                    if credential.expires_at <= Utc::now() {
+                                        return Err(crate::core::RequestError::Upstream(
+                                            "Log in to this server again.".to_owned(),
+                                        ));
+                                    }
+                                    crate::core::send_request_for_upstream_workspace(
+                                        &upstream_client,
+                                        &local_client,
+                                        &base_url,
+                                        credential.bearer_token(),
+                                        &workspace_id,
+                                        request,
+                                    )
+                                    .await
+                                }
+                            }
+                        }
+                    };
+                    let run = match tokio::time::timeout(
+                        crate::core::SCRIPT_TIMEOUT,
+                        crate::core::run_chain(
+                            &workspace,
+                            environment_id.as_deref(),
+                            &requested,
+                            &namespace,
+                            &chain_cancellation,
+                            sender,
+                            limits,
+                            &budget,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(run) => run,
+                        Err(_) => {
+                            return Err("awaited request exceeded its execution limit".to_owned());
+                        }
+                    };
+                    if let Some(failure) = run.error {
+                        return Err(failure.message);
+                    }
+                    Ok(run)
+                })
+        }
+    }
+
     /// Apply the effects of a finished chain to the real workspace: persist the
     /// chained requests' environment mutations and record their history entries
     /// and shared-history uploads.
@@ -556,8 +691,18 @@ impl ApiTester {
             .clone()
             .expect("chain cancellation is present while sending");
         self.script_cancellation = Some(cancellation.clone());
+        let tape_environment = environment_id.clone();
+        let chainer = self.build_inline_chainer(&tape_environment);
         let task = self.runtime.spawn_blocking(move || {
-            execute_post_response(&source, &request, &response, &scope, &namespace, &cancellation)
+            crate::core::execute_post_response_with_chain(
+                &source,
+                &request,
+                &response,
+                &scope,
+                &namespace,
+                &cancellation,
+                Some(&chainer),
+            )
         });
         cx.notify();
 

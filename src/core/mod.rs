@@ -43,9 +43,9 @@ pub use request_namespace::{
 };
 pub use script::{
     ChainedRequest, EnvironmentMutation, MAX_SCRIPT_SOURCE_BYTES, PostResponseResult,
-    PreRequestResult, ScriptCancellation, ScriptDiagnostic, ScriptEnvironment, ScriptError,
-    ScriptErrorKind, ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope,
-    execute_post_response, execute_pre_request,
+    PreRequestResult, SCRIPT_TIMEOUT, ScriptCancellation, ScriptDiagnostic, ScriptEnvironment,
+    ScriptError, ScriptErrorKind, ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope,
+    execute_post_response_with_chain, execute_pre_request_with_chain,
 };
 #[cfg(test)]
 pub use script::{ScriptLog, ScriptTestResult};

@@ -495,8 +495,31 @@ name after it was created.
   workspace fails with a clear script diagnostic.
 
 This is distinct from a future generic `fetch()` API: `api.requests.execute`
-gives no raw network access; it only schedules existing saved requests. Scripts
-receive no `Response` or `Promise` from `execute`.
+gives no raw network access; it only runs existing saved requests. `execute`
+returns no `Response` to the script.
+
+#### Awaiting a chained request
+
+`api.requests.execute(...)` returns a promise, so you can **await** it inside
+either phase. An awaited `execute` runs the referenced saved request's full
+pipeline (its own pre/post-response scripts plus the HTTP exchange, recursively
+including anything **it** chains) to completion, applies its environment
+mutations to the live environment, and only then lets the script continue. This
+lets a pre-request script ensure a prerequisite has run before the next line:
+
+```js
+const token = api.environment.get("AUTH_TOKEN");
+if (!token || token.trim() === "") {
+  await api.requests.execute(Auth.Login);       // runs now; blocks until done
+  api.environment.set("refreshed", api.environment.get("AUTH_TOKEN"));
+}
+api.request.headers.set("Authorization", "Bearer " + api.environment.get("AUTH_TOKEN"));
+```
+
+Here the `Authorization` header is set from the token that `Auth.Login` produced,
+because the awaited chain completed before that statement ran. If the awaited
+request's chain fails, the `await` rejects and the rest of the script is skipped.
+Calling `execute` without `await` keeps the scheduled-after-the-phase behavior.
 
 The scripting editor's completion, hover, and diagnostics reflect the active
 workspace's collection tree so the editor and runtime can never drift: typing

@@ -826,8 +826,8 @@ const ROOT_MEMBERS_POST: &[CompletionSpec] = &[
 
 const REQUESTS_MEMBERS: &[CompletionSpec] = &[method(
     "execute",
-    "(requestRef: SavedRequestReference): void",
-    "Schedules a saved request from the active workspace for execution after the current script phase. Pass a request reference such as ChatAdmin.Login (never a string path). Chained requests run through the normal request pipeline, including their own scripts and environment mutations; recursion is bounded and cycles are rejected.",
+    "(requestRef: SavedRequestReference): Promise<void>",
+    "Runs a saved request from the active workspace. Await it to run the full pipeline (its own pre/post scripts, the HTTP exchange, and anything it chains) before the script continues and apply its environment mutations to the live environment; without await it runs after the current phase. Pass a request reference such as ChatAdmin.Login (never a string path); recursion is bounded and cycles are rejected.",
 )];
 
 const REQUEST_MEMBERS_PRE: &[CompletionSpec] = &[

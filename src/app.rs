@@ -69,7 +69,7 @@ use crate::{
         build_upstream_execution_client, create_upstream_collection, create_upstream_environment,
         create_upstream_saved_request, create_upstream_workspace, delete_shared_history,
         delete_upstream_collection, delete_upstream_environment, delete_upstream_saved_request,
-        delete_upstream_workspace, execute_post_response, execute_pre_request, export_request,
+        delete_upstream_workspace, export_request,
         format_body, generate_snippet, get_upstream_user, get_upstream_workspace, import_requests,
         is_probably_text, list_upstream_environments, list_upstream_workspaces, login_upstream,
         move_upstream_collection, move_upstream_saved_request, normalize_upstream_url,

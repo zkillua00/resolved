@@ -121,12 +121,15 @@ declare namespace Resolved {
   }
 
   interface RequestReferences {
-    /** Schedules a saved request from the active workspace's collection tree
-     * to run through the normal request pipeline after this script phase. Pass
-     * a request reference such as `ChatAdmin.Login` (never a string path).
-     * This is distinct from a raw `fetch()`: execution is scheduled, and
-     * recursion is bounded and cycles rejected. */
-    readonly execute: (requestRef: SavedRequestReference) => void;
+    /** Runs a saved request from the active workspace's collection tree.
+     * Pass a request reference such as `ChatAdmin.Login` (never a string path).
+     * Await it to run the full pipeline (its own pre/post scripts, the HTTP
+     * exchange, and anything it chains) before the script continues, applying
+     * its environment mutations to the live environment; without await it runs
+     * after the current script phase. Distinct from a raw `fetch()`: execution
+     * only ever runs saved requests, and recursion is bounded and cycles
+     * rejected. */
+    readonly execute: (requestRef: SavedRequestReference) => Promise<void>;
   }
 
   interface ScriptConsole {
