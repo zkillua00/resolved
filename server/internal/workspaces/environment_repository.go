@@ -13,7 +13,21 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-func (r *Repository) ListEnvironments(ctx context.Context, workspaceID string) ([]Environment, error) {
+type EnvironmentRepository struct {
+	db         *gorm.DB
+	dataCipher *security.DataCipher
+	core       *Repository
+}
+
+func NewEnvironmentRepository(repository *Repository) *EnvironmentRepository {
+	return &EnvironmentRepository{
+		db:         repository.db,
+		dataCipher: repository.dataCipher,
+		core:       repository,
+	}
+}
+
+func (r *EnvironmentRepository) ListEnvironments(ctx context.Context, workspaceID string) ([]Environment, error) {
 	db := r.db.WithContext(ctx)
 	if err := ensureWorkspaceExists(db, workspaceID); err != nil {
 		return nil, err
@@ -21,7 +35,7 @@ func (r *Repository) ListEnvironments(ctx context.Context, workspaceID string) (
 	return r.loadEnvironments(db, workspaceID)
 }
 
-func (r *Repository) GetEnvironment(ctx context.Context, workspaceID, environmentID string) (Environment, error) {
+func (r *EnvironmentRepository) GetEnvironment(ctx context.Context, workspaceID, environmentID string) (Environment, error) {
 	var environment Environment
 	db := r.db.WithContext(ctx)
 	if err := db.Where("workspace_id = ? AND id = ?", workspaceID, environmentID).
@@ -31,10 +45,10 @@ func (r *Repository) GetEnvironment(ctx context.Context, workspaceID, environmen
 		}
 		return Environment{}, err
 	}
-	if err := r.decryptResourceName(ctx, db, workspaceID, "environment_name", environment.ID, environment.EncryptedName, &environment.Name); err != nil {
+	if err := r.core.decryptResourceName(ctx, db, workspaceID, "environment_name", environment.ID, environment.EncryptedName, &environment.Name); err != nil {
 		return Environment{}, err
 	}
-	if err := r.hydrateCreator(db, environment.CreatedByUserID, &environment.CreatedByUser); err != nil {
+	if err := r.core.hydrateCreator(db, environment.CreatedByUserID, &environment.CreatedByUser); err != nil {
 		return Environment{}, err
 	}
 	variables, err := r.loadEnvironmentVariables(db, workspaceID, []string{environment.ID})
@@ -48,7 +62,7 @@ func (r *Repository) GetEnvironment(ctx context.Context, workspaceID, environmen
 	return environment, nil
 }
 
-func (r *Repository) CreateEnvironment(ctx context.Context, environment Environment) (Environment, error) {
+func (r *EnvironmentRepository) CreateEnvironment(ctx context.Context, environment Environment) (Environment, error) {
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := ensureWorkspaceExists(tx, environment.WorkspaceID); err != nil {
 			return err
@@ -58,7 +72,7 @@ func (r *Repository) CreateEnvironment(ctx context.Context, environment Environm
 			return err
 		}
 		environment.Position = position
-		if err := r.encryptResourceName(
+		if err := r.core.encryptResourceName(
 			ctx, tx, environment.WorkspaceID, "environment_name", environment.ID,
 			&environment.Name, &environment.EncryptedName,
 		); err != nil {
@@ -75,7 +89,7 @@ func (r *Repository) CreateEnvironment(ctx context.Context, environment Environm
 	return r.GetEnvironment(ctx, environment.WorkspaceID, environment.ID)
 }
 
-func (r *Repository) UpdateEnvironmentName(
+func (r *EnvironmentRepository) UpdateEnvironmentName(
 	ctx context.Context,
 	workspaceID, environmentID, name string,
 ) (Environment, error) {
@@ -84,7 +98,7 @@ func (r *Repository) UpdateEnvironmentName(
 			return err
 		}
 		var encryptedName []byte
-		if err := r.encryptResourceName(ctx, tx, workspaceID, "environment_name", environmentID, &name, &encryptedName); err != nil {
+		if err := r.core.encryptResourceName(ctx, tx, workspaceID, "environment_name", environmentID, &name, &encryptedName); err != nil {
 			return err
 		}
 		updates := map[string]any{"name": name}
@@ -105,7 +119,7 @@ func (r *Repository) UpdateEnvironmentName(
 	return r.GetEnvironment(ctx, workspaceID, environmentID)
 }
 
-func (r *Repository) DeleteEnvironment(ctx context.Context, workspaceID, environmentID string) error {
+func (r *EnvironmentRepository) DeleteEnvironment(ctx context.Context, workspaceID, environmentID string) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := ensureEnvironmentExists(tx, workspaceID, environmentID); err != nil {
 			return err
@@ -126,7 +140,7 @@ func (r *Repository) DeleteEnvironment(ctx context.Context, workspaceID, environ
 	})
 }
 
-func (r *Repository) CreateEnvironmentVariable(
+func (r *EnvironmentRepository) CreateEnvironmentVariable(
 	ctx context.Context,
 	workspaceID string,
 	variable EnvironmentVariable,
@@ -170,7 +184,7 @@ func (r *Repository) CreateEnvironmentVariable(
 	return r.GetEnvironmentVariable(ctx, workspaceID, variable.EnvironmentID, variable.ID)
 }
 
-func (r *Repository) GetEnvironmentVariable(
+func (r *EnvironmentRepository) GetEnvironmentVariable(
 	ctx context.Context,
 	workspaceID, environmentID, variableID string,
 ) (EnvironmentVariable, error) {
@@ -195,13 +209,13 @@ func (r *Repository) GetEnvironmentVariable(
 	if err := r.decryptEnvironmentVariableKey(ctx, db, workspaceID, &variable); err != nil {
 		return EnvironmentVariable{}, err
 	}
-	if err := r.hydrateCreator(db, variable.CreatedByUserID, &variable.CreatedByUser); err != nil {
+	if err := r.core.hydrateCreator(db, variable.CreatedByUserID, &variable.CreatedByUser); err != nil {
 		return EnvironmentVariable{}, err
 	}
 	return variable, nil
 }
 
-func (r *Repository) UpdateEnvironmentVariable(
+func (r *EnvironmentRepository) UpdateEnvironmentVariable(
 	ctx context.Context,
 	workspaceID, environmentID, variableID string,
 	key *string,
@@ -251,7 +265,7 @@ func (r *Repository) UpdateEnvironmentVariable(
 	return r.GetEnvironmentVariable(ctx, workspaceID, environmentID, variableID)
 }
 
-func (r *Repository) PutEnvironmentVariableValue(
+func (r *EnvironmentRepository) PutEnvironmentVariableValue(
 	ctx context.Context,
 	workspaceID, environmentID, variableID, userID string,
 	ciphertext []byte,
@@ -279,7 +293,7 @@ func (r *Repository) PutEnvironmentVariableValue(
 	return r.GetEnvironmentVariable(ctx, workspaceID, environmentID, variableID)
 }
 
-func (r *Repository) DeleteEnvironmentVariable(
+func (r *EnvironmentRepository) DeleteEnvironmentVariable(
 	ctx context.Context,
 	workspaceID, environmentID, variableID string,
 ) error {
@@ -302,7 +316,7 @@ func (r *Repository) DeleteEnvironmentVariable(
 	})
 }
 
-func (r *Repository) ListEnvironmentValueCiphertexts(
+func (r *EnvironmentRepository) ListEnvironmentValueCiphertexts(
 	ctx context.Context,
 	workspaceID, userID string,
 ) (map[string][]byte, error) {
@@ -358,7 +372,7 @@ func RekeyEnvironmentVariableValues(
 	return nil
 }
 
-func (r *Repository) loadEnvironments(db *gorm.DB, workspaceID string) ([]Environment, error) {
+func (r *EnvironmentRepository) loadEnvironments(db *gorm.DB, workspaceID string) ([]Environment, error) {
 	var environments []Environment
 	if err := db.Where("workspace_id = ?", workspaceID).
 		Order("position ASC").Order("id ASC").Find(&environments).Error; err != nil {
@@ -366,11 +380,11 @@ func (r *Repository) loadEnvironments(db *gorm.DB, workspaceID string) ([]Enviro
 	}
 	ids := make([]string, 0, len(environments))
 	for index := range environments {
-		if err := r.decryptResourceName(db.Statement.Context, db, workspaceID, "environment_name", environments[index].ID, environments[index].EncryptedName, &environments[index].Name); err != nil {
+		if err := r.core.decryptResourceName(db.Statement.Context, db, workspaceID, "environment_name", environments[index].ID, environments[index].EncryptedName, &environments[index].Name); err != nil {
 			return nil, err
 		}
 		ids = append(ids, environments[index].ID)
-		if err := r.hydrateCreator(db, environments[index].CreatedByUserID, &environments[index].CreatedByUser); err != nil {
+		if err := r.core.hydrateCreator(db, environments[index].CreatedByUserID, &environments[index].CreatedByUser); err != nil {
 			return nil, err
 		}
 	}
@@ -387,7 +401,7 @@ func (r *Repository) loadEnvironments(db *gorm.DB, workspaceID string) ([]Enviro
 	return environments, nil
 }
 
-func (r *Repository) loadEnvironmentVariables(
+func (r *EnvironmentRepository) loadEnvironmentVariables(
 	db *gorm.DB,
 	workspaceID string,
 	environmentIDs []string,
@@ -406,7 +420,7 @@ func (r *Repository) loadEnvironmentVariables(
 		if err := r.decryptEnvironmentVariableKey(db.Statement.Context, db, workspaceID, &variables[index]); err != nil {
 			return nil, err
 		}
-		if err := r.hydrateCreator(db, variables[index].CreatedByUserID, &variables[index].CreatedByUser); err != nil {
+		if err := r.core.hydrateCreator(db, variables[index].CreatedByUserID, &variables[index].CreatedByUser); err != nil {
 			return nil, err
 		}
 		result[variables[index].EnvironmentID] = append(result[variables[index].EnvironmentID], variables[index])
@@ -414,7 +428,7 @@ func (r *Repository) loadEnvironmentVariables(
 	return result, nil
 }
 
-func (r *Repository) encryptEnvironmentVariableKey(
+func (r *EnvironmentRepository) encryptEnvironmentVariableKey(
 	ctx context.Context,
 	db *gorm.DB,
 	workspaceID string,
@@ -449,7 +463,7 @@ func (r *Repository) encryptEnvironmentVariableKey(
 	return nil
 }
 
-func (r *Repository) decryptEnvironmentVariableKey(
+func (r *EnvironmentRepository) decryptEnvironmentVariableKey(
 	ctx context.Context,
 	db *gorm.DB,
 	workspaceID string,
@@ -477,7 +491,7 @@ func (r *Repository) decryptEnvironmentVariableKey(
 	return nil
 }
 
-func (r *Repository) EncryptLegacyEnvironmentVariableKeys(ctx context.Context) error {
+func (r *EnvironmentRepository) EncryptLegacyEnvironmentVariableKeys(ctx context.Context) error {
 	if r.dataCipher == nil {
 		return security.ErrDataKeyUnavailable
 	}

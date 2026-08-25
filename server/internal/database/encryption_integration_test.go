@@ -64,6 +64,7 @@ func TestSensitiveRepositoriesPersistCiphertextOnly(t *testing.T) {
 		t.Fatalf("find encrypted user = %+v, err = %v", foundUser, err)
 	}
 	workspaceRepository := workspaces.NewRepository(db, dataCipher)
+	environmentRepository := workspaces.NewEnvironmentRepository(workspaceRepository)
 	workspace, err := workspaceRepository.CreateWorkspace(t.Context(), workspaces.Workspace{
 		ID: uuid.NewString(), Name: "Workspace", CreatedAt: now, UpdatedAt: now,
 	}, nil)
@@ -86,14 +87,14 @@ func TestSensitiveRepositoriesPersistCiphertextOnly(t *testing.T) {
 		t.Fatalf("load raw collection: %v", err)
 	}
 	assertCiphertextOnly(t, rawCollection.EncryptedName, rawCollection.Name, "Collection")
-	environment, err := workspaceRepository.CreateEnvironment(t.Context(), workspaces.Environment{
+	environment, err := environmentRepository.CreateEnvironment(t.Context(), workspaces.Environment{
 		ID: uuid.NewString(), WorkspaceID: workspace.ID, Name: "Production secrets",
 		CreatedAt: now, UpdatedAt: now,
 	})
 	if err != nil {
 		t.Fatalf("create encrypted environment: %v", err)
 	}
-	variable, err := workspaceRepository.CreateEnvironmentVariable(
+	variable, err := environmentRepository.CreateEnvironmentVariable(
 		t.Context(), workspace.ID,
 		workspaces.EnvironmentVariable{
 			ID: uuid.NewString(), EnvironmentID: environment.ID, Key: "PRIVATE_API_TOKEN",

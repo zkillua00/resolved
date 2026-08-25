@@ -142,13 +142,14 @@ func New(cfg config.Config, accessLog io.Writer) (*Application, error) {
 	)
 	rolesService := roles.NewService(repository, roles.WithEvents(recordedEvents))
 	workspaceRepository := workspaces.NewRepository(db, dataCipher)
+	environmentRepository := workspaces.NewEnvironmentRepository(workspaceRepository)
 	sharedHistoryRepository := sharedhistory.NewRepository(db, dataCipher)
 	settingsRepository := requestproxy.NewSettingsRepository(db, dataCipher)
 	if err := workspaceRepository.EncryptLegacyResourceNames(context.Background()); err != nil {
 		closeCipherOnError()
 		return nil, fmt.Errorf("encrypt existing workspace resource names: %w", err)
 	}
-	if err := workspaceRepository.EncryptLegacyEnvironmentVariableKeys(context.Background()); err != nil {
+	if err := environmentRepository.EncryptLegacyEnvironmentVariableKeys(context.Background()); err != nil {
 		closeCipherOnError()
 		return nil, fmt.Errorf("encrypt existing environment variable keys: %w", err)
 	}

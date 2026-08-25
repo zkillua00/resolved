@@ -18,6 +18,7 @@ import (
 
 type Service struct {
 	repository        *Repository
+	environments      *EnvironmentRepository
 	environmentCipher *security.EnvironmentCipher
 	events            resourceevents.Emitter
 }
@@ -73,7 +74,11 @@ func NewService(
 	environmentCipher *security.EnvironmentCipher,
 	options ...ServiceOption,
 ) *Service {
-	service := &Service{repository: repository, environmentCipher: environmentCipher}
+	service := &Service{
+		repository:        repository,
+		environments:      NewEnvironmentRepository(repository),
+		environmentCipher: environmentCipher,
+	}
 	for _, option := range options {
 		option(service)
 	}

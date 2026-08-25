@@ -47,7 +47,7 @@ func (s *Service) ListEnvironments(
 	if _, err := s.environmentWorkspace(ctx, actor, workspaceID, false); err != nil {
 		return nil, err
 	}
-	environments, err := s.repository.ListEnvironments(ctx, workspaceID)
+	environments, err := s.environments.ListEnvironments(ctx, workspaceID)
 	if err != nil {
 		return nil, mapRepositoryError(err)
 	}
@@ -68,7 +68,7 @@ func (s *Service) GetEnvironment(
 	if _, err := s.environmentWorkspace(ctx, actor, workspaceID, false); err != nil {
 		return Environment{}, err
 	}
-	environment, err := s.repository.GetEnvironment(ctx, workspaceID, environmentID)
+	environment, err := s.environments.GetEnvironment(ctx, workspaceID, environmentID)
 	if err != nil {
 		return Environment{}, mapRepositoryError(err)
 	}
@@ -97,7 +97,7 @@ func (s *Service) CreateEnvironment(
 		return Environment{}, err
 	}
 	creatorID := actor.UserID
-	environment, err := s.repository.CreateEnvironment(ctx, Environment{
+	environment, err := s.environments.CreateEnvironment(ctx, Environment{
 		ID:              uuid.NewString(),
 		WorkspaceID:     workspaceID,
 		Name:            name,
@@ -134,7 +134,7 @@ func (s *Service) UpdateEnvironment(
 	if err != nil {
 		return Environment{}, err
 	}
-	environment, err := s.repository.UpdateEnvironmentName(ctx, workspaceID, environmentID, name)
+	environment, err := s.environments.UpdateEnvironmentName(ctx, workspaceID, environmentID, name)
 	if err != nil {
 		return Environment{}, mapRepositoryError(err)
 	}
@@ -165,7 +165,7 @@ func (s *Service) DeleteEnvironment(
 	if err != nil {
 		return err
 	}
-	if err := s.repository.DeleteEnvironment(ctx, workspaceID, environmentID); err != nil {
+	if err := s.environments.DeleteEnvironment(ctx, workspaceID, environmentID); err != nil {
 		return mapRepositoryError(err)
 	}
 	s.publishChange(resourceevents.Change{
@@ -205,7 +205,7 @@ func (s *Service) CreateEnvironmentVariable(
 		return EnvironmentVariable{}, problem.Wrap(err, "encrypt environment variable value")
 	}
 	creatorID := actor.UserID
-	variable, err := s.repository.CreateEnvironmentVariable(
+	variable, err := s.environments.CreateEnvironmentVariable(
 		ctx,
 		workspaceID,
 		EnvironmentVariable{
@@ -262,7 +262,7 @@ func (s *Service) UpdateEnvironmentVariable(
 		}
 		key = &normalized
 	}
-	variable, err := s.repository.UpdateEnvironmentVariable(
+	variable, err := s.environments.UpdateEnvironmentVariable(
 		ctx, workspaceID, environmentID, variableID, key, input.Enabled, input.Secret,
 	)
 	if err != nil {
@@ -301,7 +301,7 @@ func (s *Service) PutEnvironmentVariableValue(
 	if err != nil {
 		return EnvironmentVariable{}, problem.Wrap(err, "encrypt environment variable value")
 	}
-	variable, err := s.repository.PutEnvironmentVariableValue(
+	variable, err := s.environments.PutEnvironmentVariableValue(
 		ctx, workspaceID, environmentID, variableID, actor.UserID, ciphertext,
 	)
 	if err != nil {
@@ -331,7 +331,7 @@ func (s *Service) DeleteEnvironmentVariable(
 	if err != nil {
 		return err
 	}
-	if err := s.repository.DeleteEnvironmentVariable(ctx, workspaceID, environmentID, variableID); err != nil {
+	if err := s.environments.DeleteEnvironmentVariable(ctx, workspaceID, environmentID, variableID); err != nil {
 		return mapRepositoryError(err)
 	}
 	s.publishChange(resourceevents.Change{
@@ -376,7 +376,7 @@ func (s *Service) hydrateEnvironmentValues(
 	if len(actor.EnvironmentKey) != security.EnvironmentKeyLength {
 		return problem.Wrap(nil, "authenticated session is missing an environment key")
 	}
-	values, err := s.repository.ListEnvironmentValueCiphertexts(ctx, workspaceID, actor.UserID)
+	values, err := s.environments.ListEnvironmentValueCiphertexts(ctx, workspaceID, actor.UserID)
 	if err != nil {
 		return problem.Wrap(err, "load environment variable values")
 	}

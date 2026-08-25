@@ -54,13 +54,13 @@ func MigrateAndSeed(db *gorm.DB) error {
 	); err != nil {
 		return fmt.Errorf("migrate server schema: %w", err)
 	}
-	if db.Migrator().HasIndex(&identity.User{}, "Email") {
-		if err := db.Migrator().DropIndex(&identity.User{}, "Email"); err != nil {
+	if db.Migrator().HasIndex(&identity.User{}, "idx_users_email") {
+		if err := db.Migrator().DropIndex(&identity.User{}, "idx_users_email"); err != nil {
 			return fmt.Errorf("remove plaintext user email index: %w", err)
 		}
 	}
-	if db.Migrator().HasIndex(&identity.Role{}, "NormalizedName") {
-		if err := db.Migrator().DropIndex(&identity.Role{}, "NormalizedName"); err != nil {
+	if db.Migrator().HasIndex(&identity.Role{}, "idx_roles_normalized_name") {
+		if err := db.Migrator().DropIndex(&identity.Role{}, "idx_roles_normalized_name"); err != nil {
 			return fmt.Errorf("remove plaintext role-name index: %w", err)
 		}
 	}
