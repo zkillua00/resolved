@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
+    DbStringEnum,
     request::{BodyFieldKind, RequestDraft, ResponseData},
     template::redact_secret_values,
 };
@@ -91,11 +92,10 @@ impl SnippetKind {
     }
 
     pub fn from_db_str(value: &str) -> Option<Self> {
-        match value {
-            "plain" => Some(Self::Plain),
-            "executable" => Some(Self::Executable),
-            _ => None,
-        }
+        Self::all()
+            .iter()
+            .copied()
+            .find(|kind| kind.as_db_str() == value)
     }
 
     pub const fn label(self) -> &'static str {
@@ -255,6 +255,24 @@ pub struct Snippet {
     pub generator_api_version: u32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl DbStringEnum for SnippetKind {
+    fn from_db_str(value: &str) -> Option<Self> {
+        Self::from_db_str(value)
+    }
+}
+
+impl DbStringEnum for SnippetCategory {
+    fn from_db_str(value: &str) -> Option<Self> {
+        Self::from_db_str(value)
+    }
+}
+
+impl DbStringEnum for SnippetRequirement {
+    fn from_db_str(value: &str) -> Option<Self> {
+        Self::from_db_str(value)
+    }
 }
 
 impl Snippet {

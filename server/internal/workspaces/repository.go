@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"time"
 
+	"resolved-server/internal/dbutil"
 	"resolved-server/internal/identity"
 	"resolved-server/internal/security"
 
@@ -70,7 +70,7 @@ func (r *Repository) GetWorkspace(ctx context.Context, id string) (Workspace, er
 
 func (r *Repository) CreateWorkspace(ctx context.Context, workspace Workspace, userIDs []string) (Workspace, error) {
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		userIDs = uniqueStrings(userIDs)
+		userIDs = dbutil.UniqueStrings(userIDs)
 		if err := ensureUsersExist(tx, userIDs); err != nil {
 			return err
 		}
@@ -112,7 +112,7 @@ func (r *Repository) ReplaceWorkspaceUsers(ctx context.Context, id string, userI
 		if err := ensureWorkspaceExists(tx, id); err != nil {
 			return err
 		}
-		userIDs = uniqueStrings(userIDs)
+		userIDs = dbutil.UniqueStrings(userIDs)
 		if err := ensureUsersExist(tx, userIDs); err != nil {
 			return err
 		}
@@ -281,7 +281,7 @@ func (r *Repository) ReplaceCollectionUsers(
 		if err := ensureCollectionExists(tx, workspaceID, id); err != nil {
 			return err
 		}
-		userIDs = uniqueStrings(userIDs)
+		userIDs = dbutil.UniqueStrings(userIDs)
 		if err := ensureUsersExist(tx, userIDs); err != nil {
 			return err
 		}
@@ -946,17 +946,4 @@ func insertCollectionUsers(tx *gorm.DB, collectionID string, userIDs []string) e
 
 func touchWorkspace(tx *gorm.DB, id string) error {
 	return tx.Model(&Workspace{}).Where("id = ?", id).UpdateColumn("updated_at", time.Now().UTC()).Error
-}
-
-func uniqueStrings(values []string) []string {
-	unique := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		unique[value] = struct{}{}
-	}
-	result := make([]string, 0, len(unique))
-	for value := range unique {
-		result = append(result, value)
-	}
-	sort.Strings(result)
-	return result
 }

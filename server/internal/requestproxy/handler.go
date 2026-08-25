@@ -4,6 +4,7 @@ import (
 	"resolved-server/internal/auth"
 	"resolved-server/internal/httpkit"
 	"resolved-server/internal/identity"
+	"resolved-server/internal/requestproxy/proxybody"
 	"resolved-server/internal/workspaces"
 
 	"github.com/gofiber/fiber/v3"
@@ -14,11 +15,11 @@ type Handler struct {
 }
 
 type ExecuteRequest struct {
-	WorkspaceID string   `json:"-" validate:"required"`
-	Method      string   `json:"method" validate:"required,max=64"`
-	URL         string   `json:"url" validate:"required,max=16384"`
-	Headers     []Header `json:"headers" validate:"max=256"`
-	Body        Body     `json:"body"`
+	WorkspaceID string         `json:"-" validate:"required"`
+	Method      string         `json:"method" validate:"required,max=64"`
+	URL         string         `json:"url" validate:"required,max=16384"`
+	Headers     []Header       `json:"headers" validate:"max=256"`
+	Body        proxybody.Body `json:"body"`
 }
 
 type ExecutePayload ExecuteRequest

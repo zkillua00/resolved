@@ -20,6 +20,7 @@ use thiserror::Error;
 
 use super::{
     AppSettings,
+    DbStringEnum,
     history::{DEFAULT_HISTORY_LIMIT, HistoryEntry, RequestHistory, ResponseSummary},
     request::{BodyField, BodyFieldKind, BodyMode, HeaderEntry, RawBodyLanguage, RequestDraft},
     request_tabs::RequestTabs,
@@ -1957,11 +1958,8 @@ fn load_workspace_tx(
                         url,
                         headers,
                         body,
-                        body_mode: body_mode_from_db(&body_mode, "saved request body_mode")?,
-                        raw_body_language: raw_body_language_from_db(
-                            &raw_body_language,
-                            "saved request raw_body_language",
-                        )?,
+                        body_mode: enum_from_db(&body_mode, "saved request body_mode")?,
+                        raw_body_language: enum_from_db(&raw_body_language, "saved request raw_body_language")?,
                         body_fields,
                     },
                     scripts: RequestScripts {
@@ -2092,14 +2090,14 @@ fn load_workspace_tx(
         };
         let requirements = raw_requirements
             .into_iter()
-            .map(|requirement| snippet_requirement_from_db(&requirement))
+            .map(|requirement| enum_from_db(&requirement, "snippet requirement"))
             .collect::<Result<Vec<_>, _>>()?;
         snippets.push(Snippet {
             id,
             name,
             description,
-            category: snippet_category_from_db(&category)?,
-            kind: snippet_kind_from_db(&kind)?,
+            category: enum_from_db(&category, "snippet category")?,
+            kind: enum_from_db(&kind, "snippet kind")?,
             output_language,
             source,
             requirements,
@@ -2347,11 +2345,8 @@ fn load_history_tx(
                 url: raw.url,
                 headers,
                 body: raw.body,
-                body_mode: body_mode_from_db(&raw.body_mode, "history body_mode")?,
-                raw_body_language: raw_body_language_from_db(
-                    &raw.raw_body_language,
-                    "history raw_body_language",
-                )?,
+                body_mode: enum_from_db(&raw.body_mode, "history body_mode")?,
+                raw_body_language: enum_from_db(&raw.raw_body_language, "history raw_body_language")?,
                 body_fields,
             },
             response,
@@ -2437,56 +2432,15 @@ fn load_body_fields(
                 enabled: bool_from_i64(enabled, bool_field)?,
                 name,
                 value,
-                kind: body_field_kind_from_db(&kind, kind_field)?,
+                kind: enum_from_db(&kind, kind_field)?,
             })
         })
         .collect()
 }
 
-fn body_mode_from_db(value: &str, field: &'static str) -> Result<BodyMode, DatabaseError> {
-    BodyMode::from_db_str(value).ok_or_else(|| DatabaseError::CorruptData {
+fn enum_from_db<T: DbStringEnum>(value: &str, field: &'static str) -> Result<T, DatabaseError> {
+    T::from_db_str(value).ok_or_else(|| DatabaseError::CorruptData {
         field,
-        value: value.to_owned(),
-    })
-}
-
-fn raw_body_language_from_db(
-    value: &str,
-    field: &'static str,
-) -> Result<RawBodyLanguage, DatabaseError> {
-    RawBodyLanguage::from_db_str(value).ok_or_else(|| DatabaseError::CorruptData {
-        field,
-        value: value.to_owned(),
-    })
-}
-
-fn body_field_kind_from_db(
-    value: &str,
-    field: &'static str,
-) -> Result<BodyFieldKind, DatabaseError> {
-    BodyFieldKind::from_db_str(value).ok_or_else(|| DatabaseError::CorruptData {
-        field,
-        value: value.to_owned(),
-    })
-}
-
-fn snippet_category_from_db(value: &str) -> Result<SnippetCategory, DatabaseError> {
-    SnippetCategory::from_db_str(value).ok_or_else(|| DatabaseError::CorruptData {
-        field: "snippet category",
-        value: value.to_owned(),
-    })
-}
-
-fn snippet_kind_from_db(value: &str) -> Result<SnippetKind, DatabaseError> {
-    SnippetKind::from_db_str(value).ok_or_else(|| DatabaseError::CorruptData {
-        field: "snippet kind",
-        value: value.to_owned(),
-    })
-}
-
-fn snippet_requirement_from_db(value: &str) -> Result<SnippetRequirement, DatabaseError> {
-    SnippetRequirement::from_db_str(value).ok_or_else(|| DatabaseError::CorruptData {
-        field: "snippet requirement",
         value: value.to_owned(),
     })
 }

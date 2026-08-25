@@ -8,6 +8,7 @@ import (
 	"resolved-server/internal/problem"
 	"resolved-server/internal/resourceevents"
 	"resolved-server/internal/security"
+	"resolved-server/internal/validation"
 
 	"github.com/google/uuid"
 )
@@ -40,7 +41,7 @@ func (s *Service) ListEnvironments(
 	actor Actor,
 	workspaceID string,
 ) ([]Environment, error) {
-	if err := validateID("workspace_id", workspaceID); err != nil {
+	if err := validation.ID("workspace_id", workspaceID); err != nil {
 		return nil, err
 	}
 	if _, err := s.environmentWorkspace(ctx, actor, workspaceID, false); err != nil {
@@ -84,7 +85,7 @@ func (s *Service) CreateEnvironment(
 	workspaceID string,
 	input CreateEnvironmentInput,
 ) (Environment, error) {
-	if err := validateID("workspace_id", workspaceID); err != nil {
+	if err := validation.ID("workspace_id", workspaceID); err != nil {
 		return Environment{}, err
 	}
 	workspace, err := s.environmentWorkspace(ctx, actor, workspaceID, true)
@@ -435,15 +436,15 @@ func validateEnvironmentValue(value string) error {
 }
 
 func validateWorkspaceEnvironmentIDs(workspaceID, environmentID string) error {
-	if err := validateID("workspace_id", workspaceID); err != nil {
+	if err := validation.ID("workspace_id", workspaceID); err != nil {
 		return err
 	}
-	return validateID("environment_id", environmentID)
+	return validation.ID("environment_id", environmentID)
 }
 
 func validateWorkspaceEnvironmentVariableIDs(workspaceID, environmentID, variableID string) error {
 	if err := validateWorkspaceEnvironmentIDs(workspaceID, environmentID); err != nil {
 		return err
 	}
-	return validateID("variable_id", variableID)
+	return validation.ID("variable_id", variableID)
 }

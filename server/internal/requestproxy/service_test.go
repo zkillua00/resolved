@@ -16,12 +16,13 @@ import (
 	"testing"
 
 	"resolved-server/internal/problem"
+	"resolved-server/internal/requestproxy/proxybody"
 )
 
 func TestBuildBodyPreservesOrderedFormFields(t *testing.T) {
-	body, contentType, err := buildBody(Body{
+	body, contentType, err := proxybody.Build(proxybody.Body{
 		Mode: "form_url_encoded",
-		Fields: []BodyField{
+		Fields: []proxybody.BodyField{
 			{Name: "z", Kind: "text", Value: "last first"},
 			{Name: "a", Kind: "text", Value: "one&two"},
 		},
@@ -38,9 +39,9 @@ func TestBuildBodyPreservesOrderedFormFields(t *testing.T) {
 }
 
 func TestBuildBodyMaterializesMultipartTextAndFiles(t *testing.T) {
-	body, contentType, err := buildBody(Body{
+	body, contentType, err := proxybody.Build(proxybody.Body{
 		Mode: "multipart_form_data",
-		Fields: []BodyField{
+		Fields: []proxybody.BodyField{
 			{Name: "description", Kind: "text", Value: "fixture"},
 			{
 				Name:          "document",
@@ -115,7 +116,7 @@ func TestApplyHeadersKeepsTargetHeadersButDropsHopByHopState(t *testing.T) {
 }
 
 func TestDecodeBodyAllowsPaddedPayloadAtLimit(t *testing.T) {
-	decoded, err := decodeBody(base64.StdEncoding.EncodeToString([]byte("x")), 1)
+	decoded, err := proxybody.Decode(base64.StdEncoding.EncodeToString([]byte("x")), 1)
 	if err != nil {
 		t.Fatalf("decode body at limit: %v", err)
 	}

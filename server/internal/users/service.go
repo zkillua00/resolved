@@ -11,6 +11,7 @@ import (
 	"resolved-server/internal/problem"
 	"resolved-server/internal/resourceevents"
 	"resolved-server/internal/security"
+	"resolved-server/internal/validation"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -107,7 +108,7 @@ func (s *Service) BootstrapOwner(ctx context.Context, input CreateInput) (identi
 }
 
 func (s *Service) Create(ctx context.Context, input CreateInput) (identity.User, error) {
-	if err := validateIDs("role_ids", input.RoleIDs); err != nil {
+	if err := validation.IDs("role_ids", input.RoleIDs); err != nil {
 		return identity.User{}, err
 	}
 	user, err := s.newUser(input)
@@ -141,7 +142,7 @@ func (s *Service) List(ctx context.Context) ([]identity.User, error) {
 }
 
 func (s *Service) Get(ctx context.Context, id string) (identity.User, error) {
-	if err := validateID("id", id); err != nil {
+	if err := validation.ID("id", id); err != nil {
 		return identity.User{}, err
 	}
 	user, err := s.repository.GetUser(ctx, id)
@@ -152,7 +153,7 @@ func (s *Service) Get(ctx context.Context, id string) (identity.User, error) {
 }
 
 func (s *Service) Update(ctx context.Context, id string, input UpdateInput) (identity.User, error) {
-	if err := validateID("id", id); err != nil {
+	if err := validation.ID("id", id); err != nil {
 		return identity.User{}, err
 	}
 	before, err := s.repository.GetUser(ctx, id)
@@ -245,10 +246,10 @@ func (s *Service) ReplaceRoles(
 	roleIDs []string,
 	actorUserID string,
 ) (identity.User, error) {
-	if err := validateID("id", id); err != nil {
+	if err := validation.ID("id", id); err != nil {
 		return identity.User{}, err
 	}
-	if err := validateIDs("role_ids", roleIDs); err != nil {
+	if err := validation.IDs("role_ids", roleIDs); err != nil {
 		return identity.User{}, err
 	}
 	before, err := s.repository.GetUser(ctx, id)
@@ -354,26 +355,6 @@ func (s *Service) hashPassword(password string) (string, error) {
 
 func normalizeLogin(login string) string {
 	return strings.ToLower(strings.TrimSpace(login))
-}
-
-func validateID(field, value string) error {
-	if _, err := uuid.Parse(value); err != nil {
-		return problem.WithFields(
-			"validation_failed",
-			"request validation failed",
-			map[string]string{field: "must be a valid UUID"},
-		)
-	}
-	return nil
-}
-
-func validateIDs(field string, values []string) error {
-	for _, value := range values {
-		if err := validateID(field, value); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func mapRepositoryError(err error) error {

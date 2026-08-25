@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"resolved-server/internal/dbutil"
 	"resolved-server/internal/security"
 
 	"gorm.io/gorm"
@@ -732,7 +733,7 @@ func (r *Repository) EncryptLegacyUsers(ctx context.Context) error {
 }
 
 func loadRoles(tx *gorm.DB, ids []string) ([]Role, error) {
-	ids = uniqueStrings(ids)
+	ids = dbutil.UniqueStrings(ids)
 	if len(ids) == 0 {
 		return []Role{}, nil
 	}
@@ -747,7 +748,7 @@ func loadRoles(tx *gorm.DB, ids []string) ([]Role, error) {
 }
 
 func loadPermissions(tx *gorm.DB, keys []string) ([]Permission, error) {
-	keys = uniqueStrings(keys)
+	keys = dbutil.UniqueStrings(keys)
 	if len(keys) == 0 {
 		return []Permission{}, nil
 	}
@@ -783,17 +784,4 @@ func hasOwnerRole(roles []Role) bool {
 		}
 	}
 	return false
-}
-
-func uniqueStrings(values []string) []string {
-	unique := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		unique[value] = struct{}{}
-	}
-	result := make([]string, 0, len(unique))
-	for value := range unique {
-		result = append(result, value)
-	}
-	sort.Strings(result)
-	return result
 }

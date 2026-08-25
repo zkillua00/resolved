@@ -101,3 +101,11 @@ pub use workspace_provider::{
     LocalWorkspaceProvider, RemoteWorkspaceProvider, WorkspaceProvider, WorkspaceProviderError,
     WorkspaceProviderId, WorkspaceProviderRegistry,
 };
+
+/// Persisted enums that can be read back from their on-disk string via
+/// `from_db_str`. `crate::core::database::enum_from_db` wraps those reads into a
+/// `DatabaseError::CorruptData` for unknown values instead of each call site
+/// repeating the same boilerplate.
+pub(crate) trait DbStringEnum: Sized {
+    fn from_db_str(value: &str) -> Option<Self>;
+}

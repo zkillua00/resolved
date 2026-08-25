@@ -12,6 +12,8 @@ use tokio::runtime::Handle;
 use tokio::task::{AbortHandle, JoinHandle};
 use url::Url;
 
+use super::DbStringEnum;
+
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_USER_AGENT: &str = concat!("resolved/", env!("CARGO_PKG_VERSION"));
 const MAX_BUFFERED_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
@@ -85,13 +87,10 @@ impl BodyMode {
     }
 
     pub fn from_db_str(value: &str) -> Option<Self> {
-        match value {
-            "none" => Some(Self::None),
-            "raw" => Some(Self::Raw),
-            "form_url_encoded" => Some(Self::FormUrlEncoded),
-            "multipart_form_data" => Some(Self::MultipartFormData),
-            _ => None,
-        }
+        Self::all()
+            .iter()
+            .copied()
+            .find(|mode| mode.as_db_str() == value)
     }
 
     pub const fn label(self) -> &'static str {
@@ -253,11 +252,10 @@ impl BodyFieldKind {
     }
 
     pub fn from_db_str(value: &str) -> Option<Self> {
-        match value {
-            "text" => Some(Self::Text),
-            "file" => Some(Self::File),
-            _ => None,
-        }
+        Self::all()
+            .iter()
+            .copied()
+            .find(|kind| kind.as_db_str() == value)
     }
 
     pub const fn label(self) -> &'static str {
@@ -772,6 +770,24 @@ impl RequestTask {
 
 pub fn spawn_request(runtime: &Handle, client: Client, request: RequestDraft) -> RequestTask {
     RequestTask::spawn(runtime, async move { send_request(&client, request).await })
+}
+
+impl DbStringEnum for BodyMode {
+    fn from_db_str(value: &str) -> Option<Self> {
+        Self::from_db_str(value)
+    }
+}
+
+impl DbStringEnum for RawBodyLanguage {
+    fn from_db_str(value: &str) -> Option<Self> {
+        Self::from_db_str(value)
+    }
+}
+
+impl DbStringEnum for BodyFieldKind {
+    fn from_db_str(value: &str) -> Option<Self> {
+        Self::from_db_str(value)
+    }
 }
 
 #[cfg(test)]

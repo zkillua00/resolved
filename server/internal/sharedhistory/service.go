@@ -10,6 +10,7 @@ import (
 
 	"resolved-server/internal/problem"
 	"resolved-server/internal/resourceevents"
+	"resolved-server/internal/validation"
 	"resolved-server/internal/workspaces"
 
 	"github.com/google/uuid"
@@ -87,10 +88,10 @@ func (s *Service) List(
 	canReadOthers bool,
 	workspaceID, userID string,
 ) ([]EntryView, error) {
-	if err := validateUUID("workspace_id", workspaceID); err != nil {
+	if err := validation.ID("workspace_id", workspaceID); err != nil {
 		return nil, err
 	}
-	if err := validateUUID("user_id", userID); err != nil {
+	if err := validation.ID("user_id", userID); err != nil {
 		return nil, err
 	}
 	if _, err := s.workspaces.Get(ctx, actor, workspaceID); err != nil {
@@ -130,7 +131,7 @@ func (s *Service) Create(
 	workspaceID string,
 	input CreateInput,
 ) (EntryView, error) {
-	if err := validateUUID("workspace_id", workspaceID); err != nil {
+	if err := validation.ID("workspace_id", workspaceID); err != nil {
 		return EntryView{}, err
 	}
 	if _, err := s.workspaces.Get(ctx, actor, workspaceID); err != nil {
@@ -190,7 +191,7 @@ func (s *Service) Create(
 }
 
 func (s *Service) DeleteOwn(ctx context.Context, actor workspaces.Actor, workspaceID string) error {
-	if err := validateUUID("workspace_id", workspaceID); err != nil {
+	if err := validation.ID("workspace_id", workspaceID); err != nil {
 		return err
 	}
 	if _, err := s.workspaces.Get(ctx, actor, workspaceID); err != nil {
@@ -225,22 +226,39 @@ func (s *Service) publishChange(
 
 func normalizeInput(input CreateInput) (CreateInput, []byte, error) {
 	input.ClientEntryID = strings.TrimSpace(input.ClientEntryID)
-	input.Request.Method = strings.ToUpper(strings.TrimSpace(input.Request.Method))
-	input.Request.URL = strings.TrimSpace(input.Request.URL)
 	if input.ClientEntryID == "" || len(input.ClientEntryID) > 128 {
 		return CreateInput{}, nil, invalidField("client_entry_id", "must contain at most 128 characters")
 	}
 	if input.CreatedAt.IsZero() {
 		return CreateInput{}, nil, invalidField("created_at", "is required")
 	}
+	if err := normalizeRequest(&input); err != nil {
+		return CreateInput{}, nil, err
+	}
+	if len(input.Error) > 65536 {
+		return CreateInput{}, nil, invalidField("error", "exceeds the shared history limit")
+	}
+	responseBody, err := decodeResponse(&input)
+	if err != nil {
+		return CreateInput{}, nil, err
+	}
+	return input, responseBody, nil
+}
+
+// normalizeRequest trims and validates the request half of a history entry and
+// normalizes its body-mode-dependent fields. Header values are redacted here so
+// a client bug cannot persist credentials visible to every history reader.
+func normalizeRequest(input *CreateInput) error {
+	input.Request.Method = strings.ToUpper(strings.TrimSpace(input.Request.Method))
+	input.Request.URL = strings.TrimSpace(input.Request.URL)
 	if input.Request.Method == "" || len(input.Request.Method) > 64 {
-		return CreateInput{}, nil, invalidField("request.method", "is required and must contain at most 64 characters")
+		return invalidField("request.method", "is required and must contain at most 64 characters")
 	}
 	if input.Request.URL == "" || len(input.Request.URL) > 16384 {
-		return CreateInput{}, nil, invalidField("request.url", "is required and must contain at most 16384 characters")
+		return invalidField("request.url", "is required and must contain at most 16384 characters")
 	}
 	if !validBodyMode(input.Request.BodyMode) {
-		return CreateInput{}, nil, invalidField("request.body_mode", "is invalid")
+		return invalidField("request.body_mode", "is invalid")
 	}
 	if input.Request.Headers == nil {
 		input.Request.Headers = []Header{}
@@ -248,10 +266,6 @@ func normalizeInput(input CreateInput) (CreateInput, []byte, error) {
 	if input.Request.BodyFields == nil {
 		input.Request.BodyFields = []BodyField{}
 	}
-	// Defense-in-depth: redact sensitive header values server-side so a client
-	// bug (or a non-sanitizing client) cannot persist credentials visible to
-	// every authorized history reader. Redaction is idempotent with the
-	// client-side pass.
 	input.Request.Headers = redactSensitiveHeaders(input.Request.Headers)
 	switch input.Request.BodyMode {
 	case "none":
@@ -263,19 +277,19 @@ func normalizeInput(input CreateInput) (CreateInput, []byte, error) {
 		input.Request.Body = ""
 	}
 	if len(input.Request.Body) > MaxBodyBytes {
-		return CreateInput{}, nil, invalidField("request.body", "exceeds the shared history limit")
+		return invalidField("request.body", "exceeds the shared history limit")
 	}
 	if len(input.Request.BodyLanguage) > 32 {
-		return CreateInput{}, nil, invalidField("request.raw_body_language", "must contain at most 32 characters")
+		return invalidField("request.raw_body_language", "must contain at most 32 characters")
 	}
 	if len(input.Request.Headers) > MaxHeaders || headerBytes(input.Request.Headers) > MaxHeaderBytes {
-		return CreateInput{}, nil, invalidField("request.headers", "exceed the shared history limit")
+		return invalidField("request.headers", "exceed the shared history limit")
 	}
 	if !validHeaders(input.Request.Headers) {
-		return CreateInput{}, nil, invalidField("request.headers", "contain an invalid name or value")
+		return invalidField("request.headers", "contain an invalid name or value")
 	}
 	if len(input.Request.BodyFields) > MaxBodyFields {
-		return CreateInput{}, nil, invalidField("request.body_fields", "exceed the shared history limit")
+		return invalidField("request.body_fields", "exceed the shared history limit")
 	}
 	fieldBytes := 0
 	sharedFields := make([]BodyField, 0, len(input.Request.BodyFields))
@@ -285,60 +299,62 @@ func normalizeInput(input CreateInput) (CreateInput, []byte, error) {
 			continue
 		}
 		if len(field.Name) > 4096 || len(field.Value) > MaxBodyBytes {
-			return CreateInput{}, nil, invalidField("request.body_fields", "contain an invalid name or value")
+			return invalidField("request.body_fields", "contain an invalid name or value")
 		}
 		if field.Kind != "text" && field.Kind != "file" {
-			return CreateInput{}, nil, invalidField("request.body_fields", "contain an invalid kind")
+			return invalidField("request.body_fields", "contain an invalid kind")
 		}
 		if field.Kind == "file" {
 			field.Value = ""
 		}
 		fieldBytes += len(field.Name) + len(field.Value)
 		if fieldBytes > MaxBodyBytes {
-			return CreateInput{}, nil, invalidField("request.body_fields", "exceed the shared history limit")
+			return invalidField("request.body_fields", "exceed the shared history limit")
 		}
 		sharedFields = append(sharedFields, field)
 	}
 	input.Request.BodyFields = sharedFields
-	if len(input.Error) > 65536 {
-		return CreateInput{}, nil, invalidField("error", "exceeds the shared history limit")
-	}
+	return nil
+}
 
-	var responseBody []byte
-	if input.Response != nil {
-		if input.Response.Headers == nil {
-			input.Response.Headers = []Header{}
-		}
-		input.Response.Headers = redactSensitiveHeaders(input.Response.Headers)
-		if input.Response.Status < 100 || input.Response.Status > 999 {
-			return CreateInput{}, nil, invalidField("response.status", "must be between 100 and 999")
-		}
-		if len(input.Response.Headers) > MaxHeaders || headerBytes(input.Response.Headers) > MaxHeaderBytes {
-			return CreateInput{}, nil, invalidField("response.headers", "exceed the shared history limit")
-		}
-		if !validHeaders(input.Response.Headers) {
-			return CreateInput{}, nil, invalidField("response.headers", "contain an invalid name or value")
-		}
-		if len(input.Response.StatusText) > 120 || len(input.Response.HTTPVersion) > 32 ||
-			len(input.Response.FinalURL) > 16384 || len(input.Response.ContentType) > 512 {
-			return CreateInput{}, nil, invalidField("response", "contains metadata that exceeds the shared history limit")
-		}
-		if input.Response.DurationMicros < 0 {
-			return CreateInput{}, nil, invalidField("response.duration_micros", "must not be negative")
-		}
-		if len(input.Response.BodyBase64) > base64.StdEncoding.EncodedLen(MaxBodyBytes) {
-			return CreateInput{}, nil, invalidField("response.body_base64", "exceeds the shared history limit")
-		}
-		decoded, err := base64.StdEncoding.DecodeString(input.Response.BodyBase64)
-		if err != nil {
-			return CreateInput{}, nil, invalidField("response.body_base64", "must be valid base64")
-		}
-		if len(decoded) > MaxBodyBytes {
-			return CreateInput{}, nil, invalidField("response.body_base64", "exceeds the shared history limit")
-		}
-		responseBody = decoded
+// decodeResponse validates the response half of a history entry and returns the
+// decoded (and size-guarded) response body. Other response metadata is stored in
+// the entry itself.
+func decodeResponse(input *CreateInput) ([]byte, error) {
+	if input.Response == nil {
+		return nil, nil
 	}
-	return input, responseBody, nil
+	if input.Response.Headers == nil {
+		input.Response.Headers = []Header{}
+	}
+	input.Response.Headers = redactSensitiveHeaders(input.Response.Headers)
+	if input.Response.Status < 100 || input.Response.Status > 999 {
+		return nil, invalidField("response.status", "must be between 100 and 999")
+	}
+	if len(input.Response.Headers) > MaxHeaders || headerBytes(input.Response.Headers) > MaxHeaderBytes {
+		return nil, invalidField("response.headers", "exceed the shared history limit")
+	}
+	if !validHeaders(input.Response.Headers) {
+		return nil, invalidField("response.headers", "contain an invalid name or value")
+	}
+	if len(input.Response.StatusText) > 120 || len(input.Response.HTTPVersion) > 32 ||
+		len(input.Response.FinalURL) > 16384 || len(input.Response.ContentType) > 512 {
+		return nil, invalidField("response", "contains metadata that exceeds the shared history limit")
+	}
+	if input.Response.DurationMicros < 0 {
+		return nil, invalidField("response.duration_micros", "must not be negative")
+	}
+	if len(input.Response.BodyBase64) > base64.StdEncoding.EncodedLen(MaxBodyBytes) {
+		return nil, invalidField("response.body_base64", "exceeds the shared history limit")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(input.Response.BodyBase64)
+	if err != nil {
+		return nil, invalidField("response.body_base64", "must be valid base64")
+	}
+	if len(decoded) > MaxBodyBytes {
+		return nil, invalidField("response.body_base64", "exceeds the shared history limit")
+	}
+	return decoded, nil
 }
 
 func viewEntry(entry Entry) (EntryView, error) {
@@ -428,13 +444,6 @@ func isSensitiveHeader(name string) bool {
 	return strings.Contains(normalized, "token") ||
 		strings.Contains(normalized, "secret") ||
 		strings.HasSuffix(normalized, "-api-key")
-}
-
-func validateUUID(field, value string) error {
-	if _, err := uuid.Parse(value); err != nil {
-		return invalidField(field, "must be a valid UUID")
-	}
-	return nil
 }
 
 func invalidField(field, message string) error {

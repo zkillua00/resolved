@@ -11,6 +11,7 @@ import (
 	"resolved-server/internal/problem"
 	"resolved-server/internal/resourceevents"
 	"resolved-server/internal/security"
+	"resolved-server/internal/validation"
 
 	"github.com/google/uuid"
 )
@@ -94,7 +95,7 @@ func (s *Service) List(ctx context.Context, actor Actor) ([]Workspace, error) {
 }
 
 func (s *Service) Get(ctx context.Context, actor Actor, id string) (Workspace, error) {
-	if err := validateID("workspace_id", id); err != nil {
+	if err := validation.ID("workspace_id", id); err != nil {
 		return Workspace{}, err
 	}
 	workspace, err := s.repository.GetWorkspace(ctx, id)
@@ -113,7 +114,7 @@ func (s *Service) ResolveAccessScope(
 	actor Actor,
 	workspaceID string,
 ) (AccessScope, error) {
-	if err := validateID("workspace_id", workspaceID); err != nil {
+	if err := validation.ID("workspace_id", workspaceID); err != nil {
 		return AccessScope{}, err
 	}
 	workspace, err := s.repository.GetWorkspace(ctx, workspaceID)
@@ -167,7 +168,7 @@ func (s *Service) Update(
 	id string,
 	input UpdateWorkspaceInput,
 ) (Workspace, error) {
-	if err := validateID("workspace_id", id); err != nil {
+	if err := validation.ID("workspace_id", id); err != nil {
 		return Workspace{}, err
 	}
 	name, err := normalizeName(input.Name)
@@ -209,10 +210,10 @@ func (s *Service) ReplaceWorkspaceUsers(
 	id string,
 	userIDs []string,
 ) (Workspace, error) {
-	if err := validateID("workspace_id", id); err != nil {
+	if err := validation.ID("workspace_id", id); err != nil {
 		return Workspace{}, err
 	}
-	if err := validateIDs("user_ids", userIDs); err != nil {
+	if err := validation.IDs("user_ids", userIDs); err != nil {
 		return Workspace{}, err
 	}
 	workspace, err := s.repository.GetWorkspace(ctx, id)
@@ -245,7 +246,7 @@ func (s *Service) ReplaceWorkspaceUsers(
 }
 
 func (s *Service) Delete(ctx context.Context, actor Actor, id string) error {
-	if err := validateID("workspace_id", id); err != nil {
+	if err := validation.ID("workspace_id", id); err != nil {
 		return err
 	}
 	workspace, err := s.repository.GetWorkspace(ctx, id)
@@ -301,7 +302,7 @@ func (s *Service) CreateCollection(
 	workspaceID string,
 	input CreateCollectionInput,
 ) (Collection, error) {
-	if err := validateID("workspace_id", workspaceID); err != nil {
+	if err := validation.ID("workspace_id", workspaceID); err != nil {
 		return Collection{}, err
 	}
 	name, err := normalizeName(input.Name)
@@ -309,7 +310,7 @@ func (s *Service) CreateCollection(
 		return Collection{}, err
 	}
 	if input.ParentCollectionID != nil {
-		if err := validateID("parent_collection_id", *input.ParentCollectionID); err != nil {
+		if err := validation.ID("parent_collection_id", *input.ParentCollectionID); err != nil {
 			return Collection{}, err
 		}
 	}
@@ -417,7 +418,7 @@ func (s *Service) MoveCollection(
 		return Collection{}, err
 	}
 	if parentCollectionID != nil {
-		if err := validateID("parent_collection_id", *parentCollectionID); err != nil {
+		if err := validation.ID("parent_collection_id", *parentCollectionID); err != nil {
 			return Collection{}, err
 		}
 	}
@@ -482,7 +483,7 @@ func (s *Service) ReplaceCollectionUsers(
 	if err := validateWorkspaceAndCollectionIDs(workspaceID, collectionID); err != nil {
 		return Collection{}, err
 	}
-	if err := validateIDs("user_ids", userIDs); err != nil {
+	if err := validation.IDs("user_ids", userIDs); err != nil {
 		return Collection{}, err
 	}
 	workspace, err := s.repository.GetWorkspace(ctx, workspaceID)
@@ -704,7 +705,7 @@ func (s *Service) MoveSavedRequest(
 	if err := validateWorkspaceCollectionRequestIDs(workspaceID, collectionID, requestID); err != nil {
 		return SavedRequest{}, err
 	}
-	if err := validateID("target_collection_id", targetCollectionID); err != nil {
+	if err := validation.ID("target_collection_id", targetCollectionID); err != nil {
 		return SavedRequest{}, err
 	}
 	workspace, err := s.repository.GetWorkspace(ctx, workspaceID)
@@ -909,17 +910,17 @@ func normalizeName(value string) (string, error) {
 }
 
 func validateWorkspaceAndCollectionIDs(workspaceID, collectionID string) error {
-	if err := validateID("workspace_id", workspaceID); err != nil {
+	if err := validation.ID("workspace_id", workspaceID); err != nil {
 		return err
 	}
-	return validateID("collection_id", collectionID)
+	return validation.ID("collection_id", collectionID)
 }
 
 func validateWorkspaceCollectionRequestIDs(workspaceID, collectionID, requestID string) error {
 	if err := validateWorkspaceAndCollectionIDs(workspaceID, collectionID); err != nil {
 		return err
 	}
-	return validateID("request_id", requestID)
+	return validation.ID("request_id", requestID)
 }
 
 func normalizeRequestDefinition(value json.RawMessage) (string, error) {
@@ -934,26 +935,6 @@ func normalizeRequestDefinition(value json.RawMessage) (string, error) {
 		)
 	}
 	return string(definition), nil
-}
-
-func validateID(field, value string) error {
-	if _, err := uuid.Parse(value); err != nil {
-		return problem.WithFields(
-			"validation_failed",
-			"request validation failed",
-			map[string]string{field: "must be a valid UUID"},
-		)
-	}
-	return nil
-}
-
-func validateIDs(field string, values []string) error {
-	for _, value := range values {
-		if err := validateID(field, value); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func mapRepositoryError(err error) error {
