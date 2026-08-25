@@ -28,11 +28,13 @@ use super::{
     template::redact_secret_values,
 };
 
-/// Runs a single awaited chained request's full pipeline (its own pre/post
-/// scripts, the HTTP exchange, and nested chains) to completion and returns
-/// the resulting run so its environment mutations can be applied live. The
-/// provider is responsible for actually performing the (blocking) execution.
-pub type InlineChainer<'a> = dyn Fn(&ChainedRequest) -> Result<ChainRun, String> + Sync + 'a;
+/// Runs a batch of awaited chained requests' pipelines (their own pre/post
+/// scripts, HTTP exchanges, and nested chains) concurrently and returns each
+/// resulting run so its environment mutations can be applied live. The
+/// provider owns the async execution (typically driving all of them on one
+/// shared Tokio runtime so their network calls genuinely overlap) and is
+/// responsible for actually performing the (non-blocking) execution.
+pub type InlineChainer<'a> = dyn Fn(&[ChainedRequest]) -> Vec<Result<ChainRun, String>> + Sync + 'a;
 
 pub const SCRIPT_MEMORY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 pub const SCRIPT_STACK_LIMIT_BYTES: usize = 256 * 1024;
@@ -1300,11 +1302,13 @@ fn run_engine(
         }
 
         // If the script is blocked awaiting `api.requests.execute(...)`, run the
-        // referenced saved requests' pipelines concurrently so their network
-        // calls overlap (true Promise.all semantics). Each awaited op runs on
-        // its own thread; ops left pending are carried to `scheduledRequests`
-        // by __API_TESTER_FINISH so non-awaited execute() still runs after the
-        // phase.
+        // referenced saved requests' pipelines concurrently (true Promise.all
+        // semantics). Every pending awaited op is handed to the provider in one
+        // batch; the provider drives all their pipelines on a single shared
+        // async runtime so their network calls genuinely overlap, then returns
+        // one result per op. Ops the script never awaited are carried to
+        // `scheduledRequests` by __API_TESTER_FINISH so non-awaited execute()
+        // still runs after the phase.
         match chain_inline {
             None => break,
             Some(chain_inline) => {
@@ -1359,28 +1363,16 @@ fn run_engine(
 
                 let Some(pending) = pending else { break };
 
-                // Run each awaited request's full pipeline on its own thread so
-                // their network calls genuinely overlap.
-                let outcomes: Vec<std::result::Result<crate::core::ChainRun, String>> =
-                    std::thread::scope(|scope| {
-                        let mut handles = Vec::with_capacity(pending.len());
-                        for (id, path) in &pending {
-                            let id = id.clone();
-                            let path = path.clone();
-                            handles.push(
-                                scope.spawn(move || chain_inline(&ChainedRequest { id, path })),
-                            );
-                        }
-                        handles
-                            .into_iter()
-                            .map(|handle| match handle.join() {
-                                Ok(outcome) => outcome,
-                                Err(_) => {
-                                    Err("awaited request execution thread panicked".to_owned())
-                                }
-                            })
-                            .collect()
-                    });
+                let requested: Vec<ChainedRequest> = pending
+                    .iter()
+                    .map(|(id, path)| ChainedRequest {
+                        id: id.clone(),
+                        path: path.clone(),
+                    })
+                    .collect();
+                // A single batch call: the provider runs every awaited pipeline
+                // concurrently on one shared async runtime.
+                let outcomes = chain_inline(&requested);
 
                 for ((id, _path), outcome) in pending.iter().zip(outcomes) {
                     let id_json = serde_json::to_string(id).unwrap_or_else(|_| "\"\"".to_owned());
@@ -2529,14 +2521,14 @@ api.environment.set("seven", String(value));
     fn awaited_execute_applies_env_mutations_before_continuing() {
         let (_workspace, catalog) = chaining_workspace();
         let chainer =
-            |_scheduled: &crate::core::ChainedRequest| -> Result<crate::core::ChainRun, String> {
-                Ok(crate::core::ChainRun {
+            |_scheduled: &[crate::core::ChainedRequest]| -> Vec<Result<crate::core::ChainRun, String>> {
+                vec![Ok(crate::core::ChainRun {
                     environment_mutations: vec![EnvironmentMutation::Set {
                         key: "AUTH_TOKEN".to_owned(),
                         value: "tok-123".to_owned(),
                     }],
                     ..Default::default()
-                })
+                })]
             };
         let result = execute_pre_request_with_chain(
             r#"
@@ -2580,8 +2572,8 @@ api.request.headers.set("Authorization", "Bearer " + api.environment.get("AUTH_T
     fn awaited_execute_failure_stops_the_script_before_continuing() {
         let (_workspace, catalog) = chaining_workspace();
         let chainer =
-            |_scheduled: &crate::core::ChainedRequest| -> Result<crate::core::ChainRun, String> {
-                Err("chained login failed".to_owned())
+            |_scheduled: &[crate::core::ChainedRequest]| -> Vec<Result<crate::core::ChainRun, String>> {
+                vec![Err("chained login failed".to_owned())]
             };
         let error = execute_pre_request_with_chain(
             r#"
@@ -2606,23 +2598,42 @@ api.request.headers.set("Authorization", "Bearer SHOULD-NOT-RUN");
     #[test]
     fn promise_all_executes_chained_requests_concurrently() {
         let (_workspace, catalog) = chaining_workspace();
-        // Shared probe: the engine dispatches each awaited chain on its own
-        // thread, so if two requests awaited together actually overlap their
-        // HTTP windows, max in-flight reaches 2. A serialized pump (running one
-        // chain fully before the next) would only ever observe 1.
+        // The provider (execution.rs) drives the whole awaited batch on ONE
+        // shared async runtime via join_all, so concurrent chains' network
+        // waits genuinely overlap instead of running back-to-back. This fake
+        // mirrors that production pattern: two pipelines on a single
+        // current-thread runtime must overlap (max in-flight 2), not serialize.
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let in_flight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let max_in_flight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probe_calls = calls.clone();
         let probe_in_flight = in_flight.clone();
         let probe_max = max_in_flight.clone();
-        let chainer =
-            move |_scheduled: &crate::core::ChainedRequest| -> Result<crate::core::ChainRun, String> {
-                let current =
-                    probe_in_flight.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                probe_max.fetch_max(current, std::sync::atomic::Ordering::SeqCst);
-                std::thread::sleep(std::time::Duration::from_millis(120));
-                probe_in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(crate::core::ChainRun::default())
-            };
+        let chainer = move |requested: &[crate::core::ChainedRequest]| {
+            probe_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime");
+            runtime.block_on(async {
+                let futures = requested
+                    .iter()
+                    .map(|_| {
+                        let in_flight = probe_in_flight.clone();
+                        let max_in_flight = probe_max.clone();
+                        async move {
+                            let current =
+                                in_flight.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                            max_in_flight.fetch_max(current, std::sync::atomic::Ordering::SeqCst);
+                            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+                            in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                            Ok::<crate::core::ChainRun, String>(crate::core::ChainRun::default())
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                futures::future::join_all(futures).await
+            })
+        };
         let result = execute_pre_request_with_chain(
             r#"
 await Promise.all([
@@ -2639,6 +2650,9 @@ api.environment.set("done", "yes");
         )
         .expect("Promise.all over execute() should settle");
 
+        // The whole awaited set is handed to the provider in ONE batch call.
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // The two pipelines overlapped their waits on the shared runtime.
         assert_eq!(
             max_in_flight.load(std::sync::atomic::Ordering::SeqCst),
             2,
