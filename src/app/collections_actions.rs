@@ -19,6 +19,7 @@ impl ApiTester {
         match candidate.create_collection(name) {
             Ok(id) => {
                 if self.commit_workspace(candidate).is_ok() {
+                    self.refresh_variable_intelligence(cx);
                     self.expanded_collection_ids.insert(id.clone());
                     self.select_collection(id.clone(), window, cx);
                     self.renaming_collection_id = Some(id);
@@ -114,6 +115,7 @@ impl ApiTester {
             }
             Err(error) => self.workspace_warning = Some(error.to_string()),
         }
+        self.refresh_variable_intelligence(cx);
         cx.notify();
     }
 
@@ -241,6 +243,7 @@ impl ApiTester {
                     .commit_workspace_and_request_tabs(candidate, candidate_request_tabs)
                     .is_ok()
                 {
+                    self.refresh_variable_intelligence(cx);
                     self.expanded_collection_ids.remove(&id);
                     if self.renaming_collection_id.as_deref() == Some(id.as_str()) {
                         self.renaming_collection_id = None;
@@ -367,6 +370,7 @@ impl ApiTester {
                     .commit_workspace_and_request_tabs(candidate, candidate_request_tabs)
                     .is_ok()
                 {
+                    self.refresh_variable_intelligence(cx);
                     self.request_dirty.begin_hydration();
                     self.saved_request_name
                         .update(cx, |input, cx| input.set_value(saved_name, window, cx));
@@ -509,6 +513,7 @@ impl ApiTester {
                     .commit_workspace_and_request_tabs(candidate, candidate_request_tabs)
                     .is_ok()
                 {
+                    self.refresh_variable_intelligence(cx);
                     if self.active_saved_request_id.as_deref() == Some(request_id.as_str()) {
                         let active_title = self.request_tabs.active().title().to_owned();
                         self.saved_request_name
@@ -572,6 +577,7 @@ impl ApiTester {
         {
             Ok(_) => {
                 if self.commit_workspace(candidate).is_ok() {
+                    self.refresh_variable_intelligence(cx);
                     self.expanded_collection_ids.insert(collection_id);
                     self.request_notice =
                         Some(format!("Duplicated request as “{duplicate_name}”."));
@@ -706,6 +712,7 @@ impl ApiTester {
                     .commit_workspace_and_request_tabs(candidate, candidate_request_tabs)
                     .is_ok()
                 {
+                    self.refresh_variable_intelligence(cx);
                     if self.active_saved_request_id.as_deref() == Some(request_id.as_str()) {
                         self.sync_active_request_tab_identity();
                     }

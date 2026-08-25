@@ -6,6 +6,15 @@ impl ApiTester {
     pub(super) fn replace_workspace(&mut self, workspace: Workspace) {
         self.workspace = workspace;
         self.workspace_version = self.workspace_version.wrapping_add(1);
+        // Keep the script editors' saved-request model in sync with the active
+        // workspace so completion/hover tend to reflect new, renamed, moved or
+        // deleted collections/requests immediately — and the stale-reference
+        // diagnostic never fires on a reference the runtime can still resolve
+        // (the runtime builds a fresh catalog, so a stale editor catalog was
+        // the drift). The full refresh_variable_intelligence additionally
+        // re-runs editor diagnostics and pushes checked declarations.
+        let namespace = crate::core::RequestNamespaceCatalog::from_workspace(&self.workspace);
+        *self.script_request_namespace.borrow_mut() = namespace;
     }
 
     pub(super) fn persist_history(&mut self) {

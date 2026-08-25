@@ -38,6 +38,7 @@ impl ApiTester {
         ) {
             Ok(folder_id) => {
                 if self.commit_workspace(candidate).is_ok() {
+                    self.refresh_variable_intelligence(cx);
                     self.selected_collection_id = Some(collection_id.clone());
                     self.selected_folder_id = Some(folder_id.clone());
                     self.expanded_collection_ids.insert(collection_id);
@@ -184,6 +185,7 @@ impl ApiTester {
         ) {
             Ok(()) => {
                 if self.commit_workspace(candidate).is_ok() {
+                    self.refresh_variable_intelligence(cx);
                     self.selected_collection_id = Some(collection_id.clone());
                     self.selected_folder_id = Some(folder_id);
                     self.expanded_collection_ids.insert(collection_id.clone());
@@ -360,6 +362,7 @@ impl ApiTester {
                     .commit_workspace_and_request_tabs(candidate, candidate_request_tabs)
                     .is_ok()
                 {
+                    self.refresh_variable_intelligence(cx);
                     for removed_folder_id in &removed_folder_ids {
                         self.expanded_folder_ids.remove(removed_folder_id);
                     }
@@ -449,6 +452,7 @@ impl ApiTester {
                     .commit_workspace_and_request_tabs(candidate, candidate_request_tabs)
                     .is_ok()
                 {
+                    self.refresh_variable_intelligence(cx);
                     if let Some(folder_id) = target_folder_id.as_ref() {
                         self.expanded_folder_ids.insert(folder_id.clone());
                     }

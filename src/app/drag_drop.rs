@@ -693,6 +693,7 @@ impl ApiTester {
                     .commit_workspace_and_request_tabs(candidate_workspace, candidate_request_tabs)
                     .is_ok()
                 {
+                    self.refresh_variable_intelligence(cx);
                     self.expanded_collection_ids
                         .insert(target_collection_id.clone());
                     if let Some(folder_id) = target_folder_id.as_ref() {
