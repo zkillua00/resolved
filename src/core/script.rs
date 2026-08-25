@@ -34,7 +34,18 @@ use super::{
 /// provider owns the async execution (typically driving all of them on one
 /// shared Tokio runtime so their network calls genuinely overlap) and is
 /// responsible for actually performing the (non-blocking) execution.
-pub type InlineChainer<'a> = dyn Fn(&[ChainedRequest]) -> Vec<Result<ChainRun, String>> + Sync + 'a;
+pub trait InlineChainer: Send + Sync {
+    fn run(&self, requested: &[ChainedRequest]) -> Vec<Result<ChainRun, String>>;
+}
+
+impl<F> InlineChainer for F
+where
+    F: Fn(&[ChainedRequest]) -> Vec<Result<ChainRun, String>> + Send + Sync,
+{
+    fn run(&self, requested: &[ChainedRequest]) -> Vec<Result<ChainRun, String>> {
+        self(requested)
+    }
+}
 
 pub const SCRIPT_MEMORY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 pub const SCRIPT_STACK_LIMIT_BYTES: usize = 256 * 1024;
@@ -800,7 +811,7 @@ fn execute_pre_request_inner(
     scope: &ScriptScope,
     request_namespace: &RequestNamespaceCatalog,
     cancellation: &ScriptCancellation,
-    chain_inline: Option<&InlineChainer<'_>>,
+    chain_inline: Option<&dyn InlineChainer>,
 ) -> Result<PreRequestResult, ScriptError> {
     let phase = ScriptPhase::PreRequest;
     if source.trim().is_empty() {
@@ -862,6 +873,9 @@ fn execute_pre_request_inner(
 
 /// Runs a pre-request script without inline (awaited) chaining: `execute()`
 /// only schedules requests to run after the phase.
+// Used only by tests and as the schedule-only API (runtime/chain use the
+// `_with_chain` variants).
+#[allow(dead_code)]
 pub fn execute_pre_request(
     source: &str,
     request: &RequestDraft,
@@ -888,7 +902,7 @@ pub fn execute_pre_request_with_chain(
     scope: &ScriptScope,
     request_namespace: &RequestNamespaceCatalog,
     cancellation: &ScriptCancellation,
-    chain_inline: Option<&InlineChainer<'_>>,
+    chain_inline: Option<&dyn InlineChainer>,
 ) -> Result<PreRequestResult, ScriptError> {
     execute_pre_request_inner(
         source,
@@ -908,7 +922,7 @@ fn execute_post_response_inner(
     scope: &ScriptScope,
     request_namespace: &RequestNamespaceCatalog,
     cancellation: &ScriptCancellation,
-    chain_inline: Option<&InlineChainer<'_>>,
+    chain_inline: Option<&dyn InlineChainer>,
 ) -> Result<PostResponseResult, ScriptError> {
     let phase = ScriptPhase::PostResponse;
     if source.trim().is_empty() {
@@ -953,6 +967,9 @@ fn execute_post_response_inner(
 }
 
 /// Runs a post-response script without inline (awaited) chaining.
+// Used only by tests and as the schedule-only API (runtime/chain use the
+// `_with_chain` variants).
+#[allow(dead_code)]
 pub fn execute_post_response(
     source: &str,
     request: &RequestDraft,
@@ -981,7 +998,7 @@ pub fn execute_post_response_with_chain(
     scope: &ScriptScope,
     request_namespace: &RequestNamespaceCatalog,
     cancellation: &ScriptCancellation,
-    chain_inline: Option<&InlineChainer<'_>>,
+    chain_inline: Option<&dyn InlineChainer>,
 ) -> Result<PostResponseResult, ScriptError> {
     execute_post_response_inner(
         source,
@@ -1062,7 +1079,7 @@ fn run_engine(
     phase: ScriptPhase,
     input: EngineInput<'_>,
     cancellation: &ScriptCancellation,
-    chain_inline: Option<&InlineChainer<'_>>,
+    chain_inline: Option<&dyn InlineChainer>,
     timeout: std::time::Duration,
     redactor: &SecretRedactor,
     secret_names: &BTreeSet<String>,
@@ -1390,7 +1407,7 @@ fn run_engine(
                     .collect();
                 // A single batch call: the provider runs every awaited pipeline
                 // concurrently on one shared async runtime.
-                let outcomes = chain_inline(&requested);
+                let outcomes = chain_inline.run(&requested);
 
                 for ((id, _path), outcome) in pending.iter().zip(outcomes) {
                     let id_json = serde_json::to_string(id).unwrap_or_else(|_| "\"\"".to_owned());

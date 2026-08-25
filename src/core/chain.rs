@@ -27,8 +27,8 @@ use super::{
     request::{RequestDraft, RequestError, ResponseData},
     request_namespace::{CHAIN_MAX_DEPTH, CHAIN_MAX_TOTAL, RequestNamespaceCatalog},
     script::{
-        ChainedRequest, EnvironmentMutation, SCRIPT_TIMEOUT, ScriptCancellation, ScriptScope,
-        execute_post_response, execute_pre_request,
+        ChainedRequest, EnvironmentMutation, InlineChainer, SCRIPT_TIMEOUT, ScriptCancellation,
+        ScriptScope, execute_post_response_with_chain, execute_pre_request_with_chain,
     },
     template::resolve_request,
     upstream_management::SharedHistoryUpload,
@@ -90,6 +90,7 @@ pub async fn run_chain<S, Fut>(
     scheduled: &[ChainedRequest],
     namespace: &RequestNamespaceCatalog,
     cancellation: &ScriptCancellation,
+    chain_inline: Option<&dyn InlineChainer>,
     sender: S,
     limits: ChainLimits,
     budget: &AtomicUsize,
@@ -109,6 +110,7 @@ where
             next,
             namespace,
             cancellation,
+            chain_inline,
             &sender,
             limits,
             &mut stack,
@@ -131,6 +133,7 @@ fn execute_chained<'a, S, Fut>(
     scheduled: &'a ChainedRequest,
     namespace: &'a RequestNamespaceCatalog,
     cancellation: &'a ScriptCancellation,
+    chain_inline: Option<&'a dyn InlineChainer>,
     sender: &'a S,
     limits: ChainLimits,
     stack: &'a mut Vec<String>,
@@ -201,12 +204,13 @@ where
 
         // Pre-request script (may itself schedule more requests).
         let scope = scope_from_workspace(workspace, environment_id, limits.script_timeout);
-        let pre = match execute_pre_request(
+        let pre = match execute_pre_request_with_chain(
             &template.scripts.pre_request,
             &template.request,
             &scope,
             namespace,
             cancellation,
+            chain_inline,
         ) {
             Ok(result) => result,
             Err(error) => {
@@ -240,6 +244,7 @@ where
                     child,
                     namespace,
                     cancellation,
+                    chain_inline,
                     sender,
                     limits,
                     &mut *stack,
@@ -307,13 +312,14 @@ where
 
         // Post-response script (may itself schedule more requests).
         let post_scope = scope_from_workspace(workspace, environment_id, limits.script_timeout);
-        let post = match execute_post_response(
+        let post = match execute_post_response_with_chain(
             &template.scripts.post_response,
             &request,
             &response,
             &post_scope,
             namespace,
             cancellation,
+            chain_inline,
         ) {
             Ok(result) => result,
             Err(error) => {
@@ -345,6 +351,7 @@ where
                     child,
                     namespace,
                     cancellation,
+                    chain_inline,
                     sender,
                     limits,
                     &mut *stack,
@@ -626,6 +633,7 @@ mod tests {
             &[schedule(&me_id, "Auth.Me")],
             &catalog,
             &cancellation,
+            None,
             sender,
             ChainLimits::default(),
             &budget,
@@ -700,6 +708,7 @@ mod tests {
             &[schedule(&a_id, "C.A")],
             &catalog,
             &ScriptCancellation::new(),
+            None,
             sender,
             ChainLimits::default(),
             &AtomicUsize::new(0),
@@ -748,6 +757,7 @@ mod tests {
             &scheduled,
             catalog,
             &ScriptCancellation::new(),
+            None,
             sender,
             limits,
             &AtomicUsize::new(0),
@@ -943,6 +953,7 @@ mod tests {
             &[schedule(&r, "C.R")],
             &catalog,
             &cancellation,
+            None,
             sender,
             ChainLimits::default(),
             &AtomicUsize::new(0),
@@ -950,5 +961,81 @@ mod tests {
         .await;
         assert!(run.error.is_some());
         assert!(run.error.unwrap().message.contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn chained_request_own_script_can_await_execute() {
+        // A chained request's own post-response script may itself `await
+        // api.requests.execute(...)`: run_chain threads the inline chainer into
+        // the chained scripts, so the nested await settles instead of hanging
+        // with "script finished without settling its top-level promise".
+        let (host, port, _recorded) = loopback_server(1);
+        let base = format!("http://{host}:{port}");
+        let mut workspace = Workspace::default();
+        let env_id = workspace.create_environment("Dev").unwrap();
+        workspace.set_active_environment(Some(&env_id)).unwrap();
+        let col = workspace.create_collection("C").unwrap();
+        let a = workspace
+            .create_saved_request(&col, "A", template(&format!("{base}/a"), "GET", "", ""))
+            .unwrap();
+        let b = workspace
+            .create_saved_request(
+                &col,
+                "B",
+                template(
+                    &format!("{base}/b"),
+                    "GET",
+                    "",
+                    "await api.requests.execute(C.A); api.environment.set(\"after\", \"yes\");",
+                ),
+            )
+            .unwrap();
+        let catalog = RequestNamespaceCatalog::from_workspace(&workspace);
+
+        let client = reqwest::Client::new();
+        let sender = move |request: RequestDraft| {
+            let client = client.clone();
+            async move { crate::core::request::send_request(&client, request).await }
+        };
+
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probe = called.clone();
+        let chainer = move |requested: &[ChainedRequest]| -> Vec<Result<ChainRun, String>> {
+            probe.fetch_add(requested.len(), std::sync::atomic::Ordering::SeqCst);
+            vec![Ok(ChainRun::default()); requested.len()]
+        };
+
+        let run = run_chain(
+            &workspace,
+            Some(&env_id),
+            &[schedule(&b, "C.B")],
+            &catalog,
+            &ScriptCancellation::new(),
+            Some(&chainer),
+            sender,
+            ChainLimits::default(),
+            &AtomicUsize::new(0),
+        )
+        .await;
+
+        assert!(
+            run.error.is_none(),
+            "unexpected chain error: {:?}",
+            run.error
+        );
+        // The chainer was threaded into B's own post-response script, so its
+        // nested `await execute(C.A)` resolved (called once) and the script ran
+        // past it, rather than hanging with "never resolved".
+        assert_eq!(called.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            run.environment_mutations
+                .contains(&EnvironmentMutation::Set {
+                    key: "after".to_owned(),
+                    value: "yes".to_owned(),
+                }),
+            "mutations: {:?}",
+            run.environment_mutations
+        );
+        let _ = a;
     }
 }

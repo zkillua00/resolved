@@ -533,6 +533,14 @@ follow its `await`; mutations from sibling concurrent chains are applied as
 their promises settle (in FIFO order), so read-after-write between two
 concurrent chains is not synchronized.
 
+A chained request's **own** pre/post-response scripts can `await execute(...)`
+too — the same runner is threaded into every chained script, so nesting is
+arbitrary (bounded by the usual depth, cycle, and total-execution limits). A
+reusable login/refresh request can therefore be awaited from anywhere, including
+from inside another request's own scripts: `await execute(Auth.Login)` inside a
+chained request's post-response script runs the whole Login pipeline (its own
+scripts and any further chains) before that script's next line.
+
 The scripting editor's completion, hover, and diagnostics reflect the active
 workspace's collection tree so the editor and runtime can never drift: typing
 `ChatAdmin.` suggests `Login`, `Logout`, and folder names; `ChatAdmin.Users.`
