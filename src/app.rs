@@ -1,9 +1,9 @@
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::PathBuf,
     rc::Rc,
-    sync::{Arc, OnceLock},
+    sync::{Arc, OnceLock, atomic::AtomicUsize},
     time::Duration,
 };
 
@@ -257,6 +257,8 @@ pub struct ApiTester {
     request_generation: u64,
     abort_handle: Option<AbortHandle>,
     script_cancellation: Option<ScriptCancellation>,
+    request_namespace: crate::core::RequestNamespaceCatalog,
+    chain_budget: Arc<AtomicUsize>,
     response: Option<ResponseData>,
     response_request: Option<RequestDraft>,
     response_sensitive_values: Vec<String>,
@@ -271,6 +273,7 @@ pub struct ApiTester {
     history: RequestHistory,
     history_warning: Option<String>,
     history_writable: bool,
+    snippets: Vec<Snippet>,
     workspace: Workspace,
     database_store: DatabaseStore,
     workspace_providers: WorkspaceProviderRegistry,
@@ -348,6 +351,7 @@ pub struct ApiTester {
     next_variable_row_id: usize,
     pending_delete: Option<PendingDelete>,
     script_variable_catalog: Rc<RefCell<ScriptVariableCatalog>>,
+    script_request_namespace: Rc<RefCell<crate::core::RequestNamespaceCatalog>>,
     typescript_service: Option<TypeScriptServiceHandle>,
     template_variable_catalog: TemplateVariableCatalogHandle,
     template_highlight_tasks: HashMap<EntityId, Task<()>>,

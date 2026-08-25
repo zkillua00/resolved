@@ -21,7 +21,10 @@ use rquickjs::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{RequestDraft, ResponseData, template::redact_secret_values};
+use super::{
+    RequestDraft, ResponseData, request_namespace::{RequestNamespaceCatalog, RuntimeNamespaceSpec},
+    template::redact_secret_values,
+};
 
 pub const SCRIPT_MEMORY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 pub const SCRIPT_STACK_LIMIT_BYTES: usize = 256 * 1024;
@@ -184,6 +187,87 @@ const PRELUDE: &str = r#"
     },
   });
 
+  // Saved-request namespace (dynamic, frozen). Built from the active
+  // workspace's collection tree. Request-reference leaves carry their stable
+  // saved-request id in a non-enumerable marker; namespace objects carry a
+  // separate marker so passing one to api.requests.execute gives a precise
+  // diagnostic.
+  const REQUEST_REF_MARKER = "__apiTesterRequestRef";
+  const NAMESPACE_REF_MARKER = "__apiTesterNamespaceRef";
+  const scheduledRequests = [];
+
+  function buildRequestNamespace(spec) {
+    if (spec && spec.kind && spec.kind.type === "request") {
+      const ref = {};
+      Object.defineProperty(ref, REQUEST_REF_MARKER, {
+        value: {
+          id: String(spec.kind.id),
+          path: String(spec.kind.path),
+          method: String(spec.kind.method),
+        },
+        enumerable: false,
+      });
+      return Object.freeze(ref);
+    }
+    const namespace = {};
+    Object.defineProperty(namespace, NAMESPACE_REF_MARKER, {
+      value: true,
+      enumerable: false,
+    });
+    const children = Array.isArray(spec.children) ? spec.children : [];
+    for (const child of children) {
+      Object.defineProperty(namespace, String(child.name), {
+        value: buildRequestNamespace(child),
+        enumerable: true,
+        writable: false,
+        configurable: false,
+      });
+    }
+    return Object.freeze(namespace);
+  }
+
+  const requestReferences = Array.isArray(input.requestReferences)
+    ? input.requestReferences
+    : [];
+  for (const root of requestReferences) {
+    const name = String(root.name);
+    // Never overwrite a scripting or built-in global.
+    if (own(globalThis, name)) continue;
+    Object.defineProperty(globalThis, name, {
+      value: buildRequestNamespace(root),
+      enumerable: true,
+      writable: false,
+      configurable: false,
+    });
+  }
+
+  const requestsApi = Object.freeze({
+    execute(reference) {
+      if (reference === null || typeof reference !== "object") {
+        throw new TypeError(
+          "api.requests.execute() expects a saved request reference (for example api.requests.execute(ChatAdmin.Login)); got " +
+            (reference === null ? "null" : typeof reference) +
+            "."
+        );
+      }
+      if (!own(reference, REQUEST_REF_MARKER)) {
+        if (own(reference, NAMESPACE_REF_MARKER)) {
+          throw new TypeError(
+            "api.requests.execute() received a folder/collection namespace, which is not a request. Pass a request leaf such as api.requests.execute(ChatAdmin.Login)."
+          );
+        }
+        throw new TypeError(
+          "api.requests.execute() expects a saved request reference from the active workspace, not an arbitrary object."
+        );
+      }
+      const metadata = reference[REQUEST_REF_MARKER];
+      scheduledRequests.push({
+        id: String(metadata.id),
+        path: String(metadata.path),
+      });
+    },
+  });
+
   function printable(value) {
     if (typeof value === "string") return value;
     if (typeof value === "undefined") return "undefined";
@@ -262,6 +346,7 @@ const PRELUDE: &str = r#"
     response,
     environment,
     variables,
+    requests: requestsApi,
     console: scriptConsole,
   };
   if (input.phase === "post") {
@@ -309,6 +394,7 @@ const PRELUDE: &str = r#"
       environmentMutations,
       logs,
       tests,
+      chainedRequests: scheduledRequests,
     }),
     configurable: false,
     enumerable: false,
@@ -507,6 +593,17 @@ pub struct ScriptTestResult {
     pub message: Option<String>,
 }
 
+/// A saved-request reference scheduled by `api.requests.execute(...)`.
+///
+/// Carries the stable saved-request id (never resolved by name after the
+/// reference was created) plus the dotted access path for diagnostics.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChainedRequest {
+    pub id: String,
+    pub path: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct ScriptReport {
     pub phase: ScriptPhase,
@@ -532,12 +629,14 @@ impl ScriptReport {
 pub struct PreRequestResult {
     pub request: RequestDraft,
     pub environment_mutations: Vec<EnvironmentMutation>,
+    pub chained_requests: Vec<ChainedRequest>,
     pub report: ScriptReport,
 }
 
 #[derive(Clone, Debug)]
 pub struct PostResponseResult {
     pub environment_mutations: Vec<EnvironmentMutation>,
+    pub chained_requests: Vec<ChainedRequest>,
     pub report: ScriptReport,
 }
 
@@ -589,6 +688,7 @@ struct EngineInput<'a> {
     response: Option<EngineResponse>,
     environment: &'a BTreeMap<String, String>,
     collection_variables: &'a BTreeMap<String, String>,
+    request_references: &'a [RuntimeNamespaceSpec],
     max_log_entries: usize,
     max_log_bytes: usize,
 }
@@ -620,6 +720,8 @@ struct EngineHeader {
 struct EngineOutput {
     request: RequestDraft,
     environment_mutations: Vec<EnvironmentMutation>,
+    #[serde(default)]
+    chained_requests: Vec<ChainedRequest>,
     logs: Vec<ScriptLog>,
     tests: Vec<ScriptTestResult>,
 }
@@ -633,6 +735,7 @@ pub fn execute_pre_request(
     source: &str,
     request: &RequestDraft,
     scope: &ScriptScope,
+    request_namespace: &RequestNamespaceCatalog,
     cancellation: &ScriptCancellation,
 ) -> Result<PreRequestResult, ScriptError> {
     let phase = ScriptPhase::PreRequest;
@@ -640,6 +743,7 @@ pub fn execute_pre_request(
         return Ok(PreRequestResult {
             request: request.clone(),
             environment_mutations: Vec::new(),
+            chained_requests: Vec::new(),
             report: ScriptReport::empty(phase),
         });
     }
@@ -652,6 +756,7 @@ pub fn execute_pre_request(
         response: None,
         environment: scope.environment.values(),
         collection_variables: &scope.collection_variables,
+        request_references: &request_namespace.runtime_specs(),
         max_log_entries: MAX_SCRIPT_LOG_ENTRIES,
         max_log_bytes: MAX_SCRIPT_LOG_BYTES,
     };
@@ -684,6 +789,7 @@ pub fn execute_pre_request(
     Ok(PreRequestResult {
         request: run.output.request,
         environment_mutations: run.output.environment_mutations,
+        chained_requests: run.output.chained_requests,
         report,
     })
 }
@@ -693,12 +799,14 @@ pub fn execute_post_response(
     request: &RequestDraft,
     response: &ResponseData,
     scope: &ScriptScope,
+    request_namespace: &RequestNamespaceCatalog,
     cancellation: &ScriptCancellation,
 ) -> Result<PostResponseResult, ScriptError> {
     let phase = ScriptPhase::PostResponse;
     if source.trim().is_empty() {
         return Ok(PostResponseResult {
             environment_mutations: Vec::new(),
+            chained_requests: Vec::new(),
             report: ScriptReport::empty(phase),
         });
     }
@@ -712,6 +820,7 @@ pub fn execute_post_response(
         response: Some(engine_response),
         environment: scope.environment.values(),
         collection_variables: &scope.collection_variables,
+        request_references: &request_namespace.runtime_specs(),
         max_log_entries: MAX_SCRIPT_LOG_ENTRIES,
         max_log_bytes: MAX_SCRIPT_LOG_BYTES,
     };
@@ -728,6 +837,7 @@ pub fn execute_post_response(
 
     Ok(PostResponseResult {
         environment_mutations: run.output.environment_mutations,
+        chained_requests: run.output.chained_requests,
         report,
     })
 }
@@ -1219,6 +1329,7 @@ mod tests {
 
     use super::*;
     use crate::core::request::ResponseHeader;
+    use crate::core::{RequestTemplate, Workspace};
 
     fn request() -> RequestDraft {
         let mut request = RequestDraft::new("GET", "https://example.test/{{path}}");
@@ -1252,7 +1363,7 @@ console.log("prepared", api.request.method);
 "#,
             &original,
             &scope,
-            &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
         )
         .expect("pre-request script should succeed");
 
@@ -1304,7 +1415,7 @@ api.request.bodyFields.push({
 "#,
             &original,
             &ScriptScope::default(),
-            &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
         )
         .expect("structured body mutations should succeed");
 
@@ -1351,7 +1462,7 @@ console.info(api.response.durationMs);
             &request(),
             &response,
             &ScriptScope::default(),
-            &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
         )
         .expect("post-response script should succeed");
 
@@ -1373,7 +1484,7 @@ console.info(api.response.durationMs);
             "const = ;",
             &request(),
             &ScriptScope::default(),
-            &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
         )
         .expect_err("invalid JavaScript must fail");
         assert_eq!(syntax.diagnostic.kind, ScriptErrorKind::Syntax);
@@ -1383,7 +1494,7 @@ console.info(api.response.durationMs);
             "throw new Error('broken');",
             &request(),
             &ScriptScope::default(),
-            &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
         )
         .expect_err("thrown error must fail");
         assert_eq!(runtime.diagnostic.kind, ScriptErrorKind::Runtime);
@@ -1408,7 +1519,7 @@ throw new Error("broken");
 "#,
             &request(),
             &scope,
-            &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
         )
         .expect_err("thrown error must fail");
 
@@ -1427,7 +1538,7 @@ throw new Error("broken");
             "try { while (true) {} } catch (_) {}",
             &request(),
             &ScriptScope::default(),
-            &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
         )
         .expect_err("interrupt must be uncatchable");
 
@@ -1444,7 +1555,7 @@ throw new Error("broken");
                 "while (true) {}",
                 &request(),
                 &ScriptScope::default(),
-                &worker_cancellation,
+                &RequestNamespaceCatalog::default(), &worker_cancellation,
             )
         });
 
@@ -1463,7 +1574,7 @@ throw new Error("broken");
             "Array.prototype.leaked = true;",
             &request(),
             &ScriptScope::default(),
-            &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
         )
         .expect("first script should succeed");
 
@@ -1478,7 +1589,7 @@ console.log(api.environment.get("token"));
 "#,
             &request(),
             &scope,
-            &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
         )
         .expect("second script should have a fresh runtime");
         assert_eq!(result.report.logs[0].message, "[REDACTED]");
@@ -1487,7 +1598,7 @@ console.log(api.environment.get("token"));
             r#"throw new Error(api.environment.get("token"));"#,
             &request(),
             &scope,
-            &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
         )
         .expect_err("script should throw");
         assert!(!error.diagnostic.message.contains("very-secret-token"));
@@ -1505,7 +1616,7 @@ console.log("old", "42", "new", api.environment.get("pin"));
 "#,
             &request(),
             &scope,
-            &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
         )
         .expect("secret rotation should succeed");
 
@@ -1521,7 +1632,7 @@ throw new Error("rotated=a%20b/c");
 "#,
             &request(),
             &scope,
-            &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
         )
         .expect_err("rotated secret must remain scrubbed when the script throws");
         assert_eq!(error.diagnostic.message, "rotated=[REDACTED]");
@@ -1534,7 +1645,7 @@ throw new Error("rotated=a%20b/c");
             r#"console.log("url=https://example.test/a%20b/c");"#,
             &request(),
             &encoded_scope,
-            &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
         )
         .expect("encoded secret log should be scrubbed");
         assert_eq!(
@@ -1553,7 +1664,7 @@ throw new Error("rotated=a%20b/c");
             &source,
             &request(),
             &ScriptScope::default(),
-            &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
         )
         .expect_err("a pre-script must not bypass the request-body limit");
 
@@ -1574,7 +1685,7 @@ throw new Error("rotated=a%20b/c");
             "",
             &oversized,
             &ScriptScope::default(),
-            &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
         )
         .expect("blank pre-script should not inspect the body");
         assert_eq!(pre.request.body.len(), MAX_SCRIPT_BODY_BYTES + 1);
@@ -1594,7 +1705,7 @@ throw new Error("rotated=a%20b/c");
             &oversized,
             &response,
             &ScriptScope::default(),
-            &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
         )
         .expect("blank post-script should not inspect the request body");
     }
@@ -1616,7 +1727,7 @@ throw new Error("rotated=a%20b/c");
             &request(),
             &response,
             &ScriptScope::default(),
-            &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
         )
         .expect("unsupported async test should be recorded as a failed test");
 
@@ -1646,10 +1757,153 @@ throw new Error("rotated=a%20b/c");
             &request(),
             &response,
             &ScriptScope::default(),
-            &ScriptCancellation::new(),
+            &RequestNamespaceCatalog::default(), &ScriptCancellation::new(),
         )
         .expect("binary response should be available to script");
         assert!(result.report.response_body_truncated);
         assert!(result.report.tests[0].passed);
+    }
+
+    fn chaining_workspace() -> (Workspace, RequestNamespaceCatalog) {
+        let mut workspace = Workspace::default();
+        let chat = workspace.create_collection("ChatAdmin").unwrap();
+        workspace
+            .create_saved_request(
+                &chat,
+                "Login",
+                super::super::template::RequestTemplate {
+                    request: RequestDraft::new("POST", "https://a.test/login"),
+                    scripts: Default::default(),
+                },
+            )
+            .unwrap();
+        let payments = workspace.create_collection("Payments").unwrap();
+        workspace
+            .create_saved_request(
+                &payments,
+                "Login",
+                super::super::template::RequestTemplate {
+                    request: RequestDraft::new("POST", "https://p.test/login"),
+                    scripts: Default::default(),
+                },
+            )
+            .unwrap();
+        let catalog = RequestNamespaceCatalog::from_workspace(&workspace);
+        (workspace, catalog)
+    }
+
+    #[test]
+    fn pre_request_records_scheduled_request_references_in_order() {
+        let (_workspace, catalog) = chaining_workspace();
+        let result = execute_pre_request(
+            r#"
+api.requests.execute(ChatAdmin.Login);
+api.requests.execute(Payments.Login);
+"#,
+            &request(),
+            &ScriptScope::default(),
+            &catalog,
+            &ScriptCancellation::new(),
+        )
+        .expect("scheduling chained requests should succeed");
+
+        assert_eq!(result.chained_requests.len(), 2);
+        assert_eq!(result.chained_requests[0].path, "ChatAdmin.Login");
+        assert_eq!(result.chained_requests[1].path, "Payments.Login");
+        // The two refs carry distinct stable ids.
+        assert_ne!(
+            result.chained_requests[0].id,
+            result.chained_requests[1].id
+        );
+        assert!(!result.chained_requests[0].id.is_empty());
+    }
+
+    #[test]
+    fn execute_rejects_arbitrary_and_namespace_references_with_clear_diagnostics() {
+        let (_workspace, catalog) = chaining_workspace();
+
+        // A primitive string is not a request reference.
+        let primitive = execute_pre_request(
+            r#"api.requests.execute("ChatAdmin.Login");"#,
+            &request(),
+            &ScriptScope::default(),
+            &catalog,
+            &ScriptCancellation::new(),
+        )
+        .expect_err("a string must be rejected");
+        assert!(primitive.diagnostic.message.contains("saved request reference"));
+
+        // A namespace object (a folder/collection) is not a request leaf.
+        let namespace = execute_pre_request(
+            r#"api.requests.execute(ChatAdmin);"#,
+            &request(),
+            &ScriptScope::default(),
+            &catalog,
+            &ScriptCancellation::new(),
+        )
+        .expect_err("a namespace must be rejected");
+        assert!(namespace.diagnostic.message.contains("namespace"));
+
+        // An arbitrary object is not a request reference.
+        let arbitrary = execute_pre_request(
+            r#"api.requests.execute({});"#,
+            &request(),
+            &ScriptScope::default(),
+            &catalog,
+            &ScriptCancellation::new(),
+        )
+        .expect_err("an arbitrary object must be rejected");
+        assert!(arbitrary.diagnostic.message.contains("arbitrary object"));
+    }
+
+    #[test]
+    fn request_namespace_objects_are_frozen_and_leaves_neither_enum() {
+        let (_workspace, catalog) = chaining_workspace();
+        // Namespaces and request leaves are frozen, so assignment is a no-op in
+        // strict mode (throws) rather than silently mutating shared state.
+        let result = execute_pre_request(
+            r#"
+"use strict";
+try {
+  ChatAdmin.Users = {};
+  ChatAdmin.Login = {};
+  ChatAdmin.extra = {};
+} catch (_) {}
+api.requests.execute(ChatAdmin.Login);
+"#,
+            &request(),
+            &ScriptScope::default(),
+            &catalog,
+            &ScriptCancellation::new(),
+        )
+        .expect("frozen namespace access should not throw from read");
+        assert_eq!(result.chained_requests.len(), 1);
+        let _ = result;
+    }
+
+    #[test]
+    fn post_response_can_schedule_chained_requests() {
+        let response = ResponseData {
+            status: 200,
+            status_text: "OK".to_owned(),
+            http_version: "HTTP/1.1".to_owned(),
+            final_url: "https://example.test/".to_owned(),
+            headers: Vec::new(),
+            content_type: None,
+            body: Vec::new().into(),
+            duration: Duration::from_millis(1),
+        };
+        let (_workspace, catalog) = chaining_workspace();
+        let result = execute_post_response(
+            r#"api.requests.execute(Payments.Login);"#,
+            &request(),
+            &response,
+            &ScriptScope::default(),
+            &catalog,
+            &ScriptCancellation::new(),
+        )
+        .expect("post-response scheduling should succeed");
+        assert_eq!(result.chained_requests.len(), 1);
+        assert_eq!(result.chained_requests[0].path, "Payments.Login");
     }
 }

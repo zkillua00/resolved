@@ -382,7 +382,6 @@ impl UpstreamWorkspaceView {
             created_by: self.created_by.map(Into::into),
             collections,
             environments: Vec::new(),
-            snippets: Vec::new(),
             active_environment_id: None,
         }
     }

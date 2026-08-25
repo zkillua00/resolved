@@ -6,6 +6,18 @@ impl ApiTester {
         self.dismiss_template_variable_popover();
         self.template_highlight_tasks.clear();
         update_script_variable_catalog(&self.script_variable_catalog, &self.workspace);
+        // Refresh the shared saved-request namespace model so the script runtime
+        // and both script editors can never drift: the catalog that drives
+        // completion/hover/diagnostics is the same one injected at execution.
+        let namespace = crate::core::RequestNamespaceCatalog::from_workspace(&self.workspace);
+        *self.script_request_namespace.borrow_mut() = namespace.clone();
+        // Feed the same namespace to the embedded TypeScript checker so it
+        // never flags `ChatAdmin.Login` / `api.requests` as unknown (this
+        // enqueues before the script editors' own diagnostics re-run below).
+        if let Some(service) = self.typescript_service.as_ref() {
+            service.set_request_namespace_declarations(namespace.declaration_source());
+        }
+        self.request_namespace = namespace;
         self.template_variable_catalog
             .borrow_mut()
             .replace_environment(self.workspace.active_environment());

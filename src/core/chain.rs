@@ -1,0 +1,943 @@
+//! Recursive orchestration of saved-request chaining.
+//!
+//! `api.requests.execute(ChatAdmin.Login)` records a saved-request reference in
+//! the script output (see `script.rs`). This module runs those references
+//! through the *same* request lifecycle the app would use when sending that
+//! saved request normally: its saved template, its own pre/post-response
+//! scripts, variable resolution, normal HTTP execution (locally or via the
+//! configured local/server execution policy), environment mutations, normal
+//! history and sanitized shared history.
+//!
+//! The runner is deliberately UI-free so it can be unit-tested end to end with
+//! a loopback listener. The application layer supplies the actual HTTP sender
+//! (constructed for the active local or upstream workspace) and consumes the
+//! returned history entries, shared-history payloads and environment
+//! mutations.
+//!
+//! Chaining is bounded: cycles are detected by stable saved-request identity
+//! and both nesting depth and the total number of chained executions are
+//! capped ([`crate::core::request_namespace::CHAIN_MAX_DEPTH`] and
+//! [`CHAIN_MAX_TOTAL`]). The whole chain shares one cancellation token.
+
+use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use super::{
+    history::HistoryEntry,
+    request::{RequestDraft, RequestError, ResponseData},
+    request_namespace::{CHAIN_MAX_DEPTH, CHAIN_MAX_TOTAL, RequestNamespaceCatalog},
+    script::{
+        ChainedRequest, EnvironmentMutation, ScriptCancellation, ScriptScope,
+        execute_post_response, execute_pre_request,
+    },
+    template::resolve_request,
+    upstream_management::SharedHistoryUpload,
+    workspace::Workspace,
+};
+
+/// Result of running a chain (or the chain prefix that ran before a failure).
+#[derive(Clone, Debug, Default)]
+pub struct ChainRun {
+    pub history: Vec<HistoryEntry>,
+    pub shared_history: Vec<SharedHistoryUpload>,
+    /// Mutations produced by the chained requests that successfully applied
+    /// them, in execution order.
+    pub environment_mutations: Vec<EnvironmentMutation>,
+    /// The failure that stopped the chain, if any.
+    pub error: Option<ChainFailure>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ChainFailure {
+    /// Dotted access path of the chained request that failed, e.g.
+    /// `ChatAdmin.Refresh`. `None` when the failure is not tied to one
+    /// chained request.
+    pub path: Option<String>,
+    /// Human-facing message. Callers redact secrets before surfacing it.
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChainLimits {
+    pub max_depth: usize,
+    pub max_total: usize,
+}
+
+impl Default for ChainLimits {
+    fn default() -> Self {
+        Self {
+            max_depth: CHAIN_MAX_DEPTH,
+            max_total: CHAIN_MAX_TOTAL,
+        }
+    }
+}
+
+/// Run a sequence of scheduled chained requests in order, recursively.
+///
+/// `scheduled` are the references recorded by the current script phase.
+/// `budget` counts the total number of chained executions across the whole
+/// top-level Send (shared between the pre- and post-response chains). It must
+/// be zeroed at the start of each Send. `sender` performs the actual HTTP
+/// exchange for one resolved request.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_chain<S, Fut>(
+    workspace: &Workspace,
+    environment_id: Option<&str>,
+    scheduled: &[ChainedRequest],
+    namespace: &RequestNamespaceCatalog,
+    cancellation: &ScriptCancellation,
+    sender: S,
+    limits: ChainLimits,
+    budget: &AtomicUsize,
+) -> ChainRun
+where
+    S: Fn(RequestDraft) -> Fut + Send + Sync,
+    Fut: Future<Output = Result<ResponseData, RequestError>> + Send,
+{
+    let mut run = ChainRun::default();
+    let mut working = workspace.clone();
+    let mut stack: Vec<String> = Vec::new();
+    for next in scheduled {
+        execute_chained(
+            &mut run,
+            &mut working,
+            environment_id,
+            next,
+            namespace,
+            cancellation,
+            &sender,
+            limits,
+            &mut stack,
+            1,
+            budget,
+        )
+        .await;
+        if run.error.is_some() || cancellation.is_cancelled() {
+            break;
+        }
+    }
+    run
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_chained<'a, S, Fut>(
+    run: &'a mut ChainRun,
+    workspace: &'a mut Workspace,
+    environment_id: Option<&'a str>,
+    scheduled: &'a ChainedRequest,
+    namespace: &'a RequestNamespaceCatalog,
+    cancellation: &'a ScriptCancellation,
+    sender: &'a S,
+    limits: ChainLimits,
+    stack: &'a mut Vec<String>,
+    depth: usize,
+    budget: &'a AtomicUsize,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+where
+    S: Fn(RequestDraft) -> Fut + Send + Sync,
+    Fut: Future<Output = Result<ResponseData, RequestError>> + Send,
+{
+    Box::pin(async move {
+        if run.error.is_some() {
+            return;
+        }
+        if cancellation.is_cancelled() {
+            run.error = Some(ChainFailure {
+                path: Some(scheduled.path.clone()),
+                message: "Request cancelled".to_owned(),
+            });
+            return;
+        }
+        if depth > limits.max_depth {
+            run.error = Some(ChainFailure {
+                path: Some(scheduled.path.clone()),
+                message: format!(
+                    "Chained execution exceeded the maximum nesting depth of {} at '{}'.",
+                    limits.max_depth, scheduled.path
+                ),
+            });
+            return;
+        }
+        if budget.load(Ordering::Relaxed) >= limits.max_total {
+            run.error = Some(ChainFailure {
+                path: Some(scheduled.path.clone()),
+                message: format!(
+                    "Chained execution exceeded the maximum of {} total chained requests (at '{}').",
+                    limits.max_total, scheduled.path
+                ),
+            });
+            return;
+        }
+        if stack.iter().any(|id| id == &scheduled.id) {
+            let mut cycle_paths = stack.clone();
+            cycle_paths.push(scheduled.id.clone());
+            run.error = Some(ChainFailure {
+                path: Some(scheduled.path.clone()),
+                message: format!(
+                    "Request chaining cycle detected: {}",
+                    cycle_display(&cycle_paths)
+                ),
+            });
+            return;
+        }
+
+        let Some((_collection, saved)) = workspace.saved_request(&scheduled.id) else {
+            run.error = Some(ChainFailure {
+                path: Some(scheduled.path.clone()),
+                message: format!(
+                    "Saved request reference '{}' is no longer present in the active workspace.",
+                    scheduled.path
+                ),
+            });
+            return;
+        };
+        let saved_id = saved.id.clone();
+        let template = saved.definition.clone();
+        budget.fetch_add(1, Ordering::Relaxed);
+
+        // Pre-request script (may itself schedule more requests).
+        let scope = scope_from_workspace(workspace, environment_id);
+        let pre = match execute_pre_request(
+            &template.scripts.pre_request,
+            &template.request,
+            &scope,
+            namespace,
+            cancellation,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                let message = format!(
+                    "Pre-request script for '{}' failed: {error}",
+                    scheduled.path
+                );
+                // The script engine already redacted `error`; no extra sensitive
+                // values are known at this stage.
+                record_failed(run, &template.request, &message, &[]);
+                run.error = Some(ChainFailure {
+                    path: Some(scheduled.path.clone()),
+                    message,
+                });
+                return;
+            }
+        };
+        if apply_and_collect_mutations(run, workspace, environment_id, &pre.environment_mutations)
+            .is_err()
+        {
+            return;
+        }
+
+        stack.push(saved_id.clone());
+        if run.error.is_none() {
+            for child in &pre.chained_requests {
+                execute_chained(
+                    &mut *run,
+                    &mut *workspace,
+                    environment_id,
+                    child,
+                    namespace,
+                    cancellation,
+                    sender,
+                    limits,
+                    &mut *stack,
+                    depth + 1,
+                    budget,
+                )
+                .await;
+                if run.error.is_some() || cancellation.is_cancelled() {
+                    break;
+                }
+            }
+        }
+        if run.error.is_some() || cancellation.is_cancelled() {
+            stack.pop();
+            return;
+        }
+
+        // Resolve against the now-current environment and send through the
+        // normal execution policy (local or server) provided by the caller.
+        let resolved = match resolve_request(
+            &pre.request,
+            environment_id.and_then(|id| workspace.environment(id)),
+        ) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                stack.pop();
+                run.error = Some(ChainFailure {
+                    path: Some(scheduled.path.clone()),
+                    message: format!("Failed to resolve request '{}': {error}", scheduled.path),
+                });
+                return;
+            }
+        };
+        let request = resolved.request.clone();
+        let sensitive_values = resolved.sensitive_values;
+        let network = cancellation_drive(sender(request.clone()), cancellation).await;
+
+        let response = match network {
+            Ok(response) => response,
+            Err(RequestError::Cancelled) => {
+                stack.pop();
+                run.error = Some(ChainFailure {
+                    path: Some(scheduled.path.clone()),
+                    message: "Request cancelled".to_owned(),
+                });
+                return;
+            }
+            Err(error) => {
+                stack.pop();
+                let message = format!(
+                    "Chained request '{}' failed to send: {error}",
+                    scheduled.path
+                );
+                record_failed(run, &request, &message, &sensitive_values);
+                run.error = Some(ChainFailure {
+                    path: Some(scheduled.path.clone()),
+                    message,
+                });
+                return;
+            }
+        };
+
+        // A non-2xx HTTP response is a normal response, not a transport failure.
+        push_history(run, &request, &response, &sensitive_values);
+
+        // Post-response script (may itself schedule more requests).
+        let post_scope = scope_from_workspace(workspace, environment_id);
+        let post = match execute_post_response(
+            &template.scripts.post_response,
+            &request,
+            &response,
+            &post_scope,
+            namespace,
+            cancellation,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                let message = format!(
+                    "Post-response script for '{}' failed: {error}",
+                    scheduled.path
+                );
+                run.error = Some(ChainFailure {
+                    path: Some(scheduled.path.clone()),
+                    message,
+                });
+                stack.pop();
+                return;
+            }
+        };
+        if apply_and_collect_mutations(run, workspace, environment_id, &post.environment_mutations)
+            .is_err()
+        {
+            stack.pop();
+            return;
+        }
+
+        if run.error.is_none() {
+            for child in &post.chained_requests {
+                execute_chained(
+                    &mut *run,
+                    &mut *workspace,
+                    environment_id,
+                    child,
+                    namespace,
+                    cancellation,
+                    sender,
+                    limits,
+                    &mut *stack,
+                    depth + 1,
+                    budget,
+                )
+                .await;
+                if run.error.is_some() || cancellation.is_cancelled() {
+                    break;
+                }
+            }
+        }
+        stack.pop();
+    })
+}
+
+fn cycle_display(paths: &[String]) -> String {
+    // heuristic display: we only track request ids on the stack, so present
+    // the repeated tail using the reference path that triggered it.
+    if paths.len() >= 2 {
+        // The caller appends the repeated id; we render it as "... -> <id>".
+        format!(
+            "{} -> {}",
+            paths[..paths.len() - 1].join(" -> "),
+            paths[paths.len() - 1]
+        )
+    } else {
+        paths.join(" -> ")
+    }
+}
+
+/// Build a `ScriptScope` from the active environment of a workspace snapshot.
+fn scope_from_workspace(workspace: &Workspace, environment_id: Option<&str>) -> ScriptScope {
+    let mut scope = ScriptScope::default();
+    if let Some(environment) = environment_id.and_then(|id| workspace.environment(id)) {
+        for variable in environment
+            .variables
+            .iter()
+            .filter(|variable| variable.enabled)
+        {
+            if variable.secret {
+                scope
+                    .environment
+                    .insert_secret(variable.key.clone(), variable.value.clone());
+            } else {
+                scope
+                    .environment
+                    .insert(variable.key.clone(), variable.value.clone());
+            }
+        }
+    }
+    scope
+}
+
+/// Apply script mutations to the working workspace snapshot (so later chained
+/// requests and the parent resolve with them) and accumulate them for the
+/// caller to persist to the real workspace.
+fn apply_and_collect_mutations(
+    run: &mut ChainRun,
+    workspace: &mut Workspace,
+    environment_id: Option<&str>,
+    mutations: &[EnvironmentMutation],
+) -> Result<(), ()> {
+    if mutations.is_empty() {
+        return Ok(());
+    }
+    let Some(environment_id) = environment_id else {
+        // No active environment: mutations are transient, matching normal flow.
+        return Ok(());
+    };
+    if let Err(message) = super::workspace::apply_environment_mutations_to_workspace(
+        workspace,
+        environment_id,
+        mutations,
+    ) {
+        run.error = Some(ChainFailure {
+            path: None,
+            message,
+        });
+        return Err(());
+    }
+    run.environment_mutations.extend(mutations.iter().cloned());
+    Ok(())
+}
+
+fn push_history(
+    run: &mut ChainRun,
+    request: &RequestDraft,
+    response: &ResponseData,
+    sensitive_values: &[String],
+) {
+    let entry = HistoryEntry::completed_with_secrets(request, response, sensitive_values);
+    let shared = SharedHistoryUpload::completed(
+        entry.id.clone(),
+        entry.created_at,
+        request,
+        response,
+        sensitive_values,
+    );
+    run.history.push(entry);
+    run.shared_history.push(shared);
+}
+
+fn record_failed(
+    run: &mut ChainRun,
+    request: &RequestDraft,
+    message: &str,
+    sensitive_values: &[String],
+) {
+    let entry = HistoryEntry::failed_with_secrets(request, message, sensitive_values);
+    let shared = SharedHistoryUpload::failed(
+        entry.id.clone(),
+        entry.created_at,
+        request,
+        message,
+        sensitive_values,
+    );
+    run.history.push(entry);
+    run.shared_history.push(shared);
+}
+
+/// Await a chained send, polling the shared cancellation token so cancelling
+/// the top-level Send aborts an in-flight chained HTTP request and prevents
+/// the rest of the chain from starting.
+async fn cancellation_drive<F>(
+    future: F,
+    cancellation: &ScriptCancellation,
+) -> Result<ResponseData, RequestError>
+where
+    F: Future<Output = Result<ResponseData, RequestError>>,
+{
+    let mut future = Box::pin(future);
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut future => return result,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                if cancellation.is_cancelled() {
+                    return Err(RequestError::Cancelled);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{
+        HeaderEntry,
+        request::RequestDraft,
+        template::RequestTemplate,
+        workspace::{RequestScripts, Workspace},
+    };
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    fn template(url: &str, method: &str, pre: &str, post: &str) -> RequestTemplate {
+        RequestTemplate {
+            request: RequestDraft::new(method, url),
+            scripts: RequestScripts {
+                pre_request: pre.to_owned(),
+                post_response: post.to_owned(),
+            },
+        }
+    }
+
+    /// Spawn a blocking loopback server that records each request's request line
+    /// plus its Authorization token, then answers 200.
+    fn loopback_server(requests: usize) -> (String, u16, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().unwrap();
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let recorded_worker = Arc::clone(&recorded);
+        std::thread::spawn(move || {
+            let mut handled = 0;
+            while handled < requests {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(pair) => pair,
+                    Err(_) => break,
+                };
+                let mut buffer = [0_u8; 8192];
+                let mut header = String::new();
+                loop {
+                    match stream.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(n) => header.push_str(&String::from_utf8_lossy(&buffer[..n])),
+                        Err(_) => break,
+                    }
+                    if header.contains("\r\n\r\n") {
+                        break;
+                    }
+                }
+                let first_line = header.lines().next().unwrap_or_default().to_owned();
+                let auth = header
+                    .lines()
+                    .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+                    .map(|line| {
+                        line.split(':')
+                            .nth(1)
+                            .map(str::trim)
+                            .unwrap_or_default()
+                            .to_owned()
+                    })
+                    .unwrap_or_default();
+                recorded_worker
+                    .lock()
+                    .unwrap()
+                    .push(format!("{first_line} | {auth}"));
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: application/json\r\n\r\n{}",
+                );
+                handled += 1;
+            }
+        });
+        (address.ip().to_string(), address.port(), recorded)
+    }
+
+    fn schedule(id: &str, path: &str) -> ChainedRequest {
+        ChainedRequest {
+            id: id.to_owned(),
+            path: path.to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn chained_prerequisite_token_reaches_parent_request_header() {
+        let (host, port, recorded) = loopback_server(2);
+        let base = format!("http://{host}:{port}");
+        let mut workspace = Workspace::default();
+        let auth = workspace.create_collection("Auth").unwrap();
+        workspace
+            .create_saved_request(
+                &auth,
+                "Refresh",
+                template(
+                    &format!("{base}/refresh"),
+                    "POST",
+                    "",
+                    r#"api.environment.set("AUTH_TOKEN", "token-123");"#,
+                ),
+            )
+            .unwrap();
+        let mut me_draft = RequestDraft::new("GET", &format!("{base}/me"));
+        me_draft.headers = vec![HeaderEntry::new("Authorization", "Bearer {{AUTH_TOKEN}}")];
+        let me_template = RequestTemplate {
+            request: me_draft,
+            scripts: RequestScripts {
+                pre_request: "api.requests.execute(Auth.Refresh);".to_owned(),
+                post_response: String::new(),
+            },
+        };
+        let me_id = workspace
+            .create_saved_request(&auth, "Me", me_template)
+            .unwrap();
+        let env_id = workspace.create_environment("Dev").unwrap();
+        workspace.set_active_environment(Some(&env_id)).unwrap();
+        let catalog = RequestNamespaceCatalog::from_workspace(&workspace);
+
+        let client = reqwest::Client::new();
+        let sender = move |request: RequestDraft| {
+            let client = client.clone();
+            async move { crate::core::request::send_request(&client, request).await }
+        };
+        let cancellation = ScriptCancellation::new();
+        let budget = AtomicUsize::new(0);
+
+        // Parent Me's pre-request script chains Auth.Refresh, whose post-script
+        // stores AUTH_TOKEN; Me then resolves its Authorization header from it.
+        let run = run_chain(
+            &workspace,
+            Some(&env_id),
+            &[schedule(&me_id, "Auth.Me")],
+            &catalog,
+            &cancellation,
+            sender,
+            ChainLimits::default(),
+            &budget,
+        )
+        .await;
+
+        assert!(
+            run.error.is_none(),
+            "unexpected chain error: {:?}",
+            run.error
+        );
+        // Wait for the loopback server to finish answering.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if recorded.lock().unwrap().len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let lines = recorded.lock().unwrap().clone();
+        assert_eq!(
+            lines.len(),
+            2,
+            "expected refresh + me on the wire: {lines:?}"
+        );
+        assert!(
+            lines[0].contains("/refresh"),
+            "first request should be refresh: {lines:?}"
+        );
+        let me_line = lines
+            .iter()
+            .find(|line| line.contains("/me "))
+            .expect("me on the wire");
+        assert!(
+            me_line.contains("Bearer token-123"),
+            "parent must receive the token produced by the chained prereq: {me_line}"
+        );
+        assert_eq!(run.history.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn recursive_chaining_runs_each_requests_own_scripts() {
+        let (host, port, recorded) = loopback_server(2);
+        let base = format!("http://{host}:{port}");
+        let mut workspace = Workspace::default();
+        let col = workspace.create_collection("C").unwrap();
+        // A -> (pre) B ; B post sets marker -> not needed; simply chain A -> B.
+        let b_id = workspace
+            .create_saved_request(&col, "B", template(&format!("{base}/b"), "GET", "", ""))
+            .unwrap();
+        let a_id = workspace
+            .create_saved_request(
+                &col,
+                "A",
+                template(
+                    &format!("{base}/a"),
+                    "GET",
+                    "api.requests.execute(C.B);",
+                    "",
+                ),
+            )
+            .unwrap();
+        let catalog = RequestNamespaceCatalog::from_workspace(&workspace);
+        let client = reqwest::Client::new();
+        let sender = move |request: RequestDraft| {
+            let client = client.clone();
+            async move { crate::core::request::send_request(&client, request).await }
+        };
+        let run = run_chain(
+            &workspace,
+            None,
+            &[schedule(&a_id, "C.A")],
+            &catalog,
+            &ScriptCancellation::new(),
+            sender,
+            ChainLimits::default(),
+            &AtomicUsize::new(0),
+        )
+        .await;
+        assert!(run.error.is_none(), "unexpected: {:?}", run.error);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if !recorded.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        // A executes, then recursively B executes (nested before A's network).
+        assert!(
+            recorded.lock().unwrap().len() >= 2,
+            "expected A and its nested B on the wire: {:?}",
+            recorded.lock().unwrap()
+        );
+        let lines = recorded.lock().unwrap().clone();
+        assert!(
+            lines.iter().any(|line| line.contains("/b ")),
+            "nested B should have run: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("/a ")),
+            "A should have run after its nested chain: {lines:?}"
+        );
+        let _ = b_id;
+    }
+
+    async fn run_with_limits(
+        workspace: &Workspace,
+        catalog: &RequestNamespaceCatalog,
+        scheduled: Vec<ChainedRequest>,
+        limits: ChainLimits,
+    ) -> ChainRun {
+        let client = reqwest::Client::new();
+        let sender = move |request: RequestDraft| {
+            let client = client.clone();
+            async move { crate::core::request::send_request(&client, request).await }
+        };
+        run_chain(
+            workspace,
+            None,
+            &scheduled,
+            catalog,
+            &ScriptCancellation::new(),
+            sender,
+            limits,
+            &AtomicUsize::new(0),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn cycle_is_detected_and_reported() {
+        let host = "127.0.0.1";
+        let mut workspace = Workspace::default();
+        let col = workspace.create_collection("C").unwrap();
+        let a = workspace
+            .create_saved_request(
+                &col,
+                "A",
+                template(
+                    &format!("http://{host}:1/a"),
+                    "GET",
+                    "api.requests.execute(C.B);",
+                    "",
+                ),
+            )
+            .unwrap();
+        workspace
+            .create_saved_request(
+                &col,
+                "B",
+                template(
+                    &format!("http://{host}:1/b"),
+                    "GET",
+                    "api.requests.execute(C.C);",
+                    "",
+                ),
+            )
+            .unwrap();
+        workspace
+            .create_saved_request(
+                &col,
+                "C",
+                template(
+                    &format!("http://{host}:1/c"),
+                    "GET",
+                    "api.requests.execute(C.A);",
+                    "",
+                ),
+            )
+            .unwrap();
+        let catalog = RequestNamespaceCatalog::from_workspace(&workspace);
+        let run = run_with_limits(
+            &workspace,
+            &catalog,
+            vec![schedule(&a, "C.A")],
+            ChainLimits::default(),
+        )
+        .await;
+        let error = run.error.expect("cycle must be detected");
+        assert!(error.message.contains("cycle"), "{}", error.message);
+    }
+
+    #[tokio::test]
+    async fn total_execution_limit_is_enforced() {
+        let (host, port, recorded) = loopback_server(2);
+        let base = format!("http://{host}:{port}");
+        let mut workspace = Workspace::default();
+        let col = workspace.create_collection("C").unwrap();
+        let r = workspace
+            .create_saved_request(&col, "R", template(&format!("{base}/r"), "GET", "", ""))
+            .unwrap();
+        let catalog = RequestNamespaceCatalog::from_workspace(&workspace);
+        let mut scheduled = Vec::new();
+        for _ in 0..3 {
+            scheduled.push(schedule(&r, "C.R"));
+        }
+        let limits = ChainLimits {
+            max_depth: 5,
+            max_total: 2,
+        };
+        let run = run_with_limits(&workspace, &catalog, scheduled, limits).await;
+        let error = run.error.expect("total limit must trip");
+        assert!(error.message.contains("total"), "{}", error.message);
+        // Two executed before the limit; the third was rejected.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if recorded.lock().unwrap().len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(recorded.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn nesting_depth_limit_is_enforced() {
+        let host = "127.0.0.1";
+        let mut workspace = Workspace::default();
+        let col = workspace.create_collection("C").unwrap();
+        let x1 = workspace
+            .create_saved_request(
+                &col,
+                "X1",
+                template(
+                    &format!("http://{host}:1/x1"),
+                    "GET",
+                    "api.requests.execute(C.X2);",
+                    "",
+                ),
+            )
+            .unwrap();
+        workspace
+            .create_saved_request(
+                &col,
+                "X2",
+                template(
+                    &format!("http://{host}:1/x2"),
+                    "GET",
+                    "api.requests.execute(C.X3);",
+                    "",
+                ),
+            )
+            .unwrap();
+        workspace
+            .create_saved_request(
+                &col,
+                "X3",
+                template(&format!("http://{host}:1/x3"), "GET", "", ""),
+            )
+            .unwrap();
+        let catalog = RequestNamespaceCatalog::from_workspace(&workspace);
+        let limits = ChainLimits {
+            max_depth: 2,
+            max_total: 10,
+        };
+        let run = run_with_limits(&workspace, &catalog, vec![schedule(&x1, "C.X1")], limits).await;
+        let error = run.error.expect("depth limit must trip");
+        assert!(error.message.contains("depth"), "{}", error.message);
+    }
+
+    #[tokio::test]
+    async fn stale_reference_reports_clearly() {
+        let host = "127.0.0.1";
+        let mut workspace = Workspace::default();
+        let col = workspace.create_collection("C").unwrap();
+        let r = workspace
+            .create_saved_request(
+                &col,
+                "R",
+                template(&format!("http://{host}:1/r"), "GET", "", ""),
+            )
+            .unwrap();
+        let catalog = RequestNamespaceCatalog::from_workspace(&workspace);
+        let run = run_with_limits(
+            &workspace,
+            &catalog,
+            vec![schedule("missing-id", "C.Gone")],
+            ChainLimits::default(),
+        )
+        .await;
+        let error = run.error.expect("stale ref must fail");
+        assert!(
+            error.message.contains("no longer present"),
+            "{}",
+            error.message
+        );
+        let _ = r;
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_chain_refuses_to_start() {
+        let host = "127.0.0.1";
+        let mut workspace = Workspace::default();
+        let col = workspace.create_collection("C").unwrap();
+        let r = workspace
+            .create_saved_request(
+                &col,
+                "R",
+                template(&format!("http://{host}:1/r"), "GET", "", ""),
+            )
+            .unwrap();
+        let catalog = RequestNamespaceCatalog::from_workspace(&workspace);
+        let client = reqwest::Client::new();
+        let sender = move |request: RequestDraft| {
+            let client = client.clone();
+            async move { crate::core::request::send_request(&client, request).await }
+        };
+        let cancellation = ScriptCancellation::new();
+        cancellation.cancel();
+        let run = run_chain(
+            &workspace,
+            None,
+            &[schedule(&r, "C.R")],
+            &catalog,
+            &cancellation,
+            sender,
+            ChainLimits::default(),
+            &AtomicUsize::new(0),
+        )
+        .await;
+        assert!(run.error.is_some());
+        assert!(run.error.unwrap().message.contains("cancelled"));
+    }
+}

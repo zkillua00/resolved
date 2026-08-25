@@ -22,6 +22,12 @@ impl ApiTester {
             .map(|error| format!("History could not be saved: {error}"));
     }
 
+    pub(super) fn persist_snippets(&mut self) -> Result<(), String> {
+        self.database_store
+            .save_snippets(&self.snippets)
+            .map_err(|error| format!("Snippets could not be saved: {error}"))
+    }
+
     pub(super) fn commit_workspace(&mut self, candidate: Workspace) -> Result<(), String> {
         if !self.workspace_writable {
             return Err("This workspace is read-only.".to_owned());

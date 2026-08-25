@@ -228,8 +228,15 @@ pub struct ScriptCompletionProvider {
     expose_environment_values: bool,
     typescript: Option<TypeScriptServiceHandle>,
     typescript_document: TypeScriptDocumentKind,
+    request_namespace: Option<ScriptRequestNamespaceHandle>,
     document: Rc<RefCell<ScriptDocumentVersion>>,
 }
+
+/// Shared, live saved-request namespace model used by both script editors. It
+/// is refreshed from the active workspace whenever the workspace changes, so
+/// the editor and the script runtime can never drift (the runtime injects the
+/// very same catalog).
+pub type ScriptRequestNamespaceHandle = Rc<RefCell<crate::core::RequestNamespaceCatalog>>;
 
 #[derive(Default)]
 struct ScriptDocumentVersion {
@@ -247,6 +254,7 @@ impl ScriptCompletionProvider {
             expose_environment_values: true,
             typescript: None,
             typescript_document: TypeScriptDocumentKind::Script(typescript_phase(phase)),
+            request_namespace: None,
             document: Rc::new(RefCell::new(ScriptDocumentVersion::default())),
         }
     }
@@ -272,27 +280,44 @@ impl ScriptCompletionProvider {
         self
     }
 
+    /// Shares the live saved-request namespace model from the active workspace
+    /// so collection-tree completion/hover/diagnostics match the runtime.
+    pub fn with_request_namespace(mut self, namespace: ScriptRequestNamespaceHandle) -> Self {
+        self.request_namespace = Some(namespace);
+        self
+    }
+
     /// Synchronous completion entrypoint used by the GPUI provider and focused
     /// unit tests.
     pub fn completion_items_for_source(&self, source: &str, offset: usize) -> Vec<CompletionItem> {
+        let namespace = self
+            .request_namespace
+            .as_ref()
+            .map(|handle| handle.borrow().clone());
         completion_items(
             source,
             offset,
             self.phase,
             &self.variables.borrow(),
             self.expose_environment_values,
+            namespace.as_ref(),
         )
     }
 
     /// Returns documentation for the runtime symbol or variable name under
     /// the pointer.
     pub fn hover_for_source(&self, source: &str, offset: usize) -> Option<Hover> {
+        let namespace = self
+            .request_namespace
+            .as_ref()
+            .map(|handle| handle.borrow().clone());
         hover_for_source(
             source,
             offset,
             self.phase,
             &self.variables.borrow(),
             self.expose_environment_values,
+            namespace.as_ref(),
         )
     }
 
@@ -300,6 +325,10 @@ impl ScriptCompletionProvider {
     /// result with Resolved's variable warnings.
     pub fn diagnostics_task(&self, source: String, cx: &mut App) -> Task<Vec<Diagnostic>> {
         let variables = self.variables.borrow().clone();
+        let namespace = self
+            .request_namespace
+            .as_ref()
+            .map(|handle| handle.borrow().clone());
         let typescript_request = self.typescript.clone().map(|typescript| {
             (
                 typescript,
@@ -309,7 +338,7 @@ impl ScriptCompletionProvider {
         });
 
         cx.background_spawn(async move {
-            let local = diagnostics_for_source(&source, &variables);
+            let local = diagnostics_for_source(&source, &variables, namespace.as_ref());
             let Some((typescript, document, version)) = typescript_request else {
                 return local;
             };
@@ -354,6 +383,10 @@ impl CompletionProvider for ScriptCompletionProvider {
         let variables = self.variables.borrow().clone();
         let local_phase = self.phase;
         let expose_environment_values = self.expose_environment_values;
+        let namespace = self
+            .request_namespace
+            .as_ref()
+            .map(|handle| handle.borrow().clone());
         let document = self.typescript_document;
         let version = self.version_for_source(&source);
 
@@ -364,6 +397,7 @@ impl CompletionProvider for ScriptCompletionProvider {
                 local_phase,
                 &variables,
                 expose_environment_values,
+                namespace.as_ref(),
             );
             let items = match typescript
                 .completion_items(document, version, source, offset)
@@ -413,6 +447,9 @@ impl CompletionProvider for ScriptCompletionProvider {
                 cursor_offset,
                 self.phase,
                 &self.variables.borrow(),
+                self.request_namespace
+                    .as_ref()
+                    .map(|handle| handle.borrow().clone()),
             )
     }
 }
@@ -432,6 +469,10 @@ impl HoverProvider for ScriptCompletionProvider {
         let variables = self.variables.borrow().clone();
         let local_phase = self.phase;
         let expose_environment_values = self.expose_environment_values;
+        let namespace = self
+            .request_namespace
+            .as_ref()
+            .map(|handle| handle.borrow().clone());
         let document = self.typescript_document;
         let version = self.version_for_source(&source);
 
@@ -442,6 +483,7 @@ impl HoverProvider for ScriptCompletionProvider {
                 local_phase,
                 &variables,
                 expose_environment_values,
+                namespace.as_ref(),
             ) {
                 return Ok(Some(hover));
             }
@@ -496,6 +538,7 @@ fn script_completion_is_active(
     requested_cursor: usize,
     phase: ScriptEditorPhase,
     variables: &ScriptVariableCatalog,
+    catalog: Option<crate::core::RequestNamespaceCatalog>,
 ) -> bool {
     let cursor = requested_cursor.min(text.len());
     let longest_variable_name = variables
@@ -547,6 +590,34 @@ fn script_completion_is_active(
         specs_for_path(&context.path, phase)
             .iter()
             .any(|spec| spec.label.starts_with(&context.typed))
+            || (catalog.is_some()
+                && request_namespace_members_match(
+                    catalog.as_ref(),
+                    &context.path,
+                    &context.typed,
+                ))
+    })
+}
+
+/// Whether any exposed collection namespace member matches the typed prefix at
+/// the given access path.
+fn request_namespace_members_match(
+    catalog: Option<&crate::core::RequestNamespaceCatalog>,
+    path: &[String],
+    typed: &str,
+) -> bool {
+    let Some(catalog) = catalog else {
+        return false;
+    };
+    if path.is_empty() {
+        return catalog
+            .roots()
+            .any(|root| root.status == crate::core::NodeStatus::Exposed && root.name.starts_with(typed));
+    }
+    catalog.members_at(path).is_some_and(|members| {
+        members.iter().any(|member| {
+            member.status == crate::core::NodeStatus::Exposed && member.name.starts_with(typed)
+        })
     })
 }
 
@@ -557,7 +628,11 @@ fn script_completion_is_active(
 /// dynamic arguments, `has`, and write calls are deliberately ignored. A
 /// preceding literal `api.environment.set("name", value)` makes that name
 /// available to later reads in the same source.
-pub fn diagnostics_for_source(source: &str, variables: &ScriptVariableCatalog) -> Vec<Diagnostic> {
+pub fn diagnostics_for_source(
+    source: &str,
+    variables: &ScriptVariableCatalog,
+    catalog: Option<&crate::core::RequestNamespaceCatalog>,
+) -> Vec<Diagnostic> {
     let lexed = lex(source);
     let tokens = &lexed.tokens;
     let mut script_environment_names = variables.environment_names.clone();
@@ -612,7 +687,70 @@ pub fn diagnostics_for_source(source: &str, variables: &ScriptVariableCatalog) -
         index += 1;
     }
 
+    // Diagnose stale / renamed saved-request references passed to
+    // api.requests.execute(...) that no longer resolve in the active
+    // workspace's collection tree.
+    if let Some(catalog) = catalog {
+        let mut index = 0;
+        while index < tokens.len() {
+            if let Some((span, path)) = api_requests_execute_path(tokens, index) {
+                if path.len() >= 2 && catalog.request_at(&path).is_none() {
+                    diagnostics.push(Diagnostic {
+                        range: source_range(source, span.start, span.end),
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        code: Some(NumberOrString::String("missing-request-reference".to_owned())),
+                        source: Some(DIAGNOSTIC_SOURCE.to_owned()),
+                        message: format!(
+                            "Saved request '{}' is no longer available in the active workspace; it may have been renamed or moved.",
+                            path.join(".")
+                        ),
+                        ..Default::default()
+                    });
+                }
+            }
+            index += 1;
+        }
+    }
+
     diagnostics
+}
+
+/// If `tokens[index..]` opens `api.requests.execute(` followed by a dotted
+/// identifier path, returns the final identifier's span and the path segments.
+fn api_requests_execute_path(
+    tokens: &[Token],
+    index: usize,
+) -> Option<(std::ops::Range<usize>, Vec<String>)> {
+    const KEY: &[&str] = &["api", "requests", "execute"];
+    for (offset, expected) in KEY.iter().enumerate() {
+        let position = index + (offset * 2);
+        if tokens.get(position)?.identifier()? != *expected {
+            return None;
+        }
+        if offset < 2 && !matches!(tokens.get(position + 1)?.kind, TokenKind::Dot) {
+            return None;
+        }
+    }
+    if !matches!(tokens.get(index + 5)?.kind, TokenKind::LeftParen) {
+        return None;
+    }
+    let walk_start = index + 6;
+    let mut path = Vec::new();
+    let mut cursor = walk_start;
+    let first = tokens.get(cursor)?.identifier()?;
+    path.push(first.to_owned());
+    let mut span = tokens[cursor].span.clone();
+    cursor += 1;
+    while matches!(tokens.get(cursor)?.kind, TokenKind::Dot) {
+        let identifier = tokens.get(cursor + 1)?.identifier()?;
+        span = tokens[cursor + 1].span.clone();
+        path.push(identifier.to_owned());
+        cursor += 2;
+    }
+    if path.len() < 2 {
+        return None;
+    }
+    Some((span, path))
 }
 
 #[derive(Clone, Copy)]
@@ -639,6 +777,11 @@ const ROOT_MEMBERS_PRE: &[CompletionSpec] = &[
         "Variables",
         "Read variables from the selected environment with collection-variable fallback.",
     ),
+    field(
+        "requests",
+        "RequestReferences",
+        "Schedule saved requests from the active workspace's collection tree for execution after this script phase. This is distinct from fetch().",
+    ),
     field("console", "ScriptConsole", "Bounded script console."),
 ];
 
@@ -663,6 +806,11 @@ const ROOT_MEMBERS_POST: &[CompletionSpec] = &[
         "Variables",
         "Read variables from the selected environment with collection-variable fallback.",
     ),
+    field(
+        "requests",
+        "RequestReferences",
+        "Schedule saved requests from the active workspace's collection tree for execution after this script phase. This is distinct from fetch().",
+    ),
     field("console", "ScriptConsole", "Bounded script console."),
     method(
         "test",
@@ -675,6 +823,12 @@ const ROOT_MEMBERS_POST: &[CompletionSpec] = &[
         "Throws when `condition` is falsy. `message` is converted to text and defaults to `\"assertion failed\"`.",
     ),
 ];
+
+const REQUESTS_MEMBERS: &[CompletionSpec] = &[method(
+    "execute",
+    "(requestRef: SavedRequestReference): void",
+    "Schedules a saved request from the active workspace for execution after the current script phase. Pass a request reference such as ChatAdmin.Login (never a string path). Chained requests run through the normal request pipeline, including their own scripts and environment mutations; recursion is bounded and cycles are rejected.",
+)];
 
 const REQUEST_MEMBERS_PRE: &[CompletionSpec] = &[
     field(
@@ -979,6 +1133,7 @@ fn completion_items(
     phase: ScriptEditorPhase,
     variables: &ScriptVariableCatalog,
     expose_environment_values: bool,
+    catalog: Option<&crate::core::RequestNamespaceCatalog>,
 ) -> Vec<CompletionItem> {
     let offset = clipped_char_boundary(source, requested_offset);
     let prefix = &source[..offset];
@@ -1052,12 +1207,131 @@ fn completion_items(
         return Vec::new();
     };
     let specs = specs_for_path(&context.path, phase);
-
-    specs
+    let mut items: Vec<CompletionItem> = specs
         .iter()
         .filter(|spec| spec.label.starts_with(&context.typed))
         .map(|spec| spec_completion_item(source, context.replace_start, offset, *spec))
-        .collect()
+        .collect();
+
+    if let Some(catalog) = catalog {
+        items.extend(request_namespace_items(
+            catalog,
+            &context.path,
+            &context.typed,
+            source,
+            context.replace_start,
+            offset,
+        ));
+    }
+
+    items
+}
+
+/// Completion items contributed by the active workspace's saved-request
+/// collection namespace (root collections, folders, and request references).
+/// This is the editor half of the single catalog model the runtime injects.
+fn request_namespace_items(
+    catalog: &crate::core::RequestNamespaceCatalog,
+    path: &[String],
+    typed: &str,
+    source: &str,
+    replace_start: usize,
+    offset: usize,
+) -> Vec<CompletionItem> {
+    let mut items = Vec::new();
+    if path.is_empty() {
+        // Root-level collection namespaces participate in completion.
+        for root in catalog.roots() {
+            if root.status != crate::core::NodeStatus::Exposed {
+                continue;
+            }
+            if !root.name.starts_with(typed) {
+                continue;
+            }
+            let Some(new_text) = dot_or_bracket_text(&root.access) else {
+                continue;
+            };
+            items.push(request_namespace_item(
+                source,
+                replace_start,
+                offset,
+                &root.name,
+                new_text,
+                "collection · saved-request namespace",
+                "A saved-request collection from the active workspace. Type the collection name, then `.`, to reach its folders and requests.",
+            ));
+        }
+        return items;
+    }
+
+    let Some(members) = catalog.members_at(path) else {
+        return items;
+    };
+    for member in members {
+        if member.status != crate::core::NodeStatus::Exposed {
+            continue;
+        }
+        if !member.name.starts_with(typed) {
+            continue;
+        }
+        let Some(new_text) = dot_or_bracket_text(&member.access) else {
+            continue;
+        };
+        let (detail, documentation) = match &member.kind {
+            crate::core::NodeKind::Namespace => (
+                "collection folder".to_owned(),
+                "A saved-request folder. Type the folder name, then `.`, to reach its requests.".to_owned(),
+            ),
+            crate::core::NodeKind::Request(info) => (
+                format!("{} · {} · Saved request", info.method, info.url_template),
+                "A saved request. Pass it to api.requests.execute(...) to run it through the normal request pipeline.".to_owned(),
+            ),
+        };
+        items.push(request_namespace_item(
+            source,
+            replace_start,
+            offset,
+            &member.name,
+            new_text,
+            &detail,
+            &documentation,
+        ));
+    }
+    items
+}
+
+/// For a dot-valid identifier use the plain name; otherwise emit bracket
+/// notation so the inserted text remains valid JavaScript the runtime resolves.
+fn dot_or_bracket_text(access: &crate::core::AccessStep) -> Option<String> {
+    match access {
+        crate::core::AccessStep::Dot(name) => Some(name.clone()),
+        crate::core::AccessStep::Bracket(name) => {
+            let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+            Some(format!("[\"{escaped}\"]"))
+        }
+    }
+}
+
+fn request_namespace_item(
+    source: &str,
+    replace_start: usize,
+    offset: usize,
+    name: &str,
+    new_text: String,
+    detail: &str,
+    documentation: &str,
+) -> CompletionItem {
+    CompletionItem {
+        label: name.to_owned(),
+        kind: Some(CompletionItemKind::FIELD),
+        detail: Some(detail.to_owned()),
+        documentation: Some(Documentation::String(documentation.to_owned())),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range: source_range(source, replace_start, offset),
+            new_text,
+        })),
+        ..Default::default()
+    }
 }
 
 fn specs_for_path(path: &[String], phase: ScriptEditorPhase) -> &'static [CompletionSpec] {
@@ -1098,6 +1372,7 @@ fn specs_for_path(path: &[String], phase: ScriptEditorPhase) -> &'static [Comple
         }
         [api, environment] if api == "api" && environment == "environment" => ENVIRONMENT_MEMBERS,
         [api, variables] if api == "api" && variables == "variables" => VARIABLE_MEMBERS,
+        [api, requests] if api == "api" && requests == "requests" => REQUESTS_MEMBERS,
         [api, console] if api == "api" && console == "console" => CONSOLE_MEMBERS,
         [console] if console == "console" => CONSOLE_MEMBERS,
         _ => &[],
@@ -1110,13 +1385,14 @@ fn hover_for_source(
     phase: ScriptEditorPhase,
     variables: &ScriptVariableCatalog,
     expose_environment_values: bool,
+    catalog: Option<&crate::core::RequestNamespaceCatalog>,
 ) -> Option<Hover> {
     let offset = clipped_char_boundary(source, requested_offset);
     let tokens = lex(source).tokens;
     let token_index = hover_token_at_offset(&tokens, offset)?;
 
     if tokens[token_index].identifier().is_some() {
-        return runtime_symbol_hover(source, &tokens, token_index, phase);
+        return runtime_symbol_hover(source, &tokens, token_index, phase, catalog);
     }
     if tokens[token_index].string_literal().is_some() {
         return variable_name_hover(
@@ -1158,6 +1434,7 @@ fn runtime_symbol_hover(
     tokens: &[Token],
     token_index: usize,
     phase: ScriptEditorPhase,
+    catalog: Option<&crate::core::RequestNamespaceCatalog>,
 ) -> Option<Hover> {
     let symbol = tokens.get(token_index)?;
     let symbol_name = symbol.identifier()?;
@@ -1166,17 +1443,47 @@ fn runtime_symbol_hover(
     if resolved_name != symbol_name {
         return None;
     }
+    let full_path = path.join(".");
+    // A frozen saved-request reference from the active workspace's collection
+    // tree gets its own hover identifying it as such, with only non-secret
+    // metadata.
+    if let Some(catalog) = catalog {
+        if let Some(info) = catalog.request_at(&path) {
+            return Some(markdown_hover(
+                source,
+                symbol.span.start,
+                symbol.span.end,
+                request_reference_hover(&full_path, info, phase),
+            ));
+        }
+    }
     let spec = specs_for_path(parent_path, phase)
         .iter()
         .find(|spec| spec.label == symbol_name)?;
-    let full_path = path.join(".");
-
     Some(markdown_hover(
         source,
         symbol.span.start,
         symbol.span.end,
         runtime_symbol_markdown(&full_path, *spec, phase),
     ))
+}
+
+/// Markdown hover for a frozen saved-request reference. Only non-secret
+/// metadata is shown (name, collection path, method, template URL).
+fn request_reference_hover(
+    full_path: &str,
+    info: &crate::core::RequestRefInfo,
+    phase: ScriptEditorPhase,
+) -> String {
+    format!(
+        "```typescript\n{}\n```\n\n**Saved request reference** · `{}`\n\n- Collection path: `{}`\n- Method: `{}`\n- Template URL: `{}`\n\nPass it to `api.requests.execute(...)` to run it through the normal request pipeline.\n\n_{}_",
+        full_path,
+        full_path,
+        info.collection_path.join("."),
+        info.method,
+        info.url_template,
+        phase_availability(phase),
+    )
 }
 
 fn variable_name_hover(
@@ -2511,6 +2818,7 @@ mod tests {
             ordinary.len(),
             ScriptEditorPhase::PreRequest,
             &variables,
+            None,
         ));
 
         let member = Rope::from("api.request.");
@@ -2519,6 +2827,7 @@ mod tests {
             member.len(),
             ScriptEditorPhase::PreRequest,
             &variables,
+            None,
         ));
 
         let pre_response = Rope::from("api.response.");
@@ -2527,12 +2836,14 @@ mod tests {
             pre_response.len(),
             ScriptEditorPhase::PreRequest,
             &variables,
+            None,
         ));
         assert!(script_completion_is_active(
             &pre_response,
             pre_response.len(),
             ScriptEditorPhase::PostResponse,
             &variables,
+            None,
         ));
 
         let variable = Rope::from(r#"api.environment.get("ba"#);
@@ -2541,6 +2852,7 @@ mod tests {
             variable.len(),
             ScriptEditorPhase::PreRequest,
             &variables,
+            None,
         ));
 
         let comment = Rope::from("// api.request.");
@@ -2549,6 +2861,7 @@ mod tests {
             comment.len(),
             ScriptEditorPhase::PreRequest,
             &variables,
+            None,
         ));
     }
 
@@ -2818,6 +3131,7 @@ mod tests {
                     rope.len(),
                     ScriptEditorPhase::PreRequest,
                     &variables,
+                    None,
                 ),
                 "completion should be active for {source:?}"
             );
@@ -2834,6 +3148,7 @@ mod tests {
                     rope.len(),
                     ScriptEditorPhase::PreRequest,
                     &variables,
+                    None,
                 ),
                 "completion should be inactive for {source:?}"
             );
@@ -2845,6 +3160,7 @@ mod tests {
             readonly.len(),
             ScriptEditorPhase::PostResponse,
             &variables,
+            None,
         ));
     }
 
@@ -2856,7 +3172,7 @@ api.environment.get("missing_env");
 api.variables.get('collection_id');
 api.variables.get('missing_anywhere');
 "#;
-        let diagnostics = diagnostics_for_source(source, &catalog());
+        let diagnostics = diagnostics_for_source(source, &catalog(), None);
 
         assert_eq!(diagnostics.len(), 2);
         assert!(diagnostics[0].message.contains("missing_env"));
@@ -2881,7 +3197,7 @@ api.environment.set("created", "secret-value");
 api.environment.unset("missing_unset");
 "#;
 
-        assert!(diagnostics_for_source(source, &catalog()).is_empty());
+        assert!(diagnostics_for_source(source, &catalog(), None).is_empty());
     }
 
     #[test]
@@ -2892,7 +3208,7 @@ api.environment.set("after", computeValue());
 api.environment.get("after");
 api.variables.get("after");
 "#;
-        let diagnostics = diagnostics_for_source(source, &catalog());
+        let diagnostics = diagnostics_for_source(source, &catalog(), None);
 
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("before"));
@@ -2910,7 +3226,7 @@ api.variables.get("after");
                 .is_empty()
         );
 
-        let diagnostics = diagnostics_for_source(r#"api.environment.get("disabled")"#, &catalog);
+        let diagnostics = diagnostics_for_source(r#"api.environment.get("disabled")"#, &catalog, None);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
             diagnostics[0].code,
@@ -2957,7 +3273,7 @@ api.environment.get("dynamic");
 api.environment.get("later");
 api.environment.set("later", "value");
 "#;
-        let diagnostics = diagnostics_for_source(source, &catalog());
+        let diagnostics = diagnostics_for_source(source, &catalog(), None);
 
         assert_eq!(diagnostics.len(), 2);
         assert!(diagnostics[0].message.contains("dynamic"));
@@ -2976,7 +3292,7 @@ api.environment.set("later", "value");
         let items = provider.completion_items_for_source(source, source.len());
 
         assert_eq!(labels(items), ["şehir"]);
-        assert!(diagnostics_for_source(r#"api.environment.get("şehir")"#, &catalog).is_empty());
+        assert!(diagnostics_for_source(r#"api.environment.get("şehir")"#, &catalog, None).is_empty());
     }
 
     #[test]
@@ -3222,4 +3538,169 @@ api.environment.get("disabled_key");
         let enabled_hover = hover_at(&pre, enabled, "disabled_key");
         assert!(hover_markdown(&enabled_hover).contains("Available in the selected environment"));
     }
+
+    // ---- saved-request namespace intelligence ----
+
+    fn request_workspace() -> crate::core::Workspace {
+        use crate::core::{RequestDraft, RequestScripts, RequestTemplate};
+        let mut workspace = crate::core::Workspace::default();
+        let chat = workspace.create_collection("ChatAdmin").unwrap();
+        let login = RequestTemplate {
+            request: RequestDraft::new("POST", "https://a.test/login"),
+            scripts: RequestScripts::default(),
+        };
+        workspace.create_saved_request(&chat, "Login", login).unwrap();
+        workspace
+            .create_saved_request(
+                &chat,
+                "Logout",
+                RequestTemplate {
+                    request: RequestDraft::new("POST", "https://a.test/logout"),
+                    scripts: RequestScripts::default(),
+                },
+            )
+            .unwrap();
+        let users = workspace.create_collection_folder(&chat, None, "Users").unwrap();
+        workspace
+            .create_saved_request_in_folder(
+                &chat,
+                Some(&users),
+                "Create",
+                RequestTemplate {
+                    request: RequestDraft::new("POST", "https://a.test/users"),
+                    scripts: RequestScripts::default(),
+                },
+            )
+            .unwrap();
+        let payments = workspace.create_collection("Payments").unwrap();
+        workspace
+            .create_saved_request(
+                &payments,
+                "Login",
+                RequestTemplate {
+                    request: RequestDraft::new("POST", "https://p.test/login"),
+                    scripts: RequestScripts::default(),
+                },
+            )
+            .unwrap();
+        workspace
+    }
+
+    fn namespace_provider(phase: ScriptEditorPhase) -> ScriptCompletionProvider {
+        let workspace = request_workspace();
+        let catalog = crate::core::RequestNamespaceCatalog::from_workspace(&workspace);
+        ScriptCompletionProvider::new(phase, ScriptVariableCatalog::default().shared())
+            .with_request_namespace(Rc::new(RefCell::new(catalog)))
+    }
+
+    #[test]
+    fn request_namespace_completes_root_collections() {
+        let provider = namespace_provider(ScriptEditorPhase::PreRequest);
+        let labels = |items: Vec<CompletionItem>| {
+            items.into_iter().map(|item| item.label).collect::<Vec<_>>()
+        };
+        // Root-level collection namespaces participate in completion.
+        let root_items = labels(provider.completion_items_for_source("Chat", 5));
+        assert!(root_items.contains(&"ChatAdmin".to_owned()));
+    }
+
+    #[test]
+    fn request_namespace_completes_after_collection_dot() {
+        let provider = namespace_provider(ScriptEditorPhase::PreRequest);
+        let items = provider.completion_items_for_source("api.requests.execute(ChatAdmin.", "api.requests.execute(ChatAdmin.".len());
+        let labels = items.iter().map(|item| item.label.clone()).collect::<Vec<_>>();
+        assert!(labels.contains(&"Login".to_owned()), "got {labels:?}");
+        assert!(labels.contains(&"Logout".to_owned()), "got {labels:?}");
+        assert!(labels.contains(&"Users".to_owned()), "got {labels:?}");
+        // Request completions carry useful non-secret detail (method + template URL).
+        let login = items.iter().find(|item| item.label == "Login").unwrap();
+        let detail = login.detail.as_deref().unwrap_or_default().to_owned();
+        assert!(detail.contains("POST"), "{detail}");
+        assert!(detail.contains("https://a.test/login"), "{detail}");
+        assert!(detail.contains("Saved request"), "{detail}");
+    }
+
+    #[test]
+    fn request_namespace_completes_nested_folders() {
+        let provider = namespace_provider(ScriptEditorPhase::PostResponse);
+        let items = provider.completion_items_for_source(
+            "api.requests.execute(ChatAdmin.Users.",
+            "api.requests.execute(ChatAdmin.Users.".len(),
+        );
+        let labels = items.iter().map(|item| item.label.clone()).collect::<Vec<_>>();
+        assert!(labels.contains(&"Create".to_owned()), "got {labels:?}");
+    }
+
+    #[test]
+    fn api_requests_exposes_execute() {
+        let provider = namespace_provider(ScriptEditorPhase::PreRequest);
+        let items =
+            provider.completion_items_for_source("api.requests.", "api.requests.".len());
+        assert!(
+            items.iter().any(|item| item.label == "execute"),
+            "api.requests. should offer execute: {:?}",
+            items.iter().map(|item| item.label.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn request_reference_hover_shows_metadata_without_secrets() {
+        let provider = namespace_provider(ScriptEditorPhase::PreRequest);
+        let source = "api.requests.execute(ChatAdmin.Login);";
+        let offset = source.rfind("Login").unwrap() + 1;
+        let hover = provider
+            .hover_for_source(source, offset)
+            .expect("hover for ChatAdmin.Login");
+        let markdown = hover_markdown(&hover);
+        assert!(markdown.contains("Saved request reference"), "{markdown}");
+        assert!(markdown.contains("POST"), "{markdown}");
+        assert!(markdown.contains("https://a.test/login"), "{markdown}");
+        assert!(markdown.contains("api.requests.execute"), "{markdown}");
+        // No resolved environment/secret value is ever exposed.
+        assert!(!markdown.contains("Bearer"), "{markdown}");
+    }
+
+    #[test]
+    fn stale_request_reference_is_diagnosed() {
+        let workspace = request_workspace();
+        let catalog = crate::core::RequestNamespaceCatalog::from_workspace(&workspace);
+        let variables = ScriptVariableCatalog::default();
+        // A path that no longer exists in the active workspace is flagged.
+        let diagnostics = diagnostics_for_source(
+            r#"api.requests.execute(ChatAdmin.Gone);"#,
+            &variables,
+            Some(&catalog),
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0].message.contains("no longer available"),
+            "{}",
+            diagnostics[0].message
+        );
+        // A valid reference stays clean.
+        assert!(diagnostics_for_source(
+            r#"api.requests.execute(ChatAdmin.Login);"#,
+            &variables,
+            Some(&catalog),
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn request_namespace_completion_never_exposes_resolved_values() {
+        let provider = namespace_provider(ScriptEditorPhase::PreRequest);
+        let items = provider.completion_items_for_source(
+            "api.requests.execute(ChatAdmin.",
+            "api.requests.execute(ChatAdmin.".len(),
+        );
+        for item in items {
+            let detail = item.detail.as_deref().unwrap_or_default().to_owned();
+            let doc = completion_documentation(&item);
+            // The template URL may contain placeholder names but never resolved
+            // secret text.
+            assert!(!detail.contains("secret"), "{detail}");
+            assert!(!doc.contains("secret"), "{doc}");
+        }
+    }
 }
+

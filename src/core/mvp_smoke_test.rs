@@ -10,7 +10,7 @@ use super::{
     DatabaseStore, Environment, EnvironmentMutation, HeaderEntry, HistoryEntry, RequestDraft,
     RequestHistory, RequestScripts, RequestTemplate, ScriptCancellation, ScriptEnvironment,
     ScriptScope, Workspace, build_client, execute_post_response, execute_pre_request,
-    resolve_request, spawn_request,
+    resolve_request, spawn_request, RequestNamespaceCatalog,
 };
 
 const INITIAL_SECRET: &str = "initial-test-secret";
@@ -132,6 +132,7 @@ fn sqlite_backed_mvp_request_flow_persists_scripts_mutations_and_redacted_histor
         &persisted_template.scripts.pre_request,
         &persisted_template.request,
         &pre_scope,
+        &RequestNamespaceCatalog::default(),
         &ScriptCancellation::new(),
     )
     .expect("pre-request script succeeds");
@@ -207,6 +208,7 @@ fn sqlite_backed_mvp_request_flow_persists_scripts_mutations_and_redacted_histor
         &resolved.request,
         &response,
         &post_scope,
+        &RequestNamespaceCatalog::default(),
         &ScriptCancellation::new(),
     )
     .expect("post-response script succeeds");

@@ -447,6 +447,61 @@ The exposed API is deliberately small:
   into level-colored rows; each row can be copied independently and Copy all
   remains available even when no HTTP response was produced.
 
+### Running saved requests from a script: `api.requests.execute`
+
+A pre- or post-response script can schedule another **saved request from the
+active workspace** to run through Resolved's normal request pipeline after the
+current script phase returns:
+
+```js
+api.requests.execute(ChatAdmin.Login);
+api.requests.execute(Payments.Admin.Refund);
+```
+
+Inside `api.requests.execute(...)`, `ChatAdmin.Login` is **not a string path**.
+It is a frozen request reference backed by the saved request's stable ID,
+exposed as a JavaScript namespace built from your active workspace's collection
+tree (collections and folders become objects; requests become references).
+Because the reference carries the request's stable ID, it is never resolved by
+name after it was created.
+
+- Request references come from the active workspace's saved collection tree and
+  are exposed automatically to both pre-request and post-response scripts.
+- Folder/collection structure provides namespacing, so two requests named
+  `Login` under different collections are distinct references
+  (`ChatAdmin.Login` vs `Payments.Login`).
+- Names that aren't valid JavaScript identifiers use bracket notation
+  (`ChatAdmin["My Request"]`); a collection whose name collides with a built-in
+  global (such as `JSON` or `api`) is not exposed as a namespace, and two
+  entries with the same name in the same namespace are treated as ambiguous and
+  reported rather than silently pinned to one.
+- Execution is **scheduled after the current script phase returns**. A
+  pre-request chain runs before the parent request's variable resolution and
+  network execution (so a chained request can obtain a token and the parent can
+  consume it); a post-response chain runs after the parent's response.
+- Chained requests execute their **own** pre/post-response scripts, resolve
+  variables against the current environment, apply their environment mutations
+  (visible to later requests in the same chain), and honor the workspace's
+  local/server execution policy, cancellation, and normal history/shared
+  history.
+- Recursion is bounded (max depth 16, max 64 chained executions per Send) and
+  cycles by stable request identity are detected and rejected with a useful
+  error.
+- Passing anything other than a valid request reference from the active
+  workspace fails with a clear script diagnostic.
+
+This is distinct from a future generic `fetch()` API: `api.requests.execute`
+gives no raw network access; it only schedules existing saved requests. Scripts
+receive no `Response` or `Promise` from `execute`.
+
+The scripting editor's completion, hover, and diagnostics reflect the active
+workspace's collection tree so the editor and runtime can never drift: typing
+`ChatAdmin.` suggests `Login`, `Logout`, and folder names; `ChatAdmin.Users.`
+suggests its requests; hovering a reference shows safe metadata (name,
+collection path, method, template URL); and a stale reference that was renamed
+or moved is flagged as no longer available. Resolved values and secrets are
+never shown in completion, hover, or diagnostics.
+
 A post-response script failure does not discard the received response. Script
 diagnostics, captured logs, and test results remain available in the Scripts
 tab. Logs written before a runtime exception are retained as debugging context,

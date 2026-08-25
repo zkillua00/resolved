@@ -22,9 +22,9 @@ use super::{
     AppSettings,
     DbStringEnum,
     history::{DEFAULT_HISTORY_LIMIT, HistoryEntry, RequestHistory, ResponseSummary},
-    request::{BodyField, BodyFieldKind, BodyMode, HeaderEntry, RawBodyLanguage, RequestDraft},
+    request::{BodyField, HeaderEntry, RequestDraft},
     request_tabs::RequestTabs,
-    snippet::{Snippet, SnippetCategory, SnippetKind, SnippetRequirement},
+    snippet::{Snippet, SnippetValidationError},
     template::RequestTemplate,
     workspace::{
         Collection, CollectionFolder, Environment, EnvironmentVariable, RequestScripts,
@@ -473,6 +473,9 @@ pub enum DatabaseError {
     #[error("workspace data is invalid")]
     InvalidWorkspace(#[from] WorkspaceValidationError),
 
+    #[error("snippet data is invalid")]
+    InvalidSnippet(#[from] SnippetValidationError),
+
     #[error("could not read legacy {kind} file {path}")]
     LegacyRead {
         kind: &'static str,
@@ -657,6 +660,27 @@ impl DatabaseStore {
         ensure_local_workspace_exists(&transaction, workspace_id)?;
         save_workspace_tx(&transaction, workspace_id, workspace)?;
         save_request_tabs_tx(&transaction, workspace_id, &state_json)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Load every snippet from the app-global store (not scoped to a workspace).
+    pub fn load_snippets(&self) -> Result<Vec<Snippet>, DatabaseError> {
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let snippets = load_snippets_tx(&transaction)?;
+        transaction.commit()?;
+        Ok(snippets)
+    }
+
+    /// Replace the entire app-global snippet store atomically.
+    pub fn save_snippets(&self, snippets: &[Snippet]) -> Result<(), DatabaseError> {
+        for snippet in snippets {
+            snippet.validate()?;
+        }
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        save_snippets_tx(&transaction, snippets)?;
         transaction.commit()?;
         Ok(())
     }
@@ -1514,55 +1538,6 @@ fn save_workspace_tx(
         &environment_ids,
     )?;
 
-    let mut snippet_ids = HashSet::new();
-    for (snippet_position, snippet) in workspace.snippets.iter().enumerate() {
-        snippet_ids.insert(snippet.id.clone());
-        transaction.execute(
-            "INSERT INTO snippets(
-                id, name, description, category, kind, output_language, source,
-                generator_api_version, position, created_at, updated_at, version, workspace_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12)
-             ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                description = excluded.description,
-                category = excluded.category,
-                kind = excluded.kind,
-                output_language = excluded.output_language,
-                source = excluded.source,
-                generator_api_version = excluded.generator_api_version,
-                position = excluded.position,
-                workspace_id = excluded.workspace_id,
-                created_at = excluded.created_at,
-                updated_at = excluded.updated_at,
-                version = snippets.version + 1",
-            params![
-                &snippet.id,
-                &snippet.name,
-                &snippet.description,
-                snippet.category.as_db_str(),
-                snippet.kind.as_db_str(),
-                &snippet.output_language,
-                &snippet.source,
-                to_i64(
-                    snippet.generator_api_version,
-                    "snippet generator_api_version",
-                )?,
-                to_i64(snippet_position, "snippet position")?,
-                snippet.created_at.timestamp_micros(),
-                snippet.updated_at.timestamp_micros(),
-                workspace_id,
-            ],
-        )?;
-        sync_snippet_requirements(transaction, snippet)?;
-    }
-    delete_missing_ids(
-        transaction,
-        "SELECT id FROM snippets WHERE workspace_id = ?1",
-        "DELETE FROM snippets WHERE id = ?1",
-        Some(workspace_id),
-        &snippet_ids,
-    )?;
-
     transaction.execute(
         "INSERT INTO metadata(
             workspace_id, singleton, active_environment_id, updated_at, version
@@ -1843,6 +1818,135 @@ fn sync_snippet_requirements(
     Ok(())
 }
 
+fn save_snippets_tx(
+    transaction: &Transaction<'_>,
+    snippets: &[Snippet],
+) -> Result<(), DatabaseError> {
+    let mut snippet_ids = HashSet::new();
+    for (position, snippet) in snippets.iter().enumerate() {
+        snippet_ids.insert(snippet.id.clone());
+        transaction.execute(
+            "INSERT INTO snippets(
+                id, name, description, category, kind, output_language, source,
+                generator_api_version, position, created_at, updated_at, version
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                category = excluded.category,
+                kind = excluded.kind,
+                output_language = excluded.output_language,
+                source = excluded.source,
+                generator_api_version = excluded.generator_api_version,
+                position = excluded.position,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at,
+                version = snippets.version + 1",
+            params![
+                &snippet.id,
+                &snippet.name,
+                &snippet.description,
+                snippet.category.as_db_str(),
+                snippet.kind.as_db_str(),
+                &snippet.output_language,
+                &snippet.source,
+                to_i64(
+                    snippet.generator_api_version,
+                    "snippet generator_api_version",
+                )?,
+                to_i64(position, "snippet position")?,
+                snippet.created_at.timestamp_micros(),
+                snippet.updated_at.timestamp_micros(),
+            ],
+        )?;
+        sync_snippet_requirements(transaction, snippet)?;
+    }
+    delete_missing_ids(
+        transaction,
+        "SELECT id FROM snippets",
+        "DELETE FROM snippets WHERE id = ?1",
+        None,
+        &snippet_ids,
+    )?;
+    Ok(())
+}
+
+fn load_snippets_tx(transaction: &Transaction<'_>) -> Result<Vec<Snippet>, DatabaseError> {
+    let snippet_rows = {
+        let mut statement = transaction.prepare(
+            "SELECT
+                id, name, description, category, kind, output_language, source,
+                generator_api_version, created_at, updated_at
+             FROM snippets
+             ORDER BY position ASC, id ASC",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, i64>(9)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut snippets = Vec::with_capacity(snippet_rows.len());
+    for (
+        id,
+        name,
+        description,
+        category,
+        kind,
+        output_language,
+        source,
+        generator_api_version,
+        created_at,
+        updated_at,
+    ) in snippet_rows
+    {
+        let raw_requirements = {
+            let mut statement = transaction.prepare(
+                "SELECT requirement
+                 FROM snippet_requirements
+                 WHERE snippet_id = ?1
+                 ORDER BY position ASC",
+            )?;
+            statement
+                .query_map(params![&id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let requirements = raw_requirements
+            .into_iter()
+            .map(|requirement| enum_from_db(&requirement, "snippet requirement"))
+            .collect::<Result<Vec<_>, _>>()?;
+        snippets.push(Snippet {
+            id,
+            name,
+            description,
+            category: enum_from_db(&category, "snippet category")?,
+            kind: enum_from_db(&kind, "snippet kind")?,
+            output_language,
+            source,
+            requirements,
+            generator_api_version: u32_from_i64(
+                generator_api_version,
+                "snippet generator_api_version",
+            )?,
+            created_at: datetime_from_micros(created_at, "snippet created_at")?,
+            updated_at: datetime_from_micros(updated_at, "snippet updated_at")?,
+        });
+    }
+    Ok(snippets)
+}
+
 fn load_workspace_tx(
     transaction: &Transaction<'_>,
     workspace_id: &str,
@@ -2036,80 +2140,6 @@ fn load_workspace_tx(
         });
     }
 
-    let snippet_rows = {
-        let mut statement = transaction.prepare(
-            "SELECT
-                id, name, description, category, kind, output_language, source,
-                generator_api_version, created_at, updated_at
-             FROM snippets
-             WHERE workspace_id = ?1
-             ORDER BY position ASC, id ASC",
-        )?;
-        statement
-            .query_map(params![workspace_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, i64>(7)?,
-                    row.get::<_, i64>(8)?,
-                    row.get::<_, i64>(9)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-    };
-
-    let mut snippets = Vec::with_capacity(snippet_rows.len());
-    for (
-        id,
-        name,
-        description,
-        category,
-        kind,
-        output_language,
-        source,
-        generator_api_version,
-        created_at,
-        updated_at,
-    ) in snippet_rows
-    {
-        let raw_requirements = {
-            let mut statement = transaction.prepare(
-                "SELECT requirement
-                 FROM snippet_requirements
-                 WHERE snippet_id = ?1
-                 ORDER BY position ASC",
-            )?;
-            statement
-                .query_map(params![&id], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let requirements = raw_requirements
-            .into_iter()
-            .map(|requirement| enum_from_db(&requirement, "snippet requirement"))
-            .collect::<Result<Vec<_>, _>>()?;
-        snippets.push(Snippet {
-            id,
-            name,
-            description,
-            category: enum_from_db(&category, "snippet category")?,
-            kind: enum_from_db(&kind, "snippet kind")?,
-            output_language,
-            source,
-            requirements,
-            generator_api_version: u32_from_i64(
-                generator_api_version,
-                "snippet generator_api_version",
-            )?,
-            created_at: datetime_from_micros(created_at, "snippet created_at")?,
-            updated_at: datetime_from_micros(updated_at, "snippet updated_at")?,
-        });
-    }
-
     let active_environment_id = transaction
         .query_row(
             "SELECT active_environment_id FROM metadata WHERE workspace_id = ?1",
@@ -2122,7 +2152,6 @@ fn load_workspace_tx(
         created_by: None,
         collections,
         environments,
-        snippets,
         active_environment_id,
     };
     workspace.validate()?;
@@ -2600,7 +2629,6 @@ fn read_legacy_workspace(path: &Path) -> Result<Option<Workspace>, DatabaseError
         created_by: None,
         collections: file.collections,
         environments: file.environments,
-        snippets: Vec::new(),
         active_environment_id: file.active_environment_id,
     };
     workspace.validate()?;
@@ -2698,7 +2726,11 @@ fn required_when_response<T>(value: Option<T>, field: &'static str) -> Result<T,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{MetricsPosition, SavedTheme, ShortcutOverride, ThemeSettings};
+    use crate::core::snippet::{SnippetCategory, SnippetKind, SnippetRequirement};
+    use crate::core::{
+        request::{BodyFieldKind, BodyMode, RawBodyLanguage},
+        MetricsPosition, SavedTheme, ShortcutOverride, ThemeSettings,
+    };
 
     fn database() -> (tempfile::TempDir, DatabaseStore) {
         let directory = tempfile::tempdir().unwrap();
@@ -2798,7 +2830,6 @@ mod tests {
                     },
                 ],
             }],
-            snippets: Vec::new(),
             active_environment_id: Some("environment-1".to_owned()),
         }
     }
@@ -3419,7 +3450,7 @@ mod tests {
         drop(connection);
 
         store.initialize().unwrap();
-        assert!(store.load_workspace().unwrap().snippets.is_empty());
+        assert!(store.load_snippets().unwrap().is_empty());
         assert_eq!(store.load_app_settings().unwrap(), settings);
 
         let connection = store.open_connection().unwrap();
@@ -3689,9 +3720,7 @@ mod tests {
     #[test]
     fn rejects_corrupt_snippet_enums_and_generator_version() {
         let (_directory, store) = database();
-        let mut workspace = sample_workspace();
-        workspace.snippets = sample_snippets();
-        store.save_workspace(&workspace).unwrap();
+        store.save_snippets(&sample_snippets()).unwrap();
         let connection = store.open_connection().unwrap();
         connection
             .pragma_update(None, "ignore_check_constraints", true)
@@ -3705,7 +3734,7 @@ mod tests {
             )
             .unwrap();
         assert_corrupt(
-            store.load_workspace(),
+            store.load_snippets(),
             "snippet category",
             "broken_category",
         );
@@ -3716,7 +3745,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        assert_corrupt(store.load_workspace(), "snippet kind", "broken_kind");
+        assert_corrupt(store.load_snippets(), "snippet kind", "broken_kind");
         connection
             .execute(
                 "UPDATE snippets SET kind = 'plain'
@@ -3733,7 +3762,7 @@ mod tests {
             )
             .unwrap();
         assert_corrupt(
-            store.load_workspace(),
+            store.load_snippets(),
             "snippet requirement",
             "broken_requirement",
         );
@@ -3753,7 +3782,7 @@ mod tests {
             )
             .unwrap();
         assert_corrupt(
-            store.load_workspace(),
+            store.load_snippets(),
             "snippet generator_api_version",
             "-1",
         );
@@ -3864,16 +3893,15 @@ mod tests {
     #[test]
     fn snippets_round_trip_preserves_order_and_deletes_missing_rows() {
         let (_directory, store) = database();
-        let mut workspace = sample_workspace();
-        workspace.snippets = sample_snippets();
+        let mut snippets = sample_snippets();
 
-        store.save_workspace(&workspace).unwrap();
-        assert_eq!(store.load_workspace().unwrap(), workspace);
+        store.save_snippets(&snippets).unwrap();
+        assert_eq!(store.load_snippets().unwrap(), snippets);
 
-        workspace.snippets.reverse();
-        workspace.snippets[0].requirements.reverse();
-        store.save_workspace(&workspace).unwrap();
-        assert_eq!(store.load_workspace().unwrap(), workspace);
+        snippets.reverse();
+        snippets[0].requirements.reverse();
+        store.save_snippets(&snippets).unwrap();
+        assert_eq!(store.load_snippets().unwrap(), snippets);
 
         let connection = store.open_connection().unwrap();
         let snippet_rows = {
@@ -3903,9 +3931,9 @@ mod tests {
             let mut statement = connection
                 .prepare(
                     "SELECT requirement, position
-                     FROM snippet_requirements
-                     WHERE snippet_id = 'snippet-executable'
-                     ORDER BY position",
+                    FROM snippet_requirements
+                    WHERE snippet_id = 'snippet-executable'
+                    ORDER BY position",
                 )
                 .unwrap();
             statement
@@ -3925,11 +3953,9 @@ mod tests {
         );
         drop(connection);
 
-        workspace
-            .snippets
-            .retain(|snippet| snippet.id != "snippet-executable");
-        store.save_workspace(&workspace).unwrap();
-        assert_eq!(store.load_workspace().unwrap(), workspace);
+        snippets.retain(|snippet| snippet.id != "snippet-executable");
+        store.save_snippets(&snippets).unwrap();
+        assert_eq!(store.load_snippets().unwrap(), snippets);
 
         let connection = store.open_connection().unwrap();
         let snippet_count: i64 = connection
@@ -4332,11 +4358,10 @@ mod tests {
         let (directory, store) = database();
         let history_path = directory.path().join("history.json");
         let workspace_path = directory.path().join("workspace.json");
-        let snippet_workspace = Workspace {
-            snippets: sample_snippets(),
-            ..Workspace::default()
-        };
-        store.save_workspace(&snippet_workspace).unwrap();
+        // A database holding only app-global snippets counts as non-empty, so
+        // the legacy import must notice it and leave the workspace untouched.
+        let snippets = sample_snippets();
+        store.save_snippets(&snippets).unwrap();
 
         let legacy_workspace = sample_workspace();
         let workspace_file = LegacyWorkspaceFile {
@@ -4360,7 +4385,7 @@ mod tests {
                 history_imported: false,
             }
         );
-        assert_eq!(store.load_workspace().unwrap(), snippet_workspace);
+        assert_eq!(store.load_snippets().unwrap(), snippets);
     }
 
     #[test]

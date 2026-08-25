@@ -94,6 +94,8 @@ impl ApiTester {
         let credential_vault = CredentialVault::new(database_store.clone());
         let snippet_menu_owner = cx.entity().downgrade();
         let script_variable_catalog = ScriptVariableCatalog::default().shared();
+        let script_request_namespace =
+            Rc::new(RefCell::new(crate::core::RequestNamespaceCatalog::default()));
         let typescript_service = embedded_typescript_service();
         let template_variable_catalog = TemplateVariableCatalog::default().shared();
         let method = cx.new(|cx| {
@@ -139,6 +141,7 @@ impl ApiTester {
             if let Some(service) = typescript_service.clone() {
                 intelligence = intelligence.with_typescript_service(service);
             }
+            intelligence = intelligence.with_request_namespace(Rc::clone(&script_request_namespace));
             let intelligence = Rc::new(intelligence);
             let diagnostic_intelligence = Rc::clone(&intelligence);
             CodeEditor::new(
@@ -176,6 +179,7 @@ impl ApiTester {
             if let Some(service) = typescript_service.clone() {
                 intelligence = intelligence.with_typescript_service(service);
             }
+            intelligence = intelligence.with_request_namespace(Rc::clone(&script_request_namespace));
             let intelligence = Rc::new(intelligence);
             let diagnostic_intelligence = Rc::clone(&intelligence);
             CodeEditor::new(
@@ -334,6 +338,13 @@ impl ApiTester {
                 )),
                 false,
             ),
+        };
+        let snippets = match database_store.load_snippets() {
+            Ok(snippets) => snippets,
+            Err(error) => {
+                tracing::warn!("snippets could not be loaded: {error}");
+                Vec::new()
+            }
         };
         if settings_writable {
             let mut candidate = settings.clone();
@@ -526,8 +537,8 @@ impl ApiTester {
                 .build(),
         ));
         let snippet_editor = Self::create_snippet_editor_session(
-            &workspace,
-            workspace_writable,
+            &snippets,
+            true,
             Rc::clone(&script_variable_catalog),
             typescript_service.clone(),
             window,
@@ -665,6 +676,8 @@ impl ApiTester {
             request_generation: 0,
             abort_handle: None,
             script_cancellation: None,
+            request_namespace: crate::core::RequestNamespaceCatalog::default(),
+            chain_budget: Arc::new(AtomicUsize::new(0)),
             response: None,
             response_request: None,
             response_sensitive_values: Vec::new(),
@@ -679,6 +692,7 @@ impl ApiTester {
             history,
             history_warning,
             history_writable,
+            snippets,
             workspace,
             database_store,
             workspace_providers,
@@ -756,6 +770,7 @@ impl ApiTester {
             next_variable_row_id: 0,
             pending_delete: None,
             script_variable_catalog,
+            script_request_namespace,
             typescript_service,
             template_variable_catalog,
             template_highlight_tasks: HashMap::new(),

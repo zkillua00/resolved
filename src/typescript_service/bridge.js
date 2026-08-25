@@ -37,6 +37,8 @@
     pre: globalThis.__RESOLVED_TS_EXECUTABLE_SNIPPET_PRE_DTS,
     post: globalThis.__RESOLVED_TS_EXECUTABLE_SNIPPET_POST_DTS,
   };
+  const requestNamespaceDeclarations =
+    globalThis.__RESOLVED_TS_REQUEST_NAMESPACE_DTS || "";
 
   delete globalThis.__RESOLVED_TS_LIBRARIES_JSON;
   delete globalThis.__RESOLVED_TS_RUNTIME_DTS;
@@ -45,6 +47,7 @@
   delete globalThis.__RESOLVED_TS_SNIPPET_GENERATOR_DTS;
   delete globalThis.__RESOLVED_TS_EXECUTABLE_SNIPPET_PRE_DTS;
   delete globalThis.__RESOLVED_TS_EXECUTABLE_SNIPPET_POST_DTS;
+  delete globalThis.__RESOLVED_TS_REQUEST_NAMESPACE_DTS;
 
   function createProject(
     scriptFile,
@@ -59,6 +62,10 @@
       files.set(fileName, declarations);
     }
     files.set(scriptFile, "");
+    // Dynamic request-reference namespace (from the active workspace's
+    // collection tree). Empty until Resolved pushes declarations; it is only
+    // populated for the script/plain-snippet projects, never the generators.
+    files.set("/request-namespace.d.ts", requestNamespaceDeclarations);
     for (const fileName of files.keys()) {
       versions.set(fileName, "0");
     }
@@ -166,6 +173,27 @@
     const project = projectFor(documentKind);
     project.files.set(project.scriptFile, String(source));
     project.versions.set(project.scriptFile, String(version));
+  }
+
+  // Push fresh request-namespace declarations to the script/plain-snippet
+  // projects. The version bump makes the language service revalidate on the
+  // next diagnostics/completion request. Generators stay untouched.
+  const requestNamespaceProjectKeys = [
+    "script-pre",
+    "script-post",
+    "plain-snippet-pre",
+    "plain-snippet-post",
+  ];
+  function setRequestNamespaceDeclarations(source) {
+    const declarations = String(source || "");
+    for (const key of requestNamespaceProjectKeys) {
+      const project = projects[key];
+      project.files.set("/request-namespace.d.ts", declarations);
+      project.versions.set(
+        "/request-namespace.d.ts",
+        String((Number(project.versions.get("/request-namespace.d.ts") || "0") || 0) + 1),
+      );
+    }
   }
 
   function identifierReplacementSpan(project, offset) {
@@ -368,5 +396,6 @@
     diagnostics,
     hover,
     updateDocument,
+    setRequestNamespaceDeclarations,
   });
 })();

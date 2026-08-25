@@ -110,6 +110,25 @@ declare namespace Resolved {
     readonly toObject: () => Record<string, string>;
   }
 
+  /** A frozen reference to a saved request from the active workspace's
+   * collection tree. It carries the saved request's stable identity; it is
+   * never resolved by name after it is created. */
+  interface SavedRequestReference {
+    readonly __id: string;
+    readonly __path: string;
+    readonly __method: string;
+    readonly __url: string;
+  }
+
+  interface RequestReferences {
+    /** Schedules a saved request from the active workspace's collection tree
+     * to run through the normal request pipeline after this script phase. Pass
+     * a request reference such as `ChatAdmin.Login` (never a string path).
+     * This is distinct from a raw `fetch()`: execution is scheduled, and
+     * recursion is bounded and cycles rejected. */
+    readonly execute: (requestRef: SavedRequestReference) => void;
+  }
+
   interface ScriptConsole {
     readonly log: (...values: unknown[]) => void;
     readonly info: (...values: unknown[]) => void;
@@ -135,6 +154,7 @@ declare namespace Resolved {
   interface BaseApi {
     readonly environment: Environment;
     readonly variables: Variables;
+    readonly requests: RequestReferences;
     readonly console: ScriptConsole;
   }
 

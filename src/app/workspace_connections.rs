@@ -1482,8 +1482,8 @@ impl ApiTester {
             .borrow_mut()
             .replace_environment(self.workspace.active_environment());
         self.snippet_editor = Self::create_snippet_editor_session(
-            &self.workspace,
-            self.workspace_writable,
+            &self.snippets,
+            true,
             Rc::clone(&self.script_variable_catalog),
             self.typescript_service.clone(),
             window,

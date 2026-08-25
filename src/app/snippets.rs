@@ -138,14 +138,14 @@ impl SnippetDraftSnapshot {
 
 impl ApiTester {
     pub(in crate::app) fn create_snippet_editor_session(
-        workspace: &Workspace,
-        workspace_writable: bool,
+        snippets: &[Snippet],
+        writable: bool,
         variable_catalog: Rc<RefCell<ScriptVariableCatalog>>,
         typescript_service: Option<TypeScriptServiceHandle>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> SnippetEditorSession {
-        let initial = workspace.snippets.first().cloned();
+        let initial = snippets.first().cloned();
         let baseline = initial
             .as_ref()
             .map(SnippetDraftSnapshot::from_snippet)
@@ -172,7 +172,7 @@ impl ApiTester {
                 category,
                 kind,
                 source: baseline.source.clone(),
-                read_only: !workspace_writable,
+                read_only: !writable,
                 variable_catalog,
                 typescript_service,
             },
@@ -352,7 +352,7 @@ impl ApiTester {
                 category,
                 kind,
                 source,
-                read_only: !self.workspace_writable,
+                read_only: false,
                 variable_catalog: Rc::clone(&self.script_variable_catalog),
                 typescript_service: self.typescript_service.clone(),
             },
@@ -384,8 +384,7 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.workspace_writable || editor.entity_id() != self.snippet_editor.editor.entity_id()
-        {
+        if editor.entity_id() != self.snippet_editor.editor.entity_id() {
             return;
         }
         let source = editor.read(cx).value(cx).to_string();
@@ -450,7 +449,6 @@ impl ApiTester {
 
     pub(super) fn snippet_editor_is_dirty(&self, cx: &App) -> bool {
         snippet_draft_is_dirty(
-            self.workspace_writable,
             &self.snippet_draft_snapshot(cx),
             &self.snippet_editor.baseline,
         )
@@ -467,7 +465,7 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.workspace_writable || self.snippet_editor.category == category {
+        if self.snippet_editor.category == category {
             return;
         }
         if category == SnippetCategory::PreRequest {
@@ -485,7 +483,7 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.workspace_writable || self.snippet_editor.kind == kind {
+        if self.snippet_editor.kind == kind {
             return;
         }
         let source = self.snippet_editor.editor.read(cx).value(cx).to_string();
@@ -498,9 +496,6 @@ impl ApiTester {
         enabled: bool,
         cx: &mut Context<Self>,
     ) {
-        if !self.workspace_writable {
-            return;
-        }
         self.snippet_editor
             .requirements
             .retain(|current| *current != requirement && *current != SnippetRequirement::Always);
@@ -515,8 +510,9 @@ impl ApiTester {
         let snapshot = self.snippet_draft_snapshot(cx);
         let name = snapshot.name.trim();
         let mut snippet = if let Some(id) = self.snippet_editor.selected_id.as_deref() {
-            self.workspace
-                .snippet(id)
+            self.snippets
+                .iter()
+                .find(|snippet| snippet.id == id)
                 .cloned()
                 .ok_or_else(|| "This snippet no longer exists.".to_owned())?
         } else {
@@ -548,11 +544,6 @@ impl ApiTester {
     }
 
     pub(super) fn save_snippet(&mut self, cx: &mut Context<Self>) {
-        if !self.workspace_writable {
-            self.set_snippet_notice("The workspace is read-only for this session.", true);
-            cx.notify();
-            return;
-        }
         let snippet = match self.current_snippet_definition(cx, false) {
             Ok(snippet) => snippet,
             Err(error) => {
@@ -561,17 +552,16 @@ impl ApiTester {
                 return;
             }
         };
-        let mut candidate = self.workspace.clone();
-        if let Some(index) = candidate
+        if let Some(index) = self
             .snippets
             .iter()
             .position(|current| current.id == snippet.id)
         {
-            candidate.snippets[index] = snippet.clone();
+            self.snippets[index] = snippet.clone();
         } else {
-            candidate.snippets.push(snippet.clone());
+            self.snippets.push(snippet.clone());
         }
-        match self.commit_workspace(candidate) {
+        match self.persist_snippets() {
             Ok(()) => {
                 self.snippet_editor.selected_id = Some(snippet.id.clone());
                 self.snippet_editor.baseline = SnippetDraftSnapshot::from_snippet(&snippet);
@@ -607,11 +597,6 @@ impl ApiTester {
     }
 
     pub(super) fn duplicate_snippet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.workspace_writable {
-            self.set_snippet_notice("The workspace is read-only for this session.", true);
-            cx.notify();
-            return;
-        }
         let source = match self.current_snippet_definition(cx, true) {
             Ok(snippet) => snippet,
             Err(error) => {
@@ -620,7 +605,7 @@ impl ApiTester {
                 return;
             }
         };
-        let name = unique_snippet_name(&source.name, source.category, &self.workspace.snippets);
+        let name = unique_snippet_name(&source.name, source.category, &self.snippets);
         let mut duplicate = match Snippet::new(name, source.category, source.kind) {
             Ok(snippet) => snippet,
             Err(error) => {
@@ -634,9 +619,8 @@ impl ApiTester {
         duplicate.requirements = source.requirements;
         duplicate.output_language = source.output_language;
 
-        let mut candidate = self.workspace.clone();
-        candidate.snippets.push(duplicate.clone());
-        match self.commit_workspace(candidate) {
+        self.snippets.push(duplicate.clone());
+        match self.persist_snippets() {
             Ok(()) => {
                 self.load_snippet_now(duplicate, window, cx);
                 self.set_snippet_notice("Snippet duplicated.", false);
@@ -653,8 +637,9 @@ impl ApiTester {
             return;
         };
         let Some(name) = self
-            .workspace
-            .snippet(&id)
+            .snippets
+            .iter()
+            .find(|snippet| snippet.id == id)
             .map(|snippet| snippet.name.clone())
         else {
             return;
@@ -692,24 +677,19 @@ impl ApiTester {
     }
 
     fn delete_snippet_now(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.workspace_writable {
-            return;
-        }
-        let mut candidate = self.workspace.clone();
-        let Some(index) = candidate
+        let Some(index) = self
             .snippets
             .iter()
             .position(|snippet| snippet.id == id)
         else {
             return;
         };
-        candidate.snippets.remove(index);
-        match self.commit_workspace(candidate) {
+        self.snippets.remove(index);
+        match self.persist_snippets() {
             Ok(()) => {
                 if let Some(next) = self
-                    .workspace
                     .snippets
-                    .get(index.min(self.workspace.snippets.len().saturating_sub(1)))
+                    .get(index.min(self.snippets.len().saturating_sub(1)))
                     .cloned()
                 {
                     self.load_snippet_now(next, window, cx);
@@ -784,7 +764,12 @@ impl ApiTester {
         if self.snippet_editor.selected_id.as_deref() == Some(&id) {
             return;
         }
-        let Some(snippet) = self.workspace.snippet(&id).cloned() else {
+        let Some(snippet) = self
+            .snippets
+            .iter()
+            .find(|snippet| snippet.id == id)
+            .cloned()
+        else {
             return;
         };
         if self.snippet_editor_is_dirty(cx) {
@@ -838,11 +823,10 @@ impl ApiTester {
 }
 
 fn snippet_draft_is_dirty(
-    workspace_writable: bool,
     draft: &SnippetDraftSnapshot,
     baseline: &SnippetDraftSnapshot,
 ) -> bool {
-    workspace_writable && !draft.is_equivalent_to(baseline)
+    !draft.is_equivalent_to(baseline)
 }
 
 fn unique_snippet_name(
@@ -1162,7 +1146,12 @@ impl ApiTester {
             selection,
             marker,
         } = invocation;
-        let Some(snippet) = self.workspace.snippet(&snippet_id).cloned() else {
+        let Some(snippet) = self
+            .snippets
+            .iter()
+            .find(|snippet| snippet.id == snippet_id)
+            .cloned()
+        else {
             self.request_notice = Some("That snippet no longer exists.".to_owned());
             cx.notify();
             return;
@@ -1447,7 +1436,6 @@ pub(in crate::app) fn snippet_context_menu_builder(
                 );
                 let response = state.response.as_ref();
                 let entries = state
-                    .workspace
                     .snippets
                     .iter()
                     .filter(|snippet| {
@@ -1616,7 +1604,6 @@ impl ApiTester {
             .trim()
             .to_lowercase();
         let mut snippets = self
-            .workspace
             .snippets
             .iter()
             .filter(|snippet| {
@@ -1653,7 +1640,7 @@ impl ApiTester {
                 .read(cx)
                 .value(cx)
                 .is_empty();
-        let writable = self.workspace_writable;
+        let writable = true;
         let preview_help = snippet_preview_help(self.snippet_editor.category);
 
         v_flex()
@@ -1701,7 +1688,7 @@ impl ApiTester {
                                                     .text_color(cx.theme().muted_foreground)
                                                     .child(format!(
                                                         "{} saved",
-                                                        self.workspace.snippets.len()
+                                                        self.snippets.len()
                                                     )),
                                             )
                                             .child(
@@ -2062,7 +2049,7 @@ impl ApiTester {
                             .child(snippet_field_label("Name", true, cx))
                             .child(
                                 Input::new(&self.snippet_editor.name)
-                                    .disabled(!self.workspace_writable),
+                                    .disabled(false),
                             ),
                     )
                     .child(
@@ -2073,7 +2060,7 @@ impl ApiTester {
                             .child(snippet_field_label("Description", false, cx))
                             .child(
                                 Input::new(&self.snippet_editor.description)
-                                    .disabled(!self.workspace_writable),
+                                    .disabled(false),
                             ),
                     ),
             )
@@ -2099,7 +2086,7 @@ impl ApiTester {
                         Button::new("snippet-category-pre-request")
                             .label("Pre-request")
                             .outline()
-                            .disabled(!self.workspace_writable)
+                            .disabled(false)
                             .selected(self.snippet_editor.category == SnippetCategory::PreRequest)
                             .on_click(move |_, window, cx| {
                                 if let Some(this) = pre_this.upgrade() {
@@ -2117,7 +2104,7 @@ impl ApiTester {
                         Button::new("snippet-category-post-response")
                             .label("Post-response")
                             .outline()
-                            .disabled(!self.workspace_writable)
+                            .disabled(false)
                             .selected(
                                 self.snippet_editor.category == SnippetCategory::PostResponse,
                             )
@@ -2175,7 +2162,7 @@ impl ApiTester {
                 let checked = self.snippet_editor.requirements.contains(&requirement);
                 let unavailable_for_phase = requirement == SnippetRequirement::HasResponse
                     && self.snippet_editor.category == SnippetCategory::PreRequest;
-                let disabled = !self.workspace_writable || unavailable_for_phase;
+                let disabled = unavailable_for_phase;
                 v_flex()
                     .gap_0p5()
                     .child(
@@ -2216,7 +2203,7 @@ impl ApiTester {
                         Button::new("snippet-kind-plain")
                             .label("Plain JavaScript")
                             .outline()
-                            .disabled(!self.workspace_writable)
+                            .disabled(false)
                             .selected(self.snippet_editor.kind == SnippetKind::Plain)
                             .on_click(move |_, window, cx| {
                                 if let Some(this) = plain_this.upgrade() {
@@ -2230,7 +2217,7 @@ impl ApiTester {
                         Button::new("snippet-kind-executable")
                             .label("Executable generator")
                             .outline()
-                            .disabled(!self.workspace_writable)
+                            .disabled(false)
                             .selected(self.snippet_editor.kind == SnippetKind::Executable)
                             .on_click(move |_, window, cx| {
                                 if let Some(this) = executable_this.upgrade() {
@@ -2578,7 +2565,7 @@ mod tests {
     fn canonical_snippet_draft_values_remain_clean() {
         let baseline = draft("Logger", "Writes a log statement");
 
-        assert!(!snippet_draft_is_dirty(true, &baseline, &baseline));
+        assert!(!snippet_draft_is_dirty(&baseline, &baseline));
     }
 
     #[test]
@@ -2586,20 +2573,19 @@ mod tests {
         let baseline = draft("Logger", "Writes a log statement");
         let padded = draft("  Logger\n", "\tWrites a log statement  ");
 
-        assert!(!snippet_draft_is_dirty(true, &padded, &baseline));
+        assert!(!snippet_draft_is_dirty(&padded, &baseline));
 
         let changed = draft("  Different name  ", "\tWrites a log statement  ");
-        assert!(snippet_draft_is_dirty(true, &changed, &baseline));
+        assert!(snippet_draft_is_dirty(&changed, &baseline));
     }
 
     #[test]
-    fn read_only_snippet_drafts_never_veto_close() {
+    fn changed_snippet_drafts_are_dirty() {
         let baseline = draft("Logger", "Writes a log statement");
         let mut changed = draft("Different name", "Different description");
         changed.source = "console.log('changed');".to_owned();
 
-        assert!(!snippet_draft_is_dirty(false, &changed, &baseline));
-        assert!(snippet_draft_is_dirty(true, &changed, &baseline));
+        assert!(snippet_draft_is_dirty(&changed, &baseline));
     }
 
     #[test]

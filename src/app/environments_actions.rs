@@ -648,7 +648,7 @@ impl ApiTester {
         self.commit_settings(settings, false, cx)
     }
 
-    fn replace_active_remote_workspace(&mut self, workspace: Workspace) {
+    pub(super) fn replace_active_remote_workspace(&mut self, workspace: Workspace) {
         let WorkspaceProviderId::Upstream {
             upstream_id,
             workspace_id,

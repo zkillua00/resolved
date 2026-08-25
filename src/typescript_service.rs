@@ -349,6 +349,15 @@ impl TypeScriptServiceHandle {
             .await
             .map_err(|_| TypeScriptServiceError::WorkerStopped)?
     }
+
+    /// Enqueues fresh request-namespace declarations for the type checker.
+    /// Fire-and-forget: the language service revalidates on its next request,
+    /// which keeps script diagnostics in sync with the active workspace.
+    pub fn set_request_namespace_declarations(&self, declarations: impl Into<String>) {
+        let _ = self.inner.sender.send(Command::SetRequestNamespaceDeclarations {
+            declarations: declarations.into(),
+        });
+    }
 }
 
 enum Command {
@@ -379,6 +388,9 @@ enum Command {
         source: String,
         reply: oneshot::Sender<Result<Vec<Diagnostic>, TypeScriptServiceError>>,
     },
+    /// Fire-and-forget push of the active workspace's request-reference
+    /// namespace declarations into the script/plain-snippet projects.
+    SetRequestNamespaceDeclarations { declarations: String },
     Shutdown,
 }
 
@@ -420,6 +432,9 @@ fn worker_loop(mut engine: TypeScriptEngine, receiver: Receiver<Command>) {
             } => {
                 let _ = reply.send(engine.diagnostics(document, version, source));
             }
+            Command::SetRequestNamespaceDeclarations { declarations } => {
+                let _ = engine.set_request_namespace_declarations(&declarations);
+            }
             Command::Shutdown => break,
         }
     }
@@ -442,6 +457,7 @@ fn unavailable_worker_loop(message: String, receiver: Receiver<Command>) {
             Command::Diagnostics { reply, .. } => {
                 let _ = reply.send(Err(unavailable()));
             }
+            Command::SetRequestNamespaceDeclarations { .. } => {}
             Command::Shutdown => break,
         }
     }
@@ -507,6 +523,10 @@ impl TypeScriptEngine {
                     "__RESOLVED_TS_EXECUTABLE_SNIPPET_POST_DTS",
                     EXECUTABLE_SNIPPET_POST_DECLARATIONS,
                 )
+                .catch(&ctx)
+                .map_err(|error| TypeScriptServiceError::Unavailable(error.to_string()))?;
+            globals
+                .set("__RESOLVED_TS_REQUEST_NAMESPACE_DTS", "")
                 .catch(&ctx)
                 .map_err(|error| TypeScriptServiceError::Unavailable(error.to_string()))?;
             ctx.eval::<(), _>(TYPESCRIPT_SOURCE)
@@ -668,6 +688,30 @@ impl TypeScriptEngine {
                 .map_err(|error| TypeScriptServiceError::Engine(error.to_string()))?;
             update
                 .call::<_, ()>((document.bridge_name(), source, version.to_string()))
+                .catch(&ctx)
+                .map_err(|error| TypeScriptServiceError::Engine(error.to_string()))
+        })
+    }
+
+    /// Pushes fresh request-reference namespace declarations (from the active
+    /// workspace's collection tree) into the embedded language service so the
+    /// type checker sees the same saved-request globals the runtime injects.
+    fn set_request_namespace_declarations(
+        &mut self,
+        declarations: &str,
+    ) -> Result<(), TypeScriptServiceError> {
+        self.context.with(|ctx| {
+            let service: Object<'_> = ctx
+                .globals()
+                .get(SERVICE_GLOBAL)
+                .catch(&ctx)
+                .map_err(|error| TypeScriptServiceError::Engine(error.to_string()))?;
+            let setter: Function<'_> = service
+                .get("setRequestNamespaceDeclarations")
+                .catch(&ctx)
+                .map_err(|error| TypeScriptServiceError::Engine(error.to_string()))?;
+            setter
+                .call::<_, ()>((declarations,))
                 .catch(&ctx)
                 .map_err(|error| TypeScriptServiceError::Engine(error.to_string()))
         })
@@ -1518,6 +1562,69 @@ mod tests {
                     && diagnostic.range.start.character <= incomplete_source.chars().count() as u32
                     && diagnostic.range.end.character <= incomplete_source.chars().count() as u32
             }));
+        });
+    }
+
+    #[test]
+    fn request_namespace_declarations_suppress_unknown_name_errors() {
+        run_async(async {
+            let service = TypeScriptServiceHandle::start().expect("embedded TypeScript starts");
+
+            // Build the active-workspace request namespace (ChatAdmin/Login).
+            use crate::core::{RequestDraft, RequestScripts, RequestTemplate};
+            let mut workspace = crate::core::Workspace::default();
+            let chat = workspace.create_collection("ChatAdmin").unwrap();
+            workspace
+                .create_saved_request(
+                    &chat,
+                    "Login",
+                    RequestTemplate {
+                        request: RequestDraft::new("POST", "https://a.test/login"),
+                        scripts: RequestScripts::default(),
+                    },
+                )
+                .unwrap();
+            let catalog = crate::core::RequestNamespaceCatalog::from_workspace(&workspace);
+            service.set_request_namespace_declarations(catalog.declaration_source());
+
+            // With the declarations pushed, a valid reference and api.requests
+            // must not be reported as unknown by the real checker.
+            let clean = service
+                .diagnostics(
+                    TypeScriptScriptPhase::PreRequest,
+                    1,
+                    "api.requests.execute(ChatAdmin.Login);".to_owned(),
+                )
+                .await
+                .expect("valid-reference diagnostics");
+            assert!(
+                !clean
+                    .iter()
+                    .any(|d| d.message.contains("cannot find name 'ChatAdmin'")),
+                "a declared collection root must not be unknown: {clean:?}"
+            );
+            assert!(
+                !clean.iter().any(|d| d.message.contains("'requests'")),
+                "api.requests must be declared on the api type: {clean:?}"
+            );
+
+            // A collection root absent from the active workspace is still
+            // flagged, so the checker and the Resolved stale-reference
+            // diagnostic agree.
+            let stale = service
+                .diagnostics(
+                    TypeScriptScriptPhase::PreRequest,
+                    2,
+                    "api.requests.execute(Nope.Thing);".to_owned(),
+                )
+                .await
+                .expect("stale-reference diagnostics");
+            assert!(
+                stale
+                    .iter()
+                    .any(|d| d.message.contains("Cannot find name 'Nope'")),
+                "an unknown collection root should still be flagged: {stale:?}"
+            );
         });
     }
 }

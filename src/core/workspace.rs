@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    snippet::{Snippet, SnippetCategory, SnippetValidationError},
+    script::EnvironmentMutation,
     template::RequestTemplate,
 };
 
@@ -55,8 +55,6 @@ pub struct Workspace {
     pub environments: Vec<Environment>,
     #[serde(default)]
     pub active_environment_id: Option<String>,
-    #[serde(default)]
-    pub snippets: Vec<Snippet>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -342,8 +340,6 @@ impl Workspace {
         let mut request_ids = HashSet::new();
         let mut environment_ids = HashSet::new();
         let mut variable_ids = HashSet::new();
-        let mut snippet_ids = HashSet::new();
-        let mut snippet_names = HashSet::new();
 
         for collection in &self.collections {
             validate_id("collection", &collection.id, &mut collection_ids)?;
@@ -466,28 +462,7 @@ impl Workspace {
             });
         }
 
-        for snippet in &self.snippets {
-            validate_id("snippet", &snippet.id, &mut snippet_ids)?;
-            snippet
-                .validate()
-                .map_err(|source| WorkspaceValidationError::InvalidSnippet {
-                    id: snippet.id.clone(),
-                    source,
-                })?;
-            let name_key = (snippet.category, snippet.name.to_lowercase());
-            if !snippet_names.insert(name_key) {
-                return Err(WorkspaceValidationError::DuplicateSnippetName {
-                    category: snippet.category,
-                    name: snippet.name.clone(),
-                });
-            }
-        }
-
         Ok(())
-    }
-
-    pub fn snippet(&self, id: &str) -> Option<&Snippet> {
-        self.snippets.iter().find(|snippet| snippet.id == id)
     }
 
     pub fn collection(&self, id: &str) -> Option<&Collection> {
@@ -1217,19 +1192,6 @@ pub enum WorkspaceValidationError {
 
     #[error("environment '{environment_id}' has duplicate variable key '{key}'")]
     DuplicateVariableKey { environment_id: String, key: String },
-
-    #[error("snippet '{id}' is invalid")]
-    InvalidSnippet {
-        id: String,
-        #[source]
-        source: SnippetValidationError,
-    },
-
-    #[error("duplicate {category} snippet name '{name}'")]
-    DuplicateSnippetName {
-        category: SnippetCategory,
-        name: String,
-    },
 }
 
 #[cfg(test)]
@@ -1413,8 +1375,6 @@ struct WorkspaceFile {
     environments: Vec<Environment>,
     #[serde(default)]
     active_environment_id: Option<String>,
-    #[serde(default)]
-    snippets: Vec<Snippet>,
 }
 
 #[cfg(test)]
@@ -1426,7 +1386,6 @@ impl WorkspaceFile {
             collections: workspace.collections.clone(),
             environments: workspace.environments.clone(),
             active_environment_id: workspace.active_environment_id.clone(),
-            snippets: workspace.snippets.clone(),
         }
     }
 
@@ -1436,7 +1395,6 @@ impl WorkspaceFile {
             collections: self.collections,
             environments: self.environments,
             active_environment_id: self.active_environment_id,
-            snippets: self.snippets,
         }
     }
 }
@@ -1513,6 +1471,112 @@ fn validate_name(kind: &'static str, id: &str, name: &str) -> Result<(), Workspa
             kind,
             id: id.to_owned(),
         });
+    }
+    Ok(())
+}
+
+/// Apply script-produced environment mutations to a workspace aggregate.
+///
+/// Used both by the app executor (for the currently displayed request) and by
+/// the saved-request chaining runner, so one mutation model is shared.
+pub fn apply_environment_mutations_to_workspace(
+    workspace: &mut Workspace,
+    environment_id: &str,
+    mutations: &[EnvironmentMutation],
+) -> Result<(), String> {
+    let original_metadata = workspace
+        .environment(environment_id)
+        .ok_or_else(|| format!("active environment '{environment_id}' no longer exists"))?
+        .variables
+        .iter()
+        .map(|variable| {
+            (
+                variable.key.clone(),
+                (variable.id.clone(), variable.enabled, variable.secret),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for mutation in mutations {
+        let result = match mutation {
+            EnvironmentMutation::Set { key, value } => {
+                let existing = workspace
+                    .environment(environment_id)
+                    .and_then(|environment| {
+                        environment
+                            .variables
+                            .iter()
+                            .find(|variable| variable.key == *key)
+                            .map(|variable| {
+                                (variable.id.clone(), variable.enabled, variable.secret)
+                            })
+                    });
+                if let Some((id, enabled, secret)) = existing {
+                    workspace.update_environment_variable(
+                        environment_id,
+                        &id,
+                        key.clone(),
+                        value.clone(),
+                        enabled,
+                        secret,
+                    )
+                } else if let Some((original_id, enabled, secret)) =
+                    original_metadata.get(key).cloned()
+                {
+                    workspace
+                        .add_environment_variable(
+                            environment_id,
+                            key.clone(),
+                            value.clone(),
+                            enabled,
+                            secret,
+                        )
+                        .map(|temporary_id| {
+                            if let Some(variable) = workspace
+                                .environments
+                                .iter_mut()
+                                .find(|environment| environment.id == environment_id)
+                                .and_then(|environment| {
+                                    environment
+                                        .variables
+                                        .iter_mut()
+                                        .find(|variable| variable.id == temporary_id)
+                                })
+                            {
+                                variable.id = original_id;
+                            }
+                        })
+                } else {
+                    workspace
+                        .add_environment_variable(
+                            environment_id,
+                            key.clone(),
+                            value.clone(),
+                            true,
+                            false,
+                        )
+                        .map(|_| ())
+                }
+            }
+            EnvironmentMutation::Unset { key } => {
+                let variable_id = workspace
+                    .environment(environment_id)
+                    .and_then(|environment| {
+                        environment
+                            .variables
+                            .iter()
+                            .find(|variable| variable.key == *key)
+                            .map(|variable| variable.id.clone())
+                    });
+                variable_id.map_or(Ok(()), |id| {
+                    workspace
+                        .remove_environment_variable(environment_id, &id)
+                        .map(|_| ())
+                })
+            }
+        };
+        if let Err(error) = result {
+            return Err(format!("Script environment update was not saved: {error}"));
+        }
     }
     Ok(())
 }

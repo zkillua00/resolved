@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::Ordering;
 
 // Script errors intentionally carry a full structured report and diagnostic.
 // Keeping the unboxed error preserves that context across the background task.
@@ -79,11 +80,15 @@ impl ApiTester {
 
         let source = template.scripts.pre_request.clone();
         let request = template.request.clone();
+        let namespace = self.request_namespace.clone();
         let cancellation = ScriptCancellation::new();
         self.script_cancellation = Some(cancellation.clone());
+        self.chain_budget.store(0, Ordering::Relaxed);
         let task = self
             .runtime
-            .spawn_blocking(move || execute_pre_request(&source, &request, &scope, &cancellation));
+            .spawn_blocking(move || {
+                execute_pre_request(&source, &request, &scope, &namespace, &cancellation)
+            });
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
@@ -108,7 +113,6 @@ impl ApiTester {
             return;
         }
 
-        self.script_cancellation = None;
         let result = match result {
             Ok(result) => result,
             Err(error) => {
@@ -149,6 +153,32 @@ impl ApiTester {
             return;
         }
 
+        if pre_result.chained_requests.is_empty() {
+            self.finish_pre_chain_send(
+                generation,
+                template,
+                environment_id,
+                pre_result,
+                window,
+                cx,
+            );
+        } else {
+            self.run_pre_chain(generation, template, environment_id, pre_result, window, cx);
+        }
+    }
+
+    /// Resolve and send the parent request using the now-current environment,
+    /// after any pre-request chain has run.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_pre_chain_send(
+        &mut self,
+        generation: u64,
+        template: RequestTemplate,
+        environment_id: Option<String>,
+        pre_result: PreRequestResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let environment = environment_id
             .as_deref()
             .and_then(|id| self.workspace.environment(id));
@@ -177,6 +207,210 @@ impl ApiTester {
             window,
             cx,
         );
+    }
+
+    /// Schedule and run a pre-request chain. If any chained request fails, the
+    /// parent is not sent.
+    #[allow(clippy::too_many_arguments)]
+    fn run_pre_chain(
+        &mut self,
+        generation: u64,
+        template: RequestTemplate,
+        environment_id: Option<String>,
+        pre_result: PreRequestResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let scheduled = pre_result.chained_requests.clone();
+        let completion_environment = environment_id.clone();
+        self.spawn_chain(
+            generation,
+            environment_id,
+            scheduled,
+            window,
+            cx,
+            move |this, run, window, cx| {
+                this.apply_chain_run(&run, window, cx);
+                if let Some(failure) = run.error {
+                    let message = this.chain_failure_message(&failure);
+                    this.fail_request(&template.request, message, cx);
+                    return;
+                }
+                this.finish_pre_chain_send(
+                    generation,
+                    template,
+                    completion_environment,
+                    pre_result,
+                    window,
+                    cx,
+                );
+            },
+        );
+    }
+
+    /// Spawn the shared recursive chain runner for the active (local or
+    /// upstream) workspace, then invoke `on_complete` on the main thread with
+    /// the chain outcome. The whole chain shares one cancellation token and one
+    /// execution budget with the top-level Send.
+    fn spawn_chain(
+        &mut self,
+        generation: u64,
+        environment_id: Option<String>,
+        scheduled: Vec<crate::core::ChainedRequest>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        on_complete: impl FnOnce(
+                &mut Self,
+                crate::core::ChainRun,
+                &mut Window,
+                &mut Context<Self>,
+            ) + Send
+            + 'static,
+    ) {
+        let workspace = self.workspace.clone();
+        let namespace = self.request_namespace.clone();
+        let Some(chain_cancellation) = self.script_cancellation.clone() else {
+            self.fail_request(
+                &crate::core::RequestDraft::new("GET", ""),
+                "Request execution state was lost; please try again.".to_owned(),
+                cx,
+            );
+            return;
+        };
+        let budget = Arc::clone(&self.chain_budget);
+        let local_client = self.client.clone();
+        let upstream_client = self.upstream_execution_client.clone();
+        let target = match self.workspace_providers.active_id() {
+            WorkspaceProviderId::Local(_) => None,
+            WorkspaceProviderId::Upstream { .. } => match self.active_upstream_workspace() {
+                Ok(target) => Some((target.upstream_id, target.workspace_id, target.base_url)),
+                Err(error) => {
+                    self.fail_request(
+                        &crate::core::RequestDraft::new("GET", ""),
+                        format!("Could not prepare chained execution: {error}"),
+                        cx,
+                    );
+                    return;
+                }
+            },
+        };
+        let vault = self.credential_vault.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let limits = crate::core::ChainLimits::default();
+
+        let task = self.runtime.spawn(async move {
+            let sender = move |request: crate::core::RequestDraft| {
+                let local_client = local_client.clone();
+                let upstream_client = upstream_client.clone();
+                let vault = vault.clone();
+                let runtime = Arc::clone(&runtime);
+                let target = target.clone();
+                async move {
+                    match target {
+                        None => crate::core::send_request(&local_client, request).await,
+                        Some((upstream_id, workspace_id, base_url)) => {
+                            let credential = runtime
+                                .spawn_blocking(move || vault.load_upstream(&upstream_id))
+                                .await
+                                .map_err(|error| {
+                                    crate::core::RequestError::TaskFailed(error.to_string())
+                                })?
+                                .map_err(|error| {
+                                    crate::core::RequestError::Upstream(error.to_string())
+                                })?
+                                .ok_or_else(|| {
+                                    crate::core::RequestError::Upstream(
+                                        "Log in to this server again.".to_owned(),
+                                    )
+                                })?;
+                            if credential.expires_at <= Utc::now() {
+                                return Err(crate::core::RequestError::Upstream(
+                                    "Log in to this server again.".to_owned(),
+                                ));
+                            }
+                            crate::core::send_request_for_upstream_workspace(
+                                &upstream_client,
+                                &local_client,
+                                &base_url,
+                                credential.bearer_token(),
+                                &workspace_id,
+                                request,
+                            )
+                            .await
+                        }
+                    }
+                }
+            };
+            crate::core::run_chain(
+                &workspace,
+                environment_id.as_deref(),
+                &scheduled,
+                &namespace,
+                &chain_cancellation,
+                sender,
+                limits,
+                &budget,
+            )
+            .await
+        });
+
+        cx.spawn_in(window, async move |this, cx| {
+            let run = match task.await {
+                Ok(run) => run,
+                Err(error) => crate::core::ChainRun {
+                    error: Some(crate::core::ChainFailure {
+                        path: None,
+                        message: format!("Chained execution task failed: {error}"),
+                    }),
+                    ..crate::core::ChainRun::default()
+                },
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                if generation != this.request_generation {
+                    return;
+                }
+                on_complete(this, run, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Apply the effects of a finished chain to the real workspace: persist the
+    /// chained requests' environment mutations and record their history entries
+    /// and shared-history uploads.
+    fn apply_chain_run(
+        &mut self,
+        run: &crate::core::ChainRun,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !run.environment_mutations.is_empty() {
+            if let Some(environment_id) = self.workspace.active_environment_id.clone() {
+                let _ = self.apply_environment_mutations(
+                    Some(&environment_id),
+                    &run.environment_mutations,
+                    window,
+                    cx,
+                );
+            }
+        }
+        for entry in &run.history {
+            self.history.push(entry.clone());
+        }
+        for shared in &run.shared_history {
+            self.upload_shared_history_entry(shared.clone(), cx);
+        }
+    }
+
+    /// Build a secrets-redacted message for a chain failure.
+    fn chain_failure_message(&self, failure: &crate::core::ChainFailure) -> String {
+        let redactor = Self::script_scope(self.workspace.active_environment()).redactor();
+        let message = if let Some(path) = &failure.path {
+            format!("Chained request '{path}' failed: {}", failure.message)
+        } else {
+            format!("Chained execution failed: {}", failure.message)
+        };
+        redactor.scrub(&message)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -316,10 +550,14 @@ impl ApiTester {
         let request = resolved.request.clone();
         let history_request = resolved.request.clone();
         let history_sensitive_values = resolved.sensitive_values.clone();
-        let cancellation = ScriptCancellation::new();
+        let namespace = self.request_namespace.clone();
+        let cancellation = self
+            .script_cancellation
+            .clone()
+            .expect("chain cancellation is present while sending");
         self.script_cancellation = Some(cancellation.clone());
         let task = self.runtime.spawn_blocking(move || {
-            execute_post_response(&source, &request, &response, &scope, &cancellation)
+            execute_post_response(&source, &request, &response, &scope, &namespace, &cancellation)
         });
         cx.notify();
 
@@ -359,14 +597,14 @@ impl ApiTester {
             return;
         }
 
-        self.script_cancellation = None;
-        self.sending = false;
         self.execution_stage = None;
         self.pre_script_report = Some(pre_report);
         self.response = Some(response.clone());
 
+        let mut post_chained = Vec::new();
         match result {
             Ok(Ok(post_result)) => {
+                post_chained = post_result.chained_requests;
                 let mutation_result = self.apply_environment_mutations(
                     environment_id.as_deref(),
                     &post_result.environment_mutations,
@@ -408,6 +646,8 @@ impl ApiTester {
             }
         }
 
+        // The parent exchange completed; record its history entry before running
+        // any post-response chain so the response is preserved.
         let history_entry = HistoryEntry::completed_with_secrets(
             &history_request,
             &response,
@@ -421,8 +661,29 @@ impl ApiTester {
             &history_sensitive_values,
         );
         self.history.push(history_entry);
-        self.persist_history();
         self.upload_shared_history_entry(shared_history, cx);
+
+        if post_chained.is_empty() {
+            self.finalize_post_response(generation, window, cx);
+        } else {
+            self.run_post_chain(generation, environment_id, post_chained, window, cx);
+        }
+    }
+
+    /// Finalize the parent request's completion and reveal its response. Runs
+    /// only after the parent's post-response chain (if any) has finished.
+    fn finalize_post_response(
+        &mut self,
+        generation: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.request_generation {
+            return;
+        }
+        self.sending = false;
+        self.script_cancellation = None;
+        self.persist_history();
         if self.response_tab == ResponseTab::Preview
             && self.workspace_tabs.active() == ActiveWorkspaceTab::Request
             && self.sidebar_tab != SidebarTab::Environments
@@ -432,6 +693,35 @@ impl ApiTester {
             self.hide_preview(cx);
         }
         cx.notify();
+    }
+
+    fn run_post_chain(
+        &mut self,
+        generation: u64,
+        environment_id: Option<String>,
+        post_chained: Vec<crate::core::ChainedRequest>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.spawn_chain(
+            generation,
+            environment_id,
+            post_chained,
+            window,
+            cx,
+            move |this, run, window, cx| {
+                this.apply_chain_run(&run, window, cx);
+                // The parent's already-received response must remain; surface a
+                // chained-request failure in the existing diagnostics UI.
+                if let Some(failure) = run.error {
+                    let message = this.chain_failure_message(&failure);
+                    this.request_error = Some(message);
+                    this.response_tab = ResponseTab::Scripts;
+                    this.hide_preview(cx);
+                }
+                this.finalize_post_response(generation, window, cx);
+            },
+        );
     }
 
     pub(super) fn cancel_request(&mut self, cx: &mut Context<Self>) {
@@ -520,111 +810,20 @@ impl ApiTester {
             return Ok(());
         };
         if !self.workspace_writable {
-            return Err(
-                "Script environment changes could not be saved because storage is read-only."
-                    .to_owned(),
+            return self.apply_environment_mutations_on_upstream(
+                environment_id,
+                mutations,
+                window,
+                cx,
             );
         }
 
         let mut candidate = self.workspace.clone();
-        let original_metadata = candidate
-            .environment(environment_id)
-            .ok_or_else(|| format!("active environment '{environment_id}' no longer exists"))?
-            .variables
-            .iter()
-            .map(|variable| {
-                (
-                    variable.key.clone(),
-                    (variable.id.clone(), variable.enabled, variable.secret),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        for mutation in mutations {
-            let result = match mutation {
-                EnvironmentMutation::Set { key, value } => {
-                    let existing = candidate
-                        .environment(environment_id)
-                        .and_then(|environment| {
-                            environment
-                                .variables
-                                .iter()
-                                .find(|variable| variable.key == *key)
-                                .map(|variable| {
-                                    (variable.id.clone(), variable.enabled, variable.secret)
-                                })
-                        });
-                    if let Some((id, enabled, secret)) = existing {
-                        candidate.update_environment_variable(
-                            environment_id,
-                            &id,
-                            key.clone(),
-                            value.clone(),
-                            enabled,
-                            secret,
-                        )
-                    } else if let Some((original_id, enabled, secret)) =
-                        original_metadata.get(key).cloned()
-                    {
-                        candidate
-                            .add_environment_variable(
-                                environment_id,
-                                key.clone(),
-                                value.clone(),
-                                enabled,
-                                secret,
-                            )
-                            .map(|temporary_id| {
-                                if let Some(variable) = candidate
-                                    .environments
-                                    .iter_mut()
-                                    .find(|environment| environment.id == environment_id)
-                                    .and_then(|environment| {
-                                        environment
-                                            .variables
-                                            .iter_mut()
-                                            .find(|variable| variable.id == temporary_id)
-                                    })
-                                {
-                                    variable.id = original_id;
-                                }
-                            })
-                    } else {
-                        candidate
-                            .add_environment_variable(
-                                environment_id,
-                                key.clone(),
-                                value.clone(),
-                                true,
-                                false,
-                            )
-                            .map(|_| ())
-                    }
-                }
-                EnvironmentMutation::Unset { key } => {
-                    let variable_id =
-                        candidate
-                            .environment(environment_id)
-                            .and_then(|environment| {
-                                environment
-                                    .variables
-                                    .iter()
-                                    .find(|variable| variable.key == *key)
-                                    .map(|variable| variable.id.clone())
-                            });
-                    variable_id.map_or(Ok(()), |id| {
-                        candidate
-                            .remove_environment_variable(environment_id, &id)
-                            .map(|_| ())
-                    })
-                }
-            };
-            if let Err(error) = result {
-                let message = format!("Script environment update was not saved: {error}");
-                self.workspace_warning = Some(message.clone());
-                return Err(message);
-            }
-        }
-
+        crate::core::apply_environment_mutations_to_workspace(
+            &mut candidate,
+            environment_id,
+            mutations,
+        )?;
         self.commit_workspace(candidate)
             .map_err(|error| format!("Script environment update was not saved: {error}"))?;
         self.refresh_variable_intelligence(cx);
@@ -633,4 +832,102 @@ impl ApiTester {
         }
         Ok(())
     }
+
+    /// Persist script environment changes on a remote workspace. The new value
+    /// is exposed locally immediately so the running request can use it, while
+    /// the write is pushed back to the server in the background so a slow or
+    /// failing write never blocks request execution.
+    fn apply_environment_mutations_on_upstream(
+        &mut self,
+        environment_id: &str,
+        mutations: &[EnvironmentMutation],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if !self.can_update_environment_values_content() {
+            return Err(
+                "You do not have permission to update environment values on this server."
+                    .to_owned(),
+            );
+        }
+        let WorkspaceProviderId::Upstream {
+            upstream_id,
+            workspace_id,
+        } = self.workspace_providers.active_id()
+        else {
+            return Err("No server workspace is selected.".to_owned());
+        };
+        let upstream_id = upstream_id.clone();
+        let workspace_id = workspace_id.clone();
+        let base_url = self
+            .settings
+            .upstreams
+            .server(&upstream_id)
+            .and_then(|profile| profile.parsed_base_url())
+            .ok_or_else(|| "That server URL is invalid.".to_owned())?;
+
+        let baseline = self
+            .workspace
+            .environment(environment_id)
+            .ok_or_else(|| format!("active environment '{environment_id}' no longer exists"))?
+            .clone();
+        let mut candidate = self.workspace.clone();
+        crate::core::apply_environment_mutations_to_workspace(
+            &mut candidate,
+            environment_id,
+            mutations,
+        )?;
+        let draft = candidate
+            .environment(environment_id)
+            .ok_or_else(|| format!("active environment '{environment_id}' no longer exists"))?
+            .clone();
+
+        // Reflect the mutation in the in-memory view (and provider cache) right
+        // away, so pre-request-set values are visible to the request itself.
+        self.replace_active_remote_workspace(candidate);
+        self.refresh_variable_intelligence(cx);
+        if self.selected_environment_id.as_deref() == Some(environment_id) {
+            self.reload_environment_editor(window, cx);
+        }
+
+        let vault = self.credential_vault.clone();
+        let client = self.upstream_client.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let task = self.runtime.spawn(async move {
+            let credential = runtime
+                .spawn_blocking(move || vault.load_upstream(&upstream_id))
+                .await
+                .map_err(|error| format!("Could not open the saved session: {error}"))?
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Log in to this server again.".to_owned())?;
+            if credential.expires_at <= Utc::now() {
+                return Err("Log in to this server again.".to_owned());
+            }
+            save_upstream_environment(
+                &client,
+                &base_url,
+                credential.bearer_token(),
+                &workspace_id,
+                &baseline,
+                &draft,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            Ok(())
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                if let Err(error) = result {
+                    this.workspace_warning = Some(format!(
+                        "Environment changes were applied locally but could not be saved to the server: {error}"
+                    ));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        Ok(())
+    }
 }
+

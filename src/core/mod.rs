@@ -4,7 +4,9 @@ mod history;
 mod interchange;
 mod realtime;
 mod request;
+mod request_namespace;
 mod request_tabs;
+mod chain;
 mod script;
 mod secure_store;
 mod settings;
@@ -27,17 +29,23 @@ pub use interchange::{
 pub use realtime::{RealtimeResourceChange, RealtimeSignal, watch_upstream_changes};
 pub use request::{
     BodyField, BodyFieldKind, BodyMode, HeaderEntry, RawBodyLanguage, RequestDraft, RequestError,
-    RequestTask, ResponseData, STANDARD_HTTP_METHODS, build_client, spawn_request,
+    RequestTask, ResponseData, STANDARD_HTTP_METHODS, build_client, send_request, spawn_request,
 };
 pub use request_tabs::{
     DEFAULT_REQUEST_TAB_TITLE, RequestTabAssociation, RequestTabCloseScope, RequestTabGroup,
     RequestTabGroupColor, RequestTabGroupId, RequestTabId, RequestTabRecord, RequestTabs,
 };
+#[allow(unused_imports)]
+pub use request_namespace::{
+    AccessStep, CHAIN_MAX_DEPTH, CHAIN_MAX_TOTAL, NAMESPACE_REF_MARKER, REQUEST_REF_MARKER,
+    NodeKind, NodeStatus, RequestNamespaceCatalog, RequestNamespaceNode, RequestRefInfo,
+    RuntimeNamespaceSpec, RuntimeNodeKind, is_valid_js_identifier,
+};
 pub use script::{
-    EnvironmentMutation, MAX_SCRIPT_SOURCE_BYTES, PostResponseResult, PreRequestResult,
-    ScriptCancellation, ScriptDiagnostic, ScriptEnvironment, ScriptError, ScriptErrorKind,
-    ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope, execute_post_response,
-    execute_pre_request,
+    ChainedRequest, EnvironmentMutation, MAX_SCRIPT_SOURCE_BYTES, PostResponseResult,
+    PreRequestResult, ScriptCancellation, ScriptDiagnostic, ScriptEnvironment, ScriptError,
+    ScriptErrorKind, ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope,
+    execute_post_response, execute_pre_request,
 };
 #[cfg(test)]
 pub use script::{ScriptLog, ScriptTestResult};
@@ -94,8 +102,9 @@ pub use upstream_management::{
 };
 pub use workspace::{
     Collection, CollectionFolder, Environment, RequestScripts, ResourceCreator, SavedRequest,
-    Workspace, WorkspaceMutationError,
+    Workspace, WorkspaceMutationError, apply_environment_mutations_to_workspace,
 };
+pub use chain::{ChainFailure, ChainLimits, ChainRun, run_chain};
 #[allow(unused_imports)]
 pub use workspace_provider::{
     LocalWorkspaceProvider, RemoteWorkspaceProvider, WorkspaceProvider, WorkspaceProviderError,
