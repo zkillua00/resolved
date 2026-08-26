@@ -203,3 +203,77 @@ fn empty_script_console_has_a_copyable_empty_state() {
     assert_eq!(model.row_count(), 0);
     assert_eq!(model.copy_all_text(), "No script has run yet.");
 }
+
+#[test]
+fn snippet_list_rows_filter_case_insensitively_and_order_by_category() {
+    use super::snippets::{filter_snippet_list_rows, SnippetListRow};
+    use crate::core::{SnippetCategory, SnippetKind};
+
+    fn row(id: &str, name: &str, description: &str, category: SnippetCategory) -> SnippetListRow {
+        SnippetListRow {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            description: description.to_owned(),
+            category,
+            kind: SnippetKind::Plain,
+            name_lower: name.to_lowercase(),
+            description_lower: description.to_lowercase(),
+            category_label_lower: category.label().to_lowercase(),
+        }
+    }
+
+    let rows = vec![
+        row(
+            "post-zed",
+            "Zed fetch",
+            "Posts a JSON body",
+            SnippetCategory::PostResponse,
+        ),
+        row(
+            "pre-zeal",
+            "zeal",
+            "Attach auth header",
+            SnippetCategory::PreRequest,
+        ),
+        row(
+            "pre-retry",
+            "Retry",
+            "zealous retry on 429",
+            SnippetCategory::PreRequest,
+        ),
+        row(
+            "post-header",
+            "Header",
+            "ADDS ZEALOUS HEADERS",
+            SnippetCategory::PostResponse,
+        ),
+    ];
+
+    fn ids(filtered: &[SnippetListRow]) -> Vec<&str> {
+        filtered.iter().map(|row| row.id.as_str()).collect()
+    }
+
+    // Empty query keeps every snippet, ordered by category then name.
+    assert_eq!(
+        ids(&filter_snippet_list_rows("", rows.clone())),
+        ["pre-retry", "pre-zeal", "post-header", "post-zed"]
+    );
+
+    // Case-insensitive match against the name only (mixed-case display text).
+    assert_eq!(
+        ids(&filter_snippet_list_rows("zed", rows.clone())),
+        ["post-zed"]
+    );
+
+    // Case-insensitive match against descriptions, all-caps display text.
+    assert_eq!(
+        ids(&filter_snippet_list_rows("zealous", rows.clone())),
+        ["pre-retry", "post-header"]
+    );
+
+    // Match against the category label, returning only that category.
+    assert_eq!(
+        ids(&filter_snippet_list_rows("response", rows.clone())),
+        ["post-header", "post-zed"]
+    );
+}
