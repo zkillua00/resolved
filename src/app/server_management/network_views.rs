@@ -45,9 +45,13 @@ impl ApiTester {
         let busy = management.status.busy();
         let refresh_this = cx.entity().downgrade();
 
-        let content = if let Some(status) =
-            management_status_element(&management, active_upstream_id.as_deref(), cx)
-        {
+        let content = if let Some(status) = management_status_element(
+            &management.status,
+            management.upstream_id.as_deref(),
+            management.snapshot.is_some(),
+            active_upstream_id.as_deref(),
+            cx,
+        ) {
             v_flex()
                 .w_full()
                 .min_h(px(260.))

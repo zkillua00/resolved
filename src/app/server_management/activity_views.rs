@@ -47,20 +47,29 @@ fn render_activity_log(
     let Some(entity) = this.upgrade() else {
         return div().into_any_element();
     };
-    let (management, active_upstream_id, target, realtime_status) = {
+    let (status, upstream_id, snapshot, feed, active_upstream_id, target, realtime_status) = {
         let app = entity.read(cx);
+        let management = &app.server_management;
         (
-            app.server_management.clone(),
+            management.status.clone(),
+            management.upstream_id.clone(),
+            management.snapshot.clone(),
+            management.activity_feed(kind).clone(),
             app.settings.upstreams.active_upstream_id.clone(),
             app.activity_log_target(kind),
             app.realtime_status,
         )
     };
-    if let Some(status) = management_status_element(&management, active_upstream_id.as_deref(), cx)
-    {
-        return status;
+    if let Some(status_element) = management_status_element(
+        &status,
+        upstream_id.as_deref(),
+        snapshot.is_some(),
+        active_upstream_id.as_deref(),
+        cx,
+    ) {
+        return status_element;
     }
-    let Some(snapshot) = management.snapshot.as_ref() else {
+    let Some(snapshot) = snapshot.as_ref() else {
         return management_empty("Activity log data is unavailable.", cx);
     };
     if kind == ActivityLogKind::Audit && !snapshot.has_permission(AUDIT_READ) {
@@ -79,7 +88,6 @@ fn render_activity_log(
             cx,
         );
     };
-    let feed = management.activity_feed(kind).clone();
     let matches_target = feed.upstream_id.as_deref() == Some(upstream_id.as_str())
         && feed.workspace_id == workspace_id;
     let title = if kind == ActivityLogKind::Audit {
@@ -307,6 +315,20 @@ fn schedule_first_load(
     window: &Window,
     cx: &mut App,
 ) {
+    // Only a feed that has never loaded (status Idle) needs a deferred kick;
+    // re-renders while it is Loading/Ready must not schedule busywork every
+    // frame. Errors are retried explicitly via the Retry button.
+    let already_started = this.upgrade().is_some_and(|entity| {
+        entity
+            .read(cx)
+            .server_management
+            .activity_feed(kind)
+            .status
+            != ActivityLogStatus::Idle
+    });
+    if already_started {
+        return;
+    }
     let this = this.clone();
     window.defer(cx, move |window, cx| {
         if let Some(this) = this.upgrade() {

@@ -10,8 +10,13 @@ pub(super) fn render_user_management(this: &WeakEntity<ApiTester>, cx: &mut App)
     let state = entity.read(cx);
     let management = state.server_management.clone();
     let active_upstream_id = state.settings.upstreams.active_upstream_id.clone();
-    if let Some(status) = management_status_element(&management, active_upstream_id.as_deref(), cx)
-    {
+    if let Some(status) = management_status_element(
+        &management.status,
+        management.upstream_id.as_deref(),
+        management.snapshot.is_some(),
+        active_upstream_id.as_deref(),
+        cx,
+    ) {
         return status;
     }
     let Some(snapshot) = management.snapshot.as_ref() else {
@@ -378,8 +383,13 @@ pub(super) fn render_role_management(this: &WeakEntity<ApiTester>, cx: &mut App)
     let state = entity.read(cx);
     let management = state.server_management.clone();
     let active_upstream_id = state.settings.upstreams.active_upstream_id.clone();
-    if let Some(status) = management_status_element(&management, active_upstream_id.as_deref(), cx)
-    {
+    if let Some(status) = management_status_element(
+        &management.status,
+        management.upstream_id.as_deref(),
+        management.snapshot.is_some(),
+        active_upstream_id.as_deref(),
+        cx,
+    ) {
         return status;
     }
     let Some(snapshot) = management.snapshot.as_ref() else {
@@ -771,8 +781,13 @@ pub(super) fn render_resource_management(this: &WeakEntity<ApiTester>, cx: &mut 
     let state = entity.read(cx);
     let management = state.server_management.clone();
     let active_upstream_id = state.settings.upstreams.active_upstream_id.clone();
-    if let Some(status) = management_status_element(&management, active_upstream_id.as_deref(), cx)
-    {
+    if let Some(status) = management_status_element(
+        &management.status,
+        management.upstream_id.as_deref(),
+        management.snapshot.is_some(),
+        active_upstream_id.as_deref(),
+        cx,
+    ) {
         return status;
     }
     let Some(snapshot) = management.snapshot.as_ref() else {

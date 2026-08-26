@@ -1460,7 +1460,9 @@ fn render_resource_management(this: &WeakEntity<ApiTester>, cx: &mut App) -> Any
 }
 
 fn management_status_element(
-    state: &ServerManagementState,
+    status: &ServerManagementStatus,
+    upstream_id: Option<&str>,
+    snapshot_present: bool,
     active_id: Option<&str>,
     cx: &mut App,
 ) -> Option<AnyElement> {
@@ -1470,18 +1472,18 @@ fn management_status_element(
             cx,
         ));
     }
-    if state.upstream_id.as_deref() != active_id {
+    if upstream_id != active_id {
         return Some(management_empty("Loading server settings…", cx));
     }
-    match &state.status {
+    match status {
         ServerManagementStatus::Idle | ServerManagementStatus::Loading => {
             Some(management_empty("Loading server settings…", cx))
         }
-        ServerManagementStatus::Saving if state.snapshot.is_none() => {
+        ServerManagementStatus::Saving if !snapshot_present => {
             Some(management_empty("Saving changes…", cx))
         }
         ServerManagementStatus::Saving => None,
-        ServerManagementStatus::Error(message) => Some(management_empty(message, cx)),
+        ServerManagementStatus::Error(message) => Some(management_empty(message.clone(), cx)),
         ServerManagementStatus::Ready => None,
     }
 }
