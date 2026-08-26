@@ -6,7 +6,7 @@
 //! import of the legacy JSON files.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs, io,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -1330,21 +1330,36 @@ fn save_workspace_tx(
         // A folder may appear after its children in the flat domain vector,
         // while SQLite's immediate self-referential foreign key requires the
         // parent row to exist first. Persist topologically but retain the
-        // vector index as the durable display position.
-        let mut pending_folders = collection.folders.iter().enumerate().collect::<Vec<_>>();
+        // vector index as the durable display position. A single parent ->
+        // children adjacency sweep persists every folder exactly once in
+        // increasing depth, instead of rescanning the not-yet-persisted
+        // remainder once per nesting level (O(depth^2)).
+        let mut children_by_parent: HashMap<&str, Vec<(usize, &CollectionFolder)>> = HashMap::new();
+        let mut roots: Vec<(usize, &CollectionFolder)> = Vec::new();
+        for (folder_position, folder) in collection.folders.iter().enumerate() {
+            match folder.parent_folder_id.as_deref() {
+                Some(parent_id) => children_by_parent
+                    .entry(parent_id)
+                    .or_default()
+                    .push((folder_position, folder)),
+                None => roots.push((folder_position, folder)),
+            }
+        }
         let mut persisted_folder_ids = HashSet::new();
-        while !pending_folders.is_empty() {
-            let pending_count = pending_folders.len();
-            let mut deferred_folders = Vec::new();
-
-            for (folder_position, folder) in pending_folders {
+        let mut pending: Vec<(usize, &CollectionFolder)> = roots;
+        while !pending.is_empty() {
+            let mut next_level: Vec<(usize, &CollectionFolder)> = Vec::new();
+            for (folder_position, folder) in pending {
+                // With level-order scheduling the parent of every folder in
+                // `pending` (except a top-level root) was persisted on the
+                // previous iteration; the check is kept as an invariant guard.
                 let parent_is_ready = folder
                     .parent_folder_id
                     .as_deref()
                     .map(|parent_id| persisted_folder_ids.contains(parent_id))
                     .unwrap_or(true);
                 if !parent_is_ready {
-                    deferred_folders.push((folder_position, folder));
+                    next_level.push((folder_position, folder));
                     continue;
                 }
 
@@ -1371,18 +1386,23 @@ fn save_workspace_tx(
                 )?;
                 persisted_folder_ids.insert(folder.id.as_str());
                 folder_ids.insert(folder.id.clone());
+                if let Some(folder_children) = children_by_parent.get(folder.id.as_str()) {
+                    next_level.extend(folder_children.iter().copied());
+                }
             }
+            pending = next_level;
+        }
 
-            if deferred_folders.len() == pending_count {
-                // `Workspace::validate` rejects dangling parents and cycles,
-                // so reaching this branch means the validated domain and the
-                // persistence contract have drifted apart.
-                return Err(DatabaseError::CorruptData {
-                    field: "collection folder hierarchy",
-                    value: collection.id.clone(),
-                });
-            }
-            pending_folders = deferred_folders;
+        if persisted_folder_ids.len() != collection.folders.len() {
+            // A folder whose parent is absent from `collection.folders`
+            // (dangling) or unreachable through a cycle never enters a
+            // sweep level. `Workspace::validate` rejects both, so reaching
+            // this branch means the validated domain and the persistence
+            // contract have drifted apart.
+            return Err(DatabaseError::CorruptData {
+                field: "collection folder hierarchy",
+                value: collection.id.clone(),
+            });
         }
 
         for (request_position, saved_request) in collection.requests.iter().enumerate() {
@@ -1685,39 +1705,41 @@ fn sync_header_rows(
     headers: &[HeaderEntry],
     saved_at: i64,
 ) -> Result<(), DatabaseError> {
-    for (position, header) in headers.iter().enumerate() {
-        let sql = format!(
-            "INSERT INTO {name}({parent}, position, enabled, shared, name, value, \
-             created_at, updated_at, version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 1) \
-             ON CONFLICT({parent}, position) DO UPDATE SET \
-                enabled = excluded.enabled, shared = excluded.shared, \
-                name = excluded.name, value = excluded.value, \
-                updated_at = excluded.updated_at, version = {name}.version + 1",
-            name = table.name,
-            parent = table.parent_column,
-        );
-        transaction.execute(
-            &sql,
-            params![
-                parent_id,
-                to_i64(position, table.position_field)?,
-                bool_to_i64(header.enabled),
-                bool_to_i64(header.shared),
-                &header.name,
-                &header.value,
-                saved_at,
-            ],
-        )?;
-    }
-    let sql = format!(
+    // The SQL text varies only by the (fixed) ChildTable name/parent column,
+    // so build each string once per call and prepare the statements once;
+    // only the binds change per row.
+    let upsert_sql = format!(
+        "INSERT INTO {name}({parent}, position, enabled, shared, name, value, \
+         created_at, updated_at, version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 1) \
+         ON CONFLICT({parent}, position) DO UPDATE SET \
+            enabled = excluded.enabled, shared = excluded.shared, \
+            name = excluded.name, value = excluded.value, \
+            updated_at = excluded.updated_at, version = {name}.version + 1",
+        name = table.name,
+        parent = table.parent_column,
+    );
+    let tail_delete_sql = format!(
         "DELETE FROM {name} WHERE {parent} = ?1 AND position >= ?2",
         name = table.name,
         parent = table.parent_column,
     );
-    transaction.execute(
-        &sql,
-        params![parent_id, to_i64(headers.len(), table.count_field)?],
-    )?;
+    let mut upsert = transaction.prepare(&upsert_sql)?;
+    let mut tail_delete = transaction.prepare(&tail_delete_sql)?;
+    for (position, header) in headers.iter().enumerate() {
+        upsert.execute(params![
+            parent_id,
+            to_i64(position, table.position_field)?,
+            bool_to_i64(header.enabled),
+            bool_to_i64(header.shared),
+            &header.name,
+            &header.value,
+            saved_at,
+        ])?;
+    }
+    tail_delete.execute(params![
+        parent_id,
+        to_i64(headers.len(), table.count_field)?
+    ])?;
     Ok(())
 }
 
@@ -1728,39 +1750,38 @@ fn sync_body_field_rows(
     body_fields: &[BodyField],
     saved_at: i64,
 ) -> Result<(), DatabaseError> {
-    for (position, field) in body_fields.iter().enumerate() {
-        let sql = format!(
-            "INSERT INTO {name}({parent}, position, enabled, name, value, kind, \
-             created_at, updated_at, version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 1) \
-             ON CONFLICT({parent}, position) DO UPDATE SET \
-                enabled = excluded.enabled, name = excluded.name, \
-                value = excluded.value, kind = excluded.kind, \
-                updated_at = excluded.updated_at, version = {name}.version + 1",
-            name = table.name,
-            parent = table.parent_column,
-        );
-        transaction.execute(
-            &sql,
-            params![
-                parent_id,
-                to_i64(position, table.position_field)?,
-                bool_to_i64(field.enabled),
-                &field.name,
-                &field.value,
-                field.kind.as_db_str(),
-                saved_at,
-            ],
-        )?;
-    }
-    let sql = format!(
+    let upsert_sql = format!(
+        "INSERT INTO {name}({parent}, position, enabled, name, value, kind, \
+         created_at, updated_at, version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 1) \
+         ON CONFLICT({parent}, position) DO UPDATE SET \
+            enabled = excluded.enabled, name = excluded.name, \
+            value = excluded.value, kind = excluded.kind, \
+            updated_at = excluded.updated_at, version = {name}.version + 1",
+        name = table.name,
+        parent = table.parent_column,
+    );
+    let tail_delete_sql = format!(
         "DELETE FROM {name} WHERE {parent} = ?1 AND position >= ?2",
         name = table.name,
         parent = table.parent_column,
     );
-    transaction.execute(
-        &sql,
-        params![parent_id, to_i64(body_fields.len(), table.count_field)?],
-    )?;
+    let mut upsert = transaction.prepare(&upsert_sql)?;
+    let mut tail_delete = transaction.prepare(&tail_delete_sql)?;
+    for (position, field) in body_fields.iter().enumerate() {
+        upsert.execute(params![
+            parent_id,
+            to_i64(position, table.position_field)?,
+            bool_to_i64(field.enabled),
+            &field.name,
+            &field.value,
+            field.kind.as_db_str(),
+            saved_at,
+        ])?;
+    }
+    tail_delete.execute(params![
+        parent_id,
+        to_i64(body_fields.len(), table.count_field)?
+    ])?;
     Ok(())
 }
 
