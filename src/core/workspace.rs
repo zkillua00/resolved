@@ -139,22 +139,32 @@ impl Collection {
     }
 
     fn folder_descendant_ids(&self, id: &str) -> HashSet<String> {
-        let mut descendant_ids = HashSet::from([id.to_owned()]);
-        loop {
-            let previous_len = descendant_ids.len();
-            for folder in &self.folders {
-                if folder
-                    .parent_folder_id
-                    .as_deref()
-                    .is_some_and(|parent_id| descendant_ids.contains(parent_id))
-                {
-                    descendant_ids.insert(folder.id.clone());
-                }
-            }
-            if descendant_ids.len() == previous_len {
-                return descendant_ids;
+        // Build a parent -> children adjacency in one O(N) pass, then walk it
+        // once from `id`. A folder is a descendant iff it is reachable from
+        // `id` along parent_folder_id edges, which is exactly the set the old
+        // fixpoint loop converged to (cycles included, without revisiting).
+        let mut children_by_parent: HashMap<&str, Vec<&CollectionFolder>> = HashMap::new();
+        for folder in &self.folders {
+            if let Some(parent_id) = folder.parent_folder_id.as_deref() {
+                children_by_parent
+                    .entry(parent_id)
+                    .or_default()
+                    .push(folder);
             }
         }
+
+        let mut descendant_ids = HashSet::from([id.to_owned()]);
+        let mut pending = vec![id];
+        while let Some(parent_id) = pending.pop() {
+            if let Some(children) = children_by_parent.get(parent_id) {
+                for child in children {
+                    if descendant_ids.insert(child.id.clone()) {
+                        pending.push(child.id.as_str());
+                    }
+                }
+            }
+        }
+        descendant_ids
     }
 }
 
@@ -2585,5 +2595,120 @@ mod tests {
         assert!(json.get("entries").is_none());
         assert_eq!(json["collections"], serde_json::json!([]));
         assert_eq!(json["environments"], serde_json::json!([]));
+    }
+
+    fn folder(id: &str, parent_folder_id: Option<&str>) -> CollectionFolder {
+        CollectionFolder {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            created_by: None,
+            parent_folder_id: parent_folder_id.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn folder_descendant_ids_reaches_a_deep_chain_and_leaf() {
+        let collection = Collection {
+            folders: vec![
+                folder("root", None),
+                folder("a", Some("root")),
+                folder("b", Some("a")),
+                folder("c", Some("b")),
+            ],
+            ..Collection::new("Chain").unwrap()
+        };
+
+        assert_eq!(
+            collection.folder_descendant_ids("root"),
+            HashSet::from([
+                "root".to_owned(),
+                "a".to_owned(),
+                "b".to_owned(),
+                "c".to_owned(),
+            ])
+        );
+        assert_eq!(
+            collection.folder_descendant_ids("b"),
+            HashSet::from(["b".to_owned(), "c".to_owned()])
+        );
+        assert_eq!(
+            collection.folder_descendant_ids("c"),
+            HashSet::from(["c".to_owned()])
+        );
+    }
+
+    #[test]
+    fn folder_descendant_ids_spans_a_wide_tree() {
+        let collection = Collection {
+            folders: vec![
+                folder("root", None),
+                folder("left", Some("root")),
+                folder("right", Some("root")),
+                folder("left-a", Some("left")),
+                folder("left-b", Some("left")),
+                folder("right-a", Some("right")),
+            ],
+            ..Collection::new("Wide").unwrap()
+        };
+
+        let descendants = collection.folder_descendant_ids("root");
+        assert_eq!(descendants.len(), 6);
+        for id in ["root", "left", "right", "left-a", "left-b", "right-a"] {
+            assert!(descendants.contains(id));
+        }
+        assert_eq!(
+            collection.folder_descendant_ids("left"),
+            HashSet::from(["left".to_owned(), "left-a".to_owned(), "left-b".to_owned()])
+        );
+    }
+
+    #[test]
+    fn folder_descendant_ids_absorbs_a_reachable_cycle() {
+        // a -> b -> a forms a two-folder cycle; reached from root it is fully
+        // included. A self-looping folder elsewhere stays out of root's set.
+        let collection = Collection {
+            folders: vec![
+                folder("root", None),
+                folder("a", Some("root")),
+                folder("b", Some("a")),
+                folder("c", Some("b")),
+                folder("orphan", Some("orphan")),
+            ],
+            ..Collection::new("Cycle").unwrap()
+        };
+
+        assert_eq!(
+            collection.folder_descendant_ids("root"),
+            HashSet::from([
+                "root".to_owned(),
+                "a".to_owned(),
+                "b".to_owned(),
+                "c".to_owned(),
+            ])
+        );
+        assert_eq!(
+            collection.folder_descendant_ids("b"),
+            HashSet::from(["b".to_owned(), "c".to_owned()])
+        );
+    }
+
+    #[test]
+    fn folder_descendant_ids_of_a_rootless_leaf_is_just_itself() {
+        let collection = Collection {
+            folders: vec![
+                folder("solo", None),
+                folder("child-of-nobody", Some("missing-parent")),
+            ],
+            ..Collection::new("Leaf").unwrap()
+        };
+
+        assert_eq!(
+            collection.folder_descendant_ids("solo"),
+            HashSet::from(["solo".to_owned()])
+        );
+        assert_eq!(
+            collection.folder_descendant_ids("child-of-nobody"),
+            HashSet::from(["child-of-nobody".to_owned()])
+        );
     }
 }

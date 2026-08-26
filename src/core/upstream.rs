@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt,
     fs::File,
     io::Read as _,
@@ -1519,12 +1519,25 @@ pub async fn save_upstream_environment(
         .await?;
     }
 
-    for variable in &baseline.variables {
-        if !draft
+    // Index both variable lists by id once so classification is a single pass
+    // over each side instead of an O(V^2) scan per save. `or_insert` keeps the
+    // original first-match lookup semantics if a duplicated id ever appears.
+    let baseline_variables: HashMap<&str, &EnvironmentVariable> =
+        baseline
             .variables
             .iter()
-            .any(|candidate| candidate.id == variable.id)
-        {
+            .fold(HashMap::new(), |mut by_id, variable| {
+                by_id.entry(variable.id.as_str()).or_insert(variable);
+                by_id
+            });
+    let draft_variable_ids: HashSet<&str> = draft
+        .variables
+        .iter()
+        .map(|variable| variable.id.as_str())
+        .collect();
+
+    for variable in &baseline.variables {
+        if !draft_variable_ids.contains(variable.id.as_str()) {
             delete_upstream_environment_variable(
                 client,
                 base_url,
@@ -1538,11 +1551,7 @@ pub async fn save_upstream_environment(
     }
 
     for variable in &draft.variables {
-        let Some(previous) = baseline
-            .variables
-            .iter()
-            .find(|candidate| candidate.id == variable.id)
-        else {
+        let Some(previous) = baseline_variables.get(variable.id.as_str()) else {
             create_upstream_environment_variable(
                 client,
                 base_url,
@@ -3428,5 +3437,135 @@ mod tests {
         }
         request.truncate(expected_length);
         request
+    }
+
+    #[test]
+    fn save_upstream_environment_classifies_and_orders_the_sync() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let now = Utc::now();
+
+        let server = thread::spawn(move || {
+            let mut recorded = Vec::new();
+            for _ in 0..5 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .unwrap();
+                let request = read_http_request(&mut stream);
+                let header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .unwrap();
+                let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+                let mut parts = headers.lines().next().unwrap().split_whitespace();
+                let method = parts.next().unwrap();
+                let path = parts.next().unwrap();
+                recorded.push(format!("{method} {path}"));
+
+                let body = if method == "DELETE" {
+                    serde_json::json!({ "success": true, "data": {} })
+                } else if path.ends_with("/environments/env-1") {
+                    serde_json::json!({
+                        "success": true,
+                        "data": {
+                            "id": "env-1",
+                            "workspace_id": "ws-1",
+                            "name": "New",
+                            "variables": [],
+                            "created_by": null,
+                            "created_at": now,
+                            "updated_at": now,
+                        }
+                    })
+                } else {
+                    serde_json::json!({
+                        "success": true,
+                        "data": {
+                            "id": "variable",
+                            "environment_id": "env-1",
+                            "key": "key",
+                            "value": "value",
+                            "enabled": true,
+                            "secret": false,
+                            "created_by": null,
+                            "created_at": now,
+                            "updated_at": now,
+                        }
+                    })
+                };
+                let body = serde_json::to_vec(&body).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+            recorded
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = build_upstream_client().unwrap();
+        let base_url = Url::parse(&format!("http://{address}/")).unwrap();
+
+        fn variable(id: &str, key: &str, value: &str) -> EnvironmentVariable {
+            EnvironmentVariable {
+                id: id.to_owned(),
+                key: key.to_owned(),
+                value: value.to_owned(),
+                enabled: true,
+                secret: false,
+                created_by: None,
+            }
+        }
+
+        let baseline = Environment {
+            id: "env-1".to_owned(),
+            name: "Old".to_owned(),
+            created_by: None,
+            variables: vec![
+                variable("v1", "keep", "one"),
+                variable("v2", "rename", "two"),
+                variable("v3", "gone", "three"),
+            ],
+        };
+        let draft = Environment {
+            id: "env-1".to_owned(),
+            name: "New".to_owned(),
+            created_by: None,
+            variables: vec![
+                variable("v2", "rename", "two-changed"),
+                variable("v3", "renamed-key", "three"),
+                variable("v4", "brand-new", "four"),
+            ],
+        };
+
+        runtime
+            .block_on(save_upstream_environment(
+                &client,
+                &base_url,
+                "saved-session-token",
+                "ws-1",
+                &baseline,
+                &draft,
+            ))
+            .unwrap();
+
+        let recorded = server.join().unwrap();
+        assert_eq!(
+            recorded,
+            vec![
+                "PATCH /api/v1/workspaces/ws-1/environments/env-1".to_owned(),
+                "DELETE /api/v1/workspaces/ws-1/environments/env-1/variables/v1".to_owned(),
+                "PUT /api/v1/workspaces/ws-1/environments/env-1/variables/v2/value".to_owned(),
+                "PATCH /api/v1/workspaces/ws-1/environments/env-1/variables/v3".to_owned(),
+                "POST /api/v1/workspaces/ws-1/environments/env-1/variables".to_owned(),
+            ]
+        );
     }
 }
