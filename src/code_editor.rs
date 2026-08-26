@@ -384,6 +384,15 @@ impl CodeEditor {
         &self.language
     }
 
+    /// The fold regions of the underlying editor, if it is a code editor.
+    ///
+    /// Each entry is `(start_row, end_row, folded)` in 0-based natural lines
+    /// with an inclusive end. Computed from the syntax tree during rendering,
+    /// so callers should let the editor repaint before reading this.
+    pub fn fold_regions(&self, cx: &App) -> Vec<(usize, usize, bool)> {
+        self.input.read(cx).fold_regions()
+    }
+
     pub fn rows(&self) -> usize {
         self.rows
     }

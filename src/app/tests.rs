@@ -277,3 +277,72 @@ fn snippet_list_rows_filter_case_insensitively_and_order_by_category() {
         ["post-header", "post-zed"]
     );
 }
+
+#[gpui::test]
+fn body_editor_folds_nested_json_via_keyboard_chords(cx: &mut gpui::TestAppContext) {
+    use gpui::{px, size};
+
+    let directory = tempfile::tempdir().expect("create temporary settings directory");
+    let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+    store.initialize().expect("initialize test database");
+    store
+        .save_app_settings(&AppSettings::default())
+        .expect("seed app settings");
+
+    let mut app = None;
+    let store_for_app = store.clone();
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        gpui_component::init(cx);
+        let base_key_bindings = shortcuts::capture_base_key_bindings(cx);
+        crate::theme::configure(cx);
+        let view = cx.new(|cx| {
+            ApiTester::new_with_database_store(base_key_bindings, store_for_app, window, cx)
+        });
+        crate::register_app_action_handlers(&view, cx);
+        app = Some(view.clone());
+        gpui_component::Root::new(view, window, cx)
+    });
+    let app = app.expect("capture app entity");
+    cx.update(|window, _| window.activate_window());
+    cx.simulate_resize(size(px(1_200.), px(800.)));
+
+    // Open a request, switch to the JSON body editor, and seed a nested doc.
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.workspace_tabs.activate_request();
+            app.request_pane = RequestPane::Body;
+            let json = "{\n  \"user\": {\n    \"name\": \"ada\"\n  }\n}";
+            app.body.update(cx, |editor, cx| {
+                editor.set_language(crate::code_editor::CodeLanguage::Json, cx);
+                editor.set_value(json, window, cx);
+            });
+            app.body.read(cx).focus_handle(cx).focus(window);
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+
+    // After rendering, the syntax tree yields the nested regions, unfolded.
+    let regions = cx.update(|_, cx| app.read(cx).body.read(cx).fold_regions(cx));
+    assert_eq!(regions, vec![(0, 4, false), (1, 3, false)]);
+
+    // Collapse everything with ⌘K ⌘0 (fold all).
+    cx.simulate_keystrokes("cmd-k cmd-0");
+    cx.run_until_parked();
+    assert!(
+        cx.update(|_, cx| app.read(cx).body.read(cx).fold_regions(cx))
+            .iter()
+            .all(|(_, _, folded)| *folded),
+        "⌘K ⌘0 collapses every region"
+    );
+
+    // Expand everything with ⌘K ⌘J (unfold all).
+    cx.simulate_keystrokes("cmd-k cmd-j");
+    cx.run_until_parked();
+    assert!(
+        cx.update(|_, cx| app.read(cx).body.read(cx).fold_regions(cx))
+            .iter()
+            .all(|(_, _, folded)| !*folded),
+        "⌘K ⌘J expands every region"
+    );
+}

@@ -1,0 +1,1146 @@
+diff --git a/src/highlighter/highlighter.rs b/src/highlighter/highlighter.rs
+--- a/src/highlighter/highlighter.rs	2026-08-26 22:35:32
++++ b/src/highlighter/highlighter.rs	2026-08-26 22:41:41
+@@ -628,6 +628,66 @@
+ 
+         styles
+     }
++
++    /// The language this highlighter was configured for.
++    pub fn language(&self) -> &SharedString {
++        &self.language
++    }
++
++    /// Natural-row fold candidates derived from the parsed syntax tree.
++    ///
++    /// Every named node spanning more than one line is a candidate. A child
++    /// whose row range is identical to its parent's is dropped, and a small
++    /// denylist of node kinds (document roots, error nodes, string literals,
++    /// raw text) never folds. Rows are 0-based natural lines with an inclusive
++    /// end, ordered outer-region-first so nesting can be derived by walking
++    /// forward.
++    pub fn fold_regions(&self) -> Vec<(usize, usize)> {
++        let Some(tree) = &self.tree else {
++            return Vec::new();
++        };
++
++        let root = tree.root_node();
++        if root.kind() == "ERROR" {
++            return Vec::new();
++        }
++
++        let mut raw = Vec::new();
++        let mut cursor = tree.walk();
++        for node in root.children(&mut cursor) {
++            collect_fold_nodes(node, &mut raw);
++        }
++
++        raw.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
++        raw.dedup();
++        raw
++    }
++}
++
++/// Node kinds that never fold, even when they span several lines.
++fn does_not_fold(kind: &str) -> bool {
++    matches!(
++        kind,
++        "document" | "source_file" | "program" | "module" | "translation_unit" | "ERROR" | "text"
++    ) || kind.contains("string")
++}
++
++/// Depth-first walk collecting multi-line node ranges.
++fn collect_fold_nodes(node: tree_sitter::Node, regions: &mut Vec<(usize, usize)>) {
++    if does_not_fold(node.kind()) {
++        return;
++    }
++    if node.child_count() > 0 {
++        let start = node.start_position().row;
++        let end = node.end_position().row;
++        if end > start {
++            regions.push((start, end));
++        }
++    }
++    let mut cursor = node.walk();
++    for child in node.children(&mut cursor) {
++        collect_fold_nodes(child, regions);
++    }
+ }
+ 
+ /// To merge intersection ranges, let the subsequent range cover
+diff --git a/src/input/element.rs b/src/input/element.rs
+--- a/src/input/element.rs	2026-08-26 22:35:32
++++ b/src/input/element.rs	2026-08-26 22:41:41
+@@ -14,11 +14,15 @@
+     input::{RopeExt as _, blink_cursor::CURSOR_WIDTH, text_wrapper::LineLayout},
+ };
+ 
+-use super::{InputState, LastLayout, mode::InputMode};
++use super::{mode::InputMode, FoldMarker, InputState, LastLayout};
+ 
+ const BOTTOM_MARGIN_ROWS: usize = 3;
+ pub(super) const RIGHT_MARGIN: Pixels = px(10.);
+ pub(super) const LINE_NUMBER_RIGHT_MARGIN: Pixels = px(10.);
++/// Size of the fold chevron triangle drawn in the line-number gutter.
++const FOLD_CHEVRON_SIZE: Pixels = px(8.);
++/// Left padding of the fold chevron inside the gutter.
++const FOLD_CHEVRON_LEFT: Pixels = px(3.);
+ 
+ /// Overlay application-owned semantic styles in a stable order.
+ ///
+@@ -156,6 +160,10 @@
+         let mut offset_y = px(0.);
+         for (ix, wrap_line) in text_wrapper.lines.iter().enumerate() {
+             let row = ix;
++            // Fold-hidden rows occupy no display space and never hold the caret.
++            if state.fold_is_hidden(ix) {
++                continue;
++            }
+             let line_origin = point(px(0.), offset_y);
+ 
+             // break loop if all cursor positions are found
+@@ -320,6 +328,10 @@
+         let mut line_corners = vec![];
+ 
+         for line in lines.iter() {
++            // Fold placeholders occupy no display space and no bytes.
++            if line.wrapped_lines.is_empty() {
++                continue;
++            }
+             let line_size = line.size(line_height);
+             let line_wrap_width = line_size.width;
+ 
+@@ -546,6 +558,10 @@
+         let mut visible_range = 0..total_lines;
+         let mut line_bottom = px(0.);
+         for (ix, line) in state.text_wrapper.lines.iter().enumerate() {
++            if state.fold_is_hidden(ix) {
++                // Fold-hidden rows occupy no display height.
++                continue;
++            }
+             let wrapped_height = line.height(line_height);
+             line_bottom += wrapped_height;
+ 
+@@ -736,14 +752,20 @@
+         let mut lines = vec![];
+         let mut offset = 0;
+         for (ix, line) in visible_text.split("\n").enumerate() {
++            let natural_row = visible_range.start + ix;
+             let line_item = text_wrapper
+                 .lines
+-                .get(visible_range.start + ix)
++                .get(natural_row)
+                 .expect("line should exists in text_wrapper");
+ 
+-            debug_assert_eq!(line_item.len(), line.len());
+-
+             let mut line_layout = LineLayout::new();
++            if state.fold_is_hidden(natural_row) {
++                // Fold placeholder: keeps the dense row mapping intact while
++                // occupying no display space.
++                lines.push(line_layout);
++                continue;
++            }
++
+             let mut wrapped_lines = SmallVec::with_capacity(1);
+ 
+             for range in &line_item.wrapped_lines {
+@@ -805,11 +827,16 @@
+         } = &state.mode
+         {
+             if let Some(highlighter) = highlighter.borrow().as_ref() {
+-                for line in text
++                for (line_ix, line) in text
+                     .iter_lines()
+                     .skip(visible_range.start)
+                     .take(visible_range.len())
++                    .enumerate()
+                 {
++                    if state.fold_is_hidden(visible_range.start + line_ix) {
++                        // Hidden rows contribute no painted bytes.
++                        continue;
++                    }
+                     let line_len = if is_multi_line {
+                         // +1 for `\n`
+                         line.len() + 1
+@@ -1048,6 +1075,7 @@
+             line_number_width,
+             lines: Rc::new(vec![]),
+             cursor_bounds: None,
++            fold_markers: Vec::new(),
+         };
+ 
+         let run = TextRun {
+@@ -1156,6 +1184,42 @@
+         }
+         last_layout.lines = Rc::new(lines);
+ 
++        // Build fold gutter markers (chevrons) for the visible fold headers.
++        last_layout.fold_markers = if state.mode.line_number() && !is_empty {
++            let headers = state.visible_fold_headers();
++            let mut markers = Vec::new();
++            if !headers.is_empty() {
++                let mut offset_y = last_layout.visible_top;
++                let mut row = last_layout.visible_range.start;
++                for line_layout in last_layout.lines.iter() {
++                    let is_header = headers.iter().any(|(start, _)| *start == row);
++                    if is_header {
++                        let folded = headers
++                            .iter()
++                            .any(|(start, folded)| *start == row && *folded);
++                        let row_height = line_layout.size(line_height).height;
++                        let chevron_height = FOLD_CHEVRON_SIZE.min(row_height);
++                        let top = offset_y + (row_height - chevron_height).half();
++                        markers.push(FoldMarker {
++                            start_row: row,
++                            chevron_bounds: Bounds::from_corners(
++                                point(FOLD_CHEVRON_LEFT, top),
++                                point(FOLD_CHEVRON_LEFT + FOLD_CHEVRON_SIZE, top + chevron_height),
++                            ),
++                            folded,
++                        });
++                    }
++                    if !line_layout.wrapped_lines.is_empty() {
++                        offset_y += line_layout.size(line_height).height;
++                    }
++                    row += 1;
++                }
++            }
++            markers
++        } else {
++            Vec::new()
++        };
++
+         let (ghost_first_line, ghost_lines) = Self::layout_inline_completion(
+             state,
+             &last_layout.visible_range,
+@@ -1166,7 +1230,15 @@
+         let ghost_line_count = ghost_lines.len();
+         let ghost_lines_height = ghost_line_count as f32 * line_height;
+ 
+-        let total_wrapped_lines = state.text_wrapper.len();
++        let total_wrapped_lines = state.text_wrapper.len()
++            - state
++                .text_wrapper
++                .lines
++                .iter()
++                .enumerate()
++                .filter(|(ix, _)| state.fold_is_hidden(*ix))
++                .map(|(_, line)| line.lines_len())
++                .sum::<usize>();
+         let empty_bottom_height = if state.mode.is_code_editor() {
+             bounds
+                 .size
+@@ -1251,6 +1323,11 @@
+             // build line numbers
+             for (ix, line) in last_layout.lines.iter().enumerate() {
+                 let ix = last_layout.visible_range.start + ix;
++                if line.wrapped_lines.is_empty() {
++                    // Fold placeholder: no number, no height.
++                    line_numbers.push(SmallVec::new());
++                    continue;
++                }
+                 let line_no = format!("{:>width$}", ix + 1, width = line_number_len).into();
+ 
+                 let runs = if current_row == Some(ix) {
+@@ -1543,6 +1620,30 @@
+ 
+                     // Paint first line completion text
+                     _ = first_line.paint(p, line_height, window, cx);
++                }
++            }
++        }
++
++        // Paint fold chevrons in the gutter (collapsed: ▸, expanded: ▾).
++        let fold_markers = prepaint.last_layout.fold_markers.clone();
++        if !fold_markers.is_empty() {
++            let chevron_color = cx.theme().muted_foreground.opacity(0.85);
++            for marker in &fold_markers {
++                let hit = &marker.chevron_bounds;
++                let origin = input_bounds.origin + point(hit.left(), hit.top());
++                let side = hit.size.height;
++                let mut builder = gpui::PathBuilder::fill();
++                if marker.folded {
++                    builder.move_to(origin);
++                    builder.line_to(origin + point(px(0.), side));
++                    builder.line_to(origin + point(side, side.half()));
++                } else {
++                    builder.move_to(origin);
++                    builder.line_to(origin + point(side, px(0.)));
++                    builder.line_to(origin + point(side.half(), side));
++                }
++                if let Ok(path) = builder.build() {
++                    window.paint_path(path, chevron_color);
+                 }
+             }
+         }
+diff --git a/src/input/folding.rs b/src/input/folding.rs
+--- a/src/input/folding.rs	1970-01-01 04:00:00
++++ b/src/input/folding.rs	2026-08-26 22:41:41
+@@ -0,0 +1,262 @@
++//! Code folding support for the code-editor input.
++//!
++//! A document is subdivided into foldable [`FoldRegion`]s (nested structures:
++//! objects, arrays, functions, blocks, ...). Regions are addressed in 0-based
++//! **natural** (non-wrapped) line rows with an inclusive `end_row`. A region's
++//! header is its `start_row`; while folded and visible, every row in
++//! `start_row + 1 ..= end_row` is hidden from display.
++//!
++//! The module is intentionally free of GPUI types so the fold algebra
++//! (shadowing, depth, hit-testing) is directly unit-testable.
++
++use std::collections::BTreeSet;
++
++/// A foldable region of a document, in 0-based natural line rows
++/// (`end_row` inclusive).
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct FoldRegion {
++    pub start_row: usize,
++    pub end_row: usize,
++    /// Whether the user has collapsed this region.
++    pub folded: bool,
++}
++
++impl FoldRegion {
++    pub fn new(start_row: usize, end_row: usize) -> Self {
++        Self {
++            start_row,
++            end_row,
++            folded: false,
++        }
++    }
++
++    /// Number of natural rows covered by the region (header included).
++    pub fn rows_len(&self) -> usize {
++        self.end_row.saturating_sub(self.start_row) + 1
++    }
++
++    /// True when this region actually hides interior rows when folded.
++    pub fn is_foldable(&self) -> bool {
++        self.end_row > self.start_row
++    }
++}
++
++/// Compute the set of natural rows hidden by the currently active folds.
++///
++/// A fold only hides its interior while every enclosing fold is also active:
++/// a region whose header lives inside another collapsed region is shadowed and
++/// has nothing to contribute (its header is not displayed). Regions that share
++/// a header line (e.g. an object and the array nested on the same header) are
++/// all considered at the same outline level and never shadow one another.
++pub fn hidden_rows(regions: &[FoldRegion]) -> BTreeSet<usize> {
++    let mut hidden = BTreeSet::new();
++    for region in regions {
++        if !region.is_foldable() || !region.folded {
++            continue;
++        }
++        if hidden.contains(&region.start_row) {
++            continue;
++        }
++        for row in region.start_row + 1..=region.end_row {
++            hidden.insert(row);
++        }
++    }
++    hidden
++}
++
++/// The outline depth of the region at `index`, 1 for the outermost level.
++///
++/// A region's ancestors are the regions that cover its header and span
++/// strictly further down, so siblings on a shared header line do not inflate
++/// each other's depth.
++pub fn region_depth(regions: &[FoldRegion], index: usize) -> usize {
++    let Some(region) = regions.get(index) else {
++        return 0;
++    };
++    1 + regions
++        .iter()
++        .enumerate()
++        .filter(|(ix, other)| {
++            *ix != index
++                && other.start_row <= region.start_row
++                && other.start_row <= region.end_row
++                && other.end_row > region.end_row
++        })
++        .count()
++}
++
++/// The deepest region covering `row` (inclusive), if any.
++///
++/// The innermost region is the one with the smallest span; ties are broken by
++/// preferring the region starting later on the shared line.
++pub fn innermost_region_at(regions: &[FoldRegion], row: usize) -> Option<usize> {
++    let mut best: Option<(usize, usize)> = None;
++    for (ix, region) in regions.iter().enumerate() {
++        if region.start_row > row || region.end_row < row {
++            continue;
++        }
++        let span = region.rows_len();
++        match best {
++            Some((best_ix, best_span)) => {
++                if span < best_span
++                    || (span == best_span && region.start_row > regions[best_ix].start_row)
++                {
++                    best = Some((ix, span));
++                }
++            }
++            None => best = Some((ix, span)),
++        }
++    }
++    best.map(|(ix, _)| ix)
++}
++
++/// Compute fold regions from indentation alone.
++///
++/// A region starts on a non-blank line whose next non-blank line is indented
++/// deeper, and ends at the last line (inclusive) still indented deeper than the
++/// header, tolerating blank lines inside the block. Deeper indentation yields
++/// nested regions naturally.
++pub fn indentation_fold_regions(lines: &[&str]) -> Vec<FoldRegion> {
++    fn indent_width(line: &str) -> usize {
++        let mut width: usize = 0;
++        for ch in line.chars() {
++            match ch {
++                ' ' => width += 1,
++                '\t' => width = width.div_ceil(4) * 4,
++                _ => break,
++            }
++        }
++        width
++    }
++
++    let mut regions = Vec::new();
++    for (i, line) in lines.iter().enumerate() {
++        if line.trim().is_empty() {
++            continue;
++        }
++        let indent = indent_width(line);
++
++        let mut end = i;
++        let mut k = i + 1;
++        while k < lines.len() {
++            let next = lines[k];
++            if next.trim().is_empty() {
++                k += 1;
++                continue;
++            }
++            if indent_width(next) > indent {
++                end = k;
++                k += 1;
++                continue;
++            }
++            break;
++        }
++
++        if end > i {
++            regions.push(FoldRegion::new(i, end));
++        }
++    }
++    regions
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn folded(regions: &mut [FoldRegion], start_row: usize) {
++        if let Some(r) = regions.iter_mut().find(|r| r.start_row == start_row) {
++            r.folded = true;
++        }
++    }
++
++    #[test]
++    fn hidden_rows_respects_shadowing_by_ancestors() {
++        let mut regions = vec![
++            FoldRegion::new(0, 6), // outer
++            FoldRegion::new(1, 5), // nested block
++            FoldRegion::new(2, 3), // nested-nested
++        ];
++        folded(&mut regions, 1);
++        folded(&mut regions, 2);
++
++        // Folding the child alone hides only its own interior.
++        let hidden = hidden_rows(&regions);
++        assert!(hidden.contains(&2));
++        assert!(hidden.contains(&3));
++        assert!(!hidden.contains(&1));
++        assert!(!hidden.contains(&4));
++
++        // Once the outer region is folded too, the child header is shadowed and
++        // everything through the outer end is hidden.
++        folded(&mut regions, 0);
++        let hidden = hidden_rows(&regions);
++        assert_eq!(hidden.len(), 6);
++        assert!(hidden.contains(&1));
++        assert!(hidden.contains(&6));
++    }
++
++    #[test]
++    fn regions_sharing_a_header_line_do_not_shadow_each_other() {
++        let mut regions = vec![
++            FoldRegion::new(0, 9), // outer object
++            FoldRegion::new(0, 4), // array on the same header line
++        ];
++        folded(&mut regions, 0);
++        folded(&mut regions, 1);
++
++        let hidden = hidden_rows(&regions);
++        // Both headers stay visible; interiors combined.
++        assert!(!hidden.contains(&0));
++        assert!(hidden.contains(&1) && hidden.contains(&4));
++        assert!(hidden.contains(&5) && hidden.contains(&9));
++    }
++
++    #[test]
++    fn depth_counts_only_strict_ancestors() {
++        let regions = vec![
++            FoldRegion::new(0, 9),
++            FoldRegion::new(0, 4),
++            FoldRegion::new(2, 3),
++            FoldRegion::new(5, 8),
++        ];
++        // Outer object: depth 1. Same-line array is a sibling, not an ancestor.
++        assert_eq!(region_depth(&regions, 0), 1);
++        assert_eq!(region_depth(&regions, 1), 1);
++        assert_eq!(region_depth(&regions, 2), 2);
++        assert_eq!(region_depth(&regions, 3), 2);
++    }
++
++    #[test]
++    fn innermost_region_prefers_smaller_span() {
++        let regions = vec![
++            FoldRegion::new(0, 9),
++            FoldRegion::new(0, 4),
++            FoldRegion::new(2, 3),
++        ];
++        assert_eq!(innermost_region_at(&regions, 0), Some(1));
++        assert_eq!(innermost_region_at(&regions, 2), Some(2));
++        assert_eq!(innermost_region_at(&regions, 9), Some(0));
++        assert_eq!(innermost_region_at(&regions, 10), None);
++    }
++
++    #[test]
++    fn indentation_folding_nests_deeper_blocks() {
++        let text = ["root", "    child1", "        grand", "    child2", "tail"];
++        let regions = indentation_fold_regions(&text);
++        assert_eq!(regions, vec![FoldRegion::new(0, 3), FoldRegion::new(1, 2)]);
++    }
++
++    #[test]
++    fn indentation_folding_tolerates_blank_lines_inside_blocks() {
++        let text = ["a", "    b", "", "    c", "d"];
++        let regions = indentation_fold_regions(&text);
++        assert_eq!(regions, vec![FoldRegion::new(0, 3)]);
++    }
++
++    #[test]
++    fn indentation_folding_skips_flat_and_blank_headers() {
++        let text = ["one", "two", "    three", "four", ""];
++        let regions = indentation_fold_regions(&text);
++        assert_eq!(regions, vec![FoldRegion::new(1, 2)]);
++    }
++}
+diff --git a/src/input/input.rs b/src/input/input.rs
+--- a/src/input/input.rs	2026-08-26 22:35:32
++++ b/src/input/input.rs	2026-08-26 22:41:41
+@@ -316,6 +316,15 @@
+                     .on_action(
+                         window.listener_for(&self.state, InputState::on_action_go_to_definition),
+                     )
++                    .when(state.mode.is_code_editor(), |this| {
++                        this.on_action(window.listener_for(&self.state, InputState::toggle_fold))
++                            .on_action(window.listener_for(&self.state, InputState::fold))
++                            .on_action(window.listener_for(&self.state, InputState::unfold))
++                            .on_action(window.listener_for(&self.state, InputState::fold_all))
++                            .on_action(window.listener_for(&self.state, InputState::unfold_all))
++                            .on_action(window.listener_for(&self.state, InputState::fold_level))
++                            .on_action(window.listener_for(&self.state, InputState::unfold_level))
++                    })
+             })
+             .on_action(window.listener_for(&self.state, InputState::select_all))
+             .on_action(window.listener_for(&self.state, InputState::select_to_start_of_line))
+diff --git a/src/input/mod.rs b/src/input/mod.rs
+--- a/src/input/mod.rs	2026-08-26 22:35:32
++++ b/src/input/mod.rs	2026-08-26 22:41:41
+@@ -3,6 +3,7 @@
+ mod clear_button;
+ mod cursor;
+ mod element;
++mod folding;
+ mod indent;
+ mod input;
+ mod lsp;
+diff --git a/src/input/movement.rs b/src/input/movement.rs
+--- a/src/input/movement.rs	2026-08-26 22:35:32
++++ b/src/input/movement.rs	2026-08-26 22:41:41
+@@ -45,7 +45,9 @@
+         direction: Option<MoveDirection>,
+         cx: &mut Context<Self>,
+     ) {
+-        let offset = offset.clamp(0, self.text.len());
++        // Keep the caret out of fold-hidden rows: vertical movement crosses a
++        // collapsed region in one step, generic movement lands on its header.
++        let offset = self.clamp_offset_to_visible(offset.clamp(0, self.text.len()), direction);
+         self.selected_range = (offset..offset).into();
+         self.scroll_to(offset, direction, cx);
+         self.pause_blink_cursor(cx);
+diff --git a/src/input/state.rs b/src/input/state.rs
+--- a/src/input/state.rs	2026-08-26 22:35:32
++++ b/src/input/state.rs	2026-08-26 22:41:41
+@@ -13,6 +13,7 @@
+ };
+ use ropey::{Rope, RopeSlice};
+ use serde::Deserialize;
++use std::collections::BTreeSet;
+ use std::ops::Range;
+ use std::rc::Rc;
+ use sum_tree::Bias;
+@@ -20,6 +21,7 @@
+ 
+ use super::{
+     blink_cursor::BlinkCursor, change::Change, element::TextElement,
++    folding::{self, FoldRegion},
+     indent::previous_tab_stop_offset, mask_pattern::MaskPattern, mode::InputMode, number_input,
+     text_wrapper::TextWrapper,
+ };
+@@ -44,6 +46,22 @@
+     pub secondary: bool,
+ }
+ 
++/// Fold (collapse) every region at or below the given outline depth.
++#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
++#[action(namespace = input, no_json)]
++pub struct FoldLevel {
++    /// 1-based outline depth; 1 = outermost regions.
++    pub level: u32,
++}
++
++/// Unfold (expand) every region at or below the given outline depth.
++#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
++#[action(namespace = input, no_json)]
++pub struct UnfoldLevel {
++    /// 1-based outline depth; 1 = outermost regions.
++    pub level: u32,
++}
++
+ actions!(
+     input,
+     [
+@@ -88,6 +106,11 @@
+         ToggleCodeActions,
+         Search,
+         GoToDefinition,
++        ToggleFold,
++        Fold,
++        Unfold,
++        FoldAll,
++        UnfoldAll,
+     ]
+ );
+ 
+@@ -218,12 +241,55 @@
+         KeyBinding::new("cmd-f", Search, Some(CONTEXT)),
+         #[cfg(not(target_os = "macos"))]
+         KeyBinding::new("ctrl-f", Search, Some(CONTEXT)),
++        // Code folding (VS Code-style chords and direct bindings).
++        #[cfg(target_os = "macos")]
++        KeyBinding::new("cmd-k cmd-l", ToggleFold, Some(CONTEXT)),
++        #[cfg(not(target_os = "macos"))]
++        KeyBinding::new("ctrl-k ctrl-l", ToggleFold, Some(CONTEXT)),
++        #[cfg(target_os = "macos")]
++        KeyBinding::new("cmd-k cmd-0", FoldAll, Some(CONTEXT)),
++        #[cfg(not(target_os = "macos"))]
++        KeyBinding::new("ctrl-k ctrl-0", FoldAll, Some(CONTEXT)),
++        #[cfg(target_os = "macos")]
++        KeyBinding::new("cmd-k cmd-j", UnfoldAll, Some(CONTEXT)),
++        #[cfg(not(target_os = "macos"))]
++        KeyBinding::new("ctrl-k ctrl-j", UnfoldAll, Some(CONTEXT)),
++        #[cfg(target_os = "macos")]
++        KeyBinding::new("cmd-alt-[", Fold, Some(CONTEXT)),
++        #[cfg(not(target_os = "macos"))]
++        KeyBinding::new("ctrl-alt-[", Fold, Some(CONTEXT)),
++        #[cfg(target_os = "macos")]
++        KeyBinding::new("cmd-alt-]", Unfold, Some(CONTEXT)),
++        #[cfg(not(target_os = "macos"))]
++        KeyBinding::new("ctrl-alt-]", Unfold, Some(CONTEXT)),
+     ]);
++    init_fold_level_bindings(cx);
+ 
+     search::init(cx);
+     number_input::init(cx);
+ }
+ 
++/// Bind the per-level fold/unfold chords (⌘K ⌘1…9, ⌘K ⌘⇧1…9) — generated
++/// here to keep the main binding table readable.
++fn init_fold_level_bindings(cx: &mut App) {
++    #[cfg(target_os = "macos")]
++    let prefix = "cmd-k cmd-";
++    #[cfg(not(target_os = "macos"))]
++    let prefix = "ctrl-k ctrl-";
++
++    for level in 1..=9u32 {
++        let fold = format!("{prefix}{level}");
++        cx.bind_keys([KeyBinding::new(&fold, FoldLevel { level }, Some(CONTEXT))]);
++
++        let unfold = format!("{prefix}shift-{level}");
++        cx.bind_keys([KeyBinding::new(
++            &unfold,
++            UnfoldLevel { level },
++            Some(CONTEXT),
++        )]);
++    }
++}
++
+ #[derive(Copy, Clone, Eq, PartialEq)]
+ enum WordCharacterKind {
+     Whitespace,
+@@ -372,8 +438,22 @@
+     pub(super) line_number_width: Pixels,
+     /// The cursor position (top, left) in pixels.
+     pub(super) cursor_bounds: Option<Bounds<Pixels>>,
++    /// Fold chevrons drawn in the gutter, with their hit areas in text-local
++    /// pixels (origin = text bounds origin).
++    pub(super) fold_markers: Vec<FoldMarker>,
+ }
+ 
++/// A fold chevron rendered in the line-number gutter.
++#[derive(Clone)]
++pub(super) struct FoldMarker {
++    /// The natural row of the fold header.
++    pub start_row: usize,
++    /// Hit area of the chevron, relative to the text bounds origin.
++    pub chevron_bounds: Bounds<Pixels>,
++    /// Whether the region is currently collapsed (chevron direction).
++    pub folded: bool,
++}
++
+ impl LastLayout {
+     /// Get the line layout for the given row (0-based).
+     ///
+@@ -389,10 +469,36 @@
+     }
+ }
+ 
++/// Fold bookkeeping for a code editor.
++///
++/// `regions` holds every foldable range of the current text (outer-first);
++/// `hidden` is the derived set of natural rows not currently displayed. The
++/// two stay consistent via [`FoldState::refresh_hidden`].
++#[derive(Default)]
++pub(super) struct FoldState {
++    /// All foldable regions, outer-region-first, in natural rows.
++    pub regions: Vec<FoldRegion>,
++    /// Natural rows currently hidden by active folds.
++    pub hidden: BTreeSet<usize>,
++    /// Set whenever the text changed and regions must be recomputed.
++    pub dirty: bool,
++}
++
++impl FoldState {
++    fn refresh_hidden(&mut self) {
++        self.hidden = folding::hidden_rows(&self.regions);
++    }
++
++    fn is_hidden(&self, row: usize) -> bool {
++        self.hidden.contains(&row)
++    }
++}
++
+ /// InputState to keep editing state of the [`super::Input`].
+ pub struct InputState {
+     pub(super) focus_handle: FocusHandle,
+     pub(super) mode: InputMode,
++    pub(super) folds: FoldState,
+     pub(super) text: Rope,
+     pub(super) text_wrapper: TextWrapper,
+     pub(super) history: History<Change>,
+@@ -523,6 +629,7 @@
+             pattern: None,
+             validate: None,
+             mode: InputMode::default(),
++            folds: FoldState::default(),
+             last_layout: None,
+             last_bounds: None,
+             semantic_highlights: Vec::new(),
+@@ -665,6 +772,7 @@
+             _ => false,
+         };
+         self._pending_update |= language_changed;
++        self.folds.dirty |= language_changed;
+         cx.notify();
+     }
+ 
+@@ -1414,6 +1522,309 @@
+         cx.propagate();
+     }
+ 
++    // ------------------------------------------------------------------
++    // Code folding
++    // ------------------------------------------------------------------
++
++    /// Recompute fold regions from the current text and syntax tree,
++    /// preserving which regions the user had collapsed (anchored by start row).
++    ///
++    /// The highlighter keeps an incrementally-updated tree, so this is a cheap
++    /// traversal after every edit rather than a fresh parse.
++    fn recompute_folds(&mut self) {
++        self.folds.regions.clear();
++        if !self.mode.is_code_editor() {
++            self.folds.refresh_hidden();
++            return;
++        }
++
++        let candidates: Vec<(usize, usize)> = match &self.mode {
++            InputMode::CodeEditor {
++                language,
++                highlighter,
++                ..
++            } => {
++                if language.as_ref() == "text" {
++                    // Plain text has no meaningful tree; fold by indentation.
++                    let owned: Vec<String> =
++                        self.text.iter_lines().map(|l| l.to_string()).collect();
++                    let lines: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
++                    folding::indentation_fold_regions(&lines)
++                        .into_iter()
++                        .map(|r| (r.start_row, r.end_row))
++                        .collect()
++                } else {
++                    highlighter
++                        .borrow()
++                        .as_ref()
++                        .map(|h| h.fold_regions())
++                        .unwrap_or_default()
++                }
++            }
++            _ => Vec::new(),
++        };
++
++        let previously_folded: BTreeSet<usize> = self
++            .folds
++            .regions
++            .iter()
++            .filter(|r| r.folded)
++            .map(|r| r.start_row)
++            .collect();
++
++        self.folds.regions = candidates
++            .into_iter()
++            .map(|(start_row, end_row)| FoldRegion {
++                start_row,
++                end_row,
++                folded: previously_folded.contains(&start_row),
++            })
++            .collect();
++        self.folds.refresh_hidden();
++
++        // The caret must never rest on an interior row.
++        let cursor = self.cursor();
++        let clamped = self.clamp_offset_to_visible(cursor, None);
++        if clamped != cursor {
++            self.selected_range = (clamped..clamped).into();
++        }
++    }
++
++    /// Whether the natural `row` is hidden by an active fold.
++    pub(super) fn fold_is_hidden(&self, row: usize) -> bool {
++        self.folds.is_hidden(row)
++    }
++
++    /// The current fold regions as `(start_row, end_row, folded)` tuples in
++    /// 0-based natural lines (end inclusive).
++    pub fn fold_regions(&self) -> Vec<(usize, usize, bool)> {
++        self.folds
++            .regions
++            .iter()
++            .map(|region| (region.start_row, region.end_row, region.folded))
++            .collect()
++    }
++
++    /// The index of the innermost *effective* folded region whose interior
++    /// contains `row` (header visible). None when `row` is visible.
++    fn folded_region_covering(&self, row: usize) -> Option<usize> {
++        if !self.folds.is_hidden(row) {
++            return None;
++        }
++        self.folds
++            .regions
++            .iter()
++            .enumerate()
++            .filter(|(_, region)| {
++                region.folded
++                    && !self.folds.is_hidden(region.start_row)
++                    && region.start_row < row
++                    && region.end_row >= row
++            })
++            .max_by_key(|(_, region)| region.start_row)
++            .map(|(ix, _)| ix)
++    }
++
++    /// Fold regions whose headers are visible (used to draw the gutter
++    /// chevrons).
++    pub(super) fn visible_fold_headers(&self) -> Vec<(usize, bool)> {
++        self.folds
++            .regions
++            .iter()
++            .filter(|region| region.end_row > region.start_row)
++            .filter(|region| !self.folds.is_hidden(region.start_row))
++            .map(|region| (region.start_row, region.folded))
++            .collect()
++    }
++
++    /// Snap an offset to a visible caret position when it lands inside a
++    /// hidden fold interior.
++    ///
++    /// - `Down`: continue past the collapsed region (first row below it).
++    /// - `Up`: land on the region's header row.
++    /// - `None`: end of the header line (generic navigation / word movement).
++    pub(super) fn clamp_offset_to_visible(
++        &self,
++        offset: usize,
++        direction: Option<MoveDirection>,
++    ) -> usize {
++        let point = self.text.offset_to_point(offset);
++        let Some(region_ix) = self.folded_region_covering(point.row) else {
++            return offset;
++        };
++        let region = &self.folds.regions[region_ix];
++
++        match direction {
++            Some(MoveDirection::Down) => {
++                if region.end_row + 1 >= self.text.lines_len() {
++                    return self.text.len();
++                }
++                let row = region.end_row + 1;
++                let column = point.column.min(self.text.line_len(row));
++                self.text.line_start_offset(row) + column
++            }
++            Some(MoveDirection::Up) => {
++                let row = region.start_row;
++                let column = point.column.min(self.text.line_len(row));
++                self.text.line_start_offset(row) + column
++            }
++            None => self.text.line_end_offset(region.start_row),
++        }
++    }
++
++    /// Mutate folds via the shared path: refresh the derived hidden set, keep
++    /// the caret on a visible row, and request a repaint (collapsing changes
++    /// the scroll extent and the gutter).
++    fn after_fold_change(&mut self, cx: &mut Context<Self>) {
++        self.folds.refresh_hidden();
++        let cursor = self.cursor();
++        let clamped = self.clamp_offset_to_visible(cursor, None);
++        if clamped != cursor {
++            self.selected_range = (clamped..clamped).into();
++        }
++        self.pause_blink_cursor(cx);
++        cx.notify();
++    }
++
++    pub(super) fn toggle_fold(&mut self, _: &ToggleFold, _: &mut Window, cx: &mut Context<Self>) {
++        if !self.mode.is_code_editor() {
++            return;
++        }
++        let row = self.text.offset_to_point(self.cursor()).row;
++        let Some(ix) = folding::innermost_region_at(&self.folds.regions, row) else {
++            return;
++        };
++        let region = &mut self.folds.regions[ix];
++        if !region.is_foldable() {
++            return;
++        }
++        region.folded = !region.folded;
++        self.after_fold_change(cx);
++    }
++
++    pub(super) fn fold(&mut self, _: &Fold, _: &mut Window, cx: &mut Context<Self>) {
++        self.fold_at_cursor(true, cx);
++    }
++
++    pub(super) fn unfold(&mut self, _: &Unfold, _: &mut Window, cx: &mut Context<Self>) {
++        self.fold_at_cursor(false, cx);
++    }
++
++    fn fold_at_cursor(&mut self, folded: bool, cx: &mut Context<Self>) {
++        if !self.mode.is_code_editor() {
++            return;
++        }
++        let row = self.text.offset_to_point(self.cursor()).row;
++        let Some(ix) = folding::innermost_region_at(&self.folds.regions, row) else {
++            return;
++        };
++        let region = &mut self.folds.regions[ix];
++        if !region.is_foldable() {
++            return;
++        }
++        region.folded = folded;
++        self.after_fold_change(cx);
++    }
++
++    pub(super) fn fold_all(&mut self, _: &FoldAll, _: &mut Window, cx: &mut Context<Self>) {
++        if !self.mode.is_code_editor() {
++            return;
++        }
++        for region in &mut self.folds.regions {
++            if region.is_foldable() {
++                region.folded = true;
++            }
++        }
++        self.after_fold_change(cx);
++    }
++
++    pub(super) fn unfold_all(&mut self, _: &UnfoldAll, _: &mut Window, cx: &mut Context<Self>) {
++        if !self.mode.is_code_editor() {
++            return;
++        }
++        for region in &mut self.folds.regions {
++            region.folded = false;
++        }
++        self.after_fold_change(cx);
++    }
++
++    pub(super) fn fold_level(
++        &mut self,
++        action: &FoldLevel,
++        _: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        self.apply_fold_level(action.level, true, cx);
++    }
++
++    pub(super) fn unfold_level(
++        &mut self,
++        action: &UnfoldLevel,
++        _: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        self.apply_fold_level(action.level, false, cx);
++    }
++
++    fn apply_fold_level(&mut self, level: u32, folded: bool, cx: &mut Context<Self>) {
++        if !self.mode.is_code_editor() {
++            return;
++        }
++        let level = level.max(1);
++        for ix in 0..self.folds.regions.len() {
++            if self.folds.regions[ix].is_foldable()
++                && u32::try_from(folding::region_depth(&self.folds.regions, ix)).unwrap_or(u32::MAX)
++                    >= level
++            {
++                self.folds.regions[ix].folded = folded;
++            }
++        }
++        self.after_fold_change(cx);
++    }
++
++    /// Toggle the fold whose gutter chevron was clicked. Returns true when the
++    /// click was consumed.
++    fn handle_fold_gutter_click(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) -> bool {
++        if event.button != MouseButton::Left || !self.mode.is_code_editor() {
++            return false;
++        }
++        let (Some(bounds), Some(last_layout)) =
++            (self.last_bounds.as_ref(), self.last_layout.as_ref())
++        else {
++            return false;
++        };
++
++        let pos = event.position - bounds.origin;
++        let marker = last_layout
++            .fold_markers
++            .iter()
++            .find(|marker| {
++                let hit = &marker.chevron_bounds;
++                pos.x >= hit.left()
++                    && pos.x < hit.right()
++                    && pos.y >= hit.top()
++                    && pos.y < hit.bottom()
++            })
++            .cloned();
++        let Some(marker) = marker else {
++            return false;
++        };
++
++        let Some((ix, region)) = self
++            .folds
++            .regions
++            .iter_mut()
++            .enumerate()
++            .find(|(_, region)| region.start_row == marker.start_row && region.is_foldable())
++        else {
++            return false;
++        };
++        region.folded = !region.folded;
++        let _ = ix;
++        self.after_fold_change(cx);
++        true
++    }
++
+     pub(super) fn on_mouse_down(
+         &mut self,
+         event: &MouseDownEvent,
+@@ -1423,6 +1834,11 @@
+         // Clear inline completion on any mouse interaction
+         self.clear_inline_completion(cx);
+ 
++        // A click on a fold chevron toggles the region without moving the caret.
++        if self.handle_fold_gutter_click(event, cx) {
++            return;
++        }
++
+         // If there have IME marked range and is empty (Means pressed Esc to abort IME typing)
+         // Clear the marked range.
+         if let Some(ime_marked_range) = &self.ime_marked_range {
+@@ -1759,6 +2175,11 @@
+             .skip(last_layout.visible_range.start)
+             .enumerate()
+         {
++            // Fold-hidden rows have no painted height, so the pointer cannot
++            // land inside them.
++            if self.fold_is_hidden(last_layout.visible_range.start + ix) {
++                continue;
++            }
+             let line_origin = self.line_origin_with_y_offset(&mut y_offset, line, line_height);
+             let pos = inner_position - line_origin;
+ 
+@@ -2218,6 +2639,7 @@
+             .update(&self.text, &range, &Rope::from(new_text), cx);
+         self.mode
+             .update_highlighter(&range, &self.text, &new_text, true, cx);
++        self.folds.dirty = true;
+         self.lsp.update(&self.text, window, cx);
+         self.selected_range = (new_offset..new_offset).into();
+         self.ime_marked_range.take();
+@@ -2276,6 +2698,7 @@
+             .update(&self.text, &range, &Rope::from(new_text), cx);
+         self.mode
+             .update_highlighter(&range, &self.text, &new_text, true, cx);
++        self.folds.dirty = true;
+         self.lsp.update(&self.text, window, cx);
+         if new_text.is_empty() {
+             // Cancel selection, when cancel IME input.
+@@ -2321,6 +2744,11 @@
+                 break;
+             }
+ 
++            // Fold placeholders occupy no bytes and no height.
++            if line.wrapped_lines.is_empty() {
++                continue;
++            }
++
+             if start_origin.is_none() {
+                 if let Some(p) =
+                     line.position_for_index(range.start.saturating_sub(index_offset), line_height)
+@@ -2387,6 +2815,11 @@
+                 .update_highlighter(&(0..0), &self.text, "", false, cx);
+             self.lsp.update(&self.text, window, cx);
+             self._pending_update = false;
++        }
++
++        if self.folds.dirty {
++            self.recompute_folds();
++            self.folds.dirty = false;
+         }
+ 
+         div()

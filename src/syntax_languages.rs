@@ -261,4 +261,50 @@ mod tests {
             );
         }
     }
+
+    // Fold-region tests for the tree-derived folding used by the code editors.
+    // Rows are 0-based natural lines; each region's end row is inclusive, and
+    // a region only appears when it spans more than one line.
+    fn fold_regions_for(language: &str, source: &str) -> Vec<(usize, usize)> {
+        let rope = Rope::from_str(source);
+        let mut highlighter = SyntaxHighlighter::new(language);
+        highlighter.update(None, &rope);
+        highlighter.fold_regions()
+    }
+
+    #[test]
+    fn json_derives_object_and_array_fold_regions() {
+        register();
+        let regions = fold_regions_for(
+            "json",
+            "{\n  \"user\": {\n    \"name\": \"ada\",\n    \"roles\": [\"a\",\"b\",\"c\"]\n  },\n  \"count\": 3\n}",
+        );
+        // Top object 0..=6; nested object 1..=4 (the pair on the same line is
+        // deduplicated); the array is single-line and therefore not foldable.
+        assert_eq!(regions, vec![(0, 6), (1, 4)]);
+    }
+
+    #[test]
+    fn json_deduplicates_nested_regions_sharing_a_header_line() {
+        register();
+        let regions = fold_regions_for(
+            "json",
+            "{\n  \"nested\": {\n    \"a\": 1,\n    \"b\": {\n      \"c\": [\n        2,\n        3\n      ]\n    }\n  }\n}",
+        );
+        // Outer object 0..=10, "nested" object 1..=9, "b" object 3..=8 and the
+        // array 4..=7 nested inside it. Each starts on its own header line.
+        assert_eq!(regions, vec![(0, 10), (1, 9), (3, 8), (4, 7)]);
+    }
+
+    #[test]
+    fn javascript_derives_function_and_block_fold_regions() {
+        register();
+        let regions = fold_regions_for(
+            "javascript",
+            "function greet(name) {\n  const items = [\n    1,\n    2,\n  ];\n  if (name) {\n    console.log(\"hi\");\n  }\n}",
+        );
+        // The function and its body share a range and dedupe into 0..=8; the
+        // array folds 1..=4 and the if-block 5..=7.
+        assert_eq!(regions, vec![(0, 8), (1, 4), (5, 7)]);
+    }
 }

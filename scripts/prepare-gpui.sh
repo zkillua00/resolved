@@ -5,20 +5,27 @@ project_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 vendor_root="$project_dir/vendor"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 
+# Prepare one vendored crate by applying its patch(es) on top of the pristine
+# crates.io archive. The last arguments are the ordered patch files.
 prepare_crate() (
     crate_name="$1"
     crate_version="$2"
     crate_sha256="$3"
-    patch_file="$4"
+    shift 3
+    patch_files="$@"
     crate_archive="$crate_name-$crate_version.crate"
     vendor_dir="$vendor_root/$crate_name-$crate_version"
     marker_file="$vendor_dir/.api-tester-patch-sha256"
-    patch_sha256="$(shasum -a 256 "$patch_file" | awk '{print $1}')"
+    # Combined hash over every patch, in application order, joined with `:`.
+    patch_sha256="$(printf '%s\n' "$@" | while read -r f; do shasum -a 256 "$f" | awk '{print $1}'; done | paste -sd: -)"
 
     if [ -f "$marker_file" ] &&
         [ "$(sed -n '1p' "$marker_file")" = "$patch_sha256" ] &&
         [ "$(sed -n '2p' "$marker_file")" = "$crate_sha256" ] &&
-        (cd "$vendor_dir" && patch --dry-run -R -p1 <"$patch_file" >/dev/null 2>&1); then
+        (cd "$vendor_dir" &&
+            for f in "$@"; do
+                patch --dry-run -R -p1 <"$f" >/dev/null 2>&1 || exit 1
+            done); then
         exit 0
     fi
 
@@ -54,10 +61,12 @@ prepare_crate() (
     tar -xzf "$archive" -C "$temporary_dir"
     source_dir="$temporary_dir/$crate_name-$crate_version"
 
-    if ! (cd "$source_dir" && patch --batch -p1 <"$patch_file"); then
-        echo "error: patch no longer applies to crates.io $crate_name $crate_version" >&2
-        exit 1
-    fi
+    for f in "$@"; do
+        if ! (cd "$source_dir" && patch --batch -p1 <"$f"); then
+            echo "error: patch no longer applies to crates.io $crate_name $crate_version" >&2
+            exit 1
+        fi
+    done
 
     printf '%s\n%s\n' "$patch_sha256" "$crate_sha256" \
         >"$source_dir/.api-tester-patch-sha256"
@@ -78,4 +87,5 @@ prepare_crate \
     "gpui-component" \
     "0.5.1" \
     "d021d46b4088d3d93a57ccdf443da85695a77272108caca2f6fe5369f584966a" \
-    "$project_dir/patches/gpui-component-0.5.1-input-integration.patch"
+    "$project_dir/patches/gpui-component-0.5.1-input-integration.patch" \
+    "$project_dir/patches/gpui-component-0.5.1-code-folding.patch"
