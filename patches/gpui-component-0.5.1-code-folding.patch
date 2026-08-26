@@ -1,6 +1,6 @@
 diff --git a/src/highlighter/highlighter.rs b/src/highlighter/highlighter.rs
 --- a/src/highlighter/highlighter.rs	2026-08-26 22:35:32
-+++ b/src/highlighter/highlighter.rs	2026-08-26 23:47:28
++++ b/src/highlighter/highlighter.rs	2026-08-26 23:51:46
 @@ -628,6 +628,66 @@
  
          styles
@@ -70,7 +70,7 @@ diff --git a/src/highlighter/highlighter.rs b/src/highlighter/highlighter.rs
  /// To merge intersection ranges, let the subsequent range cover
 diff --git a/src/input/element.rs b/src/input/element.rs
 --- a/src/input/element.rs	2026-08-26 22:35:32
-+++ b/src/input/element.rs	2026-08-26 23:47:28
++++ b/src/input/element.rs	2026-08-26 23:51:46
 @@ -14,11 +14,19 @@
      input::{RopeExt as _, blink_cursor::CURSOR_WIDTH, text_wrapper::LineLayout},
  };
@@ -269,7 +269,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
                          input_bounds.size.height + prepaint.ghost_lines_height,
                      ),
                  },
-@@ -1543,6 +1628,30 @@
+@@ -1543,6 +1628,31 @@
  
                      // Paint first line completion text
                      _ = first_line.paint(p, line_height, window, cx);
@@ -277,23 +277,24 @@ diff --git a/src/input/element.rs b/src/input/element.rs
 +            }
 +        }
 +
-+        // Paint fold chevrons in the gutter (collapsed: ▸, expanded: ▾).
++        // Paint fold chevrons in the gutter (Zed-style Disclosure chevrons:
++        // a stroked ❯ when folded, rotated 90° to ⌄ when expanded).
 +        let fold_markers = prepaint.last_layout.fold_markers.clone();
 +        if !fold_markers.is_empty() {
-+            let chevron_color = cx.theme().muted_foreground.opacity(0.85);
++            let chevron_color = cx.theme().muted_foreground.opacity(0.9);
 +            for marker in &fold_markers {
 +                let hit = &marker.chevron_bounds;
 +                let origin = input_bounds.origin + point(hit.left(), hit.top());
 +                let side = hit.size.height;
-+                let mut builder = gpui::PathBuilder::fill();
++                let mut builder = gpui::PathBuilder::stroke(px(1.5));
 +                if marker.folded {
 +                    builder.move_to(origin);
-+                    builder.line_to(origin + point(px(0.), side));
 +                    builder.line_to(origin + point(side, side.half()));
++                    builder.line_to(origin + point(px(0.), side));
 +                } else {
 +                    builder.move_to(origin);
-+                    builder.line_to(origin + point(side, px(0.)));
 +                    builder.line_to(origin + point(side.half(), side));
++                    builder.line_to(origin + point(side, px(0.)));
 +                }
 +                if let Ok(path) = builder.build() {
 +                    window.paint_path(path, chevron_color);
@@ -302,7 +303,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
          }
 diff --git a/src/input/folding.rs b/src/input/folding.rs
 --- a/src/input/folding.rs	1970-01-01 04:00:00
-+++ b/src/input/folding.rs	2026-08-26 23:47:28
++++ b/src/input/folding.rs	2026-08-26 23:51:46
 @@ -0,0 +1,262 @@
 +//! Code folding support for the code-editor input.
 +//!
@@ -568,7 +569,7 @@ diff --git a/src/input/folding.rs b/src/input/folding.rs
 +}
 diff --git a/src/input/input.rs b/src/input/input.rs
 --- a/src/input/input.rs	2026-08-26 22:35:32
-+++ b/src/input/input.rs	2026-08-26 23:47:28
++++ b/src/input/input.rs	2026-08-26 23:51:46
 @@ -316,6 +316,15 @@
                      .on_action(
                          window.listener_for(&self.state, InputState::on_action_go_to_definition),
@@ -587,7 +588,7 @@ diff --git a/src/input/input.rs b/src/input/input.rs
              .on_action(window.listener_for(&self.state, InputState::select_to_start_of_line))
 diff --git a/src/input/mod.rs b/src/input/mod.rs
 --- a/src/input/mod.rs	2026-08-26 22:35:32
-+++ b/src/input/mod.rs	2026-08-26 23:47:28
++++ b/src/input/mod.rs	2026-08-26 23:51:46
 @@ -3,6 +3,7 @@
  mod clear_button;
  mod cursor;
@@ -598,7 +599,7 @@ diff --git a/src/input/mod.rs b/src/input/mod.rs
  mod lsp;
 diff --git a/src/input/movement.rs b/src/input/movement.rs
 --- a/src/input/movement.rs	2026-08-26 22:35:32
-+++ b/src/input/movement.rs	2026-08-26 23:47:28
++++ b/src/input/movement.rs	2026-08-26 23:51:46
 @@ -45,7 +45,9 @@
          direction: Option<MoveDirection>,
          cx: &mut Context<Self>,
@@ -612,7 +613,7 @@ diff --git a/src/input/movement.rs b/src/input/movement.rs
          self.pause_blink_cursor(cx);
 diff --git a/src/input/state.rs b/src/input/state.rs
 --- a/src/input/state.rs	2026-08-26 22:35:32
-+++ b/src/input/state.rs	2026-08-26 23:47:28
++++ b/src/input/state.rs	2026-08-26 23:51:46
 @@ -13,6 +13,7 @@
  };
  use ropey::{Rope, RopeSlice};
