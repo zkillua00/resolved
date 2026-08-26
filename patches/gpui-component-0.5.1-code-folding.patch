@@ -1,6 +1,6 @@
 diff --git a/src/highlighter/highlighter.rs b/src/highlighter/highlighter.rs
 --- a/src/highlighter/highlighter.rs	2026-08-26 22:35:32
-+++ b/src/highlighter/highlighter.rs	2026-08-26 23:41:29
++++ b/src/highlighter/highlighter.rs	2026-08-26 23:47:28
 @@ -628,6 +628,66 @@
  
          styles
@@ -70,8 +70,8 @@ diff --git a/src/highlighter/highlighter.rs b/src/highlighter/highlighter.rs
  /// To merge intersection ranges, let the subsequent range cover
 diff --git a/src/input/element.rs b/src/input/element.rs
 --- a/src/input/element.rs	2026-08-26 22:35:32
-+++ b/src/input/element.rs	2026-08-26 23:41:29
-@@ -14,11 +14,18 @@
++++ b/src/input/element.rs	2026-08-26 23:47:28
+@@ -14,11 +14,19 @@
      input::{RopeExt as _, blink_cursor::CURSOR_WIDTH, text_wrapper::LineLayout},
  };
  
@@ -82,16 +82,17 @@ diff --git a/src/input/element.rs b/src/input/element.rs
  pub(super) const RIGHT_MARGIN: Pixels = px(10.);
  pub(super) const LINE_NUMBER_RIGHT_MARGIN: Pixels = px(10.);
 +/// Width of the fold area reserved at the right edge of the gutter, between
-+/// the line numbers and the code. Mirrors Zed's `margin + right_padding`
-+/// (`GutterDimensions::fold_area_width`).
-+const FOLD_AREA_WIDTH: Pixels = px(12.);
++/// the line numbers and the code. Mirrors Zed, which reserves `right_padding =
++/// ch_width * 4` there when fold indicators are shown (`gutter_dimensions`,
++/// `crates/editor/src/editor.rs`), at a code-editor font size that is ~4 chars.
++pub(super) const FOLD_AREA_WIDTH: Pixels = px(28.);
 +/// The fold chevron is a square scaled to this fraction of the line height
 +/// (Zed lays its crease toggles out with `line_height * 0.55`).
 +const FOLD_CHEVRON_HEIGHT_RATIO: f32 = 0.55;
  
  /// Overlay application-owned semantic styles in a stable order.
  ///
-@@ -156,6 +163,10 @@
+@@ -156,6 +164,10 @@
          let mut offset_y = px(0.);
          for (ix, wrap_line) in text_wrapper.lines.iter().enumerate() {
              let row = ix;
@@ -102,7 +103,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
              let line_origin = point(px(0.), offset_y);
  
              // break loop if all cursor positions are found
-@@ -320,6 +331,10 @@
+@@ -320,6 +332,10 @@
          let mut line_corners = vec![];
  
          for line in lines.iter() {
@@ -113,7 +114,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
              let line_size = line.size(line_height);
              let line_wrap_width = line_size.width;
  
-@@ -546,6 +561,10 @@
+@@ -546,6 +562,10 @@
          let mut visible_range = 0..total_lines;
          let mut line_bottom = px(0.);
          for (ix, line) in state.text_wrapper.lines.iter().enumerate() {
@@ -124,7 +125,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
              let wrapped_height = line.height(line_height);
              line_bottom += wrapped_height;
  
-@@ -594,7 +613,8 @@
+@@ -594,7 +614,8 @@
                  None,
              );
  
@@ -134,7 +135,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
          } else {
              px(0.)
          };
-@@ -736,14 +756,20 @@
+@@ -736,14 +757,20 @@
          let mut lines = vec![];
          let mut offset = 0;
          for (ix, line) in visible_text.split("\n").enumerate() {
@@ -158,7 +159,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
              let mut wrapped_lines = SmallVec::with_capacity(1);
  
              for range in &line_item.wrapped_lines {
-@@ -805,11 +831,16 @@
+@@ -805,11 +832,16 @@
          } = &state.mode
          {
              if let Some(highlighter) = highlighter.borrow().as_ref() {
@@ -176,7 +177,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
                      let line_len = if is_multi_line {
                          // +1 for `\n`
                          line.len() + 1
-@@ -1048,6 +1079,7 @@
+@@ -1048,6 +1080,7 @@
              line_number_width,
              lines: Rc::new(vec![]),
              cursor_bounds: None,
@@ -184,7 +185,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
          };
  
          let run = TextRun {
-@@ -1156,6 +1188,45 @@
+@@ -1156,6 +1189,45 @@
          }
          last_layout.lines = Rc::new(lines);
  
@@ -230,7 +231,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
          let (ghost_first_line, ghost_lines) = Self::layout_inline_completion(
              state,
              &last_layout.visible_range,
-@@ -1166,7 +1237,15 @@
+@@ -1166,7 +1238,15 @@
          let ghost_line_count = ghost_lines.len();
          let ghost_lines_height = ghost_line_count as f32 * line_height;
  
@@ -247,7 +248,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
          let empty_bottom_height = if state.mode.is_code_editor() {
              bounds
                  .size
-@@ -1251,6 +1330,11 @@
+@@ -1251,6 +1331,11 @@
              // build line numbers
              for (ix, line) in last_layout.lines.iter().enumerate() {
                  let ix = last_layout.visible_range.start + ix;
@@ -259,7 +260,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
                  let line_no = format!("{:>width$}", ix + 1, width = line_number_len).into();
  
                  let runs = if current_row == Some(ix) {
-@@ -1476,7 +1560,7 @@
+@@ -1476,7 +1561,7 @@
                  Bounds {
                      origin: input_bounds.origin,
                      size: size(
@@ -268,7 +269,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
                          input_bounds.size.height + prepaint.ghost_lines_height,
                      ),
                  },
-@@ -1543,6 +1627,30 @@
+@@ -1543,6 +1628,30 @@
  
                      // Paint first line completion text
                      _ = first_line.paint(p, line_height, window, cx);
@@ -301,7 +302,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
          }
 diff --git a/src/input/folding.rs b/src/input/folding.rs
 --- a/src/input/folding.rs	1970-01-01 04:00:00
-+++ b/src/input/folding.rs	2026-08-26 23:41:29
++++ b/src/input/folding.rs	2026-08-26 23:47:28
 @@ -0,0 +1,262 @@
 +//! Code folding support for the code-editor input.
 +//!
@@ -567,7 +568,7 @@ diff --git a/src/input/folding.rs b/src/input/folding.rs
 +}
 diff --git a/src/input/input.rs b/src/input/input.rs
 --- a/src/input/input.rs	2026-08-26 22:35:32
-+++ b/src/input/input.rs	2026-08-26 23:41:29
++++ b/src/input/input.rs	2026-08-26 23:47:28
 @@ -316,6 +316,15 @@
                      .on_action(
                          window.listener_for(&self.state, InputState::on_action_go_to_definition),
@@ -586,7 +587,7 @@ diff --git a/src/input/input.rs b/src/input/input.rs
              .on_action(window.listener_for(&self.state, InputState::select_to_start_of_line))
 diff --git a/src/input/mod.rs b/src/input/mod.rs
 --- a/src/input/mod.rs	2026-08-26 22:35:32
-+++ b/src/input/mod.rs	2026-08-26 23:41:29
++++ b/src/input/mod.rs	2026-08-26 23:47:28
 @@ -3,6 +3,7 @@
  mod clear_button;
  mod cursor;
@@ -597,7 +598,7 @@ diff --git a/src/input/mod.rs b/src/input/mod.rs
  mod lsp;
 diff --git a/src/input/movement.rs b/src/input/movement.rs
 --- a/src/input/movement.rs	2026-08-26 22:35:32
-+++ b/src/input/movement.rs	2026-08-26 23:41:29
++++ b/src/input/movement.rs	2026-08-26 23:47:28
 @@ -45,7 +45,9 @@
          direction: Option<MoveDirection>,
          cx: &mut Context<Self>,
@@ -611,7 +612,7 @@ diff --git a/src/input/movement.rs b/src/input/movement.rs
          self.pause_blink_cursor(cx);
 diff --git a/src/input/state.rs b/src/input/state.rs
 --- a/src/input/state.rs	2026-08-26 22:35:32
-+++ b/src/input/state.rs	2026-08-26 23:41:29
++++ b/src/input/state.rs	2026-08-26 23:47:28
 @@ -13,6 +13,7 @@
  };
  use ropey::{Rope, RopeSlice};
@@ -742,7 +743,7 @@ diff --git a/src/input/state.rs b/src/input/state.rs
  impl LastLayout {
      /// Get the line layout for the given row (0-based).
      ///
-@@ -389,10 +469,36 @@
+@@ -389,10 +469,39 @@
      }
  }
  
@@ -776,18 +777,22 @@ diff --git a/src/input/state.rs b/src/input/state.rs
      pub(super) focus_handle: FocusHandle,
      pub(super) mode: InputMode,
 +    pub(super) folds: FoldState,
++    /// Whether the pointer is over the line-number gutter (used to reveal fold
++    /// chevrons while hovering, like Zed's `gutter_hovered`).
++    pub(super) fold_gutter_hovered: bool,
      pub(super) text: Rope,
      pub(super) text_wrapper: TextWrapper,
      pub(super) history: History<Change>,
-@@ -523,6 +629,7 @@
+@@ -523,6 +632,8 @@
              pattern: None,
              validate: None,
              mode: InputMode::default(),
 +            folds: FoldState::default(),
++            fold_gutter_hovered: false,
              last_layout: None,
              last_bounds: None,
              semantic_highlights: Vec::new(),
-@@ -665,6 +772,7 @@
+@@ -665,6 +776,7 @@
              _ => false,
          };
          self._pending_update |= language_changed;
@@ -795,7 +800,7 @@ diff --git a/src/input/state.rs b/src/input/state.rs
          cx.notify();
      }
  
-@@ -1414,6 +1522,315 @@
+@@ -1414,6 +1526,335 @@
          cx.propagate();
      }
  
@@ -915,7 +920,9 @@ diff --git a/src/input/state.rs b/src/input/state.rs
 +            .iter()
 +            .filter(|region| region.end_row > region.start_row)
 +            .filter(|region| !self.folds.is_hidden(region.start_row))
-+            .filter(|region| region.folded || region.start_row == caret_row)
++            .filter(|region| {
++                region.folded || region.start_row == caret_row || self.fold_gutter_hovered
++            })
 +            .map(|region| (region.start_row, region.folded))
 +            .collect()
 +    }
@@ -1108,10 +1115,28 @@ diff --git a/src/input/state.rs b/src/input/state.rs
 +        true
 +    }
 +
++    /// Track whether the pointer sits over the line-number gutter so fold
++    /// chevrons can be revealed on hover.
++    fn update_fold_gutter_hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
++        let hovered = self
++            .last_bounds
++            .as_ref()
++            .zip(self.last_layout.as_ref())
++            .map(|(bounds, layout)| {
++                let pos = position - bounds.origin;
++                pos.x >= px(0.) && pos.x < layout.line_number_width && pos.y >= px(0.)
++            })
++            .unwrap_or(false);
++        if hovered != self.fold_gutter_hovered {
++            self.fold_gutter_hovered = hovered;
++            cx.notify();
++        }
++    }
++
      pub(super) fn on_mouse_down(
          &mut self,
          event: &MouseDownEvent,
-@@ -1423,6 +1840,11 @@
+@@ -1423,6 +1864,11 @@
          // Clear inline completion on any mouse interaction
          self.clear_inline_completion(cx);
  
@@ -1123,7 +1148,17 @@ diff --git a/src/input/state.rs b/src/input/state.rs
          // If there have IME marked range and is empty (Means pressed Esc to abort IME typing)
          // Clear the marked range.
          if let Some(ime_marked_range) = &self.ime_marked_range {
-@@ -1759,6 +2181,11 @@
+@@ -1476,6 +1922,9 @@
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
++        // Hovering the gutter reveals fold chevrons (Zed-style).
++        self.update_fold_gutter_hover(event.position, cx);
++
+         // Show diagnostic popover on mouse move
+         let offset = self.index_for_mouse_position(event.position);
+         self.handle_mouse_move(offset, event, window, cx);
+@@ -1759,6 +2208,11 @@
              .skip(last_layout.visible_range.start)
              .enumerate()
          {
@@ -1135,7 +1170,7 @@ diff --git a/src/input/state.rs b/src/input/state.rs
              let line_origin = self.line_origin_with_y_offset(&mut y_offset, line, line_height);
              let pos = inner_position - line_origin;
  
-@@ -2218,6 +2645,7 @@
+@@ -2218,6 +2672,7 @@
              .update(&self.text, &range, &Rope::from(new_text), cx);
          self.mode
              .update_highlighter(&range, &self.text, &new_text, true, cx);
@@ -1143,7 +1178,7 @@ diff --git a/src/input/state.rs b/src/input/state.rs
          self.lsp.update(&self.text, window, cx);
          self.selected_range = (new_offset..new_offset).into();
          self.ime_marked_range.take();
-@@ -2276,6 +2704,7 @@
+@@ -2276,6 +2731,7 @@
              .update(&self.text, &range, &Rope::from(new_text), cx);
          self.mode
              .update_highlighter(&range, &self.text, &new_text, true, cx);
@@ -1151,7 +1186,7 @@ diff --git a/src/input/state.rs b/src/input/state.rs
          self.lsp.update(&self.text, window, cx);
          if new_text.is_empty() {
              // Cancel selection, when cancel IME input.
-@@ -2321,6 +2750,11 @@
+@@ -2321,6 +2777,11 @@
                  break;
              }
  
@@ -1163,7 +1198,7 @@ diff --git a/src/input/state.rs b/src/input/state.rs
              if start_origin.is_none() {
                  if let Some(p) =
                      line.position_for_index(range.start.saturating_sub(index_offset), line_height)
-@@ -2387,6 +2821,11 @@
+@@ -2387,6 +2848,11 @@
                  .update_highlighter(&(0..0), &self.text, "", false, cx);
              self.lsp.update(&self.text, window, cx);
              self._pending_update = false;
