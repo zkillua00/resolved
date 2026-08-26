@@ -25,7 +25,7 @@ use super::{
     RequestDraft, ResponseData,
     chain::ChainRun,
     request_namespace::{RequestNamespaceCatalog, RuntimeNamespaceSpec},
-    template::redact_secret_values,
+    template::{REDACTED_VALUE, secret_variants},
 };
 
 /// Runs a batch of awaited chained requests' pipelines (their own pre/post
@@ -575,11 +575,12 @@ impl Default for ScriptScope {
 impl ScriptScope {
     pub fn redactor(&self) -> SecretRedactor {
         let mut redactor = SecretRedactor::default();
-        for name in &self.environment.secret_names {
-            if let Some(value) = self.environment.values.get(name) {
-                redactor.add(value.clone());
-            }
-        }
+        redactor.extend(
+            self.environment
+                .secret_names
+                .iter()
+                .filter_map(|name| self.environment.values.get(name).cloned()),
+        );
         redactor.extend(self.extra_secrets.iter().cloned());
         redactor
     }
@@ -587,7 +588,12 @@ impl ScriptScope {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SecretRedactor {
+    /// Canonical secret values, kept sorted longest-first (ties broken by
+    /// value) and deduplicated, so variant derivation is deterministic.
     secrets: Vec<String>,
+    /// Cached spelling variants of `secrets` (see `template::secret_variants`),
+    /// re-derived only when `secrets` changes; never recomputed per scrub.
+    variants: Vec<String>,
 }
 
 #[allow(dead_code)]
@@ -599,22 +605,59 @@ impl SecretRedactor {
     }
 
     pub fn add(&mut self, secret: impl Into<String>) {
-        let secret = secret.into();
-        if !secret.is_empty() && !self.secrets.contains(&secret) {
-            self.secrets.push(secret);
-            self.secrets
-                .sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+        if self.insert_secret(secret.into()) {
+            self.rebuild_variants();
         }
     }
 
     pub fn extend(&mut self, secrets: impl IntoIterator<Item = String>) {
+        let mut changed = false;
         for secret in secrets {
-            self.add(secret);
+            changed |= self.insert_secret(secret);
+        }
+        if changed {
+            self.rebuild_variants();
         }
     }
 
+    /// Inserts `secret`, keeping `secrets` sorted longest-first and
+    /// deduplicated via a binary-search probe. Returns true when the set
+    /// actually changed (so callers can skip the variant rebuild).
+    fn insert_secret(&mut self, secret: String) -> bool {
+        if secret.is_empty() {
+            return false;
+        }
+        let position = self
+            .secrets
+            .binary_search_by(|existing| {
+                existing
+                    .len()
+                    .cmp(&secret.len())
+                    .reverse()
+                    .then_with(|| existing.cmp(&secret))
+            })
+            .unwrap_or_else(|position| position);
+        if self.secrets.get(position) == Some(&secret) {
+            return false;
+        }
+        self.secrets.insert(position, secret);
+        true
+    }
+
+    fn rebuild_variants(&mut self) {
+        self.variants = secret_variants(&self.secrets);
+    }
+
     pub fn scrub(&self, text: impl AsRef<str>) -> String {
-        redact_secret_values(text.as_ref(), &self.secrets)
+        let text = text.as_ref();
+        if self.variants.is_empty() {
+            return text.to_owned();
+        }
+        self.variants
+            .iter()
+            .fold(text.to_owned(), |text, value| {
+                text.replace(value, REDACTED_VALUE)
+            })
     }
 }
 
@@ -823,8 +866,8 @@ fn execute_pre_request_inner(
         });
     }
 
-    validate_source_and_body(phase, source, request, &scope.redactor())?;
     let mut redactor = scope.redactor();
+    validate_source_and_body(phase, source, request, &redactor)?;
     let input = EngineInput {
         phase: phase.engine_name(),
         request,
@@ -2190,6 +2233,93 @@ throw new Error("rotated=a%20b/c");
             encoded.report.logs[0].message,
             "url=https://example.test/[REDACTED]"
         );
+    }
+
+    #[test]
+    fn redactor_scrub_matches_derived_variant_application() {
+        // The legacy path re-derived `secret_variants` on every scrub and
+        // applied them with chained replace. The cached-variant redactor must
+        // produce byte-identical output.
+        let secrets = [
+            "a b/c".to_owned(),
+            "top-secret".to_owned(),
+            "42".to_owned(),
+            "a b/c".to_owned(), // duplicate must be dropped
+            String::new(),      // empty secrets are dropped
+        ];
+        let redactor = SecretRedactor::new(secrets);
+        // Longest-first, ties broken by value.
+        assert_eq!(redactor.secrets, vec!["top-secret", "a b/c", "42"]);
+        assert_eq!(
+            redactor.variants,
+            super::super::template::secret_variants(&redactor.secrets)
+        );
+
+        for text in [
+            "plain text",
+            "raw a b/c form a+b%2Fc path a%20b/c",
+            "token top-secret and pin 42",
+            "a b/c then top-secret then 42",
+            "",
+        ] {
+            let expected = super::super::template::secret_variants(&redactor.secrets)
+                .iter()
+                .fold(text.to_owned(), |text, value| {
+                    text.replace(value, super::super::template::REDACTED_VALUE)
+                });
+            assert_eq!(
+                redactor.scrub(text),
+                expected,
+                "redactor scrub diverged from variant application for {text:?}"
+            );
+        }
+        for needle in ["a b/c", "a+b%2Fc", "a%20b/c", "top-secret", "42"] {
+            assert!(
+                !redactor.scrub("a b/c top-secret 42").contains(needle),
+                "redactor leaked spelling {needle:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn redactor_variants_are_cached_and_invalidate_only_on_change() {
+        let mut redactor = SecretRedactor::new(["first".to_owned()]);
+        let cached = redactor.variants.clone();
+        assert_eq!(redactor.scrub("first"), "[REDACTED]");
+        assert_eq!(redactor.scrub("other"), "other");
+
+        // Re-adding the same value and adding empty values must not rebuild.
+        redactor.add("first");
+        redactor.add("");
+        assert_eq!(redactor.variants, cached);
+
+        // A genuinely new secret invalidates the cache and scrubs thereafter.
+        redactor.add("second");
+        assert_ne!(redactor.variants, cached);
+        assert_eq!(redactor.scrub("first second"), "[REDACTED] [REDACTED]");
+        assert_eq!(redactor.scrub("third"), "third");
+
+        // extend rebuilds once for the whole batch.
+        let mut batch = redactor.clone();
+        batch.extend(["third".to_owned(), "fourth".to_owned(), "first".to_owned()]);
+        assert_eq!(batch.scrub("first fourth"), "[REDACTED] [REDACTED]");
+    }
+
+    #[test]
+    fn redactor_scrubs_overlapping_secrets_longest_first() {
+        // The shorter spelling must not consume the start of a longer secret.
+        let mut redactor = SecretRedactor::new(["abc".to_owned(), "abcd".to_owned()]);
+        assert_eq!(redactor.scrub("xabcd tail"), "x[REDACTED] tail");
+        // Keeping the collection sorted longest-first is what makes the
+        // chained application correct for overlaps.
+        assert_eq!(redactor.secrets, vec!["abcd", "abc"]);
+        assert_eq!(
+            redactor.scrub("key=abcd token=abc"),
+            "key=[REDACTED] token=[REDACTED]"
+        );
+        redactor.add("xy");
+        assert_eq!(redactor.secrets, vec!["abcd", "abc", "xy"]);
+        assert_eq!(redactor.scrub("xy tails"), "[REDACTED] tails");
     }
 
     #[test]

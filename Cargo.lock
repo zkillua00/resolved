@@ -124,6 +124,7 @@ dependencies = [
  "gpui-wry",
  "libc",
  "lsp-types",
+ "memchr",
  "reqwest",
  "ring",
  "rquickjs",

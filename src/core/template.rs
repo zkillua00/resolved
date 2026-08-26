@@ -8,7 +8,7 @@ use super::request::{BodyMode, RequestDraft};
 use super::workspace::{Environment, RequestScripts};
 
 const MAX_VARIABLE_DEPTH: usize = 32;
-const REDACTED_VALUE: &str = "[REDACTED]";
+pub(crate) const REDACTED_VALUE: &str = "[REDACTED]";
 
 /// A persistable request definition.
 ///
@@ -136,7 +136,12 @@ pub(crate) fn redact_secret_bytes(bytes: &[u8], sensitive_values: &[String]) -> 
         })
 }
 
-fn secret_variants(sensitive_values: &[String]) -> Vec<String> {
+/// Derives the distinct spellings under which a secret can appear (raw,
+/// percent-encoded, URL-path-escaped, query-escaped), longest-first, deduped.
+///
+/// Callers that scrub repeatedly should derive once and cache the result
+/// (`SecretRedactor` does) instead of re-deriving on every call.
+pub(crate) fn secret_variants(sensitive_values: &[String]) -> Vec<String> {
     let values = sensitive_values
         .iter()
         .filter(|value| !value.is_empty())
@@ -158,11 +163,7 @@ fn replace_bytes(bytes: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
     }
     let mut output = Vec::with_capacity(bytes.len());
     let mut cursor = 0;
-    while let Some(position) = bytes[cursor..]
-        .windows(needle.len())
-        .position(|candidate| candidate == needle)
-    {
-        let position = cursor + position;
+    for position in memchr::memmem::find_iter(bytes, needle) {
         output.extend_from_slice(&bytes[cursor..position]);
         output.extend_from_slice(replacement);
         cursor = position + needle.len();
@@ -763,6 +764,121 @@ mod tests {
             r#"{"outer":{"inner":{"item":"42"}}}"#
         );
         assert_eq!(resolved.used_variables, vec!["item_id"]);
+    }
+
+    #[test]
+    fn redact_secret_bytes_matches_legacy_windowed_scan() {
+        // Literal copy of the pre-memmem `replace_bytes` (hand-rolled windowed
+        // scan) so byte-for-byte equivalence of the optimized path is proven.
+        fn legacy_replace_bytes(bytes: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+            if needle.is_empty() {
+                return bytes.to_vec();
+            }
+            let mut output = Vec::with_capacity(bytes.len());
+            let mut cursor = 0;
+            while let Some(position) = bytes[cursor..]
+                .windows(needle.len())
+                .position(|candidate| candidate == needle)
+            {
+                let position = cursor + position;
+                output.extend_from_slice(&bytes[cursor..position]);
+                output.extend_from_slice(replacement);
+                cursor = position + needle.len();
+            }
+            output.extend_from_slice(&bytes[cursor..]);
+            output
+        }
+
+        let cases: &[(&[u8], &[&str])] = &[
+            (b"", &["secret"]),
+            (b"prefix secret suffix", &["secret"]),
+            (b"secret at start", &["secret"]),
+            (b"end secret", &["secret"]),
+            (b"secret secret secret", &["secret"]),
+            (b"adjacent secretssecret", &["secret"]),
+            (b"no match here", &["secret"]),
+            (b"key=abcd token=abc", &["abcd", "abc"]),
+            (b"xabcd tail", &["abc", "abcd"]),
+            (b"abczabcd", &["abcd", "abc"]),
+            ("héllo wörld".as_bytes(), &["héllo"]),
+            (b"", &[""]),
+            (b"plain", &[""]),
+            (b"", &[]),
+        ];
+        for (input, secret_values) in cases {
+            let secret_values: Vec<String> = secret_values.iter().map(|s| s.to_string()).collect();
+            let variants = secret_variants(&secret_values);
+            let mut legacy = input.to_vec();
+            let mut current = input.to_vec();
+            for variant in &variants {
+                legacy = legacy_replace_bytes(&legacy, variant.as_bytes(), REDACTED_VALUE.as_bytes());
+                current = replace_bytes(&current, variant.as_bytes(), REDACTED_VALUE.as_bytes());
+            }
+            assert_eq!(
+                current, legacy,
+                "byte output diverged for input {input:?} with secrets {secret_values:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn redact_secret_bytes_handles_overlapping_empty_and_utf8_borders() {
+        // Overlapping secrets: longest-first replacement must not leave a
+        // shorter secret spelling inside a replaced span.
+        let out = redact_secret_bytes(b"key=abcd token=abc", &["abcd".to_owned(), "abc".to_owned()]);
+        assert_eq!(out, b"key=[REDACTED] token=[REDACTED]");
+
+        // Empty secrets list / empty needle are no-ops that copy the input.
+        assert_eq!(redact_secret_bytes(b"unchanged", &[]), b"unchanged");
+        assert_eq!(redact_secret_bytes(b"unchanged", &[String::new()]), b"unchanged");
+
+        // Multi-byte UTF-8 secrets scrub on byte boundaries in their raw,
+        // form-encoded, and path-encoded spellings.
+        let secret = "héllo wörld".to_owned();
+        let haystack = format!(
+            "raw={secret} path=h%C3%A9llo%20w%C3%B6rld form=h%C3%A9llo+w%C3%B6rld"
+        );
+        let out = redact_secret_bytes(haystack.as_bytes(), &[secret]);
+        assert_eq!(
+            out,
+            b"raw=[REDACTED] path=[REDACTED] form=[REDACTED]"
+        );
+        assert_ne!(out, haystack.as_bytes());
+        let utf8 = String::from_utf8(out).unwrap();
+        assert!(!utf8.contains("h%C3%A9llo"));
+
+        // A secret that only starts or ends at a buffer border is still
+        // scrubbed completely, with no truncated replacement.
+        assert_eq!(
+            redact_secret_bytes(b"secret-tail", &["secret".to_owned()]),
+            b"[REDACTED]-tail"
+        );
+        assert_eq!(
+            redact_secret_bytes(b"head-secret", &["secret".to_owned()]),
+            b"head-[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn secret_variants_are_sorted_longest_first_and_deduplicated() {
+        let variants = secret_variants(&["abcd".to_owned(), "abc".to_owned()]);
+        assert_eq!(variants, vec!["abcd".to_owned(), "abc".to_owned()]);
+
+        // Callers feed `secret_variants` already-deduplicated values (the
+        // redactor deduplicates on insert); for one such value every distinct
+        // spelling is present, longest-first: fully path-encoded segment
+        // spelling, form-encoded, path-encoded (space only), raw. The
+        // query-encoded spelling (`a%20b/c`) collides with the path spelling
+        // and is collapsed by the adjacent `dedup()`.
+        let variants = secret_variants(&["a b/c".to_owned()]);
+        assert_eq!(
+            variants,
+            vec!["a%20b%2Fc", "a+b%2Fc", "a%20b/c", "a b/c"]
+        );
+        assert_eq!(variants.iter().map(String::len).max(), Some(9));
+
+        assert!(secret_variants(&[]).is_empty());
+        assert!(secret_variants(&[String::new()]).is_empty());
     }
 
     #[test]
