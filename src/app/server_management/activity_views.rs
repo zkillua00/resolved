@@ -268,12 +268,17 @@ fn render_activity_log(
                 })
                 .when(feed.older_cursor.is_some(), |view| {
                     view.child(
-                        h_flex().w_full().justify_center().py_2().child(
-                            Button::new(if kind == ActivityLogKind::Audit {
-                                "load-older-audit-log"
-                            } else {
-                                "load-older-change-log"
-                            })
+                        h_flex()
+                            .w_full()
+                            .justify_center()
+                            .py_2()
+                            .flex_shrink_0()
+                            .child(
+                                Button::new(if kind == ActivityLogKind::Audit {
+                                    "load-older-audit-log"
+                                } else {
+                                    "load-older-change-log"
+                                })
                             .label(if feed.loading_more {
                                 "Loading…"
                             } else {
@@ -651,6 +656,7 @@ fn render_activity_entry(entry: &ActivityLogEntry, cx: &mut App) -> AnyElement {
         .id(SharedString::from(entry_selector.clone()))
         .debug_selector(move || entry_selector.clone())
         .w_full()
+        .flex_shrink_0()
         .rounded_lg()
         .border_1()
         .border_color(cx.api_outline_variant())
@@ -858,5 +864,116 @@ mod tests {
         assert!(cx.debug_bounds("activity-log-entry-entry-1").is_some());
         assert!(cx.debug_bounds("activity-diff-before").is_some());
         assert!(cx.debug_bounds("activity-diff-after").is_some());
+    }
+
+    #[gpui::test]
+    fn activity_entries_overflow_the_scroll_list_instead_of_squeezing_into_it(
+        cx: &mut TestAppContext,
+    ) {
+        struct FeedHarness {
+            entries: Vec<ActivityLogEntry>,
+        }
+
+        impl Render for FeedHarness {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                // Replicates the server-tools settings page chain:
+                // SettingPage (v_flex size_full) -> full-bleed body
+                // (div flex_1 min_h_0 w_full) -> SettingItem::render_item wrapper
+                // (div w_full h_full) -> render_activity_log root (v_flex size_full
+                // min_h_0) -> header + bounded overflow_y_scroll feed.
+                v_flex()
+                    .size_full()
+                    .child(div().h(px(46.)).flex_shrink_0())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .child(
+                                div().w_full().h_full().child(
+                                    v_flex()
+                                        .size_full()
+                                        .min_h_0()
+                                        .child(div().h(px(58.)).flex_shrink_0())
+                                        .child(
+                                            v_flex()
+                                                .id("feed-scroll")
+                                                .debug_selector(|| "feed-scroll".to_owned())
+                                                .flex_1()
+                                                .min_h_0()
+                                                .overflow_y_scroll()
+                                                .gap_3()
+                                                .p_4()
+                                                .children(self.entries.iter().map(|entry| {
+                                                    render_activity_entry(entry, cx)
+                                                })),
+                                        ),
+                                ),
+                            ),
+                    )
+            }
+        }
+
+        let now = Utc::now();
+        let entry = |id: &str, tall: bool| ActivityLogEntry {
+            id: id.to_owned(),
+            kind: "change".to_owned(),
+            resource: "request".to_owned(),
+            action: if tall { "updated".to_owned() } else { "created".to_owned() },
+            resource_id: format!("{id}-rid"),
+            workspace_id: "workspace-1".to_owned(),
+            collection_id: "collection-1".to_owned(),
+            actor_user_id: "viewer".to_owned(),
+            actor_email: "viewer@example.test".to_owned(),
+            actor_display_name: "History Viewer".to_owned(),
+            target_name: if tall {
+                "Login if invalid token".to_owned()
+            } else {
+                "Small".to_owned()
+            },
+            diffs: if tall {
+                vec![ActivityLogDiff {
+                    field: "definition.scripts.pre_request".to_owned(),
+                    from: Value::String(
+                        "const login = async () => {\n\tconst token = api.environment.get(\"AUTH_TOKEN\")\n\tif (!token) {\n\t\tawait api.requests.execute(ChatAdmin.Auth.Login)\n\t\treturn\n\t}\n}\n\nawait login()"
+                            .to_owned(),
+                    ),
+                    to: Value::String("await login()\napi.request.headers.set(\"Authorization\", \"Bearer \" + api.environment.get(\"AUTH_TOKEN\"))".to_owned()),
+                }]
+            } else {
+                vec![ActivityLogDiff {
+                    field: "definition.request.url".to_owned(),
+                    from: Value::String("a".to_owned()),
+                    to: Value::String("b".to_owned()),
+                }]
+            },
+            created_at: now,
+        };
+
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            crate::theme::configure(cx);
+            let harness = cx.new(|_| FeedHarness {
+                entries: (0..20)
+                    .map(|i| entry(&format!("entry-{i}"), i % 4 == 0))
+                    .collect(),
+            });
+            gpui_component::Root::new(harness, window, cx)
+        });
+        cx.update(|window, _| window.activate_window());
+        // Small viewport: the combined content is far taller than the feed, so a
+        // correctly laid-out feed must overflow (and therefore scroll) instead of
+        // flex-shrinking the cards down to fit.
+        cx.simulate_resize(size(px(1_300.), px(420.)));
+        cx.run_until_parked();
+
+        let feed = cx.debug_bounds("feed-scroll").unwrap();
+        let feed_bottom = feed.origin.y + feed.size.height;
+        let last = cx.debug_bounds("activity-log-entry-entry-19").unwrap();
+        let last_bottom = last.origin.y + last.size.height;
+        assert!(
+            last_bottom > feed_bottom,
+            "last entry ended inside the feed ({last_bottom:?} <= {feed_bottom:?}); entries were squeezed to fit instead of overflowing the scroll list"
+        );
     }
 }
