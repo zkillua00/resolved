@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::core::{RequestTabId, RequestTabs};
 
 /// The content surface currently shown below the workspace tab strip.
@@ -464,19 +466,7 @@ impl WorkspaceTabs {
         let Some(tab_order) = self.tab_order.as_ref() else {
             return available;
         };
-
-        let mut visible = Vec::with_capacity(available.len());
-        for tab in tab_order {
-            if available.contains(tab) && !visible.contains(tab) {
-                visible.push(tab.clone());
-            }
-        }
-        for tab in available {
-            if !visible.contains(&tab) {
-                visible.push(tab);
-            }
-        }
-        visible
+        merge_ordered_tabs(tab_order, available)
     }
 
     /// Move any workspace tab control before or after any other workspace tab.
@@ -621,6 +611,33 @@ impl WorkspaceTabs {
     }
 }
 
+/// Merge a saved strip order with the currently available tabs, keeping every
+/// open identity exactly once.
+///
+/// Tabs absent from `tab_order` are appended after every ordered tab in their
+/// default relative order. Membership uses hash sets so the whole merge is
+/// O(n) instead of the O(n^2) linear scans a Vec-only pass performs once per
+/// frame in the tab strip.
+fn merge_ordered_tabs(
+    tab_order: &[WorkspaceTab],
+    available: Vec<WorkspaceTab>,
+) -> Vec<WorkspaceTab> {
+    let open: HashSet<WorkspaceTab> = available.iter().cloned().collect();
+    let mut visible = Vec::with_capacity(available.len());
+    let mut seen: HashSet<WorkspaceTab> = HashSet::with_capacity(available.len());
+    for tab in tab_order {
+        if open.contains(tab) && seen.insert(tab.clone()) {
+            visible.push(tab.clone());
+        }
+    }
+    for tab in available {
+        if seen.insert(tab.clone()) {
+            visible.push(tab);
+        }
+    }
+    visible
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -706,6 +723,51 @@ mod tests {
         tabs.open_tool(WorkspaceToolTab::ThemeCss("ocean".to_owned()));
         assert_eq!(tabs.theme_editor_ids, ["ocean", "forest"]);
         assert!(tabs.tool_is_active(&WorkspaceToolTab::ThemeCss("ocean".to_owned())));
+    }
+
+    #[test]
+    fn merge_ordered_tabs_reorders_dedups_and_appends_new_tabs() {
+        let a = RequestTabId::new();
+        let b = RequestTabId::new();
+        let c = RequestTabId::new();
+        let request = |id: &RequestTabId| WorkspaceTab::Request(id.clone());
+        let settings = WorkspaceTab::Tool(WorkspaceToolTab::Settings);
+        let snippets = WorkspaceTab::Tool(WorkspaceToolTab::Snippets);
+
+        // Ordered tabs are emitted first in their saved sequence; identities
+        // that are no longer open are discarded; order-absent tabs then follow
+        // in their default order, each exactly once.
+        let merged = merge_ordered_tabs(
+            &[settings.clone(), request(&b), snippets.clone()],
+            vec![request(&a), request(&b), request(&c), snippets.clone()],
+        );
+        assert_eq!(
+            merged,
+            vec![request(&b), snippets.clone(), request(&a), request(&c)]
+        );
+
+        // A still-open ordered tab keeps its position in the sequence.
+        let merged = merge_ordered_tabs(
+            &[settings.clone(), request(&b), snippets.clone()],
+            vec![
+                request(&a),
+                request(&b),
+                request(&c),
+                settings.clone(),
+                snippets.clone(),
+            ],
+        );
+        assert_eq!(
+            merged,
+            vec![settings, request(&b), snippets, request(&a), request(&c)]
+        );
+
+        // Duplicated order entries collapse into a single occurrence.
+        let deduped = merge_ordered_tabs(
+            &[request(&a), request(&b), request(&a)],
+            vec![request(&a), request(&b)],
+        );
+        assert_eq!(deduped, vec![request(&a), request(&b)]);
     }
 
     #[test]

@@ -521,30 +521,30 @@ impl RequestTabs {
             return false;
         }
 
-        let previous_order = self
-            .tabs
-            .iter()
-            .map(|tab| tab.id.clone())
-            .collect::<Vec<_>>();
         let target_group_id = self.tabs[target_index].group_id.clone();
         let previous_group_id = self.tabs[source_index].group_id.clone();
+
+        // The target's position once the dragged tab is removed is pure index
+        // math, so a landing slot equal to the source slot is detected before
+        // touching the list: no per-drag allocation of an id order snapshot and
+        // no full-list comparison pass.
+        let target_after_removal = if target_index > source_index {
+            target_index - 1
+        } else {
+            target_index
+        };
+        let insertion_index = target_after_removal + usize::from(after);
+        if insertion_index == source_index && previous_group_id == target_group_id {
+            // Removing and re-inserting the same tab in its own slot would be a
+            // pure no-op; leave the list (and group blocks) untouched.
+            return false;
+        }
+
         let mut tab = self.tabs.remove(source_index);
         tab.group_id.clone_from(&target_group_id);
-        let target_index = self
-            .tabs
-            .iter()
-            .position(|candidate| candidate.id == *target_id)
-            .expect("the distinct target must remain after source removal");
-        let insertion_index = target_index + usize::from(after);
         self.tabs.insert(insertion_index, tab);
         self.prune_empty_groups();
-
-        previous_group_id != target_group_id
-            || self
-                .tabs
-                .iter()
-                .map(|tab| &tab.id)
-                .ne(previous_order.iter())
+        true
     }
 
     /// Create a group containing `tab_id`.
@@ -1669,6 +1669,37 @@ mod tests {
         let restored: RequestTabs = serde_json::from_str(&serde_json::to_string(&tabs).unwrap())
             .expect("reordered tabs should remain persistable");
         assert_eq!(restored, tabs);
+    }
+
+    #[test]
+    fn reorder_noops_only_when_both_order_and_group_are_unchanged() {
+        let mut tabs = RequestTabs::new();
+        let first = tabs.active_tab_id().clone();
+        let second = tabs.open_new();
+        let third = tabs.open_new();
+        let ids = |tabs: &RequestTabs| {
+            tabs.tabs()
+                .iter()
+                .map(|tab| tab.id().clone())
+                .collect::<Vec<_>>()
+        };
+
+        // Moving a tab to the position it already occupies is a pure no-op:
+        // the list is left untouched and the call reports no change.
+        assert!(!tabs.reorder_tab_before(&first, &second));
+        assert!(!tabs.reorder_tab_after(&second, &first));
+        assert_eq!(ids(&tabs), [first.clone(), second.clone(), third.clone()]);
+
+        // A crossing move that keeps the visual slot still reports a change
+        // because the dragged tab adopts the target's group membership.
+        let second_group = tabs
+            .create_group_for_tab(&second, "Second", RequestTabGroupColor::Green)
+            .unwrap();
+        assert!(tabs.reorder_tab_before(&first, &second));
+        assert_eq!(tabs.get(&first).unwrap().group_id(), Some(&second_group));
+        assert_eq!(ids(&tabs), [first.clone(), second.clone(), third.clone()]);
+        assert!(!tabs.reorder_tab_before(&first, &second));
+        assert_eq!(tabs.get(&first).unwrap().group_id(), Some(&second_group));
     }
 
     #[test]

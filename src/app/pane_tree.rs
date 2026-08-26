@@ -300,24 +300,32 @@ impl PaneRoot {
             else {
                 return false;
             };
-            if !pane.tabs.iter().any(|entry| &entry.tab == target) {
+            let Some(target_index) = pane.tabs.iter().position(|entry| &entry.tab == target) else {
+                return false;
+            };
+            if source_index == target_index {
                 return false;
             }
+
+            // The target's position once the dragged tab is removed is pure
+            // index math, so a landing slot equal to the source slot is a pure
+            // no-op detected without cloning the whole tab vector to compare.
+            let target_after_removal = if target_index > source_index {
+                target_index - 1
+            } else {
+                target_index
+            };
+            let insertion_index = target_after_removal + usize::from(after);
+            if insertion_index == source_index {
+                return false;
+            }
+
             let active_tab = pane
                 .tabs
                 .get(pane.active_index.min(pane.tabs.len().saturating_sub(1)))
                 .map(|entry| entry.tab.clone());
-            let mut tabs = pane.tabs.clone();
-            let dragged_tab = tabs.remove(source_index);
-            let target_index = tabs
-                .iter()
-                .position(|entry| &entry.tab == target)
-                .expect("the distinct target must remain after removing the dragged tab");
-            tabs.insert(target_index + usize::from(after), dragged_tab);
-            if tabs == pane.tabs {
-                return false;
-            }
-            pane.tabs = tabs;
+            let dragged_tab = pane.tabs.remove(source_index);
+            pane.tabs.insert(insertion_index, dragged_tab);
             pane.active_index = active_tab
                 .and_then(|tab| pane.tabs.iter().position(|entry| entry.tab == tab))
                 .unwrap_or(0);
@@ -589,6 +597,34 @@ mod tests {
         assert!(!root.reorder_within_pane(pane_id, &tab(&a), &tab(&a), false));
         let missing = RequestTabId::new();
         assert!(!root.reorder_within_pane(pane_id, &tab(&missing), &tab(&a), false));
+    }
+
+    #[test]
+    fn reorder_within_pane_noops_when_the_dragged_tab_lands_in_its_own_slot() {
+        let a = RequestTabId::new();
+        let b = RequestTabId::new();
+        let c = RequestTabId::new();
+        let tabs = vec![tab(&a), tab(&b), tab(&c)];
+        let mut root = PaneRoot::from_tabs(tabs.clone(), 1);
+        let pane_id = root.panes()[0].id();
+
+        // Moving a tab to the position it already occupies is a no-op...
+        assert!(!root.reorder_within_pane(pane_id, &tab(&a), &tab(&b), false));
+        assert!(!root.reorder_within_pane(pane_id, &tab(&b), &tab(&a), true));
+        assert!(!root.reorder_within_pane(pane_id, &tab(&c), &tab(&c), true));
+        assert_eq!(root.active_tabs(), tabs);
+        assert_eq!(
+            root.pane(pane_id).and_then(|pane| pane.active_tab()),
+            Some(tab(&b))
+        );
+
+        // A genuine move still lands where it used to...
+        assert!(root.reorder_within_pane(pane_id, &tab(&c), &tab(&a), true));
+        assert_eq!(root.active_tabs(), vec![tab(&a), tab(&c), tab(&b)]);
+
+        // ...and an adjacent no-op stays a no-op after the real move.
+        assert!(!root.reorder_within_pane(pane_id, &tab(&b), &tab(&c), true));
+        assert_eq!(root.active_tabs(), vec![tab(&a), tab(&c), tab(&b)]);
     }
 
     #[test]

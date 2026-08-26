@@ -37,6 +37,135 @@ impl<'a> RequestTabsDurableBaseline<'a> {
     }
 }
 
+/// Cheap fingerprint of the per-tab run state that
+/// `snapshot_active_request_tab` records, used to skip re-copying a tab's
+/// response and friends when nothing observable changed since the last
+/// snapshot — switching between unchanged tabs becomes clone-free.
+///
+/// The response payload is identified by the address of its shared
+/// `bytes::Bytes` allocation (the same idiom `snippets.rs::response_identity`
+/// uses), so an unchanged response is never re-cloned and never compared
+/// byte-by-byte. `response_request` and `response_sensitive_values` are
+/// intentionally absent: both are only ever written together with `response`
+/// (execution arrival and clear), so `response_body` already discriminates
+/// them. Everything else the snapshot stores is compared field-by-field,
+/// including script diagnostics and reports, which do not derive `PartialEq`.
+#[derive(Clone, Debug)]
+struct SnapshotFingerprint {
+    request_pane: RequestPane,
+    response_tab: ResponseTab,
+    pretty_body: bool,
+    copied: bool,
+    response_body: Option<(usize, usize)>,
+    request_error: Option<String>,
+    script_diagnostic: Option<ScriptDiagnostic>,
+    pre_script_report: Option<ScriptReport>,
+    post_script_report: Option<ScriptReport>,
+    preview_error: Option<String>,
+    request_notice: Option<String>,
+}
+
+impl SnapshotFingerprint {
+    fn of_live(this: &ApiTester) -> Self {
+        Self {
+            request_pane: this.request_pane,
+            response_tab: this.response_tab,
+            pretty_body: this.pretty_body,
+            copied: this.copied,
+            response_body: response_body_identity(this.response.as_ref()),
+            request_error: this.request_error.clone(),
+            script_diagnostic: this.script_diagnostic.clone(),
+            pre_script_report: this.pre_script_report.clone(),
+            post_script_report: this.post_script_report.clone(),
+            preview_error: this.preview_error.clone(),
+            request_notice: this.request_notice.clone(),
+        }
+    }
+
+    fn of_stored(runtime: &RequestTabRuntime) -> Self {
+        Self {
+            request_pane: runtime.request_pane,
+            response_tab: runtime.response_tab,
+            pretty_body: runtime.pretty_body,
+            copied: runtime.copied,
+            response_body: response_body_identity(runtime.response.as_ref()),
+            request_error: runtime.request_error.clone(),
+            script_diagnostic: runtime.script_diagnostic.clone(),
+            pre_script_report: runtime.pre_script_report.clone(),
+            post_script_report: runtime.post_script_report.clone(),
+            preview_error: runtime.preview_error.clone(),
+            request_notice: runtime.request_notice.clone(),
+        }
+    }
+}
+
+impl PartialEq for SnapshotFingerprint {
+    fn eq(&self, other: &Self) -> bool {
+        self.request_pane == other.request_pane
+            && self.response_tab == other.response_tab
+            && self.pretty_body == other.pretty_body
+            && self.copied == other.copied
+            && self.response_body == other.response_body
+            && self.request_error == other.request_error
+            && self.preview_error == other.preview_error
+            && self.request_notice == other.request_notice
+            && script_diagnostic_fingerprint_eq(
+                self.script_diagnostic.as_ref(),
+                other.script_diagnostic.as_ref(),
+            )
+            && script_report_fingerprint_eq(
+                self.pre_script_report.as_ref(),
+                other.pre_script_report.as_ref(),
+            )
+            && script_report_fingerprint_eq(
+                self.post_script_report.as_ref(),
+                other.post_script_report.as_ref(),
+            )
+    }
+}
+
+/// Identity of a response's body: the address and length of its shared
+/// `bytes::Bytes` allocation. Two snapshots of the same response therefore
+/// compare equal without touching a single body byte.
+fn response_body_identity(response: Option<&ResponseData>) -> Option<(usize, usize)> {
+    response.map(|response| (response.body.as_ptr() as usize, response.body.len()))
+}
+
+/// Field-by-field equality for [`ScriptDiagnostic`], which derives neither
+/// `PartialEq` nor `Hash`.
+fn script_diagnostic_fingerprint_eq(
+    left: Option<&ScriptDiagnostic>,
+    right: Option<&ScriptDiagnostic>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.phase == right.phase
+                && left.kind == right.kind
+                && left.filename == right.filename
+                && left.message == right.message
+                && left.stack == right.stack
+        }
+        _ => false,
+    }
+}
+
+/// Field-by-field equality for [`ScriptReport`], which derives neither
+/// `PartialEq` nor `Hash`.
+fn script_report_fingerprint_eq(left: Option<&ScriptReport>, right: Option<&ScriptReport>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.phase == right.phase
+                && left.duration == right.duration
+                && left.logs == right.logs
+                && left.tests == right.tests
+                && left.response_body_truncated == right.response_body_truncated
+        }
+        _ => false,
+    }
+}
+
 impl ApiTester {
     pub(super) fn update_active_request_tab_title(&mut self, cx: &mut Context<Self>) {
         let input_title = self.saved_request_name.read(cx).value().to_string();
@@ -85,6 +214,17 @@ impl ApiTester {
         let active = self.request_tabs.active_mut();
         active.set_template(template);
         active.set_title(title);
+
+        // Cheap no-op guard: if the state we would record already matches the
+        // last snapshot for this tab, skip re-inserting it entirely. This makes
+        // switching between unchanged tabs clone-free — the response body is
+        // compared only by the address of its shared `Bytes` allocation, never
+        // copied.
+        if let Some(stored) = self.request_tab_runtime.get(&tab_id)
+            && SnapshotFingerprint::of_stored(stored) == SnapshotFingerprint::of_live(self)
+        {
+            return;
+        }
         self.request_tab_runtime.insert(
             tab_id,
             RequestTabRuntime {
@@ -865,5 +1005,130 @@ mod persistence_tests {
 
         assert!(detail.contains("“One”, “Two”, “Three”, and 1 more"));
         assert!(!detail.contains("“Four”"));
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn live_fingerprint() -> SnapshotFingerprint {
+        SnapshotFingerprint {
+            request_pane: RequestPane::Headers,
+            response_tab: ResponseTab::Body,
+            pretty_body: true,
+            copied: false,
+            response_body: Some((0xABC0, 1024)),
+            request_error: None,
+            script_diagnostic: None,
+            pre_script_report: None,
+            post_script_report: None,
+            preview_error: None,
+            request_notice: None,
+        }
+    }
+
+    fn report(response_body_truncated: bool) -> ScriptReport {
+        ScriptReport {
+            phase: ScriptPhase::PreRequest,
+            duration: Duration::ZERO,
+            logs: Vec::new(),
+            tests: Vec::new(),
+            response_body_truncated,
+        }
+    }
+
+    fn diagnostic(message: &str) -> ScriptDiagnostic {
+        ScriptDiagnostic {
+            phase: ScriptPhase::PreRequest,
+            kind: ScriptErrorKind::Runtime,
+            filename: "test.js",
+            message: message.to_owned(),
+            stack: None,
+        }
+    }
+
+    #[test]
+    fn fingerprint_matches_identical_state_and_no_changed_field_escapes() {
+        let base = live_fingerprint();
+        assert_eq!(base, base.clone());
+
+        // Every snapshot-relevant change must flip the fingerprint, so the
+        // no-op guard can never skip a snapshot that needs re-recording.
+        let mut changed = live_fingerprint();
+        changed.response_body = Some((0xDEF0, 2048));
+        assert_ne!(base, changed);
+
+        let mut changed = live_fingerprint();
+        changed.response_body = None;
+        assert_ne!(base, changed);
+
+        let mut changed = live_fingerprint();
+        changed.request_pane = RequestPane::Body;
+        assert_ne!(base, changed);
+
+        let mut changed = live_fingerprint();
+        changed.response_tab = ResponseTab::Headers;
+        assert_ne!(base, changed);
+
+        let mut changed = live_fingerprint();
+        changed.pretty_body = false;
+        assert_ne!(base, changed);
+
+        let mut changed = live_fingerprint();
+        changed.copied = true;
+        assert_ne!(base, changed);
+
+        let mut changed = live_fingerprint();
+        changed.request_error = Some("boom".to_owned());
+        assert_ne!(base, changed);
+
+        let mut changed = live_fingerprint();
+        changed.preview_error = Some("render failed".to_owned());
+        assert_ne!(base, changed);
+
+        let mut changed = live_fingerprint();
+        changed.request_notice = Some("Opened history entry h.".to_owned());
+        assert_ne!(base, changed);
+
+        let mut changed = live_fingerprint();
+        changed.script_diagnostic = Some(diagnostic("boom"));
+        assert_ne!(base, changed);
+
+        let mut changed = live_fingerprint();
+        changed.pre_script_report = Some(report(true));
+        assert_ne!(base, changed);
+
+        let mut changed = live_fingerprint();
+        changed.post_script_report = Some(report(true));
+        assert_ne!(base, changed);
+    }
+
+    #[test]
+    fn fingerprint_ignores_unshared_response_metadata_transients() {
+        // `response_request` / `response_sensitive_values` are 1:1 with the
+        // response, so a matching identity means matching metadata. A cloned
+        // fingerprint stays equal even after the runtime round-trip re-borrows
+        // those fields — only identity drives the comparison there.
+        let base = live_fingerprint();
+        let mut stored = base.clone();
+        stored.response_body = base.response_body;
+        assert_eq!(base, stored);
+    }
+
+    #[test]
+    fn script_report_fingerprint_compares_content_not_just_presence() {
+        let mut left = live_fingerprint();
+        left.pre_script_report = Some(report(false));
+        let mut right = left.clone();
+        right.pre_script_report = Some(report(true));
+        assert_ne!(left, right);
+
+        let mut right = left.clone();
+        right.script_diagnostic = Some(diagnostic("boom"));
+        let mut left = left.clone();
+        left.script_diagnostic = Some(diagnostic("different"));
+        assert_ne!(left, right);
     }
 }
