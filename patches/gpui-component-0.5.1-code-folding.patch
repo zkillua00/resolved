@@ -1,6 +1,6 @@
 diff --git a/src/highlighter/highlighter.rs b/src/highlighter/highlighter.rs
 --- a/src/highlighter/highlighter.rs	2026-08-26 22:35:32
-+++ b/src/highlighter/highlighter.rs	2026-08-26 23:51:46
++++ b/src/highlighter/highlighter.rs	2026-08-27 00:01:17
 @@ -628,6 +628,66 @@
  
          styles
@@ -70,8 +70,8 @@ diff --git a/src/highlighter/highlighter.rs b/src/highlighter/highlighter.rs
  /// To merge intersection ranges, let the subsequent range cover
 diff --git a/src/input/element.rs b/src/input/element.rs
 --- a/src/input/element.rs	2026-08-26 22:35:32
-+++ b/src/input/element.rs	2026-08-26 23:51:46
-@@ -14,11 +14,19 @@
++++ b/src/input/element.rs	2026-08-27 00:01:17
+@@ -14,11 +14,21 @@
      input::{RopeExt as _, blink_cursor::CURSOR_WIDTH, text_wrapper::LineLayout},
  };
  
@@ -86,13 +86,15 @@ diff --git a/src/input/element.rs b/src/input/element.rs
 +/// ch_width * 4` there when fold indicators are shown (`gutter_dimensions`,
 +/// `crates/editor/src/editor.rs`), at a code-editor font size that is ~4 chars.
 +pub(super) const FOLD_AREA_WIDTH: Pixels = px(28.);
-+/// The fold chevron is a square scaled to this fraction of the line height
-+/// (Zed lays its crease toggles out with `line_height * 0.55`).
-+const FOLD_CHEVRON_HEIGHT_RATIO: f32 = 0.55;
++/// The fold chevron is a square scaled to this fraction of the line height.
++/// Zed draws the crease indicator as a small Disclosure chevron (ChevronRight/
++/// ChevronDown at `IconSize::Small`), whose glyph occupies a small part of the
++/// row; 0.4x keeps ours visually comparable rather than filling the line.
++const FOLD_CHEVRON_HEIGHT_RATIO: f32 = 0.4;
  
  /// Overlay application-owned semantic styles in a stable order.
  ///
-@@ -156,6 +164,10 @@
+@@ -156,6 +166,10 @@
          let mut offset_y = px(0.);
          for (ix, wrap_line) in text_wrapper.lines.iter().enumerate() {
              let row = ix;
@@ -103,7 +105,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
              let line_origin = point(px(0.), offset_y);
  
              // break loop if all cursor positions are found
-@@ -320,6 +332,10 @@
+@@ -320,6 +334,10 @@
          let mut line_corners = vec![];
  
          for line in lines.iter() {
@@ -114,7 +116,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
              let line_size = line.size(line_height);
              let line_wrap_width = line_size.width;
  
-@@ -546,6 +562,10 @@
+@@ -546,6 +564,10 @@
          let mut visible_range = 0..total_lines;
          let mut line_bottom = px(0.);
          for (ix, line) in state.text_wrapper.lines.iter().enumerate() {
@@ -125,7 +127,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
              let wrapped_height = line.height(line_height);
              line_bottom += wrapped_height;
  
-@@ -594,7 +614,8 @@
+@@ -594,7 +616,8 @@
                  None,
              );
  
@@ -135,7 +137,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
          } else {
              px(0.)
          };
-@@ -736,14 +757,20 @@
+@@ -736,14 +759,20 @@
          let mut lines = vec![];
          let mut offset = 0;
          for (ix, line) in visible_text.split("\n").enumerate() {
@@ -159,7 +161,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
              let mut wrapped_lines = SmallVec::with_capacity(1);
  
              for range in &line_item.wrapped_lines {
-@@ -805,11 +832,16 @@
+@@ -805,11 +834,16 @@
          } = &state.mode
          {
              if let Some(highlighter) = highlighter.borrow().as_ref() {
@@ -177,7 +179,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
                      let line_len = if is_multi_line {
                          // +1 for `\n`
                          line.len() + 1
-@@ -1048,6 +1080,7 @@
+@@ -1048,6 +1082,7 @@
              line_number_width,
              lines: Rc::new(vec![]),
              cursor_bounds: None,
@@ -185,7 +187,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
          };
  
          let run = TextRun {
-@@ -1156,6 +1189,45 @@
+@@ -1156,6 +1191,45 @@
          }
          last_layout.lines = Rc::new(lines);
  
@@ -231,7 +233,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
          let (ghost_first_line, ghost_lines) = Self::layout_inline_completion(
              state,
              &last_layout.visible_range,
-@@ -1166,7 +1238,15 @@
+@@ -1166,7 +1240,15 @@
          let ghost_line_count = ghost_lines.len();
          let ghost_lines_height = ghost_line_count as f32 * line_height;
  
@@ -248,7 +250,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
          let empty_bottom_height = if state.mode.is_code_editor() {
              bounds
                  .size
-@@ -1251,6 +1331,11 @@
+@@ -1251,6 +1333,11 @@
              // build line numbers
              for (ix, line) in last_layout.lines.iter().enumerate() {
                  let ix = last_layout.visible_range.start + ix;
@@ -260,7 +262,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
                  let line_no = format!("{:>width$}", ix + 1, width = line_number_len).into();
  
                  let runs = if current_row == Some(ix) {
-@@ -1476,7 +1561,7 @@
+@@ -1476,7 +1563,7 @@
                  Bounds {
                      origin: input_bounds.origin,
                      size: size(
@@ -269,7 +271,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
                          input_bounds.size.height + prepaint.ghost_lines_height,
                      ),
                  },
-@@ -1543,6 +1628,31 @@
+@@ -1543,6 +1630,31 @@
  
                      // Paint first line completion text
                      _ = first_line.paint(p, line_height, window, cx);
@@ -286,7 +288,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
 +                let hit = &marker.chevron_bounds;
 +                let origin = input_bounds.origin + point(hit.left(), hit.top());
 +                let side = hit.size.height;
-+                let mut builder = gpui::PathBuilder::stroke(px(1.5));
++                let mut builder = gpui::PathBuilder::stroke(px(1.25));
 +                if marker.folded {
 +                    builder.move_to(origin);
 +                    builder.line_to(origin + point(side, side.half()));
@@ -303,7 +305,7 @@ diff --git a/src/input/element.rs b/src/input/element.rs
          }
 diff --git a/src/input/folding.rs b/src/input/folding.rs
 --- a/src/input/folding.rs	1970-01-01 04:00:00
-+++ b/src/input/folding.rs	2026-08-26 23:51:46
++++ b/src/input/folding.rs	2026-08-27 00:01:17
 @@ -0,0 +1,262 @@
 +//! Code folding support for the code-editor input.
 +//!
@@ -569,7 +571,7 @@ diff --git a/src/input/folding.rs b/src/input/folding.rs
 +}
 diff --git a/src/input/input.rs b/src/input/input.rs
 --- a/src/input/input.rs	2026-08-26 22:35:32
-+++ b/src/input/input.rs	2026-08-26 23:51:46
++++ b/src/input/input.rs	2026-08-27 00:01:17
 @@ -316,6 +316,15 @@
                      .on_action(
                          window.listener_for(&self.state, InputState::on_action_go_to_definition),
@@ -588,7 +590,7 @@ diff --git a/src/input/input.rs b/src/input/input.rs
              .on_action(window.listener_for(&self.state, InputState::select_to_start_of_line))
 diff --git a/src/input/mod.rs b/src/input/mod.rs
 --- a/src/input/mod.rs	2026-08-26 22:35:32
-+++ b/src/input/mod.rs	2026-08-26 23:51:46
++++ b/src/input/mod.rs	2026-08-27 00:01:17
 @@ -3,6 +3,7 @@
  mod clear_button;
  mod cursor;
@@ -599,7 +601,7 @@ diff --git a/src/input/mod.rs b/src/input/mod.rs
  mod lsp;
 diff --git a/src/input/movement.rs b/src/input/movement.rs
 --- a/src/input/movement.rs	2026-08-26 22:35:32
-+++ b/src/input/movement.rs	2026-08-26 23:51:46
++++ b/src/input/movement.rs	2026-08-27 00:01:17
 @@ -45,7 +45,9 @@
          direction: Option<MoveDirection>,
          cx: &mut Context<Self>,
@@ -613,7 +615,7 @@ diff --git a/src/input/movement.rs b/src/input/movement.rs
          self.pause_blink_cursor(cx);
 diff --git a/src/input/state.rs b/src/input/state.rs
 --- a/src/input/state.rs	2026-08-26 22:35:32
-+++ b/src/input/state.rs	2026-08-26 23:51:46
++++ b/src/input/state.rs	2026-08-27 00:01:17
 @@ -13,6 +13,7 @@
  };
  use ropey::{Rope, RopeSlice};
