@@ -34,7 +34,7 @@ impl ApiTester {
         &self,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let management = self.server_management.clone();
+        let management = &self.server_management;
         let active_upstream_id = self.settings.upstreams.active_upstream_id.clone();
         let server_label = self
             .settings

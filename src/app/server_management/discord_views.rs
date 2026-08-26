@@ -1,3 +1,6 @@
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::rc::Rc;
+
 use super::*;
 use crate::core::ManagementPermission;
 
@@ -7,32 +10,56 @@ pub(super) fn render_user_management(this: &WeakEntity<ApiTester>, cx: &mut App)
     let Some(entity) = this.upgrade() else {
         return div().into_any_element();
     };
-    let state = entity.read(cx);
-    let management = state.server_management.clone();
-    let active_upstream_id = state.settings.upstreams.active_upstream_id.clone();
+    let (
+        status,
+        upstream_id,
+        snapshot_present,
+        users,
+        roles,
+        selected_user_id,
+        busy,
+        can_create,
+        can_update,
+        can_assign_roles,
+        active_upstream_id,
+    ) = {
+        let state = entity.read(cx);
+        let management = &state.server_management;
+        let snapshot = management.snapshot.as_ref();
+        (
+            management.status.clone(),
+            management.upstream_id.clone(),
+            snapshot.is_some(),
+            snapshot.and_then(|snapshot| snapshot.users.as_ref()).cloned(),
+            snapshot.and_then(|snapshot| snapshot.roles.as_ref()).cloned(),
+            management.selected_user_id.clone(),
+            management.status.busy(),
+            snapshot.is_some_and(|snapshot| snapshot.has_permission(USERS_CREATE)),
+            snapshot.is_some_and(|snapshot| snapshot.has_permission(USERS_UPDATE)),
+            snapshot.is_some_and(|snapshot| snapshot.has_permission(USERS_ASSIGN_ROLES)),
+            state.settings.upstreams.active_upstream_id.clone(),
+        )
+    };
     if let Some(status) = management_status_element(
-        &management.status,
-        management.upstream_id.as_deref(),
-        management.snapshot.is_some(),
+        &status,
+        upstream_id.as_deref(),
+        snapshot_present,
         active_upstream_id.as_deref(),
         cx,
     ) {
         return status;
     }
-    let Some(snapshot) = management.snapshot.as_ref() else {
+    if !snapshot_present {
         return management_empty("User data is unavailable.", cx);
-    };
-    let Some(users) = snapshot.users.as_ref() else {
+    }
+    let Some(users) = users else {
         return management_empty("You do not have permission to view users.", cx);
     };
-
-    let roles = snapshot.roles.clone().unwrap_or_default();
-    let selected = management
-        .selected_user_id
+    let roles = roles.unwrap_or_default();
+    let selected = selected_user_id
         .as_ref()
         .and_then(|id| users.iter().find(|user| &user.id == id))
         .or_else(|| users.first());
-    let busy = management.status.busy();
     let sidebar_rows = users
         .iter()
         .map(|user| {
@@ -49,7 +76,7 @@ pub(super) fn render_user_management(this: &WeakEntity<ApiTester>, cx: &mut App)
         format!("{} total", users.len()),
         "new-management-user",
         "New user",
-        snapshot.has_permission(USERS_CREATE) && !busy,
+        can_create && !busy,
         this.clone(),
         |app, window, cx| app.open_create_user_dialog(window, cx),
         sidebar_rows,
@@ -59,8 +86,8 @@ pub(super) fn render_user_management(this: &WeakEntity<ApiTester>, cx: &mut App)
         Some(user) => render_user_detail(
             user,
             &roles,
-            snapshot.has_permission(USERS_UPDATE),
-            snapshot.has_permission(USERS_ASSIGN_ROLES),
+            can_update,
+            can_assign_roles,
             busy,
             this,
             cx,
@@ -143,23 +170,21 @@ fn render_user_detail(
     let active_this = this.clone();
     let active_user_id = user.id.clone();
     let next_active = !user.active;
-    let assigned = user
-        .roles
-        .iter()
-        .map(|role| role.id.clone())
-        .collect::<BTreeSet<_>>();
+    let assigned = Rc::new(
+        user.roles
+            .iter()
+            .map(|role| role.id.clone())
+            .collect::<BTreeSet<_>>(),
+    );
     let mut role_rows = Vec::new();
     for role in roles {
         let checked = assigned.contains(&role.id);
-        let mut next = assigned.clone();
-        if checked {
-            next.remove(&role.id);
-        } else {
-            next.insert(role.id.clone());
-        }
         let action_this = this.clone();
         let action_user_id = user.id.clone();
-        let action_role_ids = next.into_iter().collect::<Vec<_>>();
+        // Capture a cheap shared handle; the toggle payload is only
+        // materialized when the row is actually clicked.
+        let assigned = assigned.clone();
+        let role_id = role.id.clone();
         role_rows.push(
             h_flex()
                 .w_full()
@@ -205,11 +230,18 @@ fn render_user_detail(
                     .disabled(!can_assign_roles || busy)
                     .on_click(move |_, window, cx| {
                         if let Some(this) = action_this.upgrade() {
+                            let mut next = assigned.as_ref().clone();
+                            if checked {
+                                next.remove(&role_id);
+                            } else {
+                                next.insert(role_id.clone());
+                            }
+                            let role_ids = next.into_iter().collect::<Vec<_>>();
                             this.update(cx, |this, cx| {
                                 this.run_management_mutation(
                                     ManagementMutation::ReplaceUserRoles {
                                         user_id: action_user_id.clone(),
-                                        role_ids: action_role_ids.clone(),
+                                        role_ids,
                                     },
                                     window,
                                     cx,
@@ -380,39 +412,96 @@ pub(super) fn render_role_management(this: &WeakEntity<ApiTester>, cx: &mut App)
     let Some(entity) = this.upgrade() else {
         return div().into_any_element();
     };
-    let state = entity.read(cx);
-    let management = state.server_management.clone();
-    let active_upstream_id = state.settings.upstreams.active_upstream_id.clone();
+    let (
+        status,
+        upstream_id,
+        snapshot_present,
+        roles,
+        permissions,
+        selected_role_id,
+        busy,
+        can_create,
+        can_update,
+        can_assign_permissions,
+        drafts,
+        permission_counts,
+        active_upstream_id,
+    ) = {
+        let state = entity.read(cx);
+        let management = &state.server_management;
+        let snapshot = management.snapshot.as_ref();
+        let roles = snapshot.and_then(|snapshot| snapshot.roles.as_ref()).cloned();
+        let drafts = management.role_permission_drafts.clone();
+        // One dedup pass per frame: how many permission keys each role row
+        // shows. Rows read their own precomputed count instead of building a
+        // BTreeSet per row.
+        let mut distinct = HashSet::new();
+        let permission_counts = roles
+            .as_ref()
+            .map(|roles| {
+                roles
+                    .iter()
+                    .map(|role| match drafts.get(&role.id) {
+                        Some(draft) => draft.selected.len(),
+                        None => {
+                            distinct.clear();
+                            role.permissions
+                                .iter()
+                                .filter(|permission| distinct.insert(permission.key.as_str()))
+                                .count()
+                        }
+                    })
+                    .collect::<Vec<usize>>()
+            })
+            .unwrap_or_default();
+        (
+            management.status.clone(),
+            management.upstream_id.clone(),
+            snapshot.is_some(),
+            roles,
+            snapshot
+                .and_then(|snapshot| snapshot.permissions.as_ref())
+                .cloned(),
+            management.selected_role_id.clone(),
+            management.status.busy(),
+            snapshot.is_some_and(|snapshot| snapshot.has_permission(ROLES_CREATE)),
+            snapshot.is_some_and(|snapshot| snapshot.has_permission(ROLES_UPDATE)),
+            snapshot.is_some_and(|snapshot| snapshot.has_permission(ROLES_ASSIGN_PERMISSIONS)),
+            drafts,
+            permission_counts,
+            state.settings.upstreams.active_upstream_id.clone(),
+        )
+    };
     if let Some(status) = management_status_element(
-        &management.status,
-        management.upstream_id.as_deref(),
-        management.snapshot.is_some(),
+        &status,
+        upstream_id.as_deref(),
+        snapshot_present,
         active_upstream_id.as_deref(),
         cx,
     ) {
         return status;
     }
-    let Some(snapshot) = management.snapshot.as_ref() else {
+    if !snapshot_present {
         return management_empty("Role data is unavailable.", cx);
-    };
-    let Some(roles) = snapshot.roles.as_ref() else {
+    }
+    let Some(roles) = roles else {
         return management_empty("You do not have permission to view roles.", cx);
     };
+    let permissions = permissions.unwrap_or_default();
 
-    let selected = management
-        .selected_role_id
+    let selected = selected_role_id
         .as_ref()
         .and_then(|id| roles.iter().find(|role| &role.id == id))
         .or_else(|| roles.first());
-    let busy = management.status.busy();
     let sidebar_rows = roles
         .iter()
-        .map(|role| {
+        .enumerate()
+        .map(|(index, role)| {
             role_navigation_row(
                 role,
                 selected.is_some_and(|selected| selected.id == role.id),
-                management.role_permissions_are_dirty(&role.id),
-                management.role_permission_keys(role).len(),
+                drafts.contains_key(&role.id),
+                permission_counts[index],
                 this,
                 cx,
             )
@@ -423,20 +512,19 @@ pub(super) fn render_role_management(this: &WeakEntity<ApiTester>, cx: &mut App)
         format!("{} total", roles.len()),
         "new-management-role",
         "New role",
-        snapshot.has_permission(ROLES_CREATE) && !busy,
+        can_create && !busy,
         this.clone(),
         |app, window, cx| app.open_create_role_dialog(window, cx),
         sidebar_rows,
         cx,
     );
-    let permissions = snapshot.permissions.clone().unwrap_or_default();
     let detail = match selected {
         Some(role) => render_role_detail(
             role,
             &permissions,
-            &management,
-            snapshot.has_permission(ROLES_UPDATE),
-            snapshot.has_permission(ROLES_ASSIGN_PERMISSIONS),
+            &drafts,
+            can_update,
+            can_assign_permissions,
             busy,
             this,
             cx,
@@ -513,7 +601,7 @@ fn role_navigation_row(
 fn render_role_detail(
     role: &ManagementRole,
     permissions: &[ManagementPermission],
-    management: &ServerManagementState,
+    drafts: &BTreeMap<String, RolePermissionDraft>,
     can_update: bool,
     can_assign: bool,
     busy: bool,
@@ -522,13 +610,16 @@ fn render_role_detail(
 ) -> AnyElement {
     let edit_this = this.clone();
     let edit_role = role.clone();
-    let assigned = management.role_permission_keys(role);
-    let dirty = management.role_permissions_are_dirty(&role.id);
-    let mut sorted_permissions = permissions.to_vec();
-    sorted_permissions.sort_by(|left, right| left.key.cmp(&right.key));
+    let draft = drafts.get(&role.id);
+    let dirty = draft.is_some();
+    // Sort permission rows by key through an index order so the list itself
+    // is never cloned just to be reordered.
+    let mut permission_order: Vec<usize> = (0..permissions.len()).collect();
+    permission_order.sort_by(|&left, &right| permissions[left].key.cmp(&permissions[right].key));
     let mut permission_rows = Vec::new();
     let mut current_group = String::new();
-    for permission in sorted_permissions {
+    for &permission_index in &permission_order {
+        let permission = &permissions[permission_index];
         let group = permission
             .key
             .split_once('.')
@@ -550,7 +641,12 @@ fn render_role_detail(
                     .into_any_element(),
             );
         }
-        let checked = assigned.contains(&permission.key);
+        // Membership is read straight from the draft (or the role's own
+        // permission list) instead of materializing a key set per frame.
+        let checked = match draft {
+            Some(draft) => draft.selected.contains(&permission.key),
+            None => role.permissions.iter().any(|owned| owned.key == permission.key),
+        };
         let action_this = this.clone();
         let action_role_id = role.id.clone();
         let action_permission_key = permission.key.clone();
@@ -778,45 +874,71 @@ pub(super) fn render_resource_management(this: &WeakEntity<ApiTester>, cx: &mut 
     let Some(entity) = this.upgrade() else {
         return div().into_any_element();
     };
-    let state = entity.read(cx);
-    let management = state.server_management.clone();
-    let active_upstream_id = state.settings.upstreams.active_upstream_id.clone();
+    let (
+        status,
+        upstream_id,
+        snapshot_present,
+        workspaces,
+        users,
+        selected_resource,
+        busy,
+        can_assign_workspaces,
+        can_assign_collections,
+        active_upstream_id,
+    ) = {
+        let state = entity.read(cx);
+        let management = &state.server_management;
+        let snapshot = management.snapshot.as_ref();
+        (
+            management.status.clone(),
+            management.upstream_id.clone(),
+            snapshot.is_some(),
+            snapshot
+                .and_then(|snapshot| snapshot.workspaces.as_ref())
+                .cloned(),
+            snapshot.and_then(|snapshot| snapshot.users.as_ref()).cloned(),
+            management.selected_resource.clone(),
+            management.status.busy(),
+            snapshot.is_some_and(|snapshot| snapshot.has_permission(WORKSPACES_ASSIGN_USERS)),
+            snapshot.is_some_and(|snapshot| snapshot.has_permission(COLLECTIONS_ASSIGN_USERS)),
+            state.settings.upstreams.active_upstream_id.clone(),
+        )
+    };
     if let Some(status) = management_status_element(
-        &management.status,
-        management.upstream_id.as_deref(),
-        management.snapshot.is_some(),
+        &status,
+        upstream_id.as_deref(),
+        snapshot_present,
         active_upstream_id.as_deref(),
         cx,
     ) {
         return status;
     }
-    let Some(snapshot) = management.snapshot.as_ref() else {
+    if !snapshot_present {
         return management_empty("Resource data is unavailable.", cx);
-    };
-    let Some(workspaces) = snapshot.workspaces.as_ref() else {
+    }
+    let Some(workspaces) = workspaces else {
         return management_empty(
             "You do not have permission to view workspace resources.",
             cx,
         );
     };
+    let users = users.unwrap_or_default();
 
-    let selected = management
-        .selected_resource
+    let selected = selected_resource
         .as_ref()
-        .and_then(|selection| find_selected_resource(workspaces, selection))
+        .and_then(|selection| find_selected_resource(&workspaces, selection))
         .or_else(|| workspaces.first().cloned().map(SelectedResource::Workspace));
     let mut sidebar_rows = Vec::new();
-    for workspace in workspaces {
+    for workspace in &workspaces {
         append_workspace_navigation(
             &mut sidebar_rows,
             workspace,
-            management.selected_resource.as_ref(),
+            selected_resource.as_ref(),
             this,
             cx,
         );
     }
     let refresh_this = this.clone();
-    let busy = management.status.busy();
     let sidebar = v_flex()
         .w(px(MANAGEMENT_SIDEBAR_WIDTH))
         .h_full()
@@ -873,13 +995,12 @@ pub(super) fn render_resource_management(this: &WeakEntity<ApiTester>, cx: &mut 
                 .children(sidebar_rows),
         )
         .into_any_element();
-    let users = snapshot.users.clone().unwrap_or_default();
     let detail = match selected {
         Some(resource) => render_resource_detail(
             resource,
             &users,
-            snapshot.has_permission(WORKSPACES_ASSIGN_USERS),
-            snapshot.has_permission(COLLECTIONS_ASSIGN_USERS),
+            can_assign_workspaces,
+            can_assign_collections,
             busy,
             this,
             cx,
@@ -1184,19 +1305,16 @@ fn render_access_detail(
     this: &WeakEntity<ApiTester>,
     cx: &mut App,
 ) -> AnyElement {
-    let assigned = direct_user_ids.into_iter().collect::<BTreeSet<_>>();
+    let assigned = Rc::new(direct_user_ids.into_iter().collect::<BTreeSet<_>>());
     let mut user_rows = Vec::new();
     for user in users {
         let checked = assigned.contains(&user.id);
-        let mut next = assigned.clone();
-        if checked {
-            next.remove(&user.id);
-        } else {
-            next.insert(user.id.clone());
-        }
-        let action_user_ids = next.into_iter().collect::<Vec<_>>();
         let action_target = target.clone();
         let action_this = this.clone();
+        // Capture a cheap shared handle; the toggle payload is only
+        // materialized when the row is actually clicked.
+        let assigned = assigned.clone();
+        let user_id = user.id.clone();
         user_rows.push(
             h_flex()
                 .w_full()
@@ -1246,12 +1364,19 @@ fn render_access_detail(
                     .disabled(!can_assign || busy || (!user.active && !checked))
                     .on_click(move |_, window, cx| {
                         if let Some(this) = action_this.upgrade() {
+                            let mut next = assigned.as_ref().clone();
+                            if checked {
+                                next.remove(&user_id);
+                            } else {
+                                next.insert(user_id.clone());
+                            }
+                            let user_ids = next.into_iter().collect::<Vec<_>>();
                             this.update(cx, |this, cx| {
                                 let mutation = match &action_target {
                                     AccessTarget::Workspace(workspace_id) => {
                                         ManagementMutation::ReplaceWorkspaceUsers {
                                             workspace_id: workspace_id.clone(),
-                                            user_ids: action_user_ids.clone(),
+                                            user_ids,
                                         }
                                     }
                                     AccessTarget::Collection {
@@ -1260,7 +1385,7 @@ fn render_access_detail(
                                     } => ManagementMutation::ReplaceCollectionUsers {
                                         workspace_id: workspace_id.clone(),
                                         collection_id: collection_id.clone(),
-                                        user_ids: action_user_ids.clone(),
+                                        user_ids,
                                     },
                                 };
                                 this.run_management_mutation(mutation, window, cx);

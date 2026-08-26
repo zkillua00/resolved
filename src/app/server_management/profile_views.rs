@@ -1,4 +1,3 @@
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use gpui::StatefulInteractiveElement as _;
 
 use super::*;
@@ -11,33 +10,67 @@ pub(super) fn render_profiles(this: &WeakEntity<ApiTester>, cx: &mut App) -> Any
     let Some(entity) = this.upgrade() else {
         return div().into_any_element();
     };
-    let app = entity.read(cx);
-    let management = app.server_management.clone();
-    let Some(snapshot) = management.snapshot.as_ref() else {
+    let (
+        status,
+        snapshot_present,
+        profiles,
+        selected_profile_id,
+        current_user_id,
+        can_view_others,
+        history_status,
+        history,
+        selected_history_id,
+        selected_body,
+    ) = {
+        let app = entity.read(cx);
+        let management = &app.server_management;
+        let snapshot = management.snapshot.as_ref();
+        let selected_history_id = management
+            .selected_profile_history_id
+            .as_ref()
+            .and_then(|id| management.profile_history.iter().find(|entry| &entry.id == id))
+            .or_else(|| management.profile_history.first())
+            .map(|entry| entry.id.clone());
+        (
+            management.status.clone(),
+            snapshot.is_some(),
+            snapshot
+                .map(|snapshot| snapshot.profiles.clone())
+                .unwrap_or_default(),
+            management.selected_profile_id.clone(),
+            snapshot
+                .map(|snapshot| snapshot.current_user.id.clone())
+                .unwrap_or_default(),
+            snapshot.is_some_and(|snapshot| snapshot.has_permission(HISTORY_READ_OTHERS)),
+            management.profile_history_status.clone(),
+            management.profile_history.clone(),
+            selected_history_id.clone(),
+            selected_history_id
+                .and_then(|id| management.profile_history_body_cache.get(&id).cloned()),
+        )
+    };
+    if !snapshot_present {
         return profile_message(
-            match &management.status {
+            match &status {
                 ServerManagementStatus::Loading => "Loading server profiles…".to_owned(),
                 ServerManagementStatus::Error(error) => error.clone(),
                 _ => "Profile data is unavailable.".to_owned(),
             },
             cx,
         );
-    };
+    }
 
-    let selected = management
-        .selected_profile_id
+    let selected = selected_profile_id
         .as_deref()
-        .and_then(|id| snapshot.profiles.iter().find(|profile| profile.id == id))
-        .or_else(|| snapshot.profiles.first());
-    let rows = snapshot
-        .profiles
+        .and_then(|id| profiles.iter().find(|profile| profile.id == id))
+        .or_else(|| profiles.first());
+    let rows = profiles
         .iter()
         .map(|profile| {
             render_profile_row(
                 profile,
                 selected.is_some_and(|selected| selected.id == profile.id),
-                profile.id == snapshot.current_user.id
-                    || snapshot.has_permission(HISTORY_READ_OTHERS),
+                profile.id == current_user_id || can_view_others,
                 this,
                 cx,
             )
@@ -63,7 +96,7 @@ pub(super) fn render_profiles(this: &WeakEntity<ApiTester>, cx: &mut App) -> Any
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(format!("{} member profiles", snapshot.profiles.len())),
+                        .child(format!("{} member profiles", profiles.len())),
                 ),
         )
         .child(
@@ -78,7 +111,19 @@ pub(super) fn render_profiles(this: &WeakEntity<ApiTester>, cx: &mut App) -> Any
         );
 
     let detail = selected
-        .map(|profile| render_profile_detail(profile, snapshot, &management, this, cx))
+        .map(|profile| {
+            render_profile_detail(
+                profile,
+                &current_user_id,
+                can_view_others,
+                &history_status,
+                &history,
+                selected_history_id.as_deref(),
+                selected_body.as_deref(),
+                this,
+                cx,
+            )
+        })
         .unwrap_or_else(|| profile_message("No profiles are available.".to_owned(), cx));
 
     h_flex()
@@ -152,27 +197,24 @@ fn render_profile_row(
         .into_any_element()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_profile_detail(
     profile: &ProfileView,
-    snapshot: &UpstreamManagementSnapshot,
-    management: &ServerManagementState,
+    current_user_id: &str,
+    can_view_others: bool,
+    history_status: &ProfileHistoryStatus,
+    history: &[SharedHistoryEntry],
+    selected_history_id: Option<&str>,
+    selected_body: Option<&str>,
     this: &WeakEntity<ApiTester>,
     cx: &mut App,
 ) -> AnyElement {
-    let can_view =
-        profile.id == snapshot.current_user.id || snapshot.has_permission(HISTORY_READ_OTHERS);
+    let can_view = profile.id == current_user_id || can_view_others;
     let refresh_this = this.clone();
     let refresh_user_id = profile.id.clone();
-    let selected_entry = management
-        .selected_profile_history_id
-        .as_deref()
-        .and_then(|id| {
-            management
-                .profile_history
-                .iter()
-                .find(|entry| entry.id == id)
-        })
-        .or_else(|| management.profile_history.first());
+    let selected_entry = selected_history_id
+        .and_then(|id| history.iter().find(|entry| entry.id == id))
+        .or_else(|| history.first());
 
     v_flex()
         .size_full()
@@ -201,7 +243,7 @@ fn render_profile_detail(
                                         .child(profile.display_name.clone()),
                                 )
                                 .child(profile_badge(
-                                    if profile.id == snapshot.current_user.id {
+                                    if profile.id == current_user_id {
                                         "You"
                                     } else if can_view {
                                         "History authorized"
@@ -231,10 +273,7 @@ fn render_profile_detail(
                     .label("Refresh history")
                     .small()
                     .outline()
-                    .disabled(
-                        !can_view
-                            || management.profile_history_status == ProfileHistoryStatus::Loading,
-                    )
+                    .disabled(!can_view || *history_status == ProfileHistoryStatus::Loading)
                     .on_click(move |_, window, cx| {
                         if let Some(this) = refresh_this.upgrade() {
                             this.update(cx, |this, cx| {
@@ -244,7 +283,7 @@ fn render_profile_detail(
                     }),
                 ),
         )
-        .child(match (can_view, &management.profile_history_status) {
+        .child(match (can_view, history_status) {
             (false, _) => profile_message(
                 "Only members with history.read_others can view this history.".to_owned(),
                 cx,
@@ -257,18 +296,18 @@ fn render_profile_detail(
                 profile_message("Loading shared history…".to_owned(), cx)
             }
             (true, ProfileHistoryStatus::Error(error)) => profile_message(error.clone(), cx),
-            (true, ProfileHistoryStatus::Ready) if management.profile_history.is_empty() => {
+            (true, ProfileHistoryStatus::Ready) if history.is_empty() => {
                 profile_message("No shared requests in this workspace yet.".to_owned(), cx)
             }
             (true, ProfileHistoryStatus::Ready) => h_flex()
                 .flex_1()
                 .min_h_0()
                 .items_start()
-                .child(render_history_list(management, this, cx))
+                .child(render_history_list(history, selected_history_id, this, cx))
                 .child(
                     div().flex_1().min_w_0().h_full().child(
                         selected_entry
-                            .map(|entry| render_history_entry(entry, cx))
+                            .map(|entry| render_history_entry(entry, selected_body, cx))
                             .unwrap_or_else(|| {
                                 profile_message("Select a history entry.".to_owned(), cx)
                             }),
@@ -280,18 +319,18 @@ fn render_profile_detail(
 }
 
 fn render_history_list(
-    management: &ServerManagementState,
+    history: &[SharedHistoryEntry],
+    selected_history_id: Option<&str>,
     this: &WeakEntity<ApiTester>,
     cx: &mut App,
 ) -> AnyElement {
-    let rows = management
-        .profile_history
+    let rows = history
         .iter()
         .map(|entry| {
             let select_this = this.clone();
             let entry_id = entry.id.clone();
             let debug_entry_id = entry.id.clone();
-            let selected = management.selected_profile_history_id.as_ref() == Some(&entry.id);
+            let selected = selected_history_id == Some(entry.id.as_str());
             let status = entry
                 .response
                 .as_ref()
@@ -391,7 +430,7 @@ fn render_history_list(
         .into_any_element()
 }
 
-fn render_history_entry(entry: &SharedHistoryEntry, cx: &mut App) -> AnyElement {
+fn render_history_entry(entry: &SharedHistoryEntry, body: Option<&str>, cx: &mut App) -> AnyElement {
     let response = entry.response.as_ref();
     v_flex()
         .id(SharedString::from(format!(
@@ -446,7 +485,7 @@ fn render_history_entry(entry: &SharedHistoryEntry, cx: &mut App) -> AnyElement 
             ))
             .child(history_text_section(
                 "RESPONSE BODY",
-                &shared_response_body(response),
+                body.unwrap_or_default(),
                 response.body_truncated,
                 cx,
             ))
@@ -572,14 +611,6 @@ fn history_text_section(
         .into_any_element()
 }
 
-fn shared_response_body(response: &crate::core::SharedHistoryResponse) -> String {
-    let Ok(body) = BASE64_STANDARD.decode(&response.body_base64) else {
-        return "Invalid shared response body".to_owned();
-    };
-    String::from_utf8(body.clone())
-        .unwrap_or_else(|_| format!("Binary response body ({} bytes)", body.len()))
-}
-
 fn history_section_title(title: &'static str, cx: &mut App) -> AnyElement {
     div()
         .text_xs()
@@ -662,6 +693,7 @@ fn profile_message(message: String, cx: &mut App) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
     use gpui::{Context, Render, TestAppContext, Window, px, size};
 
     use super::*;
@@ -742,7 +774,8 @@ mod tests {
                 app.server_management.selected_profile_id = Some("author".to_owned());
                 app.server_management.profile_history_status = ProfileHistoryStatus::Ready;
                 app.server_management.selected_profile_history_id = Some("entry-1".to_owned());
-                app.server_management.profile_history = vec![SharedHistoryEntry {
+                app.server_management
+                    .set_profile_history(vec![SharedHistoryEntry {
                     id: "entry-1".to_owned(),
                     created_at: now,
                     request: SharedHistoryRequest {
@@ -773,7 +806,7 @@ mod tests {
                         duration_micros: 1250,
                     }),
                     error: String::new(),
-                }];
+                }]);
             });
             let harness = cx.new(|_| ProfilesHarness { app });
             gpui_component::Root::new(harness, window, cx)

@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use chrono::Local;
 use gpui::{ListState, list};
@@ -48,13 +49,17 @@ fn render_activity_log(
     let Some(entity) = this.upgrade() else {
         return div().into_any_element();
     };
-    let (status, upstream_id, snapshot, feed, active_upstream_id, target, realtime_status) = {
+    let (status, upstream_id, snapshot_present, audit_visible, feed, active_upstream_id, target, realtime_status) = {
         let app = entity.read(cx);
         let management = &app.server_management;
         (
             management.status.clone(),
             management.upstream_id.clone(),
-            management.snapshot.clone(),
+            management.snapshot.is_some(),
+            management
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.has_permission(AUDIT_READ)),
             management.activity_feed(kind).clone(),
             app.settings.upstreams.active_upstream_id.clone(),
             app.activity_log_target(kind),
@@ -64,16 +69,16 @@ fn render_activity_log(
     if let Some(status_element) = management_status_element(
         &status,
         upstream_id.as_deref(),
-        snapshot.is_some(),
+        snapshot_present,
         active_upstream_id.as_deref(),
         cx,
     ) {
         return status_element;
     }
-    let Some(snapshot) = snapshot.as_ref() else {
+    if !snapshot_present {
         return management_empty("Activity log data is unavailable.", cx);
-    };
-    if kind == ActivityLogKind::Audit && !snapshot.has_permission(AUDIT_READ) {
+    }
+    if kind == ActivityLogKind::Audit && !audit_visible {
         return management_empty(
             "You do not have permission to view the user and role audit log.",
             cx,
@@ -250,7 +255,9 @@ fn render_activity_log(
                 // fires when the feed was replaced wholesale (target switch).
                 list_state.reset(entries.len());
             }
-            let entries_for_list = entries.to_vec();
+            // The list item builder borrows each visible entry through this
+            // shared handle instead of cloning the feed's entries per frame.
+            let list_entries = feed.entries.clone();
             v_flex()
                 .id(if kind == ActivityLogKind::Audit {
                     "audit-log-scroll"
@@ -295,7 +302,7 @@ fn render_activity_log(
                 })
                 .child(
                     list(list_state, move |ix, _window, cx| {
-                        render_activity_entry(&entries_for_list[ix], cx)
+                        render_activity_entry(&list_entries[ix], cx)
                     })
                     .flex_1()
                     .min_h_0()
@@ -672,19 +679,19 @@ fn reconcile_feed_list(list: &ListState, mode: &ActivityLoadMode, old_len: usize
 fn apply_activity_page(feed: &mut ActivityLogFeed, mode: &ActivityLoadMode, page: ActivityLogPage) {
     match mode {
         ActivityLoadMode::Initial => {
-            feed.entries = page.entries;
+            feed.entries = Rc::new(page.entries);
             feed.older_cursor = page.older_cursor;
             feed.newer_cursor = page.newer_cursor;
             feed.status = ActivityLogStatus::Ready;
         }
         ActivityLoadMode::Older(_) => {
-            merge_activity_entries(&mut feed.entries, page.entries);
+            merge_activity_entries(Rc::make_mut(&mut feed.entries), page.entries);
             feed.older_cursor = page.older_cursor;
             feed.loading_more = false;
         }
         ActivityLoadMode::Newer(cursor) => {
             let was_empty = feed.entries.is_empty();
-            merge_activity_entries(&mut feed.entries, page.entries);
+            merge_activity_entries(Rc::make_mut(&mut feed.entries), page.entries);
             feed.newer_cursor = page.newer_cursor.or_else(|| feed.newer_cursor.clone());
             if cursor.is_none() && was_empty {
                 feed.older_cursor = page.older_cursor;
