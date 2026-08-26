@@ -1,4 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::rc::Rc;
 
 use gpui::{ListAlignment, ListState};
 use gpui_component::group_box::GroupBoxVariant;
@@ -8,7 +10,8 @@ use zeroize::Zeroizing;
 
 use crate::core::{
     COLLECTIONS_ASSIGN_USERS, HISTORY_READ_OTHERS, ManagementRole, ManagementUser,
-    ROLES_ASSIGN_PERMISSIONS, ROLES_CREATE, ROLES_UPDATE, SharedHistoryEntry, USERS_ASSIGN_ROLES,
+    ROLES_ASSIGN_PERMISSIONS, ROLES_CREATE, ROLES_UPDATE, SharedHistoryEntry,
+    SharedHistoryResponse, USERS_ASSIGN_ROLES,
     USERS_CREATE, USERS_UPDATE, UpstreamCollectionView, UpstreamManagementSnapshot,
     UpstreamSavedRequestView, UpstreamUserSummary, UpstreamWorkspaceView, WORKSPACES_ASSIGN_USERS,
     create_management_role, create_management_user, list_shared_history, load_upstream_management,
@@ -57,7 +60,7 @@ pub(super) struct ActivityLogFeed {
     upstream_id: Option<String>,
     workspace_id: Option<String>,
     status: ActivityLogStatus,
-    entries: Vec<crate::core::ActivityLogEntry>,
+    entries: Rc<Vec<crate::core::ActivityLogEntry>>,
     older_cursor: Option<String>,
     newer_cursor: Option<String>,
     loading_more: bool,
@@ -127,6 +130,9 @@ pub(super) struct ServerManagementState {
     selected_profile_history_id: Option<String>,
     profile_history_status: ProfileHistoryStatus,
     profile_history: Vec<SharedHistoryEntry>,
+    /// Decoded response-body display strings for profile history entries,
+    /// rebuilt by `set_profile_history` so renders never re-decode base64.
+    profile_history_body_cache: HashMap<String, String>,
     change_log: ActivityLogFeed,
     audit_log: ActivityLogFeed,
     change_log_list: ListState,
@@ -147,6 +153,7 @@ impl Default for ServerManagementState {
             selected_profile_history_id: None,
             profile_history_status: ProfileHistoryStatus::Idle,
             profile_history: Vec::new(),
+            profile_history_body_cache: HashMap::new(),
             change_log: ActivityLogFeed::default(),
             audit_log: ActivityLogFeed::default(),
             change_log_list: ListState::new(0, ListAlignment::Top, px(200.)),
@@ -166,17 +173,6 @@ enum ManagementResourceSelection {
 }
 
 impl ServerManagementState {
-    fn role_permission_keys(&self, role: &ManagementRole) -> BTreeSet<String> {
-        self.role_permission_drafts
-            .get(&role.id)
-            .map(|draft| draft.selected.clone())
-            .unwrap_or_else(|| management_role_permission_keys(role))
-    }
-
-    fn role_permissions_are_dirty(&self, role_id: &str) -> bool {
-        self.role_permission_drafts.contains_key(role_id)
-    }
-
     fn toggle_role_permission(&mut self, role_id: &str, permission_key: &str) {
         let Some(baseline) = self
             .snapshot
@@ -227,7 +223,21 @@ impl ServerManagementState {
     pub(super) fn reset_profile_history(&mut self) {
         self.profile_history_status = ProfileHistoryStatus::Idle;
         self.profile_history.clear();
+        self.profile_history_body_cache.clear();
         self.selected_profile_history_id = None;
+    }
+
+    fn set_profile_history(&mut self, entries: Vec<SharedHistoryEntry>) {
+        self.profile_history_body_cache = entries
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .response
+                    .as_ref()
+                    .map(|response| (entry.id.clone(), shared_history_response_body(response)))
+            })
+            .collect();
+        self.profile_history = entries;
     }
 
     pub(super) fn is_history_visible_for(&self, user_id: &str) -> bool {
@@ -312,6 +322,16 @@ fn management_role_permission_keys(role: &ManagementRole) -> BTreeSet<String> {
         .iter()
         .map(|permission| permission.key.clone())
         .collect()
+}
+
+fn shared_history_response_body(response: &SharedHistoryResponse) -> String {
+    let Ok(body) = BASE64_STANDARD.decode(&response.body_base64) else {
+        return "Invalid shared response body".to_owned();
+    };
+    match String::from_utf8(body) {
+        Ok(body) => body,
+        Err(error) => format!("Binary response body ({} bytes)", error.into_bytes().len()),
+    }
 }
 
 enum ManagementMutation {
@@ -1027,7 +1047,7 @@ impl ApiTester {
                         this.server_management.selected_profile_history_id = preferred_entry_id
                             .filter(|selected| entries.iter().any(|entry| &entry.id == selected))
                             .or_else(|| entries.first().map(|entry| entry.id.clone()));
-                        this.server_management.profile_history = entries;
+                        this.server_management.set_profile_history(entries);
                         this.server_management.profile_history_status = ProfileHistoryStatus::Ready;
                     }
                     Ok(Err(error)) => {
@@ -1564,10 +1584,48 @@ fn management_dialog_field(label: &'static str, input: Input) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+
     use super::*;
 
     fn permission_keys(keys: &[&str]) -> BTreeSet<String> {
         keys.iter().map(|key| (*key).to_owned()).collect()
+    }
+
+    #[test]
+    fn shared_history_response_body_decodes_utf8_once_without_extra_copies() {
+        let response = SharedHistoryResponse {
+            status: 201,
+            status_text: "Created".to_owned(),
+            http_version: "HTTP/2".to_owned(),
+            final_url: "https://api.example.test/widgets/1".to_owned(),
+            headers: Vec::new(),
+            body_base64: BASE64_STANDARD.encode(br#"{"id":1}"#),
+            body_truncated: false,
+            content_type: "application/json".to_owned(),
+            duration_micros: 1_250,
+        };
+        assert_eq!(shared_history_response_body(&response), r#"{"id":1}"#);
+
+        // Non-UTF-8 payloads degrade to a byte-count summary.
+        let binary = SharedHistoryResponse {
+            body_base64: BASE64_STANDARD.encode([0x00u8, 0x01, 0xff]),
+            ..response.clone()
+        };
+        assert_eq!(
+            shared_history_response_body(&binary),
+            "Binary response body (3 bytes)"
+        );
+
+        // Corrupt base64 degrades to an explicit label.
+        let corrupt = SharedHistoryResponse {
+            body_base64: "%%%".to_owned(),
+            ..response
+        };
+        assert_eq!(
+            shared_history_response_body(&corrupt),
+            "Invalid shared response body"
+        );
     }
 
     #[test]
