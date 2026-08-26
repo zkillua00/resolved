@@ -1,4 +1,4 @@
-use std::{ops::Range, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc};
 
 use super::*;
 
@@ -192,7 +192,11 @@ impl ApiTester {
             )
         });
 
-        let search_subscription = cx.subscribe(&search, |_, _, _: &InputEvent, cx| cx.notify());
+        let search_subscription = cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
         let name_subscription = cx.subscribe(&name, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.invalidate_snippet_preview();
@@ -561,6 +565,7 @@ impl ApiTester {
         } else {
             self.snippets.push(snippet.clone());
         }
+        SNIPPET_LIST_CACHE.with(|cache| cache.borrow_mut().invalidate());
         match self.persist_snippets() {
             Ok(()) => {
                 self.snippet_editor.selected_id = Some(snippet.id.clone());
@@ -620,6 +625,7 @@ impl ApiTester {
         duplicate.output_language = source.output_language;
 
         self.snippets.push(duplicate.clone());
+        SNIPPET_LIST_CACHE.with(|cache| cache.borrow_mut().invalidate());
         match self.persist_snippets() {
             Ok(()) => {
                 self.load_snippet_now(duplicate, window, cx);
@@ -685,6 +691,7 @@ impl ApiTester {
             return;
         };
         self.snippets.remove(index);
+        SNIPPET_LIST_CACHE.with(|cache| cache.borrow_mut().invalidate());
         match self.persist_snippets() {
             Ok(()) => {
                 if let Some(next) = self
@@ -1603,26 +1610,29 @@ impl ApiTester {
             .value()
             .trim()
             .to_lowercase();
-        let mut snippets = self
-            .snippets
-            .iter()
-            .filter(|snippet| {
-                query.is_empty()
-                    || snippet.name.to_lowercase().contains(&query)
-                    || snippet.description.to_lowercase().contains(&query)
-                    || snippet.category.label().to_lowercase().contains(&query)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        snippets.sort_by(|left, right| {
-            snippet_category_order(left.category)
-                .cmp(&snippet_category_order(right.category))
-                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+        // Memoized list derivation: a notify caused by anything other than a
+        // changed search query (or a snippet create/update/delete invalidating
+        // the cache) reuses the last rows with zero re-derivation work.
+        let rows = SNIPPET_LIST_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            let is_hit = cache
+                .memo
+                .as_ref()
+                .is_some_and(|(version, cached_query, _)| {
+                    *version == cache.version && cached_query == &query
+                });
+            if is_hit {
+                cache.memo.clone().expect("memo hit requires a memo").2
+            } else {
+                let rows = derive_snippet_list_rows(&self.snippets, &query, &mut cache.lower);
+                cache.memo = Some((cache.version, query.clone(), rows.clone()));
+                rows
+            }
         });
 
-        let list_rows = snippets
+        let list_rows = rows
             .iter()
-            .map(|snippet| self.render_snippet_list_row(snippet, cx))
+            .map(|row| self.render_snippet_list_row(row, cx))
             .collect::<Vec<_>>();
         let this = cx.entity().downgrade();
         let new_this = this.clone();
@@ -1733,7 +1743,7 @@ impl ApiTester {
                                     .p_2()
                                     .gap_1()
                                     .children(list_rows)
-                                    .when(snippets.is_empty(), |this| {
+                                    .when(rows.is_empty(), |this| {
                                         this.child(
                                             v_flex()
                                                 .items_center()
@@ -1943,18 +1953,17 @@ impl ApiTester {
             .into_any_element()
     }
 
-    fn render_snippet_list_row(&self, snippet: &Snippet, cx: &mut Context<Self>) -> AnyElement {
-        let selected = self.snippet_editor.selected_id.as_deref() == Some(&snippet.id);
-        let id = snippet.id.clone();
-        let description =
-            (!snippet.description.is_empty()).then(|| compact_label(&snippet.description, 54));
+    fn render_snippet_list_row(&self, row: &SnippetListRow, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.snippet_editor.selected_id.as_deref() == Some(&row.id);
+        let id = row.id.clone();
+        let description = (!row.description.is_empty()).then(|| compact_label(&row.description, 54));
         let leading_icon_color = if selected {
             cx.api_primary_bright()
         } else {
             cx.theme().muted_foreground
         };
         div()
-            .id(SharedString::from(format!("snippet-row-{}", snippet.id)))
+            .id(SharedString::from(format!("snippet-row-{}", row.id)))
             .w_full()
             .flex()
             .cursor_pointer()
@@ -1988,7 +1997,7 @@ impl ApiTester {
                                     .whitespace_nowrap()
                                     .text_sm()
                                     .font_semibold()
-                                    .child(snippet.name.clone()),
+                                    .child(row.name.clone()),
                             )
                             .child(
                                 h_flex()
@@ -1998,7 +2007,7 @@ impl ApiTester {
                                             .whitespace_nowrap()
                                             .text_xs()
                                             .text_color(cx.theme().muted_foreground)
-                                            .child(snippet.category.label()),
+                                            .child(row.category.label()),
                                     )
                                     .child(
                                         div()
@@ -2011,7 +2020,7 @@ impl ApiTester {
                                             .whitespace_nowrap()
                                             .text_xs()
                                             .text_color(cx.theme().muted_foreground)
-                                            .child(snippet.kind.label()),
+                                            .child(row.kind.label()),
                                     ),
                             )
                             .when_some(description, |this, description| {
@@ -2342,6 +2351,147 @@ fn format_snippet_source(
     settings: &crate::core::FormatterSettings,
 ) -> Result<String, String> {
     crate::core::format_script_source(source, settings)
+}
+
+/// Lowercase search fields for one snippet, computed once per snippet-set
+/// version and reused across query changes so re-typing in the search box never
+/// repeats the per-field `to_lowercase` heap allocations.
+struct SnippetSearchFields {
+    name_lower: String,
+    description_lower: String,
+    category_label_lower: String,
+}
+
+impl SnippetSearchFields {
+    fn from_snippet(snippet: &Snippet) -> Self {
+        Self {
+            name_lower: snippet.name.to_lowercase(),
+            description_lower: snippet.description.to_lowercase(),
+            category_label_lower: snippet.category.label().to_lowercase(),
+        }
+    }
+}
+
+/// Lightweight library row for one snippet. Carries only the fields the list
+/// row renders (plus lowercase search fields); the potentially multi-KB
+/// `Snippet::source` body is never copied onto the list path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SnippetListRow {
+    pub(super) id: String,
+    pub(super) name: String,
+    pub(super) description: String,
+    pub(super) category: SnippetCategory,
+    pub(super) kind: SnippetKind,
+    pub(super) name_lower: String,
+    pub(super) description_lower: String,
+    pub(super) category_label_lower: String,
+}
+
+impl SnippetListRow {
+    fn from_parts(
+        id: String,
+        name: String,
+        description: String,
+        category: SnippetCategory,
+        kind: SnippetKind,
+        name_lower: String,
+        description_lower: String,
+        category_label_lower: String,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            description,
+            category,
+            kind,
+            name_lower,
+            description_lower,
+            category_label_lower,
+        }
+    }
+}
+
+/// Render cache for the snippets library list, sized to the single running app
+/// instance (GPUI drives one main-thread event loop). Every snippet
+/// create/update/delete site bumps `version`, which invalidates both the cached
+/// lowercase search fields and the memoized rows below.
+#[derive(Default)]
+struct SnippetListCache {
+    version: u64,
+    lower: HashMap<String, SnippetSearchFields>,
+    memo: Option<(u64, String, Vec<SnippetListRow>)>,
+}
+
+thread_local! {
+    static SNIPPET_LIST_CACHE: RefCell<SnippetListCache> = RefCell::new(SnippetListCache::default());
+}
+
+impl SnippetListCache {
+    fn invalidate(&mut self) {
+        self.version = self.version.wrapping_add(1);
+        self.lower.clear();
+        self.memo = None;
+    }
+}
+
+/// Derive the filtered, category-ordered library rows for `query` on top of
+/// cached per-snippet lowercase fields. This is the only place the list path
+/// walks `Snippet`s; it never clones a `Snippet`, so source bodies are not
+/// copied per row.
+fn derive_snippet_list_rows(
+    snippets: &[Snippet],
+    query: &str,
+    lower: &mut HashMap<String, SnippetSearchFields>,
+) -> Vec<SnippetListRow> {
+    lower.retain(|id, _| snippets.iter().any(|snippet| &snippet.id == id));
+    let rows = snippets
+        .iter()
+        .map(|snippet| {
+            let fields = lower
+                .entry(snippet.id.clone())
+                .or_insert_with(|| SnippetSearchFields::from_snippet(snippet));
+            SnippetListRow::from_parts(
+                snippet.id.clone(),
+                snippet.name.clone(),
+                snippet.description.clone(),
+                snippet.category,
+                snippet.kind,
+                fields.name_lower.clone(),
+                fields.description_lower.clone(),
+                fields.category_label_lower.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    filter_snippet_list_rows(query, rows)
+}
+
+/// Pure filter + sort over already-derived rows. An empty query keeps every
+/// snippet; otherwise a `contains` over the pre-lowercased name, description,
+/// and category-label fields. `query` is expected to be lowercased already
+/// (the render path lowercases the search input), matching the original
+/// behavior. Rows are ordered by category (Pre-request before Post-response),
+/// then by lowercased name.
+pub(super) fn filter_snippet_list_rows(
+    query: &str,
+    rows: Vec<SnippetListRow>,
+) -> Vec<SnippetListRow> {
+    let mut matched = if query.is_empty() {
+        rows
+    } else {
+        rows.into_iter()
+            .filter(|row| {
+                row.name_lower.contains(query)
+                    || row.description_lower.contains(query)
+                    || row.category_label_lower.contains(query)
+            })
+            .collect::<Vec<_>>()
+    };
+    matched.sort_by(|left, right| {
+        snippet_category_order(left.category)
+            .cmp(&snippet_category_order(right.category))
+            .then_with(|| left.name_lower.cmp(&right.name_lower))
+    });
+    matched
 }
 
 fn snippet_category_order(category: SnippetCategory) -> u8 {
