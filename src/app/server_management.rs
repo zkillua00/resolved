@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use gpui::{ListAlignment, ListState};
 use gpui_component::group_box::GroupBoxVariant;
 use gpui_component::setting::{SettingGroup, SettingItem, SettingPage, Settings as SettingsView};
 use gpui_component::switch::Switch;
@@ -116,7 +117,7 @@ impl ServerManagementStatus {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(super) struct ServerManagementState {
     pub upstream_id: Option<String>,
     pub status: ServerManagementStatus,
@@ -128,9 +129,33 @@ pub(super) struct ServerManagementState {
     profile_history: Vec<SharedHistoryEntry>,
     change_log: ActivityLogFeed,
     audit_log: ActivityLogFeed,
+    change_log_list: ListState,
+    audit_log_list: ListState,
     selected_role_id: Option<String>,
     role_permission_drafts: BTreeMap<String, RolePermissionDraft>,
     selected_resource: Option<ManagementResourceSelection>,
+}
+
+impl Default for ServerManagementState {
+    fn default() -> Self {
+        Self {
+            upstream_id: None,
+            status: ServerManagementStatus::default(),
+            snapshot: None,
+            selected_user_id: None,
+            selected_profile_id: None,
+            selected_profile_history_id: None,
+            profile_history_status: ProfileHistoryStatus::Idle,
+            profile_history: Vec::new(),
+            change_log: ActivityLogFeed::default(),
+            audit_log: ActivityLogFeed::default(),
+            change_log_list: ListState::new(0, ListAlignment::Top, px(200.)),
+            audit_log_list: ListState::new(0, ListAlignment::Top, px(200.)),
+            selected_role_id: None,
+            role_permission_drafts: BTreeMap::new(),
+            selected_resource: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

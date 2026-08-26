@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use chrono::Local;
+use gpui::{ListState, list};
 use serde_json::Value;
 
 use super::*;
@@ -105,10 +106,6 @@ fn render_activity_log(
     } else {
         &[]
     };
-    let cards = entries
-        .iter()
-        .map(|entry| render_activity_entry(entry, cx))
-        .collect::<Vec<_>>();
     let loading = !matches_target
         || matches!(
             feed.status,
@@ -227,7 +224,7 @@ fn render_activity_log(
                     }),
                 )
                 .into_any_element()
-        } else if cards.is_empty() {
+        } else if entries.is_empty() {
             management_empty(
                 if kind == ActivityLogKind::Audit {
                     "No user or role changes have been recorded yet."
@@ -237,24 +234,45 @@ fn render_activity_log(
                 cx,
             )
         } else {
+            let Some(entity) = this.upgrade() else {
+                return div().into_any_element();
+            };
+            // The list virtualizes the feed: only the entries near the visible
+            // range are rendered and measured each frame, which keeps scrolling
+            // cheap even with many loaded entries.
+            let list_state = entity
+                .read(cx)
+                .server_management
+                .activity_feed_list(kind)
+                .clone();
+            if list_state.item_count() != entries.len() {
+                // Safety net: page applications splice precisely; this only
+                // fires when the feed was replaced wholesale (target switch).
+                list_state.reset(entries.len());
+            }
+            let entries_for_list = entries.to_vec();
             v_flex()
                 .id(if kind == ActivityLogKind::Audit {
                     "audit-log-scroll"
                 } else {
                     "change-log-scroll"
                 })
+                .debug_selector(move || {
+                    if kind == ActivityLogKind::Audit {
+                        "audit-log-scroll"
+                    } else {
+                        "change-log-scroll"
+                    }
+                    .to_owned()
+                })
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
-                .p_4()
-                .gap_3()
-                .children(cards)
                 .when_some(feed.error.clone(), |view, error| {
                     view.child(
                         div()
                             .w_full()
-                            .rounded_md()
-                            .border_1()
+                            .flex_shrink_0()
+                            .border_b_1()
                             .border_color(cx.theme().danger.opacity(0.35))
                             .bg(cx.theme().danger.opacity(0.06))
                             .px_3()
@@ -268,12 +286,22 @@ fn render_activity_log(
                     view.child(
                         div()
                             .w_full()
+                            .flex_shrink_0()
                             .text_center()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child("Receiving newer changes…"),
                     )
                 })
+                .child(
+                    list(list_state, move |ix, _window, cx| {
+                        render_activity_entry(&entries_for_list[ix], cx)
+                    })
+                    .flex_1()
+                    .min_h_0()
+                    .p_4()
+                    .gap_3(),
+                )
                 .when(feed.older_cursor.is_some(), |view| {
                     view.child(
                         h_flex()
@@ -281,26 +309,28 @@ fn render_activity_log(
                             .justify_center()
                             .py_2()
                             .flex_shrink_0()
+                            .border_t_1()
+                            .border_color(cx.api_outline_variant())
                             .child(
                                 Button::new(if kind == ActivityLogKind::Audit {
                                     "load-older-audit-log"
                                 } else {
                                     "load-older-change-log"
                                 })
-                            .label(if feed.loading_more {
-                                "Loading…"
-                            } else {
-                                "Load older changes"
-                            })
-                            .outline()
-                            .disabled(feed.loading_more || feed.syncing)
-                            .on_click(move |_, window, cx| {
-                                if let Some(this) = load_more_this.upgrade() {
-                                    this.update(cx, |this, cx| {
-                                        this.load_more_activity_log(kind, window, cx);
-                                    });
-                                }
-                            }),
+                                .label(if feed.loading_more {
+                                    "Loading…"
+                                } else {
+                                    "Load older changes"
+                                })
+                                .outline()
+                                .disabled(feed.loading_more || feed.syncing)
+                                .on_click(move |_, window, cx| {
+                                    if let Some(this) = load_more_this.upgrade() {
+                                        this.update(cx, |this, cx| {
+                                            this.load_more_activity_log(kind, window, cx);
+                                        });
+                                    }
+                                }),
                         ),
                     )
                 })
@@ -351,6 +381,13 @@ impl ServerManagementState {
         match kind {
             ActivityLogKind::Change => &mut self.change_log,
             ActivityLogKind::Audit => &mut self.audit_log,
+        }
+    }
+
+    fn activity_feed_list(&self, kind: ActivityLogKind) -> &ListState {
+        match kind {
+            ActivityLogKind::Change => &self.change_log_list,
+            ActivityLogKind::Audit => &self.audit_log_list,
         }
     }
 }
@@ -567,12 +604,15 @@ impl ApiTester {
                 }
                 let mut continue_sync = false;
                 let mut run_pending_sync = false;
+                let mut applied = None;
                 {
                     let feed = this.server_management.activity_feed_mut(kind);
                     match result {
                         Ok(Ok(page)) => {
                             let has_more_newer = page.has_more_newer;
+                            let old_len = feed.entries.len();
                             apply_activity_page(feed, &mode, page);
+                            applied = Some((old_len, feed.entries.len()));
                             continue_sync =
                                 matches!(mode, ActivityLoadMode::Newer(_)) && has_more_newer;
                             if !continue_sync && feed.sync_pending {
@@ -585,6 +625,14 @@ impl ApiTester {
                         Err(error) => apply_activity_error(feed, &mode, error.to_string()),
                     }
                 }
+                if let Some((old_len, new_len)) = applied {
+                    // Keep the virtualized list sized to the feed: reset on a
+                    // fresh page, append on "load older", insert on realtime
+                    // syncs — instead of letting the render-time safety net
+                    // reset (which would yank the scroll back to the top).
+                    let list = this.server_management.activity_feed_list(kind).clone();
+                    reconcile_feed_list(&list, &mode, old_len, new_len);
+                }
                 if continue_sync || run_pending_sync {
                     this.sync_activity_log_realtime(kind, window, cx);
                 }
@@ -592,6 +640,32 @@ impl ApiTester {
             });
         })
         .detach();
+    }
+}
+
+fn reconcile_feed_list(list: &ListState, mode: &ActivityLoadMode, old_len: usize, new_len: usize) {
+    let grew = new_len.saturating_sub(old_len);
+    match mode {
+        ActivityLoadMode::Initial => list.reset(new_len),
+        ActivityLoadMode::Older(_) => {
+            if grew > 0 {
+                // Older entries append below the previously loaded page; keep
+                // the current scroll position anchored to the same items.
+                list.splice(old_len..old_len, grew);
+            } else {
+                list.reset(new_len);
+            }
+        }
+        ActivityLoadMode::Newer(_) => {
+            if grew > 0 {
+                // Realtime entries prepend above; the visible items shift by
+                // the number of new headers, which the existing sync banner
+                // already calls out.
+                list.splice(0..0, grew);
+            } else {
+                list.reset(new_len);
+            }
+        }
     }
 }
 
@@ -996,6 +1070,74 @@ mod tests {
         assert!(
             last_bottom > feed_bottom,
             "last entry ended inside the feed ({last_bottom:?} <= {feed_bottom:?}); entries were squeezed to fit instead of overflowing the scroll list"
+        );
+    }
+
+    #[gpui::test]
+    fn feed_list_virtualizes_offscreen_entries(cx: &mut TestAppContext) {
+        struct FeedListHarness {
+            entries: Vec<ActivityLogEntry>,
+            state: ListState,
+        }
+
+        impl Render for FeedListHarness {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let entries = self.entries.clone();
+                v_flex()
+                    .size_full()
+                    .child(
+                        list(self.state.clone(), move |ix, _, cx| {
+                            render_activity_entry(&entries[ix], cx)
+                        })
+                        .flex_1()
+                        .min_h_0(),
+                    )
+            }
+        }
+
+        let now = Utc::now();
+        let entries: Vec<_> = (0..30)
+            .map(|i| ActivityLogEntry {
+                id: format!("entry-{i}"),
+                kind: "change".to_owned(),
+                resource: "request".to_owned(),
+                action: "updated".to_owned(),
+                resource_id: format!("rid-{i}"),
+                workspace_id: "workspace-1".to_owned(),
+                collection_id: "collection-1".to_owned(),
+                actor_user_id: "viewer".to_owned(),
+                actor_email: "viewer@example.test".to_owned(),
+                actor_display_name: "History Viewer".to_owned(),
+                target_name: "Small".to_owned(),
+                diffs: vec![ActivityLogDiff {
+                    field: "definition.request.url".to_owned(),
+                    from: Value::String("a".to_owned()),
+                    to: Value::String("b".to_owned()),
+                }],
+                created_at: now,
+            })
+            .collect();
+        let state = ListState::new(0, gpui::ListAlignment::Top, px(200.));
+        state.reset(entries.len());
+
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            crate::theme::configure(cx);
+            let harness = cx.new(|_| FeedListHarness { entries, state: state.clone() });
+            gpui_component::Root::new(harness, window, cx)
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_resize(size(px(900.), px(400.)));
+        cx.run_until_parked();
+
+        assert_eq!(state.item_count(), 30);
+        assert!(
+            cx.debug_bounds("activity-log-entry-entry-0").is_some(),
+            "top entry should render at the top of the feed"
+        );
+        assert!(
+            cx.debug_bounds("activity-log-entry-entry-29").is_none(),
+            "offscreen (bottom) entry must not be laid out — the feed list has to virtualize"
         );
     }
 }
