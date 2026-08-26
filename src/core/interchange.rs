@@ -1956,26 +1956,56 @@ fn export_kotlin_java_http_client(name: &str, template: &RequestTemplate) -> Str
 }
 
 fn looks_like_openapi(source: &str) -> bool {
-    let lower = source.to_ascii_lowercase();
-    (lower.contains("\"openapi\"")
-        || lower
-            .lines()
-            .any(|line| line.trim_start().starts_with("openapi:")))
-        && (lower.contains("\"paths\"")
-            || lower
-                .lines()
-                .any(|line| line.trim_start().starts_with("paths:")))
+    document_has_key(source, "\"openapi\"", "openapi:")
+        && document_has_key(source, "\"paths\"", "paths:")
 }
 
 fn looks_like_asyncapi(source: &str) -> bool {
-    let lower = source.to_ascii_lowercase();
-    lower.contains("\"asyncapi\"")
-        || lower
-            .lines()
-            .any(|line| line.trim_start().starts_with("asyncapi:"))
+    document_has_key(source, "\"asyncapi\"", "asyncapi:")
+}
+
+/// Detect a marker key in either its JSON (`"key"`, in `quoted`) or YAML
+/// (`key:`, in `yaml`) spelling anywhere in the document, without allocating
+/// a lowercased copy of the source (up to MAX_INTERCHANGE_BYTES).
+fn document_has_key(source: &str, quoted: &str, yaml: &str) -> bool {
+    contains_ignore_ascii_case(source, quoted)
+        || any_line_starts_with_ignore_ascii_case(source, yaml)
+}
+
+/// Case-insensitive ASCII substring search that borrows the source instead of
+/// materializing a full lowercased copy.
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+/// Whether any line starts with `needle` after leading whitespace, compared
+/// ASCII-case-insensitively without allocating (mirrors a `starts_with` check
+/// on the lowercased source's lines).
+fn any_line_starts_with_ignore_ascii_case(source: &str, needle: &str) -> bool {
+    source.lines().any(|line| {
+        let line = line.trim_start();
+        line.as_bytes()
+            .get(..needle.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(needle.as_bytes()))
+    })
 }
 
 fn parse_yaml_or_json(source: &str, label: &str) -> Result<Value, InterchangeError> {
+    let head = source.trim_start_matches('\u{feff}').trim_start();
+    if head.starts_with('{') || head.starts_with('[') {
+        // JSON is a strict subset of YAML but parses several times faster with
+        // the JSON parser; only fall back to YAML (flow mappings and other
+        // non-JSON syntax live there) when the JSON parse fails.
+        if let Ok(value) = serde_json::from_str::<Value>(source) {
+            return Ok(value);
+        }
+    }
     serde_yaml::from_str(source)
         .map_err(|error| InterchangeError::Parse(format!("invalid {label}: {error}")))
 }
@@ -2245,6 +2275,24 @@ fn import_asyncapi(source: &str) -> Result<ImportBundle, InterchangeError> {
             InterchangeError::Parse("AsyncAPI document has no channels object".to_owned())
         })?;
     let mut requests = Vec::new();
+    // Index operations by their channel's name once, so per-channel lookup is
+    // O(1) instead of linearly rescanning every operation (each with an
+    // rsplit('/')) for every channel.
+    let mut operations_by_channel: std::collections::HashMap<&str, &Value> =
+        std::collections::HashMap::new();
+    if let Some(operations) = root.get("operations").and_then(Value::as_object) {
+        for operation in operations.values() {
+            let Some(channel) = operation
+                .get("channel")
+                .and_then(|channel| channel.get("$ref"))
+                .and_then(Value::as_str)
+                .and_then(|reference| reference.rsplit('/').next())
+            else {
+                continue;
+            };
+            operations_by_channel.entry(channel).or_insert(operation);
+        }
+    }
     for (channel_name, channel) in channels {
         let channel = resolve_local_reference(&root, channel);
         let address = channel
@@ -2254,7 +2302,7 @@ fn import_asyncapi(source: &str) -> Result<ImportBundle, InterchangeError> {
         let channel_http_binding = channel
             .get("bindings")
             .and_then(|bindings| bindings.get("http"));
-        let operation = asyncapi_operation_for_channel(&root, channel_name);
+        let operation = operations_by_channel.get(channel_name.as_str()).copied();
         let operation_http_binding = operation
             .and_then(|operation| operation.get("bindings"))
             .and_then(|bindings| bindings.get("http"));
@@ -2379,19 +2427,6 @@ fn import_asyncapi(source: &str) -> Result<ImportBundle, InterchangeError> {
     })
 }
 
-fn asyncapi_operation_for_channel<'a>(root: &'a Value, channel_name: &str) -> Option<&'a Value> {
-    root.get("operations")
-        .and_then(Value::as_object)?
-        .values()
-        .find(|operation| {
-            operation
-                .get("channel")
-                .and_then(|channel| channel.get("$ref"))
-                .and_then(Value::as_str)
-                .is_some_and(|reference| reference.rsplit('/').next() == Some(channel_name))
-        })
-}
-
 fn asyncapi_server(root: &Value) -> String {
     let Some(server) = root
         .get("servers")
@@ -2488,13 +2523,28 @@ fn starts_with_command(source: &str, command: &str) -> bool {
 }
 
 fn normalized_command_source(source: &str) -> String {
-    source
-        .replace("\\\r\n", " ")
-        .replace("\\\n", " ")
-        .replace("`\r\n", " ")
-        .replace("`\n", " ")
-        .replace("^\r\n", " ")
-        .replace("^\n", " ")
+    // Fold the six line-continuation replacements (`\\\r\n`, `\\\n`, `` `\r\n ``,
+    // `` `\n ``, `^\r\n`, `^\n` -> single space) into one scan instead of six
+    // full-string passes; the replacement text can never re-introduce a
+    // continuation marker, so a single left-to-right pass is equivalent.
+    let mut output = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    while let Some(character) = chars.next() {
+        let is_continuation_marker = matches!(character, '\\' | '`' | '^');
+        let followed_by_crlf =
+            matches!(chars.peek(), Some('\r')) && chars.clone().nth(1) == Some('\n');
+        let followed_by_lf = matches!(chars.peek(), Some('\n'));
+        if is_continuation_marker && (followed_by_crlf || followed_by_lf) {
+            chars.next();
+            if followed_by_crlf {
+                chars.next();
+            }
+            output.push(' ');
+        } else {
+            output.push(character);
+        }
+    }
+    output
 }
 
 fn shell_tokens(source: &str) -> Result<Vec<String>, InterchangeError> {
@@ -4108,5 +4158,196 @@ axios.get(endpoint);"#,
             .unwrap();
         assert_eq!(operation["bindings"]["http"]["method"], "POST");
         assert_eq!(operation["bindings"]["http"]["bindingVersion"], "0.3.0");
+    }
+
+    #[test]
+    fn json_openapi_document_takes_the_json_path_with_identical_result() {
+        let json = r#"{"openapi":"3.1.0","info":{"title":"Users","version":"1.0.0"},"servers":[{"url":"https://api.example.com"}],"paths":{"/users":{"get":{"operationId":"listUsers","responses":{"default":{"description":"ok"}}}},"/users/{userId}":{"get":{"operationId":"getUser","parameters":[{"name":"limit","in":"query","schema":{"type":"integer","default":25}}],"responses":{"default":{"description":"ok"}}}}}}"#;
+        assert!(json.trim_start().starts_with('{'));
+        // The JSON fast path must yield exactly the serde_json interpretation.
+        assert_eq!(
+            parse_yaml_or_json(json, "OpenAPI document").unwrap(),
+            serde_json::from_str::<Value>(json).unwrap()
+        );
+        // ...and the resulting import must be byte-for-byte the same bundle as
+        // the equivalent YAML document (which still parses via serde_yaml).
+        let yaml = r#"
+openapi: 3.1.0
+info:
+  title: Users
+  version: 1.0.0
+servers:
+  - url: https://api.example.com
+paths:
+  /users:
+    get:
+      operationId: listUsers
+      responses:
+        default:
+          description: ok
+  /users/{userId}:
+    get:
+      operationId: getUser
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 25
+      responses:
+        default:
+          description: ok
+"#;
+        let json_bundle = import_requests(json).unwrap();
+        let yaml_bundle = import_requests(yaml).unwrap();
+        assert_eq!(json_bundle.source_format, "OpenAPI");
+        assert_eq!(json_bundle.requests.len(), 2);
+        assert_eq!(json_bundle.requests, yaml_bundle.requests);
+    }
+
+    #[test]
+    fn yaml_documents_still_parse_via_yaml() {
+        // Plain block YAML does not look like JSON and goes straight to YAML.
+        let plain = "openapi: 3.1.0\ninfo: { title: Users, version: 1.0.0 }\npaths: {}\n";
+        assert!(!plain.trim_start().starts_with('{'));
+        assert_eq!(
+            parse_yaml_or_json(plain, "OpenAPI document").unwrap(),
+            serde_yaml::from_str::<Value>(plain).unwrap()
+        );
+        // A document that *starts with* '{' but uses flow-mapping/unquoted
+        // YAML syntax is invalid JSON: the JSON fast path must fall back to
+        // YAML and still parse.
+        let flow =
+            "{ openapi: 3.1.0, info: { title: Users, version: 1.0.0 }, paths: { get: {x: 1} } }";
+        assert!(flow.trim_start().starts_with('{'));
+        assert_eq!(
+            parse_yaml_or_json(flow, "OpenAPI document").unwrap(),
+            serde_yaml::from_str::<Value>(flow).unwrap()
+        );
+    }
+
+    #[test]
+    fn malformed_documents_report_the_same_parse_error() {
+        // Non-JSON-looking malformed YAML keeps the YAML error path.
+        assert!(matches!(
+            parse_yaml_or_json("openapi: [unclosed", "OpenAPI document"),
+            Err(InterchangeError::Parse(message))
+                if message.starts_with("invalid OpenAPI document")
+        ));
+        // '{'-prefixed malformed input falls back to YAML, so the reported
+        // error is the YAML one, exactly as before the JSON fast path.
+        assert!(matches!(
+            parse_yaml_or_json("{\"openapi\":\"3.0.0\"", "OpenAPI document"),
+            Err(InterchangeError::Parse(message))
+                if message.starts_with("invalid OpenAPI document")
+        ));
+    }
+
+    #[test]
+    fn asyncapi_import_with_many_channels_stays_correct() {
+        // Exercises the channel->operation index: lookups by channel tail,
+        // first-operation-wins for duplicate targets, filtering of operations
+        // whose channel does not exist, and channels with no operation at all.
+        let bundle = import_requests(r##"{
+  "asyncapi": "3.0.0",
+  "info": { "title": "Hooks", "version": "1.0.0" },
+  "servers": { "prod": { "host": "hooks.example.com", "protocol": "https" } },
+  "channels": {
+    "eventA": { "address": "/a", "messages": { "m": { "payload": { "type": "object" } } } },
+    "eventB": { "address": "/b" },
+    "eventC": { "address": "/c" },
+    "eventD": { "address": "/d" }
+  },
+  "operations": {
+    "sendA": { "action": "send", "channel": { "$ref": "#/channels/eventA" }, "bindings": { "http": { "method": "POST", "query": { "type": "object", "properties": { "source": { "type": "string", "default": "webhook" } } } } } },
+    "sendB": { "action": "send", "channel": { "$ref": "#/channels/eventB" }, "bindings": { "http": { "method": "PUT" } } },
+    "sendC": { "action": "send", "channel": { "$ref": "#/channels/eventC" }, "bindings": { "http": { "method": "PATCH" } } },
+    "sendDup": { "action": "send", "channel": { "$ref": "#/channels/eventC" }, "bindings": { "http": { "method": "DELETE" } } },
+    "sendGhost": { "action": "send", "channel": { "$ref": "#/channels/missing" }, "bindings": { "http": { "method": "OPTIONS" } } }
+  }
+}"##)
+        .unwrap();
+        assert_eq!(bundle.requests.len(), 4);
+        let by_name = |name: &str| {
+            bundle
+                .requests
+                .iter()
+                .find(|request| request.name == name)
+                .unwrap_or_else(|| panic!("missing request {name}"))
+                .template
+                .request
+                .clone()
+        };
+        let a = by_name("eventA");
+        assert_eq!(a.url, "https://hooks.example.com/a?source=webhook");
+        assert_eq!(a.method, "POST");
+        let b = by_name("eventB");
+        assert_eq!(b.url, "https://hooks.example.com/b");
+        assert_eq!(b.method, "PUT");
+        let c = by_name("eventC");
+        assert_eq!(c.url, "https://hooks.example.com/c");
+        assert_eq!(c.method, "PATCH", "first operation for a channel must win");
+        let d = by_name("eventD");
+        assert_eq!(d.url, "https://hooks.example.com/d");
+        assert_eq!(d.method, "POST");
+    }
+
+    #[test]
+    fn normalized_command_source_matches_sequential_replace_semantics() {
+        let reference = |source: &str| {
+            source
+                .replace("\\\r\n", " ")
+                .replace("\\\n", " ")
+                .replace("`\r\n", " ")
+                .replace("`\n", " ")
+                .replace("^\r\n", " ")
+                .replace("^\n", " ")
+        };
+        let cases = [
+            "",
+            "curl https://x",
+            "curl \\\n  -X POST \\\n  https://x",
+            "curl \\\r\n  -X POST",
+            "powershell `\n  $x = 1",
+            "powershell `\r\n  $x = 1",
+            "cmd ^\n  echo hi",
+            "cmd ^\r\n  echo hi",
+            "a \\\r\nb \\\nc `\r\nd `\ne ^\r\nf ^\ng",
+            "curl \\",
+            "ab\\\rcd",
+            "a ^\r b",
+            "\r\n",
+            "curl \\\n  https://e.test/é",
+            "\\\"\\n",
+            "^\n^\r\n`\n`\r\n\\\n\\\r\n",
+        ];
+        for case in cases {
+            assert_eq!(
+                normalized_command_source(case),
+                reference(case),
+                "normalized_command_source diverged from sequential replace for {case:?}"
+            );
+        }
+        assert_eq!(normalized_command_source(""), "");
+        assert_eq!(normalized_command_source("a \\\nb"), "a  b");
+        assert_eq!(normalized_command_source("a ^\r\nb"), "a  b");
+        assert_eq!(
+            normalized_command_source("curl https://x"),
+            "curl https://x"
+        );
+    }
+
+    #[test]
+    fn format_sniffing_is_case_insensitive() {
+        assert!(looks_like_openapi("\nOPENAPI: 3.1.0\nPATHS: {}\n"));
+        assert!(looks_like_openapi(
+            "{\"OpenAPI\": \"3.1.0\", \"Paths\": {}}"
+        ));
+        assert!(!looks_like_openapi("openapi-version: 3.1.0\npaths: {}"));
+        assert!(!looks_like_openapi("openapi: 3.1.0\n"));
+        assert!(!looks_like_openapi("paths: {}\n"));
+        assert!(looks_like_asyncapi("asyncapi: 3.0.0\n"));
+        assert!(!looks_like_asyncapi("not asyncapi at all"));
+        assert!(looks_like_asyncapi("{\"AsyncAPI\": \"3.0.0\"}"));
     }
 }
