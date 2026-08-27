@@ -719,7 +719,9 @@ impl Focusable for CodeEditor {
 impl Render for CodeEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let editor_style = cx.api_theme().classes.editor.clone();
-        let editor_line_height = editor_style.font_size * (10. / 7.);
+        // Match the compact 20 px buffer row shown by Zed at the default
+        // 13 px editor font. Keeping this proportional preserves theme zoom.
+        let editor_line_height = editor_style.font_size * (20. / 13.);
         let context_menu = self.context_menu.clone().map(|menu| {
             deferred(
                 anchored()
@@ -768,6 +770,11 @@ impl Render for CodeEditor {
                     .appearance(false)
                     .disabled(self.read_only)
                     .size_full()
+                    // Zed's gutter bounds begin at the editor bounds. The
+                    // generic Input component otherwise keeps control padding
+                    // even with appearance disabled, leaving an inset strip
+                    // to the left of the line-number gutter.
+                    .p_0()
                     .font_family(editor_style.font_family)
                     .text_size(editor_style.font_size)
                     .line_height(editor_line_height),

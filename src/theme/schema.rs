@@ -464,6 +464,14 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         "Code editor canvas; falls back to the lowest surface.",
     ),
     property(
+        "--api-editor-gutter-background",
+        ThemePropertyKind::Color,
+        ThemePropertyCategory::Editor,
+        false,
+        "var(--api-surface-lowest)",
+        "Line-number and fold gutter background; falls back to the editor canvas.",
+    ),
+    property(
         "--api-editor-foreground",
         ThemePropertyKind::Color,
         ThemePropertyCategory::Editor,
@@ -701,14 +709,14 @@ pub(crate) const THEME_CLASS_PROPERTIES: &[ThemeClassPropertySpec] = &[
         selector: ".editor",
         name: "font-family",
         kind: ThemeClassPropertyKind::FontFamily,
-        default_value: "inherit",
+        default_value: "\"Menlo\"",
         documentation: "Font family used for request, response, script, and theme code editors.",
     },
     ThemeClassPropertySpec {
         selector: ".editor",
         name: "font-size",
         kind: ThemeClassPropertyKind::Length,
-        default_value: "0.875rem",
+        default_value: "0.8125rem",
         documentation: "Code editor font size before interface zoom is applied.",
     },
     ThemeClassPropertySpec {

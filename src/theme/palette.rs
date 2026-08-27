@@ -50,8 +50,8 @@ impl Default for ApiThemeClasses {
             },
             button: ButtonClassStyle::default(),
             editor: EditorClassStyle {
-                font_family: ".SystemUIFont".into(),
-                font_size: px(14.),
+                font_family: "Menlo".into(),
+                font_size: px(13.),
                 border_radius: None,
                 margin: Edges::all(Pixels::ZERO),
                 padding: Edges::all(Pixels::ZERO),
@@ -304,6 +304,15 @@ fn build_highlight_theme(
             "--api-editor-background",
             required(tokens, "--api-surface-lowest"),
         )),
+        "editor.gutter.background": color_hex(optional(
+            tokens,
+            "--api-editor-gutter-background",
+            optional(
+                tokens,
+                "--api-editor-background",
+                required(tokens, "--api-surface-lowest"),
+            ),
+        )),
         "editor.foreground": color_hex(optional(
             tokens,
             "--api-editor-foreground",
@@ -374,6 +383,7 @@ fn build_highlight_theme(
     theme.name = name.to_owned();
     theme.appearance = mode;
     theme.style.editor_background = overrides.editor_background;
+    theme.style.editor_gutter_background = overrides.editor_gutter_background;
     theme.style.editor_foreground = overrides.editor_foreground;
     theme.style.editor_active_line = overrides.editor_active_line;
     theme.style.editor_line_number = overrides.editor_line_number;

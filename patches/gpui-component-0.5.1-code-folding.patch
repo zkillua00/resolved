@@ -1,8 +1,9 @@
 diff --git a/src/highlighter/highlighter.rs b/src/highlighter/highlighter.rs
---- a/src/highlighter/highlighter.rs	2026-08-26 22:35:32
-+++ b/src/highlighter/highlighter.rs	2026-08-27 00:01:17
-@@ -628,6 +628,66 @@
- 
+index 1df549c..0e86be7 100644
+--- a/src/highlighter/highlighter.rs
++++ b/src/highlighter/highlighter.rs
+@@ -628,6 +628,66 @@ impl SyntaxHighlighter {
+
          styles
      }
 +
@@ -66,57 +67,71 @@ diff --git a/src/highlighter/highlighter.rs b/src/highlighter/highlighter.rs
 +        collect_fold_nodes(child, regions);
 +    }
  }
- 
+
  /// To merge intersection ranges, let the subsequent range cover
+diff --git a/src/highlighter/registry.rs b/src/highlighter/registry.rs
+index 3187f7c..fe50a64 100644
+--- a/src/highlighter/registry.rs
++++ b/src/highlighter/registry.rs
+@@ -413,6 +413,8 @@ impl StatusColors {
+ pub struct HighlightThemeStyle {
+     #[serde(rename = "editor.background")]
+     pub editor_background: Option<Hsla>,
++    #[serde(rename = "editor.gutter.background")]
++    pub editor_gutter_background: Option<Hsla>,
+     #[serde(rename = "editor.foreground")]
+     pub editor_foreground: Option<Hsla>,
+     #[serde(rename = "editor.active_line.background")]
 diff --git a/src/input/element.rs b/src/input/element.rs
---- a/src/input/element.rs	2026-08-26 22:35:32
-+++ b/src/input/element.rs	2026-08-27 00:01:17
-@@ -14,11 +14,21 @@
+index 08c33f7..cdd2c2a 100644
+--- a/src/input/element.rs
++++ b/src/input/element.rs
+@@ -14,11 +14,17 @@ use crate::{
      input::{RopeExt as _, blink_cursor::CURSOR_WIDTH, text_wrapper::LineLayout},
  };
- 
+
 -use super::{InputState, LastLayout, mode::InputMode};
-+use super::{mode::InputMode, FoldMarker, InputState, LastLayout};
- 
++use super::{FoldMarker, InputState, LastLayout, mode::InputMode};
+
  const BOTTOM_MARGIN_ROWS: usize = 3;
  pub(super) const RIGHT_MARGIN: Pixels = px(10.);
  pub(super) const LINE_NUMBER_RIGHT_MARGIN: Pixels = px(10.);
-+/// Width of the fold area reserved at the right edge of the gutter, between
-+/// the line numbers and the code. Mirrors Zed, which reserves `right_padding =
-+/// ch_width * 4` there when fold indicators are shown (`gutter_dimensions`,
-+/// `crates/editor/src/editor.rs`), at a code-editor font size that is ~4 chars.
-+pub(super) const FOLD_AREA_WIDTH: Pixels = px(28.);
-+/// The fold chevron is a square scaled to this fraction of the line height.
-+/// Zed draws the crease indicator as a small Disclosure chevron (ChevronRight/
-+/// ChevronDown at `IconSize::Small`), whose glyph occupies a small part of the
-+/// row; 0.4x keeps ours visually comparable rather than filling the line.
-+const FOLD_CHEVRON_HEIGHT_RATIO: f32 = 0.4;
- 
++/// Zed's small Disclosure icon has a wide, shallow stroke rather than a square
++/// `V`. Keep the glyph proportional to the editor line height so it remains
++/// crisp with custom font sizes while matching that silhouette.
++const FOLD_CHEVRON_WIDTH_RATIO: f32 = 0.35;
++const FOLD_CHEVRON_HEIGHT_RATIO: f32 = 0.2;
++const FOLD_HOVER_BUTTON_RATIO: f32 = 1.2;
+
  /// Overlay application-owned semantic styles in a stable order.
  ///
-@@ -156,6 +166,10 @@
+@@ -156,6 +162,12 @@ impl TextElement {
          let mut offset_y = px(0.);
          for (ix, wrap_line) in text_wrapper.lines.iter().enumerate() {
              let row = ix;
 +            // Fold-hidden rows occupy no display space and never hold the caret.
 +            if state.fold_is_hidden(ix) {
++                // Hidden rows still occupy bytes in the document.
++                prev_lines_offset += wrap_line.len() + 1;
 +                continue;
 +            }
              let line_origin = point(px(0.), offset_y);
- 
+
              // break loop if all cursor positions are found
-@@ -320,6 +334,10 @@
+@@ -320,6 +332,12 @@ impl TextElement {
          let mut line_corners = vec![];
- 
+
          for line in lines.iter() {
-+            // Fold placeholders occupy no display space and no bytes.
++            // Fold placeholders occupy no display space, but retain their
++            // natural byte extent so following highlights remain aligned.
 +            if line.wrapped_lines.is_empty() {
++                prev_lines_offset += line.len() + 1;
 +                continue;
 +            }
              let line_size = line.size(line_height);
              let line_wrap_width = line_size.width;
- 
-@@ -546,6 +564,10 @@
+
+@@ -546,6 +564,10 @@ impl TextElement {
          let mut visible_range = 0..total_lines;
          let mut line_bottom = px(0.);
          for (ix, line) in state.text_wrapper.lines.iter().enumerate() {
@@ -126,18 +141,46 @@ diff --git a/src/input/element.rs b/src/input/element.rs
 +            }
              let wrapped_height = line.height(line_height);
              line_bottom += wrapped_height;
- 
-@@ -594,7 +616,8 @@
+
+@@ -570,7 +592,7 @@ impl TextElement {
+         font_size: Pixels,
+         style: &TextStyle,
+         window: &mut Window,
+-    ) -> (Pixels, usize) {
++    ) -> (Pixels, usize, Pixels) {
+         let total_lines = text.lines_len();
+         let line_number_len = match total_lines {
+             0..=9999 => 5,
+@@ -579,7 +601,7 @@ impl TextElement {
+             _ => 8,
+         };
+
+-        let line_number_width = if state.mode.line_number() {
++        let (line_number_width, fold_area_width) = if state.mode.line_number() {
+             let empty_line_number = window.text_system().shape_line(
+                 "+".repeat(line_number_len).into(),
+                 font_size,
+@@ -594,12 +616,16 @@ impl TextElement {
                  None,
              );
- 
+
 -            empty_line_number.width + px(6.) + LINE_NUMBER_RIGHT_MARGIN
-+            // The trailing fold area (chevrons) is reserved past the numbers.
-+            empty_line_number.width + px(6.) + FOLD_AREA_WIDTH
++            // Zed reserves four `ch` units for fold controls. The five shaped
++            // number cells represent its one-cell left pad plus four sticky
++            // line-number digits, so only the four-cell fold lane is appended.
++            let fold_area_width = empty_line_number.width / line_number_len as f32 * 4.;
++            (empty_line_number.width + fold_area_width, fold_area_width)
          } else {
-             px(0.)
+-            px(0.)
++            (px(0.), px(0.))
          };
-@@ -736,14 +759,20 @@
+
+-        (line_number_width, line_number_len)
++        (line_number_width, line_number_len, fold_area_width)
+     }
+
+     /// Compute inline completion ghost lines for rendering.
+@@ -736,14 +762,20 @@ impl TextElement {
          let mut lines = vec![];
          let mut offset = 0;
          for (ix, line) in visible_text.split("\n").enumerate() {
@@ -147,21 +190,21 @@ diff --git a/src/input/element.rs b/src/input/element.rs
 -                .get(visible_range.start + ix)
 +                .get(natural_row)
                  .expect("line should exists in text_wrapper");
- 
+
 -            debug_assert_eq!(line_item.len(), line.len());
 -
              let mut line_layout = LineLayout::new();
 +            if state.fold_is_hidden(natural_row) {
-+                // Fold placeholder: keeps the dense row mapping intact while
-+                // occupying no display space.
-+                lines.push(line_layout);
++                // Keep the natural row and byte extent without visual height.
++                lines.push(LineLayout::hidden(line.len()));
++                offset += line.len() + 1;
 +                continue;
 +            }
 +
              let mut wrapped_lines = SmallVec::with_capacity(1);
- 
+
              for range in &line_item.wrapped_lines {
-@@ -805,11 +834,16 @@
+@@ -805,10 +837,11 @@ impl TextElement {
          } = &state.mode
          {
              if let Some(highlighter) = highlighter.borrow().as_ref() {
@@ -172,31 +215,71 @@ diff --git a/src/input/element.rs b/src/input/element.rs
                      .take(visible_range.len())
 +                    .enumerate()
                  {
-+                    if state.fold_is_hidden(visible_range.start + line_ix) {
-+                        // Hidden rows contribute no painted bytes.
-+                        continue;
-+                    }
                      let line_len = if is_multi_line {
                          // +1 for `\n`
-                         line.len() + 1
-@@ -1048,6 +1082,7 @@
+@@ -818,8 +851,10 @@ impl TextElement {
+                     };
+
+                     let range = offset..offset + line_len;
+-                    let line_styles = highlighter.styles(&range, &cx.theme().highlight_theme);
+-                    styles = gpui::combine_highlights(styles, line_styles).collect();
++                    if !state.fold_is_hidden(visible_range.start + line_ix) {
++                        let line_styles = highlighter.styles(&range, &cx.theme().highlight_theme);
++                        styles = gpui::combine_highlights(styles, line_styles).collect();
++                    }
+
+                     offset = range.end;
+                 }
+@@ -1013,6 +1048,12 @@ impl Element for TextElement {
+
+         let mut bounds = bounds;
+
++        let editor_foreground = cx
++            .theme()
++            .highlight_theme
++            .style
++            .editor_foreground
++            .unwrap_or(cx.theme().foreground);
+         let (display_text, text_color) = if is_empty {
+             (
+                 &Rope::from(placeholder.as_str()),
+@@ -1024,13 +1065,13 @@ impl Element for TextElement {
+                 cx.theme().foreground,
+             )
+         } else {
+-            (&text, cx.theme().foreground)
++            (&text, editor_foreground)
+         };
+
+         let text_style = window.text_style();
+
+         // Calculate the width of the line numbers
+-        let (line_number_width, line_number_len) =
++        let (line_number_width, line_number_len, fold_area_width) =
+             Self::layout_line_numbers(&state, &text, text_size, &text_style, window);
+
+         let wrap_width = if multi_line && state.soft_wrap {
+@@ -1046,8 +1087,10 @@ impl Element for TextElement {
+             line_height,
+             wrap_width,
              line_number_width,
++            fold_area_width,
              lines: Rc::new(vec![]),
              cursor_bounds: None,
 +            fold_markers: Vec::new(),
          };
- 
+
          let run = TextRun {
-@@ -1156,6 +1191,45 @@
+@@ -1156,6 +1199,63 @@ impl Element for TextElement {
          }
          last_layout.lines = Rc::new(lines);
- 
+
 +        // Build fold gutter markers (chevrons) for the visible fold headers.
 +        last_layout.fold_markers = if state.mode.line_number() && !is_empty {
 +            let headers = state.visible_fold_headers();
 +            let mut markers = Vec::new();
 +            if !headers.is_empty() {
-+                let fold_area_start = last_layout.line_number_width - FOLD_AREA_WIDTH;
++                let fold_area_start = last_layout.line_number_width - last_layout.fold_area_width;
 +                let mut offset_y = last_layout.visible_top;
 +                let mut row = last_layout.visible_range.start;
 +                for line_layout in last_layout.lines.iter() {
@@ -206,15 +289,33 @@ diff --git a/src/input/element.rs b/src/input/element.rs
 +                            .iter()
 +                            .any(|(start, folded)| *start == row && *folded);
 +                        let row_height = line_layout.size(line_height).height;
-+                        let chevron_size =
-+                            (line_height * FOLD_CHEVRON_HEIGHT_RATIO).min(row_height);
-+                        let left = fold_area_start + (FOLD_AREA_WIDTH - chevron_size).half();
-+                        let top = offset_y + (row_height - chevron_size).half();
++                        let (chevron_width, chevron_height) = if folded {
++                            (
++                                line_height * FOLD_CHEVRON_HEIGHT_RATIO,
++                                line_height * FOLD_CHEVRON_WIDTH_RATIO,
++                            )
++                        } else {
++                            (
++                                line_height * FOLD_CHEVRON_WIDTH_RATIO,
++                                line_height * FOLD_CHEVRON_HEIGHT_RATIO,
++                            )
++                        };
++                        let chevron_height = chevron_height.min(row_height);
++                        let left =
++                            fold_area_start + (last_layout.fold_area_width - chevron_width).half();
++                        let top = offset_y + (row_height - chevron_height).half();
 +                        markers.push(FoldMarker {
 +                            start_row: row,
++                            hit_bounds: Bounds::from_corners(
++                                point(fold_area_start, offset_y),
++                                point(
++                                    fold_area_start + last_layout.fold_area_width,
++                                    offset_y + row_height,
++                                ),
++                            ),
 +                            chevron_bounds: Bounds::from_corners(
 +                                point(left, top),
-+                                point(left + chevron_size, top + chevron_size),
++                                point(left + chevron_width, top + chevron_height),
 +                            ),
 +                            folded,
 +                        });
@@ -233,10 +334,10 @@ diff --git a/src/input/element.rs b/src/input/element.rs
          let (ghost_first_line, ghost_lines) = Self::layout_inline_completion(
              state,
              &last_layout.visible_range,
-@@ -1166,7 +1240,15 @@
+@@ -1166,7 +1266,15 @@ impl Element for TextElement {
          let ghost_line_count = ghost_lines.len();
          let ghost_lines_height = ghost_line_count as f32 * line_height;
- 
+
 -        let total_wrapped_lines = state.text_wrapper.len();
 +        let total_wrapped_lines = state.text_wrapper.len()
 +            - state
@@ -250,7 +351,35 @@ diff --git a/src/input/element.rs b/src/input/element.rs
          let empty_bottom_height = if state.mode.is_code_editor() {
              bounds
                  .size
-@@ -1251,6 +1333,11 @@
+@@ -1234,7 +1342,12 @@ impl Element for TextElement {
+             let other_line_runs = vec![TextRun {
+                 len: line_number_len,
+                 font: style.font(),
+-                color: cx.theme().muted_foreground,
++                color: cx
++                    .theme()
++                    .highlight_theme
++                    .style
++                    .editor_line_number
++                    .unwrap_or(cx.theme().muted_foreground),
+                 background_color: None,
+                 underline: None,
+                 strikethrough: None,
+@@ -1242,7 +1355,12 @@ impl Element for TextElement {
+             let current_line_runs = vec![TextRun {
+                 len: line_number_len,
+                 font: style.font(),
+-                color: cx.theme().foreground,
++                color: cx
++                    .theme()
++                    .highlight_theme
++                    .style
++                    .editor_active_line_number
++                    .unwrap_or(editor_foreground),
+                 background_color: None,
+                 underline: None,
+                 strikethrough: None,
+@@ -1251,6 +1369,11 @@ impl Element for TextElement {
              // build line numbers
              for (ix, line) in last_layout.lines.iter().enumerate() {
                  let ix = last_layout.visible_range.start + ix;
@@ -260,9 +389,18 @@ diff --git a/src/input/element.rs b/src/input/element.rs
 +                    continue;
 +                }
                  let line_no = format!("{:>width$}", ix + 1, width = line_number_len).into();
- 
+
                  let runs = if current_row == Some(ix) {
-@@ -1476,7 +1563,7 @@
+@@ -1377,7 +1500,7 @@ impl Element for TextElement {
+                 let p = point(input_bounds.origin.x, origin.y + offset_y);
+                 let height = line_height * lines.len() as f32;
+                 // Paint the current line background
+-                if is_active {
++                if is_active && selected_range.is_empty() {
+                     if let Some(bg_color) = active_line_color {
+                         window.paint_quad(fill(
+                             Bounds::new(p, size(bounds.size.width, height)),
+@@ -1476,11 +1599,32 @@ impl Element for TextElement {
                  Bounds {
                      origin: input_bounds.origin,
                      size: size(
@@ -271,41 +409,103 @@ diff --git a/src/input/element.rs b/src/input/element.rs
                          input_bounds.size.height + prepaint.ghost_lines_height,
                      ),
                  },
-@@ -1543,6 +1630,31 @@
- 
-                     // Paint first line completion text
-                     _ = first_line.paint(p, line_height, window, cx);
+-                cx.theme().editor_background(),
++                cx.theme()
++                    .highlight_theme
++                    .style
++                    .editor_gutter_background
++                    .unwrap_or_else(|| cx.theme().editor_background()),
++            ));
++
++            // Give the gutter the same bounded sidebar treatment as Zed. The
++            // low-opacity theme border remains visible without becoming a
++            // bright rule in either light or dark custom themes.
++            window.paint_quad(fill(
++                Bounds::new(
++                    point(
++                        input_bounds.origin.x + prepaint.last_layout.line_number_width - px(1.),
++                        input_bounds.origin.y,
++                    ),
++                    size(
++                        px(1.),
++                        input_bounds.size.height + prepaint.ghost_lines_height,
++                    ),
++                ),
++                cx.theme().sidebar_border.opacity(0.55),
+             ));
+
+             // Each item is the normal lines.
+@@ -1492,7 +1636,7 @@ impl Element for TextElement {
+
+                 let height = line_height * lines.len() as f32;
+                 // paint active line number background
+-                if is_active {
++                if is_active && selected_range.is_empty() {
+                     if let Some(bg_color) = active_line_color {
+                         window.paint_quad(fill(
+                             Bounds::new(p, size(prepaint.last_layout.line_number_width, height)),
+@@ -1547,6 +1691,56 @@ impl Element for TextElement {
+             }
+         }
+
++        // Paint fold chevrons in the gutter as Zed-style Disclosure strokes.
++        let fold_markers = prepaint.last_layout.fold_markers.clone();
++        if !fold_markers.is_empty() {
++            let chevron_color = cx
++                .theme()
++                .highlight_theme
++                .style
++                .editor_line_number
++                .unwrap_or(cx.theme().muted_foreground);
++            let mouse_position = window.mouse_position();
++            for marker in &fold_markers {
++                let hit = &marker.chevron_bounds;
++                let origin = input_bounds.origin + point(hit.left(), hit.top());
++                let width = hit.size.width;
++                let height = hit.size.height;
++                let absolute_hit_bounds = Bounds::new(
++                    input_bounds.origin + marker.hit_bounds.origin,
++                    marker.hit_bounds.size,
++                );
++                let hovered = absolute_hit_bounds.contains(&mouse_position);
++                if hovered {
++                    let button_size = line_height * FOLD_HOVER_BUTTON_RATIO;
++                    let button_bounds = Bounds::new(
++                        point(
++                            absolute_hit_bounds.center().x - button_size.half(),
++                            absolute_hit_bounds.center().y - button_size.half(),
++                        ),
++                        size(button_size, button_size),
++                    );
++                    window.paint_quad(
++                        fill(button_bounds, cx.theme().secondary_hover)
++                            .corner_radii(Corners::all(px(4.))),
++                    );
++                }
++                let mut builder = gpui::PathBuilder::stroke(px(1.));
++                if marker.folded {
++                    builder.move_to(origin);
++                    builder.line_to(origin + point(width, height.half()));
++                    builder.line_to(origin + point(px(0.), height));
++                } else {
++                    builder.move_to(origin);
++                    builder.line_to(origin + point(width.half(), height));
++                    builder.line_to(origin + point(width, px(0.)));
++                }
++                if let Ok(path) = builder.build() {
++                    window.paint_path(path, chevron_color);
 +                }
 +            }
 +        }
 +
-+        // Paint fold chevrons in the gutter (Zed-style Disclosure chevrons:
-+        // a stroked ❯ when folded, rotated 90° to ⌄ when expanded).
-+        let fold_markers = prepaint.last_layout.fold_markers.clone();
-+        if !fold_markers.is_empty() {
-+            let chevron_color = cx.theme().muted_foreground.opacity(0.9);
-+            for marker in &fold_markers {
-+                let hit = &marker.chevron_bounds;
-+                let origin = input_bounds.origin + point(hit.left(), hit.top());
-+                let side = hit.size.height;
-+                let mut builder = gpui::PathBuilder::stroke(px(1.25));
-+                if marker.folded {
-+                    builder.move_to(origin);
-+                    builder.line_to(origin + point(side, side.half()));
-+                    builder.line_to(origin + point(px(0.), side));
-+                } else {
-+                    builder.move_to(origin);
-+                    builder.line_to(origin + point(side.half(), side));
-+                    builder.line_to(origin + point(side, px(0.)));
-+                }
-+                if let Ok(path) = builder.build() {
-+                    window.paint_path(path, chevron_color);
-                 }
-             }
-         }
+         self.paint_mouse_listeners(window, cx);
+     }
+ }
 diff --git a/src/input/folding.rs b/src/input/folding.rs
---- a/src/input/folding.rs	1970-01-01 04:00:00
-+++ b/src/input/folding.rs	2026-08-27 00:01:17
+new file mode 100644
+index 0000000..61d9e68
+--- /dev/null
++++ b/src/input/folding.rs
 @@ -0,0 +1,262 @@
 +//! Code folding support for the code-editor input.
 +//!
@@ -570,9 +770,10 @@ diff --git a/src/input/folding.rs b/src/input/folding.rs
 +    }
 +}
 diff --git a/src/input/input.rs b/src/input/input.rs
---- a/src/input/input.rs	2026-08-26 22:35:32
-+++ b/src/input/input.rs	2026-08-27 00:01:17
-@@ -316,6 +316,15 @@
+index bad7a2b..b346ec0 100644
+--- a/src/input/input.rs
++++ b/src/input/input.rs
+@@ -316,6 +316,15 @@ impl RenderOnce for Input {
                      .on_action(
                          window.listener_for(&self.state, InputState::on_action_go_to_definition),
                      )
@@ -589,9 +790,10 @@ diff --git a/src/input/input.rs b/src/input/input.rs
              .on_action(window.listener_for(&self.state, InputState::select_all))
              .on_action(window.listener_for(&self.state, InputState::select_to_start_of_line))
 diff --git a/src/input/mod.rs b/src/input/mod.rs
---- a/src/input/mod.rs	2026-08-26 22:35:32
-+++ b/src/input/mod.rs	2026-08-27 00:01:17
-@@ -3,6 +3,7 @@
+index 18c4292..8f9e89c 100644
+--- a/src/input/mod.rs
++++ b/src/input/mod.rs
+@@ -3,6 +3,7 @@ mod change;
  mod clear_button;
  mod cursor;
  mod element;
@@ -600,9 +802,10 @@ diff --git a/src/input/mod.rs b/src/input/mod.rs
  mod input;
  mod lsp;
 diff --git a/src/input/movement.rs b/src/input/movement.rs
---- a/src/input/movement.rs	2026-08-26 22:35:32
-+++ b/src/input/movement.rs	2026-08-27 00:01:17
-@@ -45,7 +45,9 @@
+index a63549d..87d1e58 100644
+--- a/src/input/movement.rs
++++ b/src/input/movement.rs
+@@ -45,7 +45,9 @@ impl InputState {
          direction: Option<MoveDirection>,
          cx: &mut Context<Self>,
      ) {
@@ -614,9 +817,10 @@ diff --git a/src/input/movement.rs b/src/input/movement.rs
          self.scroll_to(offset, direction, cx);
          self.pause_blink_cursor(cx);
 diff --git a/src/input/state.rs b/src/input/state.rs
---- a/src/input/state.rs	2026-08-26 22:35:32
-+++ b/src/input/state.rs	2026-08-27 00:01:17
-@@ -13,6 +13,7 @@
+index b6938c8..9874998 100644
+--- a/src/input/state.rs
++++ b/src/input/state.rs
+@@ -13,14 +13,21 @@ use gpui::{
  };
  use ropey::{Rope, RopeSlice};
  use serde::Deserialize;
@@ -624,18 +828,26 @@ diff --git a/src/input/state.rs b/src/input/state.rs
  use std::ops::Range;
  use std::rc::Rc;
  use sum_tree::Bias;
-@@ -20,6 +21,7 @@
- 
+ use unicode_segmentation::*;
+
  use super::{
-     blink_cursor::BlinkCursor, change::Change, element::TextElement,
+-    blink_cursor::BlinkCursor, change::Change, element::TextElement,
+-    indent::previous_tab_stop_offset, mask_pattern::MaskPattern, mode::InputMode, number_input,
++    blink_cursor::BlinkCursor,
++    change::Change,
++    element::TextElement,
 +    folding::{self, FoldRegion},
-     indent::previous_tab_stop_offset, mask_pattern::MaskPattern, mode::InputMode, number_input,
++    indent::previous_tab_stop_offset,
++    mask_pattern::MaskPattern,
++    mode::InputMode,
++    number_input,
      text_wrapper::TextWrapper,
  };
-@@ -44,6 +46,22 @@
+ use crate::Size;
+@@ -44,6 +51,22 @@ pub struct Enter {
      pub secondary: bool,
  }
- 
+
 +/// Fold (collapse) every region at or below the given outline depth.
 +#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 +#[action(namespace = input, no_json)]
@@ -655,7 +867,7 @@ diff --git a/src/input/state.rs b/src/input/state.rs
  actions!(
      input,
      [
-@@ -88,6 +106,11 @@
+@@ -88,6 +111,11 @@ actions!(
          ToggleCodeActions,
          Search,
          GoToDefinition,
@@ -666,8 +878,8 @@ diff --git a/src/input/state.rs b/src/input/state.rs
 +        UnfoldAll,
      ]
  );
- 
-@@ -218,12 +241,55 @@
+
+@@ -218,12 +246,55 @@ pub(crate) fn init(cx: &mut App) {
          KeyBinding::new("cmd-f", Search, Some(CONTEXT)),
          #[cfg(not(target_os = "macos"))]
          KeyBinding::new("ctrl-f", Search, Some(CONTEXT)),
@@ -694,11 +906,11 @@ diff --git a/src/input/state.rs b/src/input/state.rs
 +        KeyBinding::new("ctrl-alt-]", Unfold, Some(CONTEXT)),
      ]);
 +    init_fold_level_bindings(cx);
- 
+
      search::init(cx);
      number_input::init(cx);
  }
- 
+
 +/// Bind the per-level fold/unfold chords (⌘K ⌘1…9, ⌘K ⌘⇧1…9) — generated
 +/// here to keep the main binding table readable.
 +fn init_fold_level_bindings(cx: &mut App) {
@@ -723,33 +935,37 @@ diff --git a/src/input/state.rs b/src/input/state.rs
  #[derive(Copy, Clone, Eq, PartialEq)]
  enum WordCharacterKind {
      Whitespace,
-@@ -372,8 +438,22 @@
+@@ -370,8 +441,26 @@ pub(super) struct LastLayout {
+     pub(super) wrap_width: Option<Pixels>,
+     /// The line number area width of text layout, if not line number, this will be 0px.
      pub(super) line_number_width: Pixels,
++    /// Width of the disclosure-control lane at the right edge of the gutter.
++    pub(super) fold_area_width: Pixels,
      /// The cursor position (top, left) in pixels.
      pub(super) cursor_bounds: Option<Bounds<Pixels>>,
 +    /// Fold chevrons drawn in the gutter, with their hit areas in text-local
 +    /// pixels (origin = text bounds origin).
 +    pub(super) fold_markers: Vec<FoldMarker>,
- }
- 
++}
++
 +/// A fold chevron rendered in the line-number gutter.
 +#[derive(Clone)]
 +pub(super) struct FoldMarker {
 +    /// The natural row of the fold header.
 +    pub start_row: usize,
-+    /// Hit area of the chevron, relative to the text bounds origin.
++    /// Full disclosure hit area, relative to the text bounds origin.
++    pub hit_bounds: Bounds<Pixels>,
++    /// Painted chevron bounds, relative to the text bounds origin.
 +    pub chevron_bounds: Bounds<Pixels>,
 +    /// Whether the region is currently collapsed (chevron direction).
 +    pub folded: bool,
-+}
-+
+ }
+
  impl LastLayout {
-     /// Get the line layout for the given row (0-based).
-     ///
-@@ -389,10 +469,39 @@
+@@ -389,10 +478,39 @@ impl LastLayout {
      }
  }
- 
+
 +/// Fold bookkeeping for a code editor.
 +///
 +/// `regions` holds every foldable range of the current text (outer-first);
@@ -786,7 +1002,7 @@ diff --git a/src/input/state.rs b/src/input/state.rs
      pub(super) text: Rope,
      pub(super) text_wrapper: TextWrapper,
      pub(super) history: History<Change>,
-@@ -523,6 +632,8 @@
+@@ -523,6 +641,8 @@ impl InputState {
              pattern: None,
              validate: None,
              mode: InputMode::default(),
@@ -795,18 +1011,18 @@ diff --git a/src/input/state.rs b/src/input/state.rs
              last_layout: None,
              last_bounds: None,
              semantic_highlights: Vec::new(),
-@@ -665,6 +776,7 @@
+@@ -665,6 +785,7 @@ impl InputState {
              _ => false,
          };
          self._pending_update |= language_changed;
 +        self.folds.dirty |= language_changed;
          cx.notify();
      }
- 
-@@ -1414,6 +1526,335 @@
+
+@@ -1414,6 +1535,335 @@ impl InputState {
          cx.propagate();
      }
- 
+
 +    // ------------------------------------------------------------------
 +    // Code folding
 +    // ------------------------------------------------------------------
@@ -1092,7 +1308,7 @@ diff --git a/src/input/state.rs b/src/input/state.rs
 +            .fold_markers
 +            .iter()
 +            .find(|marker| {
-+                let hit = &marker.chevron_bounds;
++                let hit = &marker.hit_bounds;
 +                pos.x >= hit.left()
 +                    && pos.x < hit.right()
 +                    && pos.y >= hit.top()
@@ -1139,10 +1355,10 @@ diff --git a/src/input/state.rs b/src/input/state.rs
      pub(super) fn on_mouse_down(
          &mut self,
          event: &MouseDownEvent,
-@@ -1423,6 +1864,11 @@
+@@ -1423,6 +1873,11 @@ impl InputState {
          // Clear inline completion on any mouse interaction
          self.clear_inline_completion(cx);
- 
+
 +        // A click on a fold chevron toggles the region without moving the caret.
 +        if self.handle_fold_gutter_click(event, cx) {
 +            return;
@@ -1151,7 +1367,7 @@ diff --git a/src/input/state.rs b/src/input/state.rs
          // If there have IME marked range and is empty (Means pressed Esc to abort IME typing)
          // Clear the marked range.
          if let Some(ime_marked_range) = &self.ime_marked_range {
-@@ -1476,6 +1922,9 @@
+@@ -1476,6 +1931,9 @@ impl InputState {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
@@ -1161,7 +1377,7 @@ diff --git a/src/input/state.rs b/src/input/state.rs
          // Show diagnostic popover on mouse move
          let offset = self.index_for_mouse_position(event.position);
          self.handle_mouse_move(offset, event, window, cx);
-@@ -1759,6 +2208,11 @@
+@@ -1759,6 +2217,11 @@ impl InputState {
              .skip(last_layout.visible_range.start)
              .enumerate()
          {
@@ -1172,8 +1388,8 @@ diff --git a/src/input/state.rs b/src/input/state.rs
 +            }
              let line_origin = self.line_origin_with_y_offset(&mut y_offset, line, line_height);
              let pos = inner_position - line_origin;
- 
-@@ -2218,6 +2672,7 @@
+
+@@ -2218,6 +2681,7 @@ impl EntityInputHandler for InputState {
              .update(&self.text, &range, &Rope::from(new_text), cx);
          self.mode
              .update_highlighter(&range, &self.text, &new_text, true, cx);
@@ -1181,7 +1397,7 @@ diff --git a/src/input/state.rs b/src/input/state.rs
          self.lsp.update(&self.text, window, cx);
          self.selected_range = (new_offset..new_offset).into();
          self.ime_marked_range.take();
-@@ -2276,6 +2731,7 @@
+@@ -2276,6 +2740,7 @@ impl EntityInputHandler for InputState {
              .update(&self.text, &range, &Rope::from(new_text), cx);
          self.mode
              .update_highlighter(&range, &self.text, &new_text, true, cx);
@@ -1189,10 +1405,10 @@ diff --git a/src/input/state.rs b/src/input/state.rs
          self.lsp.update(&self.text, window, cx);
          if new_text.is_empty() {
              // Cancel selection, when cancel IME input.
-@@ -2321,6 +2777,11 @@
+@@ -2321,6 +2786,11 @@ impl EntityInputHandler for InputState {
                  break;
              }
- 
+
 +            // Fold placeholders occupy no bytes and no height.
 +            if line.wrapped_lines.is_empty() {
 +                continue;
@@ -1201,15 +1417,37 @@ diff --git a/src/input/state.rs b/src/input/state.rs
              if start_origin.is_none() {
                  if let Some(p) =
                      line.position_for_index(range.start.saturating_sub(index_offset), line_height)
-@@ -2387,6 +2848,11 @@
-                 .update_highlighter(&(0..0), &self.text, "", false, cx);
-             self.lsp.update(&self.text, window, cx);
+@@ -2389,6 +2859,11 @@ impl Render for InputState {
              self._pending_update = false;
-+        }
-+
+         }
+
 +        if self.folds.dirty {
 +            self.recompute_folds();
 +            self.folds.dirty = false;
-         }
- 
++        }
++
          div()
+             .id("input-state")
+             .flex_1()
+diff --git a/src/input/text_wrapper.rs b/src/input/text_wrapper.rs
+index e081b0b..3f1debb 100644
+--- a/src/input/text_wrapper.rs
++++ b/src/input/text_wrapper.rs
+@@ -358,6 +358,17 @@ impl LineLayout {
+         self
+     }
+
++    /// Keep a natural line's byte extent while omitting all of its visual rows.
++    /// Folded interiors still participate in document-offset mapping even
++    /// though they occupy no pixels.
++    pub(crate) fn hidden(len: usize) -> Self {
++        Self {
++            len,
++            longest_width: px(0.),
++            wrapped_lines: SmallVec::new(),
++        }
++    }
++
+     pub(crate) fn set_wrapped_lines(&mut self, wrapped_lines: SmallVec<[ShapedLine; 1]>) {
+         self.len = wrapped_lines.iter().map(|l| l.len).sum();
+         let width = wrapped_lines

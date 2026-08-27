@@ -101,6 +101,7 @@
      * Removing a token restores its semantic surface/foreground fallback.
      */
     --api-editor-background: var(--api-surface-lowest);
+    --api-editor-gutter-background: var(--api-surface-lowest);
     --api-editor-foreground: var(--api-foreground);
     --api-editor-active-line: var(--api-surface-container);
     --api-editor-line-number: #948f9a;
@@ -161,8 +162,8 @@
  * radius retains the framed or unframed shape selected by each editor.
  */
 .editor {
-    font-family: inherit;
-    font-size: 0.875rem;
+    font-family: "Menlo";
+    font-size: 0.8125rem;
     border-radius: auto;
     margin: 0;
     padding: 0;

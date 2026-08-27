@@ -1125,7 +1125,8 @@ mod tests {
             theme.palette.token("--api-warning")
         );
         assert_eq!(theme.classes.app.font_size.as_f32(), 16.);
-        assert_eq!(theme.classes.editor.font_size.as_f32(), 14.);
+        assert_eq!(theme.classes.editor.font_family.as_ref(), "Menlo");
+        assert_eq!(theme.classes.editor.font_size.as_f32(), 13.);
         assert!(theme.classes.button.border_radius.is_none());
         assert!(theme.classes.button.padding.is_none());
         assert_eq!(
