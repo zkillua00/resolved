@@ -10,6 +10,8 @@ use crate::core::{
     AUDIT_READ, ActivityLogEntry, ActivityLogPage, list_audit_activity, list_workspace_activity,
 };
 
+const ACTIVITY_VALUE_PREVIEW_CHARS: usize = 240;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ActivityLogKind {
     Change,
@@ -752,7 +754,8 @@ fn render_activity_entry(entry: &ActivityLogEntry, cx: &mut App) -> AnyElement {
     let diff_rows = entry
         .diffs
         .iter()
-        .map(|diff| render_diff_row(diff, cx))
+        .enumerate()
+        .map(|(index, diff)| render_diff_row(&entry.id, index, diff, cx))
         .collect::<Vec<_>>();
 
     v_flex()
@@ -819,7 +822,12 @@ fn render_activity_entry(entry: &ActivityLogEntry, cx: &mut App) -> AnyElement {
         .into_any_element()
 }
 
-fn render_diff_row(diff: &crate::core::ActivityLogDiff, cx: &mut App) -> AnyElement {
+fn render_diff_row(
+    entry_id: &str,
+    index: usize,
+    diff: &crate::core::ActivityLogDiff,
+    cx: &mut App,
+) -> AnyElement {
     v_flex()
         .w_full()
         .gap_2()
@@ -840,7 +848,15 @@ fn render_diff_row(diff: &crate::core::ActivityLogDiff, cx: &mut App) -> AnyElem
                 .w_full()
                 .items_start()
                 .gap_3()
-                .child(diff_value_card("BEFORE", &diff.from, false, cx))
+                .child(diff_value_card(
+                    "BEFORE",
+                    entry_id,
+                    index,
+                    &diff.field,
+                    &diff.from,
+                    false,
+                    cx,
+                ))
                 .child(
                     div()
                         .flex_shrink_0()
@@ -848,24 +864,79 @@ fn render_diff_row(diff: &crate::core::ActivityLogDiff, cx: &mut App) -> AnyElem
                         .text_color(cx.theme().muted_foreground)
                         .child("→"),
                 )
-                .child(diff_value_card("AFTER", &diff.to, true, cx)),
+                .child(diff_value_card(
+                    "AFTER",
+                    entry_id,
+                    index,
+                    &diff.field,
+                    &diff.to,
+                    true,
+                    cx,
+                )),
         )
         .into_any_element()
 }
 
-fn diff_value_card(label: &str, value: &Value, after: bool, cx: &mut App) -> AnyElement {
-    let text = match value {
+fn activity_value_text(value: &Value) -> String {
+    match value {
         Value::Null => "Not set".to_owned(),
         Value::String(value) if value.is_empty() => "Empty string".to_owned(),
         Value::String(value) => value.clone(),
         _ => serde_json::to_string_pretty(value).unwrap_or_else(|_| "[INVALID VALUE]".to_owned()),
-    };
+    }
+}
+
+fn activity_value_preview(value: &str) -> (String, bool) {
+    let mut preview = String::with_capacity(value.len().min(ACTIVITY_VALUE_PREVIEW_CHARS));
+    let mut characters = 0;
+    let mut separated = false;
+
+    for character in value.chars() {
+        if character.is_whitespace() {
+            separated = !preview.is_empty();
+            continue;
+        }
+        if separated {
+            if characters == ACTIVITY_VALUE_PREVIEW_CHARS {
+                return (format!("{preview}…"), true);
+            }
+            preview.push(' ');
+            characters += 1;
+            separated = false;
+        }
+        if characters == ACTIVITY_VALUE_PREVIEW_CHARS {
+            return (format!("{preview}…"), true);
+        }
+        preview.push(character);
+        characters += 1;
+    }
+
+    (preview, false)
+}
+
+fn diff_value_card(
+    label: &'static str,
+    entry_id: &str,
+    index: usize,
+    field: &str,
+    value: &Value,
+    after: bool,
+    cx: &mut App,
+) -> AnyElement {
+    let text = activity_value_text(value);
+    let (preview, shortened) = activity_value_preview(&text);
     let color = if after {
         cx.theme().success
     } else {
         cx.theme().danger
     };
     let selector = format!("activity-diff-{}", label.to_ascii_lowercase());
+    let element_id = SharedString::from(format!(
+        "activity-diff-value-{entry_id}-{index}-{}",
+        label.to_ascii_lowercase()
+    ));
+    let dialog_title = format!("{} — {label}", field);
+    let dialog_text = text.clone();
     v_flex()
         .debug_selector(move || selector.clone())
         .min_w_0()
@@ -876,12 +947,17 @@ fn diff_value_card(label: &str, value: &Value, after: bool, cx: &mut App) -> Any
                 .text_size(px(10.))
                 .font_semibold()
                 .text_color(color)
-                .child(label.to_owned()),
+                .child(if shortened {
+                    format!("{label} · OPEN FULL VALUE")
+                } else {
+                    format!("{label} · OPEN")
+                }),
         )
         .child(
             div()
+                .id(element_id)
                 .w_full()
-                .min_h(px(38.))
+                .h(px(38.))
                 .px_3()
                 .py_2()
                 .rounded_md()
@@ -890,8 +966,55 @@ fn diff_value_card(label: &str, value: &Value, after: bool, cx: &mut App) -> Any
                 .bg(color.opacity(0.055))
                 .font_family(cx.theme().mono_font_family.clone())
                 .text_sm()
-                .whitespace_normal()
-                .child(text),
+                .whitespace_nowrap()
+                .truncate()
+                .cursor_pointer()
+                .on_click(move |_, window, cx| {
+                    let title = dialog_title.clone();
+                    let value = dialog_text.clone();
+                    window.open_dialog(cx, move |dialog, _, cx| {
+                        let clipboard_value = value.clone();
+                        dialog
+                            .title(title.clone())
+                            .w(px(760.))
+                            .alert()
+                            .button_props(DialogButtonProps::default().ok_text("Close"))
+                            .child(
+                                v_flex()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .id("activity-dialog-value")
+                                            .max_h(px(520.))
+                                            .overflow_y_scroll()
+                                            .p_3()
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(cx.api_outline_variant())
+                                            .bg(cx.api_surface_lowest())
+                                            .font_family(cx.theme().mono_font_family.clone())
+                                            .text_sm()
+                                            .whitespace_normal()
+                                            .child(value.clone()),
+                                    )
+                                    .child(
+                                        h_flex().justify_end().child(
+                                            Button::new("copy-activity-log-value")
+                                                .label("Copy value")
+                                                .outline()
+                                                .on_click(move |_, _, cx| {
+                                                    cx.write_to_clipboard(
+                                                        ClipboardItem::new_string(
+                                                            clipboard_value.clone(),
+                                                        ),
+                                                    );
+                                                }),
+                                        ),
+                                    ),
+                            )
+                    });
+                })
+                .child(preview),
         )
         .into_any_element()
 }
@@ -931,8 +1054,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn activity_value_preview_is_single_line_bounded_and_unicode_safe() {
+        let (preview, shortened) = activity_value_preview("{\n  \"enabled\": true\n}");
+        assert_eq!(preview, "{ \"enabled\": true }");
+        assert!(!shortened);
+
+        let long = "é".repeat(ACTIVITY_VALUE_PREVIEW_CHARS + 1);
+        let (preview, shortened) = activity_value_preview(&long);
+        assert!(shortened);
+        assert_eq!(preview.chars().count(), ACTIVITY_VALUE_PREVIEW_CHARS + 1);
+        assert!(preview.ends_with('…'));
+    }
+
+    #[test]
+    fn activity_value_text_keeps_the_complete_recorded_value() {
+        let value = serde_json::json!({"request": {"url": "https://example.test"}});
+        let text = activity_value_text(&value);
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), value);
+    }
+
     #[gpui::test]
     fn change_log_renders_readable_before_and_after_values(cx: &mut TestAppContext) {
+        let large_value = serde_json::json!({
+            "request": {
+                "body": "x".repeat(20_000),
+                "url": "https://example.test/items"
+            }
+        });
         let (_, cx) = cx.add_window_view(|window, cx| {
             gpui_component::init(cx);
             crate::theme::configure(cx);
@@ -952,7 +1101,7 @@ mod tests {
                     target_name: "Search".to_owned(),
                     diffs: vec![ActivityLogDiff {
                         field: "definition.request.url".to_owned(),
-                        from: Value::String("search?q=test".to_owned()),
+                        from: large_value,
                         to: Value::String("search?q=test123".to_owned()),
                     }],
                     created_at: now,
@@ -965,7 +1114,11 @@ mod tests {
         cx.run_until_parked();
 
         assert!(cx.debug_bounds("activity-log-entry-entry-1").is_some());
-        assert!(cx.debug_bounds("activity-diff-before").is_some());
+        let before = cx.debug_bounds("activity-diff-before").unwrap();
+        assert!(
+            before.size.height < px(80.),
+            "a 20KB recorded value must stay compact in the scrolling feed: {before:?}"
+        );
         assert!(cx.debug_bounds("activity-diff-after").is_some());
     }
 
@@ -1088,7 +1241,7 @@ mod tests {
         }
 
         impl Render for FeedListHarness {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
                 let entries = self.entries.clone();
                 v_flex()
                     .size_full()

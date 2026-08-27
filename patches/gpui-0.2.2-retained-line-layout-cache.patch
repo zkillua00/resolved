@@ -1,0 +1,174 @@
+diff --git a/src/text_system/line_layout.rs b/src/text_system/line_layout.rs
+--- a/src/text_system/line_layout.rs
++++ b/src/text_system/line_layout.rs
+@@ -1,5 +1,5 @@
+ use crate::{FontId, GlyphId, Pixels, PlatformTextSystem, Point, SharedString, Size, point, px};
+-use collections::FxHashMap;
++use collections::{FxHashMap, VecDeque};
+ use parking_lot::{Mutex, RwLock, RwLockUpgradableReadGuard};
+ use smallvec::SmallVec;
+ use std::{
+@@ -392,9 +392,64 @@ impl WrappedLineLayout {
+ pub(crate) struct LineLayoutCache {
+     previous_frame: Mutex<FrameCache>,
+     current_frame: RwLock<FrameCache>,
++    retained: Mutex<RetainedCache>,
+     platform_text_system: Arc<dyn PlatformTextSystem>,
+ }
+
++// Fast scrolling can move a line out of GPUI's two-frame cache and back into
++// view before the gesture ends. Keep a bounded history so those lines reuse
++// their glyph layout instead of reaching CoreText again.
++const RETAINED_LAYOUT_CAPACITY: usize = 2_048;
++
++#[derive(Default)]
++struct RetainedCache {
++    lines: FxHashMap<Arc<CacheKey>, Arc<LineLayout>>,
++    wrapped_lines: FxHashMap<Arc<CacheKey>, Arc<WrappedLineLayout>>,
++    line_order: VecDeque<Arc<CacheKey>>,
++    wrapped_line_order: VecDeque<Arc<CacheKey>>,
++}
++
++impl RetainedCache {
++    fn line(&self, key: &dyn AsCacheKeyRef) -> Option<(Arc<CacheKey>, Arc<LineLayout>)> {
++        self.lines
++            .get_key_value(key)
++            .map(|(key, layout)| (key.clone(), layout.clone()))
++    }
++
++    fn wrapped_line(
++        &self,
++        key: &dyn AsCacheKeyRef,
++    ) -> Option<(Arc<CacheKey>, Arc<WrappedLineLayout>)> {
++        self.wrapped_lines
++            .get_key_value(key)
++            .map(|(key, layout)| (key.clone(), layout.clone()))
++    }
++
++    fn insert_line(&mut self, key: Arc<CacheKey>, layout: Arc<LineLayout>) {
++        if self.lines.insert(key.clone(), layout).is_some() {
++            return;
++        }
++        self.line_order.push_back(key);
++        while self.lines.len() > RETAINED_LAYOUT_CAPACITY {
++            if let Some(key) = self.line_order.pop_front() {
++                self.lines.remove(&key);
++            }
++        }
++    }
++
++    fn insert_wrapped_line(&mut self, key: Arc<CacheKey>, layout: Arc<WrappedLineLayout>) {
++        if self.wrapped_lines.insert(key.clone(), layout).is_some() {
++            return;
++        }
++        self.wrapped_line_order.push_back(key);
++        while self.wrapped_lines.len() > RETAINED_LAYOUT_CAPACITY {
++            if let Some(key) = self.wrapped_line_order.pop_front() {
++                self.wrapped_lines.remove(&key);
++            }
++        }
++    }
++}
++
+ #[derive(Default)]
+ struct FrameCache {
+     lines: FxHashMap<Arc<CacheKey>, Arc<LineLayout>>,
+@@ -414,6 +469,7 @@ impl LineLayoutCache {
+         Self {
+             previous_frame: Mutex::default(),
+             current_frame: RwLock::default(),
++            retained: Mutex::default(),
+             platform_text_system,
+         }
+     }
+@@ -498,6 +554,13 @@ impl LineLayoutCache {
+                 .insert(key.clone(), layout.clone());
+             current_frame.used_wrapped_lines.push(key);
+             layout
++        } else if let Some((key, layout)) = self.retained.lock().wrapped_line(key) {
++            let mut current_frame = RwLockUpgradableReadGuard::upgrade(current_frame);
++            current_frame
++                .wrapped_lines
++                .insert(key.clone(), layout.clone());
++            current_frame.used_wrapped_lines.push(key);
++            layout
+         } else {
+             drop(current_frame);
+             let text = SharedString::from(text);
+@@ -524,7 +587,10 @@ impl LineLayoutCache {
+             current_frame
+                 .wrapped_lines
+                 .insert(key.clone(), layout.clone());
+-            current_frame.used_wrapped_lines.push(key);
++            current_frame.used_wrapped_lines.push(key.clone());
++            self.retained
++                .lock()
++                .insert_wrapped_line(key, layout.clone());
+
+             layout
+         }
+@@ -559,6 +625,10 @@ impl LineLayoutCache {
+             current_frame.lines.insert(key.clone(), layout.clone());
+             current_frame.used_lines.push(key);
+             layout
++        } else if let Some((key, layout)) = self.retained.lock().line(key) {
++            current_frame.lines.insert(key.clone(), layout.clone());
++            current_frame.used_lines.push(key);
++            layout
+         } else {
+             let text = SharedString::from(text);
+             let mut layout = self
+@@ -586,7 +656,8 @@ impl LineLayoutCache {
+             });
+             let layout = Arc::new(layout);
+             current_frame.lines.insert(key.clone(), layout.clone());
+-            current_frame.used_lines.push(key);
++            current_frame.used_lines.push(key.clone());
++            self.retained.lock().insert_line(key, layout.clone());
+             layout
+         }
+     }
+@@ -665,6 +736,43 @@ impl<'a> Borrow<dyn AsCacheKeyRef + 'a> for Arc<CacheKey> {
+     }
+ }
+
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn cache_key(text: String) -> Arc<CacheKey> {
++        Arc::new(CacheKey {
++            text: text.into(),
++            font_size: px(13.),
++            runs: SmallVec::new(),
++            wrap_width: None,
++            force_width: None,
++        })
++    }
++
++    #[test]
++    fn retained_line_cache_is_bounded_and_reuses_recent_layouts() {
++        let mut cache = RetainedCache::default();
++        let first_key = cache_key("line-0".to_owned());
++        let last_key = cache_key(format!("line-{RETAINED_LAYOUT_CAPACITY}"));
++
++        for index in 0..=RETAINED_LAYOUT_CAPACITY {
++            let key = if index == 0 {
++                first_key.clone()
++            } else if index == RETAINED_LAYOUT_CAPACITY {
++                last_key.clone()
++            } else {
++                cache_key(format!("line-{index}"))
++            };
++            cache.insert_line(key, Arc::new(LineLayout::default()));
++        }
++
++        assert_eq!(cache.lines.len(), RETAINED_LAYOUT_CAPACITY);
++        assert!(cache.line(first_key.as_ref()).is_none());
++        assert!(cache.line(last_key.as_ref()).is_some());
++    }
++}
++
+ impl AsCacheKeyRef for CacheKeyRef<'_> {
+     fn as_cache_key_ref(&self) -> CacheKeyRef<'_> {
+         *self
