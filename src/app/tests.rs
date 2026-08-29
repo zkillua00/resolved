@@ -326,8 +326,8 @@ fn body_editor_folds_nested_json_via_keyboard_chords(cx: &mut gpui::TestAppConte
     let regions = cx.update(|_, cx| app.read(cx).body.read(cx).fold_regions(cx));
     assert_eq!(regions, vec![(0, 4, false), (1, 3, false)]);
 
-    // Collapse everything with ⌘K ⌘0 (fold all).
-    cx.simulate_keystrokes("cmd-k cmd-0");
+    // Collapse everything fold-all (secondary-K secondary-0).
+    cx.simulate_keystrokes("secondary-k secondary-0");
     cx.run_until_parked();
     assert!(
         cx.update(|_, cx| app.read(cx).body.read(cx).fold_regions(cx))
@@ -336,8 +336,8 @@ fn body_editor_folds_nested_json_via_keyboard_chords(cx: &mut gpui::TestAppConte
         "⌘K ⌘0 collapses every region"
     );
 
-    // Expand everything with ⌘K ⌘J (unfold all).
-    cx.simulate_keystrokes("cmd-k cmd-j");
+    // Expand everything unfold-all (secondary-K secondary-J).
+    cx.simulate_keystrokes("secondary-k secondary-j");
     cx.run_until_parked();
     assert!(
         cx.update(|_, cx| app.read(cx).body.read(cx).fold_regions(cx))

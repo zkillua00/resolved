@@ -85,7 +85,7 @@ impl Render for ApiTester {
             };
         let upstream_login_page = self
             .upstream_login_open
-            .then(|| self.render_upstream_login_page(cx));
+            .then(|| self.render_upstream_login_page(window, cx));
         let workspace_error = self.visible_workspace_error();
 
         v_flex()
@@ -105,7 +105,7 @@ impl Render for ApiTester {
             .key_context(shortcuts::APP_KEY_CONTEXT)
             .capture_any_mouse_down(cx.listener(Self::cancel_shortcut_recording_on_pointer))
             .capture_key_down(cx.listener(Self::capture_template_key_down))
-            .child(self.render_title_bar(cx))
+            .child(self.render_title_bar(window, cx))
             .when_some(workspace_error, |this, message| {
                 this.child(
                     div()

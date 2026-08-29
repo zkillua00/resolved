@@ -1,8 +1,8 @@
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Seek as _, SeekFrom, Write as _};
-use std::os::fd::AsRawFd as _;
-use std::os::unix::fs::OpenOptionsExt as _;
-use std::path::Path;
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{self, Seek as _, SeekFrom, Write as _},
+    path::Path,
+};
 
 /// Holds an advisory, process-wide lock for the application's SQLite workspace.
 ///
@@ -10,6 +10,9 @@ use std::path::Path;
 /// aggregates by replacement. Restricting the MVP to one process prevents two
 /// stale in-memory snapshots from deleting each other's rows.
 pub struct InstanceGuard {
+    // The open descriptor holds the advisory lock for the guard's lifetime;
+    // kept unnamed so no code path can write through it accidentally. The
+    // byte contents (the owning process id) are diagnostic only.
     _file: File,
 }
 
@@ -22,28 +25,29 @@ impl InstanceGuard {
         {
             fs::create_dir_all(parent)?;
         }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .open(path)?;
 
-        // SAFETY: `file` owns a live descriptor for the duration of the call
-        // and remains owned by `InstanceGuard` until the process releases it.
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if result != 0 {
-            let error = io::Error::last_os_error();
-            return if error.kind() == io::ErrorKind::WouldBlock {
-                Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "Resolved is already running",
-                ))
-            } else {
-                Err(error)
-            };
+        let mut options = OpenOptions::new();
+        options.create(true).truncate(false).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
         }
+        let mut file = options.open(path)?;
+
+        // Lock while the file is still empty, then record the owning process
+        // id. `File::try_lock` places an advisory lock that the OS releases
+        // when this handle closes or the process exits, matching the previous
+        // exclusive `flock` semantics on every platform this crate supports.
+        file.try_lock().map_err(|error| match error {
+            std::fs::TryLockError::WouldBlock => {
+                io::Error::new(io::ErrorKind::AlreadyExists, "Resolved is already running")
+            }
+            std::fs::TryLockError::Error(io_error) => io::Error::new(
+                io_error.kind(),
+                format!("could not lock the Resolved workspace: {io_error}"),
+            ),
+        })?;
 
         file.set_len(0)?;
         file.seek(SeekFrom::Start(0))?;

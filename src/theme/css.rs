@@ -1175,7 +1175,7 @@ mod tests {
             Err(ThemeCssError::MissingSelector(selector)) if selector == ".app"
         ));
 
-        let missing_property = BUILTIN_THEME_CSS.replace("    gap: auto;\n", "");
+        let missing_property = strip_gap_declaration_for_tests(BUILTIN_THEME_CSS);
         assert!(matches!(
             parse_theme_css(&missing_property),
             Err(ThemeCssError::MissingClassProperty { selector, property })
@@ -1445,4 +1445,20 @@ mod tests {
             Err(ThemeCssError::Syntax { line: 1, .. })
         ));
     }
+}
+
+/// Remove the bundled `.button` `gap` declaration regardless of the checkout's
+/// line endings (`git config core.autocrlf` can hand the embedded asset CRLF
+/// lines on Windows); shared by the theme tests.
+#[cfg(test)]
+pub(crate) fn strip_gap_declaration_for_tests(source: &str) -> String {
+    let without_declaration = source
+        .lines()
+        .filter(|line| !line.trim().starts_with("gap: auto;"))
+        .collect::<Vec<_>>();
+    let mut result = without_declaration.join("\n");
+    if source.ends_with('\n') {
+        result.push('\n');
+    }
+    result
 }

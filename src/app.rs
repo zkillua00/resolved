@@ -154,6 +154,7 @@ mod ui_utils;
 mod upstream_connections;
 mod upstream_workspace_actions;
 mod welcome_page;
+mod windows_controls;
 mod workspace_connections;
 mod workspace_panes;
 mod workspace_tab;

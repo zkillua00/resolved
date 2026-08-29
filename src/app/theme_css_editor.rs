@@ -1,7 +1,11 @@
 use super::*;
 
 impl ApiTester {
-    pub(super) fn render_theme_css_title_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_theme_css_title_bar(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let title = self
             .workspace_tabs
             .active_theme_editor_id()
@@ -10,11 +14,12 @@ impl ApiTester {
         h_flex()
             .h(px(APP_TITLE_BAR_HEIGHT))
             .flex_shrink_0()
-            .pl(px(92.))
+            .pl(windows_controls::leading_inset())
             .pr_6()
             .border_b_1()
             .border_color(cx.theme().title_bar_border)
             .bg(cx.theme().title_bar)
+            .justify_between()
             .child(
                 h_flex()
                     .h_full()
@@ -35,6 +40,7 @@ impl ApiTester {
                             .child(title),
                     ),
             )
+            .child(windows_controls::windows_window_controls(window, cx))
             .into_any_element()
     }
 

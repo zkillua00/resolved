@@ -311,7 +311,7 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.update(|_, cx| app.read(cx).environment_editor_is_dirty(cx)));
 
-        cx.simulate_keystrokes("cmd-s");
+        cx.simulate_keystrokes("secondary-s");
 
         let (active_workspace_tab, sidebar_tab, editor_dirty, environment_name) =
             cx.update(|_, cx| {
@@ -387,7 +387,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        cx.simulate_keystrokes("cmd-s");
+        cx.simulate_keystrokes("secondary-s");
 
         let (request_name, request_url) = cx.update(|_, cx| {
             let app = app.read(cx);

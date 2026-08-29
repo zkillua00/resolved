@@ -18,7 +18,7 @@ futures = "0.3"
 gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
 gpui-component = { version = "=0.5.1", features = ["tree-sitter-languages"] }
 gpui-wry = "=0.5.0"
-libc = "0.2"
+libc = { version = "0.2", optional = true }
 lsp-types = "=0.97.0"
 memchr = "2.7"
 reqwest = { version = "=0.13.4", default-features = false, features = [
@@ -62,6 +62,21 @@ zeroize = "=1.9.0"
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "=0.10.0"
 security-framework = { version = "=3.7.0", features = ["OSX_10_15"] }
+libc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_Packaging_Appx",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"
+
+[features]
+default = []
+macos = ["dep:libc"]
 
 [dev-dependencies]
 gpui = { version = "=0.2.2", features = ["test-support"] }

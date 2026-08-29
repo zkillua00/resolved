@@ -144,7 +144,11 @@ impl ApiTester {
             .into_any_element()
     }
 
-    pub(super) fn render_upstream_login_page(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_upstream_login_page(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let busy = self.upstream_login_status.busy();
         let securing = self.upstream_login_status == UpstreamLoginStatus::SecuringSession;
         let status = self.upstream_login_status.label().map(ToOwned::to_owned);
@@ -164,7 +168,7 @@ impl ApiTester {
                 h_flex()
                     .h(px(APP_TITLE_BAR_HEIGHT))
                     .flex_shrink_0()
-                    .pl(px(92.))
+                    .pl(windows_controls::leading_inset())
                     .pr_6()
                     .border_b_1()
                     .border_color(cx.theme().title_bar_border)
@@ -187,19 +191,26 @@ impl ApiTester {
                             ),
                     )
                     .child(
-                        Button::new("close-upstream-login")
-                            .icon(IconName::Close)
-                            .ghost()
-                            .rounded_full()
-                            .disabled(securing)
-                            .tooltip(if securing {
-                                "Please wait while the server is saved"
-                            } else {
-                                "Close"
-                            })
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.close_upstream_login(window, cx);
-                            })),
+                        h_flex()
+                            .h_full()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Button::new("close-upstream-login")
+                                    .icon(IconName::Close)
+                                    .ghost()
+                                    .rounded_full()
+                                    .disabled(securing)
+                                    .tooltip(if securing {
+                                        "Please wait while the server is saved"
+                                    } else {
+                                        "Close"
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.close_upstream_login(window, cx);
+                                    })),
+                            )
+                            .child(windows_controls::windows_window_controls(window, cx))
                     ),
             )
             .child(

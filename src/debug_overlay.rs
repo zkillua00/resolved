@@ -2,7 +2,6 @@ use std::{
     cell::RefCell,
     cmp::Ordering,
     collections::VecDeque,
-    mem::MaybeUninit,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering as AtomicOrdering},
@@ -352,6 +351,8 @@ async fn sample_current_process(
 
 #[cfg(target_os = "macos")]
 fn current_physical_footprint() -> Option<u64> {
+    use std::mem::MaybeUninit;
+
     let mut usage = MaybeUninit::<libc::rusage_info_v2>::uninit();
     // SAFETY: proc_pid_rusage initializes the complete rusage_info_v2 buffer
     // when it returns zero. The buffer is correctly sized and aligned.

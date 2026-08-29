@@ -299,10 +299,27 @@ pub fn normalize_binding(source: &str) -> Result<String, ShortcutValidationError
                     keystroke: raw.to_owned(),
                 })?;
             validate_keystroke(&keystroke, raw)?;
+            let mut keystroke = keystroke;
+            normalize_keystroke_for_platform(&mut keystroke);
             Ok(keystroke.unparse())
         })
         .collect::<Result<Vec<_>, _>>()
         .map(|strokes| strokes.join(" "))
+}
+
+/// Canonicalize a keystroke's modifier for the running platform.
+///
+/// GPUI parses `cmd-` into the platform modifier on every OS, but typed
+/// keystrokes only produce that modifier on macOS — Windows key events set
+/// Control — and `Keystroke::unparse` spells the platform modifier `win-`
+/// there. Normalizing defaults through the modifier flag (not the authored
+/// string) keeps conflict detection comparing identical spellings and
+/// installs bindings Windows can actually match.
+fn normalize_keystroke_for_platform(keystroke: &mut Keystroke) {
+    if cfg!(target_os = "windows") && keystroke.modifiers.platform {
+        keystroke.modifiers.platform = false;
+        keystroke.modifiers.control = true;
+    }
 }
 
 fn validate_keystroke(keystroke: &Keystroke, source: &str) -> Result<(), ShortcutValidationError> {
@@ -669,10 +686,19 @@ mod tests {
 
     #[test]
     fn normalization_canonicalizes_case_modifier_order_and_chords() {
-        assert_eq!(
-            normalize_binding(" SHIFT-CMD-S   CTRL-TAB ").unwrap(),
-            "cmd-shift-s ctrl-tab"
-        );
+        if cfg!(not(target_os = "windows")) {
+            assert_eq!(
+                normalize_binding(" SHIFT-CMD-S   CTRL-TAB ").unwrap(),
+                "cmd-shift-s ctrl-tab"
+            );
+        } else {
+            // The macOS-authored Command modifier resolves to Control on
+            // Windows so installed bindings match typed keystrokes.
+            assert_eq!(
+                normalize_binding(" SHIFT-CMD-S   CTRL-TAB ").unwrap(),
+                "ctrl-shift-s ctrl-tab"
+            );
+        }
     }
 
     #[test]
@@ -732,10 +758,15 @@ mod tests {
         );
         let error = effective_shortcuts(&settings).unwrap_err();
 
+        let expected_binding = if cfg!(target_os = "windows") {
+            "ctrl-t".to_owned()
+        } else {
+            "cmd-t".to_owned()
+        };
         assert_eq!(
             error.issues,
             vec![ShortcutConfigIssue::Conflict(ShortcutConflict {
-                binding: "cmd-t".to_owned(),
+                binding: expected_binding,
                 first: ShortcutId::NewRequestTab,
                 second: ShortcutId::SaveRequest,
             })]

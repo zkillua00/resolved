@@ -1559,12 +1559,16 @@ pub(in crate::app) fn snippet_context_menu_builder(
 }
 
 impl ApiTester {
-    pub(super) fn render_snippets_title_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_snippets_title_bar(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let dirty = self.snippet_editor_is_dirty(cx);
         h_flex()
             .h(px(APP_TITLE_BAR_HEIGHT))
             .flex_shrink_0()
-            .pl(px(92.))
+            .pl(windows_controls::leading_inset())
             .pr_6()
             .border_b_1()
             .border_color(cx.theme().title_bar_border)
@@ -1594,10 +1598,17 @@ impl ApiTester {
                     ),
             )
             .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Right-click a code editor → Snippets"),
+                h_flex()
+                    .h_full()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Right-click a code editor → Snippets"),
+                    )
+                    .child(windows_controls::windows_window_controls(window, cx))
             )
             .into_any_element()
     }

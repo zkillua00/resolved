@@ -1,9 +1,11 @@
-use std::{borrow::Cow, path::Path};
+use std::borrow::Cow;
 
 use gpui::{
     App, AppContext as _, Application, AssetSource, Bounds, Entity, Menu, MenuItem, SharedString,
-    SystemMenuType, WindowBounds, WindowOptions, px, size,
+    WindowBounds, WindowOptions, px, size,
 };
+#[cfg(target_os = "macos")]
+use gpui::SystemMenuType;
 use gpui_component::{Root, WindowExt as _};
 
 mod app;
@@ -13,6 +15,7 @@ mod core;
 mod debug_overlay;
 mod editor_util;
 mod instance_guard;
+mod platform;
 mod request_dirty;
 mod script_intelligence;
 mod shortcuts;
@@ -35,6 +38,7 @@ use shortcuts::{
 
 struct AppAssets;
 
+#[cfg(target_os = "macos")]
 fn configure_menus(cx: &mut App) {
     cx.set_menus(vec![
         Menu {
@@ -50,6 +54,33 @@ fn configure_menus(cx: &mut App) {
         Menu {
             name: "File".into(),
             items: vec![
+                MenuItem::action("New Request Tab", NewRequestTab),
+                MenuItem::action("Close Active Tab", CloseRequestTab),
+                MenuItem::separator(),
+                MenuItem::action("Save Request", SaveRequest),
+                MenuItem::action("Save Request As…", SaveRequestAs),
+            ],
+        },
+        Menu {
+            name: "Request".into(),
+            items: vec![MenuItem::action(
+                "Send or Cancel Request",
+                SendOrCancelRequest,
+            )],
+        },
+    ]);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configure_menus(cx: &mut App) {
+    // The Services submenu and top-level app menu are macOS concepts; on
+    // Windows these menus surface through gpui-component's AppMenuBar.
+    cx.set_menus(vec![
+        Menu {
+            name: "File".into(),
+            items: vec![
+                MenuItem::action("Settings…", ShowSettings),
+                MenuItem::separator(),
                 MenuItem::action("New Request Tab", NewRequestTab),
                 MenuItem::action("Close Active Tab", CloseRequestTab),
                 MenuItem::separator(),
@@ -153,6 +184,10 @@ impl AssetSource for AppAssets {
             }
             "icons/external-link.svg" => include_bytes!("../assets/icons/external-link.svg"),
             "icons/folder-closed.svg" => include_bytes!("../assets/icons/folder-closed.svg"),
+            "icons/window-close.svg" => include_bytes!("../assets/icons/window-close.svg"),
+            "icons/window-maximize.svg" => include_bytes!("../assets/icons/window-maximize.svg"),
+            "icons/window-minimize.svg" => include_bytes!("../assets/icons/window-minimize.svg"),
+            "icons/window-restore.svg" => include_bytes!("../assets/icons/window-restore.svg"),
             "icons/plus.svg" => include_bytes!("../assets/icons/plus.svg"),
             "icons/replace.svg" => include_bytes!("../assets/icons/replace.svg"),
             "icons/search.svg" => include_bytes!("../assets/icons/search.svg"),
@@ -166,38 +201,29 @@ impl AssetSource for AppAssets {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn containing_app_bundle(executable: &Path) -> Option<&Path> {
-    let macos = executable.parent()?;
-    if macos.file_name()? != "MacOS" {
-        return None;
+/// Append a diagnostic line to the Windows panic log.
+///
+/// The packaged process has no stderr and swallows many webview/OS errors
+/// into `Result`s, so subsystems report here; a `None` from any caller is
+/// usually the only trace of a packaged-only failure. No-op elsewhere.
+pub(crate) fn log_diagnostic(message: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::io::Write as _;
+        let path = DatabaseStore::default_path().with_file_name("api-tester-panic.log");
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(file, "{} {message}", chrono::Local::now().to_rfc3339());
+        }
     }
-    let contents = macos.parent()?;
-    if contents.file_name()? != "Contents" {
-        return None;
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = message;
     }
-    let bundle = contents.parent()?;
-    (bundle.extension()? == "app").then_some(bundle)
-}
-
-#[cfg(target_os = "macos")]
-fn require_app_bundle() -> Result<(), String> {
-    let executable = std::env::current_exe()
-        .map_err(|error| format!("could not resolve the executable path: {error}"))?;
-    containing_app_bundle(&executable).map_or_else(
-        || {
-            Err(
-                "Resolved must run from its macOS application bundle. Use scripts/cargo.sh run."
-                    .to_owned(),
-            )
-        },
-        |_| Ok(()),
-    )
 }
 
 fn main() {
-    #[cfg(target_os = "macos")]
-    if let Err(error) = require_app_bundle() {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if let Err(error) = platform::launch_blocker() {
         eprintln!("{error}");
         std::process::exit(1);
     }
@@ -208,6 +234,26 @@ fn main() {
                 .unwrap_or_else(|_| "api_tester=info".into()),
         )
         .init();
+
+    // A packaged GUI process has no stderr, so a Rust panic in it would die
+    // as an opaque fast-fail in Event Viewer. Route panics to a log file next
+    // to the data directory instead. Windows only; macOS keeps the debugger
+    // workflow (and this build's release profile strips symbols anyway).
+    #[cfg(target_os = "windows")]
+    std::panic::set_hook(Box::new(|info| {
+        use std::io::Write as _;
+        let path = DatabaseStore::default_path()
+            .with_file_name("api-tester-panic.log");
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(
+                file,
+                "{}\n{info}\nbacktrace:\n{}",
+                chrono::Local::now().to_rfc3339(),
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
+        eprintln!("{info}");
+    }));
 
     let lock_path = DatabaseStore::default_path().with_file_name("api-tester.lock");
     let _instance_guard = match InstanceGuard::acquire(&lock_path) {
@@ -293,21 +339,4 @@ fn main() {
 
             cx.activate(true);
         });
-}
-#[cfg(all(test, target_os = "macos"))]
-mod launch_tests {
-    use super::*;
-
-    #[test]
-    fn recognizes_only_executables_inside_macos_app_bundles() {
-        let bundled = Path::new("/tmp/Resolved.app/Contents/MacOS/api-tester");
-        assert_eq!(
-            containing_app_bundle(bundled),
-            Some(Path::new("/tmp/Resolved.app"))
-        );
-        assert!(containing_app_bundle(Path::new("/tmp/target/debug/api-tester")).is_none());
-        assert!(
-            containing_app_bundle(Path::new("/tmp/Resolved/Contents/MacOS/api-tester")).is_none()
-        );
-    }
 }

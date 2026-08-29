@@ -3,7 +3,29 @@ use gpui::{
     div,
 };
 use gpui_wry::WebView as GpuiWebView;
-use wry::{NewWindowResponse, WebViewBuilder, WebViewBuilderExtDarwin};
+use wry::{NewWindowResponse, WebContext, WebViewBuilder};
+
+/// The link-preview policy shared by every webview backend.
+///
+/// Only the Darwin builder exposes a real link-preview switch; the other
+/// backends have no such behavior, so the policy compiles to a no-op there.
+trait PreviewLinkPolicy: Sized {
+    fn with_allow_link_preview(self, allow: bool) -> Self;
+}
+
+#[cfg(target_os = "macos")]
+impl PreviewLinkPolicy for WebViewBuilder<'_> {
+    fn with_allow_link_preview(self, allow: bool) -> Self {
+        wry::WebViewBuilderExtDarwin::with_allow_link_preview(self, allow)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl PreviewLinkPolicy for WebViewBuilder<'_> {
+    fn with_allow_link_preview(self, _allow: bool) -> Self {
+        self
+    }
+}
 
 const SAFE_EMPTY: &str = r#"<!doctype html>
 <html>
@@ -22,10 +44,21 @@ pub struct HtmlPreview {
 
 impl HtmlPreview {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // WebView2 keeps its user-data folder beside the host executable by
+        // default; the Windows Store deployment puts that under
+        // `C:\Program Files\WindowsApps\...`, which is read-only, so
+        // environment creation fails and the pane renders nothing. Point the
+        // web context at the app's own data directory on Windows (the loose
+        // macOS flow is unaffected; WKWebView needs no folder there).
+        // `with_incognito(true)` below still keeps the session in WebView2's
+        // private mode on top of that folder.
+        let mut web_context = WebContext::new(preview_data_directory());
         // Build the WKWebView before creating the entity so a creation failure
         // (rare but real: window-server/display errors) degrades to an unavailable
-        // preview instead of panicking the whole app on a user action.
-        let webview = WebViewBuilder::new()
+        // preview instead of panicking the whole app on a user action. The
+        // packaged Windows process has no stderr, so the failure reason is
+        // mirrored into the diagnostic log beside the data directory.
+        let webview = WebViewBuilder::new_with_web_context(&mut web_context)
             .with_html(SAFE_EMPTY)
             .with_incognito(true)
             .with_javascript_disabled()
@@ -36,9 +69,18 @@ impl HtmlPreview {
             .with_navigation_handler(|url| url.starts_with("about:blank"))
             .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
             .with_download_started_handler(|_, _| false)
-            .build_as_child(window)
-            .ok()
-            .map(|raw| {
+            .build_as_child(window);
+        let webview = match webview {
+            Ok(webview) => {
+                crate::log_diagnostic("web preview: webview created");
+                Some(webview)
+            }
+            Err(error) => {
+                crate::log_diagnostic(&format!("web preview: creation failed: {error}"));
+                None
+            }
+        };
+        let webview = webview.map(|raw| {
                 cx.new(|cx| {
                     let mut view = GpuiWebView::new(raw, window, cx);
                     view.hide();
@@ -83,6 +125,25 @@ impl Render for HtmlPreview {
             root = root.child(webview);
         }
         root
+    }
+}
+
+/// The WebView2 user-data folder: the app's own data directory, where the
+/// process has write access in every deployment (loose, unpackaged, or
+/// WindowsApps). `None` elsewhere keeps the platform default.
+fn preview_data_directory() -> Option<std::path::PathBuf> {
+    if cfg!(target_os = "windows") {
+        // The instance guard already creates this directory for the SQLite
+        // workspace, so a fresh install can't race it here.
+        Some(
+            crate::core::DatabaseStore::default_path()
+                .with_file_name("webview-data")
+                .parent()
+                .map(|directory| directory.join("webview-data"))
+                .unwrap_or_else(|| std::env::temp_dir().join("resolved-webview-data")),
+        )
+    } else {
+        None
     }
 }
 

@@ -1003,6 +1003,19 @@ mod tests {
     };
     use gpui_component::Rope;
     use gpui_component::setting::{SettingGroup, SettingItem, SettingPage, Settings};
+
+    /// The editor's word-motion and word-deletion keys follow gpui
+    /// Component's platform split: Option on macOS, Control elsewhere.
+    const DELETE_PREVIOUS_WORD: &str = if cfg!(target_os = "macos") {
+        "alt-backspace"
+    } else {
+        "ctrl-backspace"
+    };
+    const MOVE_PREVIOUS_WORD: &str = if cfg!(target_os = "macos") {
+        "alt-left"
+    } else {
+        "ctrl-left"
+    };
     use lsp_types::{CompletionContext, CompletionItem, CompletionResponse};
     use std::cell::Cell;
 
@@ -1309,7 +1322,7 @@ mod tests {
         });
         cx.simulate_input("p");
         cx.run_until_parked();
-        cx.simulate_keystrokes("alt-backspace");
+        cx.simulate_keystrokes(DELETE_PREVIOUS_WORD);
         assert_eq!(
             cx.read(|cx| input.read(cx).value().to_string()),
             "items.",
@@ -1351,7 +1364,7 @@ mod tests {
             });
         });
 
-        cx.simulate_keystrokes("alt-backspace");
+        cx.simulate_keystrokes(DELETE_PREVIOUS_WORD);
         assert_eq!(cx.read(|cx| input.read(cx).value().to_string()), "alpha");
 
         cx.update(|window, cx| {
@@ -1360,7 +1373,7 @@ mod tests {
                 input.set_cursor_position(lsp_types::Position::new(0, 8), window, cx);
             });
         });
-        cx.simulate_keystrokes("alt-left");
+        cx.simulate_keystrokes(MOVE_PREVIOUS_WORD);
         cx.simulate_input("|");
         assert_eq!(
             cx.read(|cx| input.read(cx).value().to_string()),
@@ -1374,7 +1387,7 @@ mod tests {
                 input.set_cursor_position(lsp_types::Position::new(0, 9), window, cx);
             });
         });
-        cx.simulate_keystrokes("alt-backspace");
+        cx.simulate_keystrokes(DELETE_PREVIOUS_WORD);
         assert_eq!(
             cx.read(|cx| input.read(cx).value().to_string()),
             "items.",

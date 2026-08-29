@@ -1387,7 +1387,8 @@ mod tests {
 
     #[test]
     fn missing_class_property_diagnostic_ignores_selectors_in_comments() {
-        let source = super::super::bundled_css().replace("    gap: auto;\n", "");
+        let source =
+            crate::theme::css::strip_gap_declaration_for_tests(super::super::bundled_css());
         let diagnostics = theme_css_diagnostics(&source);
         assert_eq!(diagnostics.len(), 1);
         let line = diagnostics[0].range.start.line as usize;

@@ -3,6 +3,12 @@ set -eu
 
 project_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
+if [ "$(uname -s)" = "Windows" ] || uname -s | grep -qi msys; then
+    echo "error: scripts/cargo.sh is the macOS driver; on Windows use scripts/cargo.ps1" >&2
+    echo "       (PowerShell: powershell -ExecutionPolicy Bypass -File scripts/cargo.ps1 <args>)" >&2
+    exit 2
+fi
+
 if [ "${1:-}" = "run" ] && [ "$(uname -s)" = "Darwin" ]; then
     shift
     run_profile="debug"
