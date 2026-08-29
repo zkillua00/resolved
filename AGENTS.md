@@ -5,7 +5,8 @@ codebases in one repo:
 
 - **`src/`** — the Rust desktop client (`api-tester` crate, edition 2024, Apache-2.0).
   UI built on **GPUI 0.2.2** + **gpui-component 0.5.1** + **gpui-wry** (WKWebView for the
-  HTML Preview tab only). Persistence is SQLite (`rusqlite`, bundled). Requests go through
+  HTML Preview tab only, WebView2 on Windows). Persistence is
+  SQLite (`rusqlite`, bundled). Requests go through
   `reqwest`; pre/post scripts run sandboxed with `rquickjs`; editors use tree-sitter.
 - **`server/`** — a standalone, self-hostable **Go 1.25** collaboration server
   (`resolved-server`, module `resolved-server`, Fiber + GORM, SQLite by default).
@@ -20,6 +21,17 @@ codebases in one repo:
   - `./scripts/cargo.sh build` / `test` / `check`
   - `./scripts/cargo.sh run` — bundles via `scripts/bundle-macos.sh` and opens
     `target/{debug,release}/Resolved.app` (`--release` for release).
+- **Windows**: use `scripts/cargo.ps1` instead (PowerShell); it mirrors the
+  sh prep scripts (`scripts/prepare-gpui.ps1`,
+  `scripts/prepare-typescript-service.ps1`). The exe embeds its icon via
+  `build.rs` (`winresource`) and `assets/windows/resolved.ico`. Windows
+  builds refuse to run outside an MSIX (`platform::launch_blocker` probes
+  package identity); `scripts/package-msix.ps1` packs and signs
+  `target/{debug,release}/Resolved.msix` (needs Windows SDK MakeAppx/SignTool
+  and a self-signed cert — see the script's `-InstallCert`). Shortcuts
+  normalize `cmd-` to `ctrl-` at install time, and gpui-component's
+  `TitleBar` pattern (custom client-drawn min/max/close via
+  `WindowControlArea`) is applied in `src/app/windows_controls.rs`.
 - Server: work in `server/` — `go build ./...`, `go test ./...`.
   Local boot needs the two env vars exported, e.g.
   `export RESOLVED_ENCRYPTION_SECRET="$(openssl rand -base64 32)"` and

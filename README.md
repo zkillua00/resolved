@@ -2,11 +2,12 @@
 
 **Know exactly what you sent.**
 
-A native macOS API workbench built with [GPUI 0.2.2](https://docs.rs/gpui/0.2.2/gpui/) and
+A native API workbench built with [GPUI 0.2.2](https://docs.rs/gpui/0.2.2/gpui/) and
 [GPUI Component 0.5.1](https://docs.rs/gpui-component/0.5.1/gpui_component/).
 The request workspace, code editors, collections, environments, response views,
-and performance HUD are rendered by GPUI. Captured HTML responses use macOS
-WKWebView through `gpui-wry` only when the Preview tab is selected.
+and performance HUD are rendered by GPUI. Captured HTML responses use the OS
+web view (WKWebView on macOS, WebView2 on Windows) through `gpui-wry` only
+when the Preview tab is selected.
 
 ## MVP features
 
@@ -678,15 +679,49 @@ the local user account accordingly.
 
 ## Run
 
-The project uses Rust edition 2024 and targets macOS first.
+The project uses Rust edition 2024. macOS is the primary target; Windows is
+supported through an MSIX-packaged build.
+
+### macOS
 
 ```sh
 scripts/cargo.sh run
 ```
 
-On macOS, this command builds and opens `target/debug/Resolved.app`. The bare
+This command builds and opens `target/debug/Resolved.app`. The bare
 Cargo executable is not a supported launch target because it has no application
 bundle identity for Keychain and system-service access.
+
+### Windows
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\cargo.ps1 build
+powershell -ExecutionPolicy Bypass -File scripts\cargo.ps1 run            # build + package + launch
+```
+
+Prerequisites: Visual Studio Build Tools with the C++ workload, the Rust MSVC
+toolchain, and the Windows SDK (MakeAppx/SignTool for packaging). The driver
+runs the PowerShell vendoring scripts (`scripts/prepare-gpui.ps1`,
+`scripts/prepare-typescript-service.ps1`) with the same pins and checksums as
+the macOS flow.
+
+The packaged app is required: a bare `api-tester.exe` refuses to start because
+package identity drives WebView2 data isolation and app identity. Package and
+sign with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\package-msix.ps1 -Profile debug
+Add-AppxPackage -Path target\debug\Resolved.msix
+```
+
+Keyboard defaults are authored in macOS spelling and normalized at install
+time (`cmd-` becomes `ctrl-`), and the custom title bars draw their own
+minimize/maximize/close buttons on Windows, wired to the window's non-client
+commands through GPUI control-area hitboxes.
+
+On Windows, permissions for the local data directory and SQLite files come
+from NTFS ACLs rather than POSIX modes; the `0700`/`0600` restrictions apply
+to the macOS side only.
 
 GPUI's `runtime_shaders` feature is enabled, so the normal build works with Apple
 Command Line Tools and does not require the full Xcode Metal command-line
