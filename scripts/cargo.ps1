@@ -10,11 +10,33 @@
 # Prerequisites: Visual Studio Build Tools (C++ workload), Rust MSVC,
 # and the MSIX Packaging toolchain (MakeAppx.exe from the Windows SDK,
 # or 'winget install Microsoft.WindowsSDK.10.0.26100' for the SDK tools).
+# Cargo uses every logical processor by default. Override that only when a
+# machine needs a lower cap, for example: $env:CARGO_BUILD_JOBS = 16
 
 $ErrorActionPreference = 'Stop'
 
 $projectDir = Split-Path -Parent $PSScriptRoot
 Set-Location $projectDir
+
+function Initialize-WindowsBuildToolchain {
+    # Keep an explicit caller-provided linker. Otherwise use the copy of lld
+    # bundled with Rust: it is faster and more parallel than link.exe during
+    # the final link, without adding another machine prerequisite.
+    $linkerVariable = 'CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER'
+    if ([Environment]::GetEnvironmentVariable($linkerVariable, 'Process')) {
+        return
+    }
+
+    $rustSysroot = (& rustc --print sysroot).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'failed to locate the Rust toolchain' }
+
+    $rustLld = Join-Path $rustSysroot 'lib\rustlib\x86_64-pc-windows-msvc\bin\rust-lld.exe'
+    if (Test-Path -LiteralPath $rustLld) {
+        [Environment]::SetEnvironmentVariable($linkerVariable, $rustLld, 'Process')
+    }
+}
+
+Initialize-WindowsBuildToolchain
 
 function Invoke-Prepare {
     & "$projectDir\scripts\prepare-gpui.ps1"

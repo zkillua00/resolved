@@ -1,0 +1,5 @@
+[build]
+# Cargo already defaults this to all logical CPUs, but spelling it out makes
+# the repository's parallel-build policy explicit and prevents a lower global
+# Cargo setting from silently serializing local builds.
+jobs = "default"
