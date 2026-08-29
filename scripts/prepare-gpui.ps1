@@ -18,7 +18,8 @@ $pinned = @(
         sha256  = '979b45cfa6ec723b6f42330915a1b3769b930d02b2d505f9697f8ca602bee707'
         patches = @(
             "$projectDir\patches\gpui-0.2.2-metal-memoryless.patch",
-            "$projectDir\patches\gpui-0.2.2-retained-line-layout-cache.patch"
+            "$projectDir\patches\gpui-0.2.2-retained-line-layout-cache.patch",
+            "$projectDir\patches\gpui-0.2.2-reentrant-async-context.patch"
         )
     },
     @{

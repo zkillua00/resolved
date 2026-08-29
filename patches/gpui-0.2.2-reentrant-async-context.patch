@@ -1,0 +1,38 @@
+diff --git a/src/app/async_context.rs b/src/app/async_context.rs
+--- a/src/app/async_context.rs
++++ b/src/app/async_context.rs
+@@ -54,6 +54,10 @@ impl AppContext for AsyncApp {
+         update: impl FnOnce(&mut T, &mut Context<T>) -> R,
+     ) -> Self::Result<R> {
+         let app = self.app.upgrade().context("app was released")?;
+-        let mut app = app.borrow_mut();
++        // Native platform callbacks can be invoked re-entrantly. Async
++        // contexts are fallible so this overlap can be rejected instead of
++        // panicking across an extern callback.
++        let mut app = app.try_borrow_mut()?;
+         Ok(app.update_entity(handle, update))
+     }
+@@ -484,3 +488,23 @@ impl VisualContext for AsyncWindowContext {
+         })
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::TestAppContext;
++
++    #[test]
++    fn update_entity_returns_error_during_reentrant_app_borrow() {
++        let mut cx = TestAppContext::single();
++        let entity = cx.new(|_| 0usize);
++        let mut async_cx = cx.to_async();
++
++        cx.update(|_| {
++            let result = entity.update(&mut async_cx, |value, _| *value += 1);
++            assert!(result.is_err());
++        });
++
++        assert_eq!(cx.read(|cx| *entity.read(cx)), 0);
++    }
++}
