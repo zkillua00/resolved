@@ -66,6 +66,15 @@ impl ApiTester {
 
     pub(super) fn render_settings_workspace(&self, cx: &mut Context<Self>) -> AnyElement {
         let servers_page = self.upstream_settings_page(cx);
+        let snippets_page = SettingPage::new("Snippets")
+            .description("Create and maintain reusable JavaScript for request editors.")
+            .resettable(false)
+            .group(
+                SettingGroup::new()
+                    .title("Library")
+                    .description("Snippets stay available from every compatible code editor.")
+                    .item(self.snippet_library_setting_item(cx)),
+            );
         let editor_page = SettingPage::new("Editor")
             .description(
                 "Tune every code editor and the built-in JSON, JavaScript, and TypeScript formatters.",
@@ -140,9 +149,15 @@ impl ApiTester {
                     ]),
             );
 
-        let mut pages = Vec::with_capacity(5);
+        let mut pages = Vec::with_capacity(6);
         pages.push(servers_page);
-        pages.extend([editor_page, keyboard_page, appearance_page, developer_page]);
+        pages.extend([
+            snippets_page,
+            editor_page,
+            keyboard_page,
+            appearance_page,
+            developer_page,
+        ]);
 
         v_flex()
             .relative()
@@ -175,6 +190,35 @@ impl ApiTester {
                 ),
             )
             .into_any_element()
+    }
+
+    fn snippet_library_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        let snippet_count = self.snippets.len();
+        SettingItem::new(
+            "Saved snippets",
+            SettingField::<SharedString>::render(move |_, _, _| {
+                let this = this.clone();
+                Button::new("settings-manage-snippets")
+                    .label("Open snippet library")
+                    .outline()
+                    .on_click(move |_, window, cx| {
+                        if let Some(this) = this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.open_workspace_tool_tab(
+                                    WorkspaceToolTab::Snippets,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }
+                    })
+            }),
+        )
+        .description(format!(
+            "{snippet_count} saved. Add, edit, preview, and remove reusable snippets in the library."
+        ))
+        .layout(gpui::Axis::Vertical)
     }
 
     fn editor_tab_size_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {

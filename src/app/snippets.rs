@@ -1589,7 +1589,6 @@ impl ApiTester {
                             .px_1()
                             .text_sm()
                             .font_semibold()
-                            .child(Icon::new(IconName::CaseSensitive).with_size(px(16.)))
                             .child("Snippets")
                             .when(dirty, |this| {
                                 this.child(div().size(px(7.)).rounded_full().bg(cx.theme().warning))

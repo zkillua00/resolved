@@ -5,14 +5,14 @@ impl ApiTester {
         let request_workspace_active = self.workspace_tabs.active() == ActiveWorkspaceTab::Request;
         let settings_workspace_active = matches!(
             self.workspace_tabs.active(),
-            ActiveWorkspaceTab::Settings | ActiveWorkspaceTab::ThemeCss
+            ActiveWorkspaceTab::Snippets
+                | ActiveWorkspaceTab::Settings
+                | ActiveWorkspaceTab::ThemeCss
         );
         let request_proxy_workspace_active =
             self.workspace_tabs.active() == ActiveWorkspaceTab::RequestProxy;
         let server_tools_workspace_active =
             self.workspace_tabs.active() == ActiveWorkspaceTab::ServerTools;
-        let snippets_workspace_active =
-            self.workspace_tabs.active() == ActiveWorkspaceTab::Snippets;
         let using_server = matches!(
             self.workspace_providers.active_id(),
             WorkspaceProviderId::Upstream { .. }
@@ -134,33 +134,6 @@ impl ApiTester {
                         this.child(div().text_size(px(10.5)).font_semibold().child("History"))
                     }),
             )
-            .child(
-                v_flex()
-                    .id("rail-snippets")
-                    .w(item_width)
-                    .h(item_height)
-                    .items_center()
-                    .justify_center()
-                    .gap_1()
-                    .rounded_lg()
-                    .cursor_pointer()
-                    .text_color(cx.theme().muted_foreground)
-                    .when(snippets_workspace_active, |this| {
-                        this.bg(cx.theme().sidebar_accent)
-                            .text_color(cx.theme().foreground)
-                    })
-                    .hover(|style| style.bg(cx.theme().sidebar_accent))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_workspace_tool_tab(WorkspaceToolTab::Snippets, window, cx);
-                    }))
-                    .when(compact, |this| {
-                        this.tooltip(|window, cx| Tooltip::new("Snippets").build(window, cx))
-                    })
-                    .child(gpui_component::Icon::new(IconName::CaseSensitive).with_size(px(18.)))
-                    .when(!compact, |this| {
-                        this.child(div().text_size(px(10.5)).font_semibold().child("Snippets"))
-                    }),
-            )
             .children(using_server.then(|| {
                 v_flex()
                     .id("rail-request-proxy")
@@ -184,7 +157,7 @@ impl ApiTester {
                     .when(compact, |this| {
                         this.tooltip(|window, cx| Tooltip::new("Request proxy").build(window, cx))
                     })
-                    .child(gpui_component::Icon::new(IconName::Globe).with_size(px(18.)))
+                    .child(gpui_component::Icon::new(IconName::Replace).with_size(px(18.)))
                     .when(!compact, |this| {
                         this.child(div().text_size(px(10.5)).font_semibold().child("Proxy"))
                     })

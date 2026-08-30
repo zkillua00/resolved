@@ -90,7 +90,7 @@ impl ApiTester {
                     .items_center()
                     .justify_center()
                     .gap_1()
-                    .child(Icon::new(IconName::Globe).with_size(px(18.)))
+                    .child(Icon::new(IconName::LayoutDashboard).with_size(px(18.)))
                     .when(!compact, |this| {
                         this.child(
                             div()

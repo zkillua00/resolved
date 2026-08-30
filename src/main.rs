@@ -169,6 +169,10 @@ impl AssetSource for AppAssets {
                 include_bytes!("../assets/icons/gallery-vertical-end.svg")
             }
             "icons/globe.svg" => include_bytes!("../assets/icons/globe.svg"),
+            "icons/inspector.svg" => include_bytes!("../assets/icons/inspector.svg"),
+            "icons/layout-dashboard.svg" => {
+                include_bytes!("../assets/icons/layout-dashboard.svg")
+            }
             "icons/palette.svg" => include_bytes!("../assets/icons/palette.svg"),
             "icons/settings-2.svg" => include_bytes!("../assets/icons/settings-2.svg"),
             "icons/chart-pie.svg" => include_bytes!("../assets/icons/chart-pie.svg"),
@@ -200,6 +204,21 @@ impl AssetSource for AppAssets {
 
     fn list(&self, _path: &str) -> gpui::Result<Vec<SharedString>> {
         Ok(Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod asset_tests {
+    use super::*;
+
+    #[test]
+    fn navigation_icons_are_embedded() {
+        for path in ["icons/inspector.svg", "icons/layout-dashboard.svg"] {
+            assert!(
+                AppAssets.load(path).expect("load embedded asset").is_some(),
+                "{path} must be bundled or its navigation slot renders blank"
+            );
+        }
     }
 }
 

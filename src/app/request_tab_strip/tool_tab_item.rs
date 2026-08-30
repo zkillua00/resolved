@@ -19,7 +19,7 @@ pub(super) fn render_workspace_tool_tab(
             "workspace-tool-tab-request-proxy".to_owned(),
             "workspace-request-proxy-tab-drag-handle",
             "Request proxy".to_owned(),
-            IconName::Globe,
+            IconName::Replace,
             false,
         ),
         WorkspaceToolTab::ServerTools => (
