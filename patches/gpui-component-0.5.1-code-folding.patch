@@ -154,6 +154,14 @@ index 08c33f7..cdd2c2a 100644
 @@ -579,7 +601,7 @@ impl TextElement {
              _ => 8,
          };
++        // Keep one leading pad before the largest visible line number instead
++        // of reserving four digit cells for every document.
++        let line_number_len = match total_lines {
++            0..=9 => 2,
++            10..=99 => 3,
++            100..=999 => 4,
++            _ => line_number_len,
++        };
 
 -        let line_number_width = if state.mode.line_number() {
 +        let (line_number_width, fold_area_width) = if state.mode.line_number() {
@@ -165,10 +173,9 @@ index 08c33f7..cdd2c2a 100644
              );
 
 -            empty_line_number.width + px(6.) + LINE_NUMBER_RIGHT_MARGIN
-+            // Zed reserves four `ch` units for fold controls. The five shaped
-+            // number cells represent its one-cell left pad plus four sticky
-+            // line-number digits, so only the four-cell fold lane is appended.
-+            let fold_area_width = empty_line_number.width / line_number_len as f32 * 4.;
++            // Two character cells leave a stable disclosure hit target while
++            // keeping short documents compact.
++            let fold_area_width = empty_line_number.width / line_number_len as f32 * 2.;
 +            (empty_line_number.width + fold_area_width, fold_area_width)
          } else {
 -            px(0.)

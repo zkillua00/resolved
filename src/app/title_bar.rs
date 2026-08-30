@@ -147,7 +147,8 @@ impl ApiTester {
                                         .text_color(cx.theme().warning)
                                         .child("Modified"),
                                 )
-                            }),
+                            })
+                            .child(windows_controls::caption_drag_region()),
                     ),
             )
             .child(

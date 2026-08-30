@@ -827,7 +827,6 @@ impl ApiTester {
             .border_b_1()
             .border_color(cx.theme().title_bar_border)
             .bg(cx.theme().title_bar)
-            .justify_between()
             .child(
                 h_flex().gap_6().child(resolved_brand_lockup(cx)).child(
                     h_flex()
@@ -841,6 +840,7 @@ impl ApiTester {
                         .child("Server Tools"),
                 ),
             )
+            .child(windows_controls::caption_drag_region())
             .child(windows_controls::windows_window_controls(window, cx))
             .into_any_element()
     }
@@ -863,19 +863,25 @@ impl ApiTester {
 
         v_flex()
             .debug_selector(|| "server-tools-workspace".to_owned())
+            .relative()
             .size_full()
             .min_h_0()
             .bg(cx.theme().background)
+            .child(super::settings_page::settings_sidebar_underlay(px(220.), cx))
             .when_some(self.settings_warning.clone(), |this, warning| {
-                this.child(super::settings_page::settings_message(
+                this.child(super::settings_page::dismissible_settings_message(
                     warning,
                     cx.theme().danger,
+                    super::settings_page::SettingsMessageKind::Warning,
+                    cx,
                 ))
             })
             .when_some(self.settings_notice.clone(), |this, notice| {
-                this.child(super::settings_page::settings_message(
+                this.child(super::settings_page::dismissible_settings_message(
                     notice,
                     cx.theme().info,
+                    super::settings_page::SettingsMessageKind::Notice,
+                    cx,
                 ))
             })
             .child(

@@ -63,7 +63,7 @@ impl ApiTester {
                             .child(selected_name.to_owned()),
                     ),
             )
-            .child(div().flex_1())
+            .child(windows_controls::caption_drag_region())
             .child(
                 Button::new("environment-workspace-active")
                     .icon(IconName::Globe)

@@ -175,14 +175,14 @@ pub const SHORTCUT_DESCRIPTORS: &[ShortcutDescriptor] = &[
     },
     ShortcutDescriptor {
         id: ShortcutId::SaveRequest,
-        label: "Save request",
-        category: ShortcutCategory::ActiveRequest,
+        label: "Save active context",
+        category: ShortcutCategory::Application,
         default_binding: "cmd-s",
     },
     ShortcutDescriptor {
         id: ShortcutId::SaveRequestAs,
-        label: "Save request as",
-        category: ShortcutCategory::ActiveRequest,
+        label: "Save active context as",
+        category: ShortcutCategory::Application,
         default_binding: "cmd-shift-s",
     },
     ShortcutDescriptor {

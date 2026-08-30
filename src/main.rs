@@ -59,8 +59,8 @@ fn configure_menus(cx: &mut App) {
                 MenuItem::action("New Request Tab", NewRequestTab),
                 MenuItem::action("Close Active Tab", CloseRequestTab),
                 MenuItem::separator(),
-                MenuItem::action("Save Request", SaveRequest),
-                MenuItem::action("Save Request As…", SaveRequestAs),
+                MenuItem::action("Save", SaveRequest),
+                MenuItem::action("Save As…", SaveRequestAs),
             ],
         },
         Menu {
@@ -86,8 +86,8 @@ fn configure_menus(cx: &mut App) {
                 MenuItem::action("New Request Tab", NewRequestTab),
                 MenuItem::action("Close Active Tab", CloseRequestTab),
                 MenuItem::separator(),
-                MenuItem::action("Save Request", SaveRequest),
-                MenuItem::action("Save Request As…", SaveRequestAs),
+                MenuItem::action("Save", SaveRequest),
+                MenuItem::action("Save As…", SaveRequestAs),
             ],
         },
         Menu {

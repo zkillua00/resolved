@@ -46,6 +46,20 @@ pub const fn trailing_inset() -> Pixels {
     }
 }
 
+/// Flexible, non-interactive title-bar space used for native window dragging.
+/// Keep interactive controls as siblings so the caption hit target cannot
+/// swallow their pointer events.
+pub(crate) fn caption_drag_region() -> AnyElement {
+    let region = div().h_full().flex_1();
+    if uses_windows_window_controls() {
+        region
+            .window_control_area(WindowControlArea::Drag)
+            .into_any_element()
+    } else {
+        region.into_any_element()
+    }
+}
+
 const WINDOW_CONTROL_WIDTH: Pixels = px(46.);
 const GLYPH_SIZE: Pixels = px(12.);
 

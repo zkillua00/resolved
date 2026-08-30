@@ -1,10 +1,31 @@
 use super::*;
 
-fn environment_workspace_handles_save(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SaveShortcutTarget {
+    Request,
+    Environment,
+    Snippet,
+    ThemeCss,
+    None,
+}
+
+fn save_shortcut_target(
     active_workspace_tab: ActiveWorkspaceTab,
     sidebar_tab: SidebarTab,
-) -> bool {
-    active_workspace_tab == ActiveWorkspaceTab::Request && sidebar_tab == SidebarTab::Environments
+) -> SaveShortcutTarget {
+    match active_workspace_tab {
+        ActiveWorkspaceTab::Request => match sidebar_tab {
+            SidebarTab::Collections => SaveShortcutTarget::Request,
+            SidebarTab::Environments => SaveShortcutTarget::Environment,
+            SidebarTab::History => SaveShortcutTarget::None,
+        },
+        ActiveWorkspaceTab::Snippets => SaveShortcutTarget::Snippet,
+        ActiveWorkspaceTab::ThemeCss => SaveShortcutTarget::ThemeCss,
+        ActiveWorkspaceTab::Welcome
+        | ActiveWorkspaceTab::RequestProxy
+        | ActiveWorkspaceTab::ServerTools
+        | ActiveWorkspaceTab::Settings => SaveShortcutTarget::None,
+    }
 }
 
 fn request_workspace_handles_format(
@@ -83,18 +104,33 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if environment_workspace_handles_save(self.workspace_tabs.active(), self.sidebar_tab) {
-            // Match the Environment editor's Save button. Command-S belongs
-            // to the visible editor and must never fall through to request
-            // saving, even when there is nothing writable to save.
-            if !self.sending && self.environment_editor_is_dirty(cx) {
-                self.save_environment(window, cx);
+        match save_shortcut_target(self.workspace_tabs.active(), self.sidebar_tab) {
+            SaveShortcutTarget::Request => self.save_current_request(false, window, cx),
+            SaveShortcutTarget::Environment => {
+                if !self.sending && self.environment_editor_is_dirty(cx) {
+                    self.save_environment(window, cx);
+                }
             }
-            return;
+            SaveShortcutTarget::Snippet => {
+                if self.snippet_editor.selected_id.is_none() || self.snippet_editor_is_dirty(cx) {
+                    self.save_snippet(cx);
+                }
+            }
+            SaveShortcutTarget::ThemeCss => {
+                let can_save = self.settings_writable
+                    && self.active_theme_editor().is_some_and(|session| {
+                        session.dirty
+                            && session.validation.is_ok()
+                            && session.theme_id.as_deref().is_some_and(|theme_id| {
+                                self.settings.theme.saved_theme(theme_id).is_some()
+                            })
+                    });
+                if can_save {
+                    self.apply_theme_editor(cx);
+                }
+            }
+            SaveShortcutTarget::None => {}
         }
-
-        self.activate_request_workspace(SidebarTab::Collections, window, cx);
-        self.save_current_request(false, window, cx);
     }
 
     pub(crate) fn on_save_request_as(
@@ -103,8 +139,13 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.activate_request_workspace(SidebarTab::Collections, window, cx);
-        self.save_current_request(true, window, cx);
+        match save_shortcut_target(self.workspace_tabs.active(), self.sidebar_tab) {
+            SaveShortcutTarget::Request => self.save_current_request(true, window, cx),
+            SaveShortcutTarget::ThemeCss => self.open_save_theme_as_dialog(window, cx),
+            SaveShortcutTarget::Environment
+            | SaveShortcutTarget::Snippet
+            | SaveShortcutTarget::None => {}
+        }
     }
 
     pub(crate) fn on_focus_request_url(
@@ -210,31 +251,39 @@ mod tests {
     use gpui::{TestAppContext, px, size};
 
     #[test]
-    fn save_shortcut_targets_only_the_visible_environment_workspace() {
-        assert!(environment_workspace_handles_save(
-            ActiveWorkspaceTab::Request,
-            SidebarTab::Environments,
-        ));
+    fn save_shortcut_target_follows_the_visible_workspace() {
+        assert_eq!(
+            save_shortcut_target(ActiveWorkspaceTab::Request, SidebarTab::Collections),
+            SaveShortcutTarget::Request
+        );
+        assert_eq!(
+            save_shortcut_target(ActiveWorkspaceTab::Request, SidebarTab::Environments),
+            SaveShortcutTarget::Environment
+        );
+        assert_eq!(
+            save_shortcut_target(ActiveWorkspaceTab::Snippets, SidebarTab::Collections),
+            SaveShortcutTarget::Snippet
+        );
+        assert_eq!(
+            save_shortcut_target(ActiveWorkspaceTab::ThemeCss, SidebarTab::Collections),
+            SaveShortcutTarget::ThemeCss
+        );
 
         for active_workspace_tab in [
             ActiveWorkspaceTab::Welcome,
             ActiveWorkspaceTab::RequestProxy,
             ActiveWorkspaceTab::ServerTools,
             ActiveWorkspaceTab::Settings,
-            ActiveWorkspaceTab::ThemeCss,
         ] {
-            assert!(!environment_workspace_handles_save(
-                active_workspace_tab,
-                SidebarTab::Environments,
-            ));
+            assert_eq!(
+                save_shortcut_target(active_workspace_tab, SidebarTab::Collections),
+                SaveShortcutTarget::None
+            );
         }
-
-        for sidebar_tab in [SidebarTab::Collections, SidebarTab::History] {
-            assert!(!environment_workspace_handles_save(
-                ActiveWorkspaceTab::Request,
-                sidebar_tab,
-            ));
-        }
+        assert_eq!(
+            save_shortcut_target(ActiveWorkspaceTab::Request, SidebarTab::History),
+            SaveShortcutTarget::None
+        );
     }
 
     #[test]
@@ -408,5 +457,77 @@ mod tests {
             .requests[0];
         assert_eq!(request.name, "List users");
         assert_eq!(request.definition.request.url, "https://example.com/users");
+    }
+
+    #[gpui::test]
+    fn command_s_in_a_tool_does_not_save_the_last_request(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("create temporary database directory");
+        let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+        store.initialize().expect("initialize test database");
+
+        let mut workspace = Workspace::default();
+        let collection_id = workspace
+            .create_collection("Users")
+            .expect("create test collection");
+        store
+            .save_workspace(&workspace)
+            .expect("seed test workspace");
+
+        let mut app = None;
+        let store_for_app = store.clone();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            let base_key_bindings = shortcuts::capture_base_key_bindings(cx);
+            crate::theme::configure(cx);
+            let view = cx.new(|cx| {
+                ApiTester::new_with_database_store(base_key_bindings, store_for_app, window, cx)
+            });
+            crate::register_app_action_handlers(&view, cx);
+            app = Some(view.clone());
+            gpui_component::Root::new(view, window, cx)
+        });
+        let app = app.expect("capture app entity");
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_resize(size(px(1_200.), px(800.)));
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.activate_request_workspace(SidebarTab::Collections, window, cx);
+                app.url.update(cx, |input, cx| {
+                    input.set_value("https://example.com/unsaved", window, cx);
+                });
+                app.saved_request_name.update(cx, |input, cx| {
+                    input.set_value("Must remain unsaved", window, cx);
+                });
+                app.open_workspace_tool_tab(WorkspaceToolTab::Settings, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("secondary-s");
+
+        let (active_workspace_tab, request_count) = cx.update(|_, cx| {
+            let app = app.read(cx);
+            (
+                app.workspace_tabs.active(),
+                app.workspace
+                    .collection(&collection_id)
+                    .expect("collection remains in memory")
+                    .requests
+                    .len(),
+            )
+        });
+        assert_eq!(active_workspace_tab, ActiveWorkspaceTab::Settings);
+        assert_eq!(request_count, 0);
+
+        let persisted = store.load_workspace().expect("reload saved workspace");
+        assert!(
+            persisted
+                .collection(&collection_id)
+                .expect("collection was persisted")
+                .requests
+                .is_empty()
+        );
     }
 }

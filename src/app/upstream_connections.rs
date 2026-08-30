@@ -173,7 +173,6 @@ impl ApiTester {
                     .border_b_1()
                     .border_color(cx.theme().title_bar_border)
                     .bg(cx.theme().title_bar)
-                    .justify_between()
                     .child(
                         h_flex()
                             .gap_6()
@@ -190,6 +189,7 @@ impl ApiTester {
                                     .child("Connect to server"),
                             ),
                     )
+                    .child(windows_controls::caption_drag_region())
                     .child(
                         h_flex()
                             .h_full()

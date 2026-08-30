@@ -6,6 +6,8 @@ use gpui_component::switch::Switch;
 
 use super::*;
 
+const SETTINGS_SIDEBAR_WIDTH: Pixels = px(220.);
+
 impl ApiTester {
     /// Memoized parse of a theme's CSS source. Parsing happens once per
     /// distinct source instead of once per saved theme per frame.
@@ -44,7 +46,6 @@ impl ApiTester {
             .border_b_1()
             .border_color(cx.theme().title_bar_border)
             .bg(cx.theme().title_bar)
-            .justify_between()
             .child(
                 h_flex().gap_6().child(resolved_brand_lockup(cx)).child(
                     h_flex()
@@ -58,6 +59,7 @@ impl ApiTester {
                         .child("Settings"),
                 ),
             )
+            .child(windows_controls::caption_drag_region())
             .child(windows_controls::windows_window_controls(window, cx))
             .into_any_element()
     }
@@ -143,19 +145,31 @@ impl ApiTester {
         pages.extend([editor_page, keyboard_page, appearance_page, developer_page]);
 
         v_flex()
+            .relative()
             .size_full()
             .min_h_0()
             .bg(cx.theme().background)
+            .child(settings_sidebar_underlay(SETTINGS_SIDEBAR_WIDTH, cx))
             .when_some(self.settings_warning.clone(), |this, warning| {
-                this.child(settings_message(warning, cx.theme().danger))
+                this.child(dismissible_settings_message(
+                    warning,
+                    cx.theme().danger,
+                    SettingsMessageKind::Warning,
+                    cx,
+                ))
             })
             .when_some(self.settings_notice.clone(), |this, notice| {
-                this.child(settings_message(notice, cx.theme().info))
+                this.child(dismissible_settings_message(
+                    notice,
+                    cx.theme().info,
+                    SettingsMessageKind::Notice,
+                    cx,
+                ))
             })
             .child(
                 div().flex_1().min_h_0().child(
                     SettingsView::new("api-tester-settings")
-                        .sidebar_width(px(220.))
+                        .sidebar_width(SETTINGS_SIDEBAR_WIDTH)
                         .with_group_variant(GroupBoxVariant::Outline)
                         .pages(pages),
                 ),
@@ -1566,5 +1580,68 @@ pub(super) fn settings_message(message: String, color: Hsla) -> AnyElement {
         .text_sm()
         .text_color(color)
         .child(message)
+        .into_any_element()
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum SettingsMessageKind {
+    Warning,
+    Notice,
+}
+
+pub(super) fn dismissible_settings_message(
+    message: String,
+    color: Hsla,
+    kind: SettingsMessageKind,
+    cx: &mut Context<ApiTester>,
+) -> AnyElement {
+    let button_id = match kind {
+        SettingsMessageKind::Warning => "dismiss-settings-warning",
+        SettingsMessageKind::Notice => "dismiss-settings-notice",
+    };
+
+    h_flex()
+        .mx_4()
+        .mt_3()
+        .px_3()
+        .py_2()
+        .gap_2()
+        .rounded_md()
+        .border_1()
+        .border_color(color.opacity(0.45))
+        .bg(color.opacity(0.1))
+        .text_sm()
+        .text_color(color)
+        .child(div().flex_1().min_w_0().child(message))
+        .child(
+            Button::new(button_id)
+                .icon(IconName::Close)
+                .small()
+                .ghost()
+                .tooltip("Dismiss")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    match kind {
+                        SettingsMessageKind::Warning => this.settings_warning = None,
+                        SettingsMessageKind::Notice => this.settings_notice = None,
+                    }
+                    cx.notify();
+                })),
+        )
+        .into_any_element()
+}
+
+pub(super) fn settings_sidebar_underlay(
+    sidebar_width: Pixels,
+    cx: &App,
+) -> AnyElement {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .w(sidebar_width)
+        .bg(cx.theme().sidebar)
+        .border_r_1()
+        .border_color(cx.theme().sidebar_border)
         .into_any_element()
 }
