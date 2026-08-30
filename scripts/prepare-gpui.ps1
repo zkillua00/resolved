@@ -103,7 +103,7 @@ function Invoke-PrepareCrate($crate) {
                     $patchText,
                     [Text.UTF8Encoding]::new($false)
                 )
-                & git apply --recount --whitespace=nowarn --unsafe-paths $normalizedPatch
+                & git apply --recount --unidiff-zero --whitespace=nowarn --unsafe-paths $normalizedPatch
                 if ($LASTEXITCODE -ne 0) {
                     throw "patch no longer applies: $patch"
                 }

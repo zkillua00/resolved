@@ -1,7 +1,7 @@
 diff --git a/src/app/async_context.rs b/src/app/async_context.rs
 --- a/src/app/async_context.rs
 +++ b/src/app/async_context.rs
-@@ -54,6 +54,10 @@ impl AppContext for AsyncApp {
+@@ -54,6 +54,9 @@ impl AppContext for AsyncApp {
          update: impl FnOnce(&mut T, &mut Context<T>) -> R,
      ) -> Self::Result<R> {
          let app = self.app.upgrade().context("app was released")?;

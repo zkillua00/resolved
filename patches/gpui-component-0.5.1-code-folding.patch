@@ -151,7 +151,7 @@ index 08c33f7..cdd2c2a 100644
          let total_lines = text.lines_len();
          let line_number_len = match total_lines {
              0..=9999 => 5,
-@@ -579,7 +601,7 @@ impl TextElement {
+@@ -579,7 +601,15 @@ impl TextElement {
              _ => 8,
          };
 +        // Keep one leading pad before the largest visible line number instead
@@ -168,7 +168,7 @@ index 08c33f7..cdd2c2a 100644
              let empty_line_number = window.text_system().shape_line(
                  "+".repeat(line_number_len).into(),
                  font_size,
-@@ -594,12 +616,16 @@ impl TextElement {
+@@ -594,12 +616,15 @@ impl TextElement {
                  None,
              );
 

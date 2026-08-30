@@ -1,13 +1,14 @@
+#[cfg(target_os = "windows")]
 use std::{env, error::Error, path::Path};
 
 fn main() {
     // The macOS .app bundle provides Info.plist, icons, and signing through
     // scripts/bundle-macos.sh, so only Windows needs build-time resources.
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-        embed_windows_resources().expect("embedding Windows resources must succeed");
-    }
+    #[cfg(target_os = "windows")]
+    embed_windows_resources().expect("embedding Windows resources must succeed");
 }
 
+#[cfg(target_os = "windows")]
 fn embed_windows_resources() -> Result<(), Box<dyn Error>> {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR")?;
     let icon = Path::new(&manifest_dir)
