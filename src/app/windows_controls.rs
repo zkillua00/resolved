@@ -35,6 +35,17 @@ pub const fn leading_inset() -> Pixels {
     }
 }
 
+/// Right-side title-bar breathing room on platforms without client-drawn
+/// Windows controls. On Windows the control cluster must touch the window's
+/// trailing edge so its native hit targets stay aligned across workspaces.
+pub const fn trailing_inset() -> Pixels {
+    if cfg!(target_os = "windows") {
+        px(0.)
+    } else {
+        px(24.)
+    }
+}
+
 const WINDOW_CONTROL_WIDTH: Pixels = px(46.);
 const GLYPH_SIZE: Pixels = px(12.);
 

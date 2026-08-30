@@ -169,7 +169,7 @@ impl ApiTester {
                     .h(px(APP_TITLE_BAR_HEIGHT))
                     .flex_shrink_0()
                     .pl(windows_controls::leading_inset())
-                    .pr_6()
+                    .pr(windows_controls::trailing_inset())
                     .border_b_1()
                     .border_color(cx.theme().title_bar_border)
                     .bg(cx.theme().title_bar)

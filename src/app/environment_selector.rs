@@ -32,11 +32,10 @@ impl ApiTester {
             .h(px(APP_TITLE_BAR_HEIGHT))
             .flex_shrink_0()
             .pl(windows_controls::leading_inset())
-            .pr_6()
+            .pr(windows_controls::trailing_inset())
             .border_b_1()
             .border_color(cx.theme().title_bar_border)
             .bg(cx.theme().title_bar)
-            .justify_between()
             .child(
                 h_flex()
                     .min_w_0()
@@ -64,6 +63,7 @@ impl ApiTester {
                             .child(selected_name.to_owned()),
                     ),
             )
+            .child(div().flex_1())
             .child(
                 Button::new("environment-workspace-active")
                     .icon(IconName::Globe)
