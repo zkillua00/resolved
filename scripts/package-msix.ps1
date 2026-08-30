@@ -34,14 +34,38 @@ if (-not (Test-Path $exePath)) {
     throw "missing $exePath - run 'scripts/cargo.ps1 build' first"
 }
 
-$version = (& cargo metadata --no-deps --format-version 1 |
-    ConvertFrom-Json).packages[0].version
-# MSIX versions must be four numeric parts ending in .0 (`x.y.z.w`).
-$manifestVersion = "$version.0"
-
 $identityName = 'nous.resolved'
 $certificateSubject = 'CN=Nous Research'
 $publisher = $certificateSubject.Substring(3)
+$version = (& cargo metadata --no-deps --format-version 1 |
+    ConvertFrom-Json).packages[0].version
+# MSIX versions use four numeric parts. Release packages start at revision 0;
+# repeated local installs of the same Cargo version advance the revision so
+# Windows deploys the rebuilt executable instead of retaining stale bytes.
+$manifestVersion = [version]"$version.0"
+if ($Install) {
+    $installed = Get-AppxPackage -Name $identityName -ErrorAction SilentlyContinue |
+        Sort-Object Version -Descending |
+        Select-Object -First 1
+    if ($installed) {
+        $installedVersion = [version]$installed.Version
+        $sameBaseVersion = $installedVersion.Major -eq $manifestVersion.Major -and
+            $installedVersion.Minor -eq $manifestVersion.Minor -and
+            $installedVersion.Build -eq $manifestVersion.Build
+        if ($sameBaseVersion -and $installedVersion.Revision -ge $manifestVersion.Revision) {
+            if ($installedVersion.Revision -ge 65535) {
+                throw "MSIX revision limit reached for $version; bump the Cargo package version"
+            }
+            $manifestVersion = [version]::new(
+                $manifestVersion.Major,
+                $manifestVersion.Minor,
+                $manifestVersion.Build,
+                $installedVersion.Revision + 1
+            )
+        }
+    }
+}
+$manifestVersion = $manifestVersion.ToString()
 
 function Find-SdkTool([string]$name) {
     $versions = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
@@ -173,9 +197,13 @@ if ($Install) {
         $store.Close()
     }
     Write-Host 'Installing the package...'
-    Add-AppxPackage -Path $msixPath
+    Add-AppxPackage -Path $msixPath `
+        -ForceApplicationShutdown `
+        -ForceUpdateFromAnyVersion
+    $installedPackage = Get-AppxPackage -Name $identityName | Select-Object -First 1
+    $appUserModelId = "$($installedPackage.PackageFamilyName)!Resolved"
     Write-Host 'Installed. Launch with:'
-    Write-Host '  Start-Process "shell:AppsFolder\nous.resolved_rst4z8a1w!Resolved"'
+    Write-Host "  Start-Process 'shell:AppsFolder\$appUserModelId'"
     Write-Host 'or from the Start menu ("Resolved").'
 } else {
     Write-Host 'Install it with:'

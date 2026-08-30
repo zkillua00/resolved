@@ -1,8 +1,9 @@
 use gpui::{
     AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Window,
-    div,
+    Timer, div,
 };
 use gpui_wry::WebView as GpuiWebView;
+use std::time::Duration;
 use wry::{NewWindowResponse, WebContext, WebViewBuilder};
 
 /// The link-preview policy shared by every webview backend.
@@ -27,23 +28,14 @@ impl PreviewLinkPolicy for WebViewBuilder<'_> {
     }
 }
 
-const SAFE_EMPTY: &str = r#"<!doctype html>
-<html>
-<head>
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'">
-  <meta name="color-scheme" content="light dark">
-</head>
-<body></body>
-</html>"#;
-
-const CSP_META: &str = r#"<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'"><meta name="color-scheme" content="light dark">"#;
+const CSP_META: &str = r#"<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'>"#;
 
 pub struct HtmlPreview {
     webview: Option<Entity<GpuiWebView>>,
 }
 
 impl HtmlPreview {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(html: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // WebView2 keeps its user-data folder beside the host executable by
         // default; the Windows Store deployment puts that under
         // `C:\Program Files\WindowsApps\...`, which is read-only, so
@@ -58,9 +50,19 @@ impl HtmlPreview {
         // preview instead of panicking the whole app on a user action. The
         // packaged Windows process has no stderr, so the failure reason is
         // mirrored into the diagnostic log beside the data directory.
+        // Prepare the captured response before creating the native child.
+        // On Windows, WebView2's builder-time NavigateToString can report a
+        // successful navigation yet finish with the default empty document.
+        // Navigate only after gpui-wry owns the fully-created child below.
+        let document = safe_html_document(html);
+        crate::log_diagnostic(&format!(
+            "web preview: initial document source_bytes={} document_bytes={}",
+            html.len(),
+            document.len()
+        ));
         let webview = WebViewBuilder::new_with_web_context(&mut web_context)
-            .with_html(SAFE_EMPTY)
             .with_incognito(true)
+            .with_background_color((255, 255, 255, 255))
             .with_javascript_disabled()
             .with_devtools(false)
             .with_autoplay(false)
@@ -69,6 +71,16 @@ impl HtmlPreview {
             .with_navigation_handler(|url| url.starts_with("about:blank"))
             .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
             .with_download_started_handler(|_, _| false)
+            .with_on_page_load_handler(|event, url| {
+                let scheme = url.split_once(':').map_or("unknown", |(scheme, _)| scheme);
+                let event = match event {
+                    wry::PageLoadEvent::Started => "started",
+                    wry::PageLoadEvent::Finished => "finished",
+                };
+                crate::log_diagnostic(&format!(
+                    "web preview: page load {event} (scheme: {scheme})"
+                ));
+            })
             .build_as_child(window);
         let webview = match webview {
             Ok(webview) => {
@@ -80,15 +92,104 @@ impl HtmlPreview {
                 None
             }
         };
-        let webview = webview.map(|raw| {
-                cx.new(|cx| {
-                    let mut view = GpuiWebView::new(raw, window, cx);
-                    view.hide();
-                    view
-                })
-            });
+        // The preview is created only while its tab is active and is dropped
+        // when hidden, so keep WebView2 visible through its first navigation
+        // and nonzero layout. A hide/show cycle here can leave its child
+        // composition surface black even though the document remains
+        // interactive.
+        let webview = webview.map(|raw| cx.new(|cx| GpuiWebView::new(raw, window, cx)));
+
+        if let Some(initial_view) = webview.clone() {
+            cx.spawn(async move |_, cx| {
+                // Let WebView2 finish creating its controller and default
+                // document before replacing that document with the captured
+                // response. This avoids a builder-time NavigateToString being
+                // overwritten by WebView2's own initial about:blank load.
+                Timer::after(Duration::from_millis(100)).await;
+                let result = initial_view.update(cx, |view, _| {
+                    load_document(view.raw(), &document)?;
+                    view.show();
+                    Ok::<(), wry::Error>(())
+                });
+                match result {
+                    Ok(Ok(())) => crate::log_diagnostic("web preview: initial document submitted"),
+                    Ok(Err(error)) => crate::log_diagnostic(&format!(
+                        "web preview: initial document submission failed: {error}"
+                    )),
+                    Err(error) => crate::log_diagnostic(&format!(
+                        "web preview: initial document submission failed: {error}"
+                    )),
+                }
+            })
+            .detach();
+        }
+
+        // Record the renderer's own view of the document after its first
+        // layout. This deliberately logs only structure/layout metadata, not
+        // response text. It distinguishes an empty/hidden DOM from a native
+        // WebView2 composition failure when the preview surface is blank.
+        cx.spawn(async move |this, cx| {
+            Timer::after(Duration::from_millis(750)).await;
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            this.update(cx, |this, cx| this.log_render_state(cx)).ok();
+        })
+        .detach();
 
         Self { webview }
+    }
+
+    fn log_render_state(&self, cx: &mut Context<Self>) {
+        let Some(webview) = &self.webview else {
+            return;
+        };
+        let script = r#"(() => {
+            try {
+                const root = document.documentElement;
+                const body = document.body;
+                const style = element => {
+                    if (!element) return null;
+                    const computed = getComputedStyle(element);
+                    const rect = element.getBoundingClientRect();
+                    return {
+                        display: computed.display,
+                        visibility: computed.visibility,
+                        opacity: computed.opacity,
+                        color: computed.color,
+                        backgroundColor: computed.backgroundColor,
+                        width: rect.width,
+                        height: rect.height
+                    };
+                };
+                return {
+                    readyState: document.readyState,
+                    titleLength: document.title.length,
+                    textLength: body?.innerText?.length ?? -1,
+                    childCount: body?.children?.length ?? -1,
+                    elementCount: document.querySelectorAll('*').length,
+                    markupLength: root?.outerHTML?.length ?? -1,
+                    viewportWidth: innerWidth,
+                    viewportHeight: innerHeight,
+                    devicePixelRatio,
+                    root: style(root),
+                    body: style(body)
+                };
+            } catch (error) {
+                return { error: String(error) };
+            }
+        })()"#;
+        let result = webview.update(cx, |view, _| {
+            view.raw().evaluate_script_with_callback(script, |state| {
+                crate::log_diagnostic(&format!("web preview: render state {state}"));
+            })
+        });
+        match result {
+            Ok(()) => {}
+            Err(error) => crate::log_diagnostic(&format!(
+                "web preview: render-state probe failed: {error}"
+            )),
+        }
     }
 
     pub fn is_available(&self) -> bool {
@@ -101,13 +202,25 @@ impl HtmlPreview {
             return Ok(());
         };
         let document = safe_html_document(html);
+        crate::log_diagnostic(&format!(
+            "web preview: reload document source_bytes={} document_bytes={}",
+            html.len(),
+            document.len()
+        ));
         let result = webview.update(cx, |view, _| {
-            view.raw().load_html(&document)?;
+            load_document(view.raw(), &document)?;
             view.show();
             Ok(())
         });
         cx.notify();
         result
+    }
+
+    pub fn show(&mut self, cx: &mut Context<Self>) {
+        if let Some(webview) = &self.webview {
+            webview.update(cx, |view, _| view.show());
+        }
+        cx.notify();
     }
 
     pub fn hide(&mut self, cx: &mut Context<Self>) {
@@ -116,6 +229,26 @@ impl HtmlPreview {
         }
         cx.notify();
     }
+}
+
+/// Load a captured document without allowing its own scripts to execute.
+///
+/// WebView2's `NavigateToString` can successfully complete while leaving its
+/// default empty document in a child WebView hosted by GPUI. Host-injected
+/// script remains available when page JavaScript is disabled, so on Windows
+/// replace the current document directly. Other engines keep their native
+/// HTML loading path.
+#[cfg(target_os = "windows")]
+fn load_document(webview: &wry::WebView, document: &str) -> wry::Result<()> {
+    let encoded = serde_json::to_string(document).expect("serializing an HTML string cannot fail");
+    webview.evaluate_script(&format!(
+        "document.open();document.write({encoded});document.close();"
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn load_document(webview: &wry::WebView, document: &str) -> wry::Result<()> {
+    webview.load_html(document)
 }
 
 impl Render for HtmlPreview {

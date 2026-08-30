@@ -19,7 +19,8 @@ $pinned = @(
         patches = @(
             "$projectDir\patches\gpui-0.2.2-metal-memoryless.patch",
             "$projectDir\patches\gpui-0.2.2-retained-line-layout-cache.patch",
-            "$projectDir\patches\gpui-0.2.2-reentrant-async-context.patch"
+            "$projectDir\patches\gpui-0.2.2-reentrant-async-context.patch",
+            "$projectDir\patches\gpui-0.2.2-windows-clip-children.patch"
         )
     },
     @{

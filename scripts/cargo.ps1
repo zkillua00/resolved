@@ -18,6 +18,35 @@ $ErrorActionPreference = 'Stop'
 $projectDir = Split-Path -Parent $PSScriptRoot
 Set-Location $projectDir
 
+function Initialize-WindowsShaderCompiler {
+    # GPUI 0.2.2 only probes PATH and one specific Windows SDK version.
+    # Resolve the newest installed x64 SDK compiler so other SDK versions work.
+    if ($env:GPUI_FXC_PATH -and (Test-Path -LiteralPath $env:GPUI_FXC_PATH -PathType Leaf)) {
+        return
+    }
+
+    $kitsRoot = (Get-ItemProperty `
+        'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots' `
+        -Name KitsRoot10 `
+        -ErrorAction SilentlyContinue).KitsRoot10
+    if (-not $kitsRoot) {
+        $kitsRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\'
+    }
+
+    $sdkBin = Join-Path $kitsRoot 'bin'
+    $sdkVersions = Get-ChildItem -LiteralPath $sdkBin -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -as [version] } |
+        Sort-Object { [version]$_.Name } -Descending
+    foreach ($sdkVersion in $sdkVersions) {
+        $fxc = Join-Path $sdkVersion.FullName 'x64\fxc.exe'
+        if (Test-Path -LiteralPath $fxc -PathType Leaf) {
+            $env:GPUI_FXC_PATH = $fxc
+            Write-Host "Using Windows SDK shader compiler: $fxc"
+            return
+        }
+    }
+}
+
 function Initialize-WindowsBuildToolchain {
     # Keep an explicit caller-provided linker. Otherwise use the copy of lld
     # bundled with Rust: it is faster and more parallel than link.exe during
@@ -36,6 +65,7 @@ function Initialize-WindowsBuildToolchain {
     }
 }
 
+Initialize-WindowsShaderCompiler
 Initialize-WindowsBuildToolchain
 
 function Invoke-Prepare {

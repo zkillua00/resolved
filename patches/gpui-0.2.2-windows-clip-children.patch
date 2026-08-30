@@ -1,0 +1,26 @@
+diff --git a/src/platform/windows/window.rs b/src/platform/windows/window.rs
+index 24f2a8a..796e3f0 100644
+--- a/src/platform/windows/window.rs
++++ b/src/platform/windows/window.rs
+@@ -391,7 +391,7 @@ impl WindowsWindow {
+                 .unwrap_or(""),
+         );
+ 
+-        let (mut dwexstyle, dwstyle) = if params.kind == WindowKind::PopUp {
++        let (mut dwexstyle, mut dwstyle) = if params.kind == WindowKind::PopUp {
+             (WS_EX_TOOLWINDOW, WINDOW_STYLE(0x0))
+         } else {
+             let mut dwstyle = WS_SYSMENU;
+@@ -406,6 +406,12 @@ impl WindowsWindow {
+ 
+             (WS_EX_APPWINDOW, dwstyle)
+         };
++        // GPUI renders through a DirectComposition surface, while embedded
++        // controls such as WebView2 render in native child HWNDs. Excluding
++        // child rectangles from the parent paint surface keeps that surface
++        // from visually covering the child while the child still receives
++        // pointer input.
++        dwstyle |= WS_CLIPCHILDREN;
+         if !disable_direct_composition {
+             dwexstyle |= WS_EX_NOREDIRECTIONBITMAP;
+         }

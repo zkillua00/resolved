@@ -271,6 +271,18 @@ fn main() {
         }
     };
 
+    // GPUI's DirectComposition visual is composited above native child HWNDs
+    // such as the WebView2 response preview. The child still receives input,
+    // but its pixels are hidden behind the GPUI surface. Select GPUI's HWND
+    // swap-chain renderer before the Windows platform is initialized so the
+    // native child participates in normal window z-order and clipping.
+    #[cfg(target_os = "windows")]
+    // SAFETY: this runs on the single startup thread before `Application`
+    // creates GPUI's platform or any worker threads.
+    unsafe {
+        std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "1");
+    }
+
     Application::new()
         .with_assets(AppAssets)
         .run(|cx: &mut App| {

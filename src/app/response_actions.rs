@@ -51,17 +51,24 @@ impl ApiTester {
         }
 
         let html = response.body_text_lossy();
+        let is_new = self.preview.is_none();
         let preview = self
             .preview
-            .get_or_insert_with(|| cx.new(|cx| HtmlPreview::new(window, cx)))
+            .get_or_insert_with(|| cx.new(|cx| HtmlPreview::new(&html, window, cx)))
             .clone();
         if !preview.read(cx).is_available() {
-            self.preview_error =
-                Some("The response preview could not be created.".to_owned());
+            self.preview_error = Some("The response preview could not be created.".to_owned());
             self.hide_preview(cx);
             return;
         }
-        let result = preview.update(cx, |preview, cx| preview.load_html(&html, cx));
+        // A newly-created WebView already has this response as its initial
+        // document. Only navigate an existing preview.
+        let result = if is_new {
+            preview.update(cx, |preview, cx| preview.show(cx));
+            Ok(())
+        } else {
+            preview.update(cx, |preview, cx| preview.load_html(&html, cx))
+        };
         match result {
             Ok(()) => self.preview_error = None,
             Err(error) => {
