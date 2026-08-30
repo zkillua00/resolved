@@ -64,7 +64,6 @@ impl ApiTester {
         // A newly-created WebView already has this response as its initial
         // document. Only navigate an existing preview.
         let result = if is_new {
-            preview.update(cx, |preview, cx| preview.show(cx));
             Ok(())
         } else {
             preview.update(cx, |preview, cx| preview.load_html(&html, cx))

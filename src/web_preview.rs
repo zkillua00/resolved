@@ -3,7 +3,13 @@ use gpui::{
     Timer, div,
 };
 use gpui_wry::WebView as GpuiWebView;
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use wry::{NewWindowResponse, WebContext, WebViewBuilder};
 
 /// The link-preview policy shared by every webview backend.
@@ -109,15 +115,33 @@ impl HtmlPreview {
                 // Wait for gpui-wry's first prepaint to assign a nonempty pane
                 // rectangle. Its logical visibility remains enabled so layout
                 // proceeds while the native controller itself stays hidden.
+                let mut stable_bounds = None;
+                let mut stable_samples = 0;
                 let mut positioned = false;
                 for _ in 0..120 {
                     Timer::after(Duration::from_millis(16)).await;
-                    match initial_view.update(cx, |view, _| !view.bounds().is_empty()) {
-                        Ok(true) => {
-                            positioned = true;
-                            break;
+                    match initial_view.update(cx, |view, _| view.bounds()) {
+                        Ok(bounds) if bounds.is_empty() => {
+                            stable_bounds = None;
+                            stable_samples = 0;
                         }
-                        Ok(false) => {}
+                        Ok(bounds) => {
+                            if stable_bounds == Some(bounds) {
+                                stable_samples += 1;
+                            } else {
+                                stable_bounds = Some(bounds);
+                                stable_samples = 1;
+                            }
+                            // A first nonempty layout can still be GPUI's
+                            // provisional response-pane size. Require roughly
+                            // 100 ms of unchanged bounds before exposing the
+                            // native controller so none of that resize is
+                            // visible to the user.
+                            if stable_samples >= 6 {
+                                positioned = true;
+                                break;
+                            }
+                        }
                         Err(error) => {
                             crate::log_diagnostic(&format!(
                                 "web preview: initial layout check failed: {error}"
@@ -133,19 +157,96 @@ impl HtmlPreview {
                     return;
                 }
 
-                let result = initial_view.update(cx, |view, _| {
-                    load_document(view.raw(), &document)?;
-                    view.show();
-                    Ok::<(), wry::Error>(())
-                });
-                match result {
-                    Ok(Ok(())) => crate::log_diagnostic("web preview: initial document submitted"),
-                    Ok(Err(error)) => crate::log_diagnostic(&format!(
-                        "web preview: initial document submission failed: {error}"
-                    )),
-                    Err(error) => crate::log_diagnostic(&format!(
-                        "web preview: initial document submission failed: {error}"
-                    )),
+                let result =
+                    initial_view.update(cx, |view, _| load_document(view.raw(), &document));
+                let ready = match result {
+                    Ok(Ok(ready)) => {
+                        crate::log_diagnostic("web preview: initial document submitted");
+                        ready
+                    }
+                    Ok(Err(error)) => {
+                        crate::log_diagnostic(&format!(
+                            "web preview: initial document submission failed: {error}"
+                        ));
+                        return;
+                    }
+                    Err(error) => {
+                        crate::log_diagnostic(&format!(
+                            "web preview: initial document submission failed: {error}"
+                        ));
+                        return;
+                    }
+                };
+
+                if let Some(ready) = ready {
+                    let mut completed = false;
+                    for _ in 0..120 {
+                        if ready.load(Ordering::Acquire) {
+                            completed = true;
+                            break;
+                        }
+                        Timer::after(Duration::from_millis(16)).await;
+                    }
+                    if !completed {
+                        crate::log_diagnostic(
+                            "web preview: initial document did not complete before reveal",
+                        );
+                        return;
+                    }
+                }
+
+                // ExecuteScript completion means the DOM write finished, not
+                // that WebView2 has presented the corresponding compositor
+                // frame. Wry does not expose WebView2's frame-presented event,
+                // so retain the hidden controller through a short compositor
+                // grace period before the final bounds-stability gate.
+                Timer::after(Duration::from_millis(500)).await;
+
+                // Host script execution and WebView2 painting are
+                // asynchronous. Keep the controller hidden while the loaded
+                // document gets its first layout, and require the host pane to
+                // remain settled throughout that work before revealing it.
+                stable_bounds = None;
+                stable_samples = 0;
+                positioned = false;
+                for _ in 0..120 {
+                    Timer::after(Duration::from_millis(16)).await;
+                    match initial_view.update(cx, |view, _| view.bounds()) {
+                        Ok(bounds) if bounds.is_empty() => {
+                            stable_bounds = None;
+                            stable_samples = 0;
+                        }
+                        Ok(bounds) => {
+                            if stable_bounds == Some(bounds) {
+                                stable_samples += 1;
+                            } else {
+                                stable_bounds = Some(bounds);
+                                stable_samples = 1;
+                            }
+                            if stable_samples >= 6 {
+                                positioned = true;
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            crate::log_diagnostic(&format!(
+                                "web preview: post-load layout check failed: {error}"
+                            ));
+                            return;
+                        }
+                    }
+                }
+                if !positioned {
+                    crate::log_diagnostic(
+                        "web preview: post-load layout never settled at nonempty bounds",
+                    );
+                    return;
+                }
+
+                if let Err(error) = initial_view.update(cx, |view, _| view.show()) {
+                    crate::log_diagnostic(&format!(
+                        "web preview: initial reveal failed: {error}"
+                    ));
                 }
             })
             .detach();
@@ -234,20 +335,74 @@ impl HtmlPreview {
             html.len(),
             document.len()
         ));
-        let result = webview.update(cx, |view, _| {
-            load_document(view.raw(), &document)?;
-            view.show();
-            Ok(())
-        });
-        cx.notify();
-        result
-    }
+        let webview = webview.clone();
+        let ready = webview.update(cx, |view, _| {
+            // Keep gpui-wry logically visible so prepaint continues updating
+            // bounds, but hide the native controller while WebView2 replaces
+            // and lays out the document.
+            view.raw().set_visible(false)?;
+            load_document(view.raw(), &document)
+        })?;
 
-    pub fn show(&mut self, cx: &mut Context<Self>) {
-        if let Some(webview) = &self.webview {
-            webview.update(cx, |view, _| view.show());
-        }
+        cx.spawn(async move |_, cx| {
+            if let Some(ready) = ready {
+                let mut completed = false;
+                for _ in 0..120 {
+                    if ready.load(Ordering::Acquire) {
+                        completed = true;
+                        break;
+                    }
+                    Timer::after(Duration::from_millis(16)).await;
+                }
+                if !completed {
+                    crate::log_diagnostic(
+                        "web preview: reload document did not complete before reveal",
+                    );
+                    return;
+                }
+            }
+
+            Timer::after(Duration::from_millis(500)).await;
+
+            let mut stable_bounds = None;
+            let mut stable_samples = 0;
+            for _ in 0..120 {
+                Timer::after(Duration::from_millis(16)).await;
+                match webview.update(cx, |view, _| view.bounds()) {
+                    Ok(bounds) if bounds.is_empty() => {
+                        stable_bounds = None;
+                        stable_samples = 0;
+                    }
+                    Ok(bounds) => {
+                        if stable_bounds == Some(bounds) {
+                            stable_samples += 1;
+                        } else {
+                            stable_bounds = Some(bounds);
+                            stable_samples = 1;
+                        }
+                        if stable_samples >= 6 {
+                            if let Err(error) = webview.update(cx, |view, _| view.show()) {
+                                crate::log_diagnostic(&format!(
+                                    "web preview: reload reveal failed: {error}"
+                                ));
+                            }
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        crate::log_diagnostic(&format!(
+                            "web preview: reload layout check failed: {error}"
+                        ));
+                        return;
+                    }
+                }
+            }
+            crate::log_diagnostic("web preview: reload layout never settled at nonempty bounds");
+        })
+        .detach();
+
         cx.notify();
+        Ok(())
     }
 
     pub fn hide(&mut self, cx: &mut Context<Self>) {
@@ -266,16 +421,21 @@ impl HtmlPreview {
 /// replace the current document directly. Other engines keep their native
 /// HTML loading path.
 #[cfg(target_os = "windows")]
-fn load_document(webview: &wry::WebView, document: &str) -> wry::Result<()> {
+fn load_document(webview: &wry::WebView, document: &str) -> wry::Result<Option<Arc<AtomicBool>>> {
     let encoded = serde_json::to_string(document).expect("serializing an HTML string cannot fail");
-    webview.evaluate_script(&format!(
-        "document.open();document.write({encoded});document.close();"
-    ))
+    let ready = Arc::new(AtomicBool::new(false));
+    let callback_ready = Arc::clone(&ready);
+    webview.evaluate_script_with_callback(
+        &format!("document.open();document.write({encoded});document.close();true"),
+        move |_| callback_ready.store(true, Ordering::Release),
+    )?;
+    Ok(Some(ready))
 }
 
 #[cfg(not(target_os = "windows"))]
-fn load_document(webview: &wry::WebView, document: &str) -> wry::Result<()> {
-    webview.load_html(document)
+fn load_document(webview: &wry::WebView, document: &str) -> wry::Result<Option<Arc<AtomicBool>>> {
+    webview.load_html(document)?;
+    Ok(None)
 }
 
 impl Render for HtmlPreview {
