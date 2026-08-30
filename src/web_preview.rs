@@ -62,6 +62,11 @@ impl HtmlPreview {
         ));
         let webview = WebViewBuilder::new_with_web_context(&mut web_context)
             .with_incognito(true)
+            // The child is created at the native default origin. Keep it
+            // hidden until gpui-wry has assigned the preview pane's real
+            // bounds, otherwise WebView2 flashes in the window's top-left
+            // corner for its first frame.
+            .with_visible(false)
             .with_background_color((255, 255, 255, 255))
             .with_javascript_disabled()
             .with_devtools(false)
@@ -101,11 +106,33 @@ impl HtmlPreview {
 
         if let Some(initial_view) = webview.clone() {
             cx.spawn(async move |_, cx| {
-                // Let WebView2 finish creating its controller and default
-                // document before replacing that document with the captured
-                // response. This avoids a builder-time NavigateToString being
-                // overwritten by WebView2's own initial about:blank load.
-                Timer::after(Duration::from_millis(100)).await;
+                // Wait for gpui-wry's first prepaint to assign a nonempty pane
+                // rectangle. Its logical visibility remains enabled so layout
+                // proceeds while the native controller itself stays hidden.
+                let mut positioned = false;
+                for _ in 0..120 {
+                    Timer::after(Duration::from_millis(16)).await;
+                    match initial_view.update(cx, |view, _| !view.bounds().is_empty()) {
+                        Ok(true) => {
+                            positioned = true;
+                            break;
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            crate::log_diagnostic(&format!(
+                                "web preview: initial layout check failed: {error}"
+                            ));
+                            return;
+                        }
+                    }
+                }
+                if !positioned {
+                    crate::log_diagnostic(
+                        "web preview: initial layout never produced nonempty bounds",
+                    );
+                    return;
+                }
+
                 let result = initial_view.update(cx, |view, _| {
                     load_document(view.raw(), &document)?;
                     view.show();
