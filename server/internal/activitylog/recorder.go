@@ -72,7 +72,7 @@ func logKind(resource resourceevents.Resource) string {
 		resourceevents.ResourceRequest:
 		return KindChange
 	case resourceevents.ResourceUser, resourceevents.ResourceRole,
-		resourceevents.ResourceRequestExecution:
+		resourceevents.ResourceRequestExecution, resourceevents.ResourceServerSettings:
 		return KindAudit
 	default:
 		return ""

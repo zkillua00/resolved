@@ -143,8 +143,11 @@ resource and its scope:
 
 The message signals that affected state should be fetched again through the
 REST API; it is not a replacement for the resource representation. Events are
-sent only to authenticated connections whose current grants or permissions
-cover the affected resource. Shared-history changes use `resource` value
+sent only to authenticated connections whose resource scope and read
+permissions both cover the affected resource. Collection mutations go only to
+accounts that can list the permission-projected collection tree for that
+workspace; permission without scope, or scope without the list permissions, is
+not enough. Shared-history changes use `resource` value
 `shared_history` and identify the history owner in `resource_id`.
 
 `GET /api/v1/workspaces` returns the workspaces visible to the authenticated
@@ -188,8 +191,9 @@ Clients then reload the authorized profile history through REST.
 
 `GET /api/v1/workspaces/{workspace_id}/change-log` returns the newest page of
 workspace, collection, and saved-request mutations visible in the caller's
-current resource scope. `GET /api/v1/audit-log` returns user and
-role administration events and requires `audit.read`. Each entry snapshots its
+current resource scope. `GET /api/v1/audit-log` returns user and role
+administration, server request execution, and server-setting events and
+requires `audit.read`. Each entry snapshots its
 actor and target name and includes `diffs` with `field`, `from`, and `to` values.
 Saved-request definitions use structured JSON paths for updates. Sensitive or
 explicitly unshared header values are redacted, multipart file paths are
@@ -228,7 +232,9 @@ original port is preserved in both cases, and override targets cannot define a
 port or path. Request definitions, headers, bodies, uploaded multipart file
 bytes, and responses are not persisted by the execution endpoint. The Resolved
 bearer token authenticates the outer server call and is never forwarded
-automatically.
+automatically. Each execution emits a metadata-only `request_execution`
+WebSocket event to connections with `audit.read`; server-setting changes emit
+`server_settings` events to connections with `server_settings.read`.
 
 Grant `requests.execute` carefully. A user with this permission can reach HTTP
 services visible from the server's network, including private services that may

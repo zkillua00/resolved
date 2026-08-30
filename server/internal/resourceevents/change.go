@@ -12,9 +12,9 @@ const EventName = "resource.changed"
 type Action string
 
 const (
-	ActionCreated Action = "created"
-	ActionUpdated Action = "updated"
-	ActionDeleted Action = "deleted"
+	ActionCreated  Action = "created"
+	ActionUpdated  Action = "updated"
+	ActionDeleted  Action = "deleted"
 	ActionExecuted Action = "executed"
 )
 
@@ -30,6 +30,7 @@ const (
 	ResourceEnvironment         Resource = "environment"
 	ResourceEnvironmentVariable Resource = "environment_variable"
 	ResourceRequestExecution    Resource = "request_execution"
+	ResourceServerSettings      Resource = "server_settings"
 )
 
 type Audience struct {

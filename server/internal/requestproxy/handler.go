@@ -99,10 +99,15 @@ func (h *Handler) UpdateSettingsController() fiber.Handler {
 		UpdateSettingsRequest,
 	](
 		func(c fiber.Ctx, payload UpdateSettingsPayload) httpkit.Response[Settings] {
-			settings, err := h.service.UpdateSettings(c.Context(), Settings{
-				Mode:              payload.Mode,
-				HostnameOverrides: payload.HostnameOverrides,
-			})
+			principal := auth.PrincipalFromContext(c)
+			settings, err := h.service.UpdateSettings(
+				c.Context(),
+				principal.User.ID,
+				Settings{
+					Mode:              payload.Mode,
+					HostnameOverrides: payload.HostnameOverrides,
+				},
+			)
 			if err != nil {
 				return httpkit.NewErrorResponse[Settings](err)
 			}

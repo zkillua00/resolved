@@ -6,12 +6,13 @@ import (
 	"time"
 
 	"resolved-server/eventsystem"
+	"resolved-server/internal/identity"
 	"resolved-server/internal/resourceevents"
 	websocket "resolved-server/websocket"
 	"resolved-server/websocket/connection"
 )
 
-func TestPublisherDeliversScopedEventOncePerConnection(t *testing.T) {
+func TestPublisherRequiresResourceScopeAndReadPermissions(t *testing.T) {
 	events := eventsystem.NewEventListener()
 	events.StartNewEventLoop()
 	t.Cleanup(events.Stop)
@@ -21,10 +22,16 @@ func TestPublisherDeliversScopedEventOncePerConnection(t *testing.T) {
 
 	member := connection.NewMockWebsocketConnection()
 	owner := connection.NewMockWebsocketConnection()
+	scopedWithoutRead := connection.NewMockWebsocketConnection()
 	outsider := connection.NewMockWebsocketConnection()
 	socket.AddUser("member", userChannel("member"), member)
-	socket.AddUser("member", permissionChannel("collections.read"), member)
+	for _, permission := range requiredPermissions(resourceevents.ResourceCollection) {
+		socket.AddUser("member", permissionChannel(permission), member)
+		socket.AddUser("owner", permissionChannel(permission), owner)
+		socket.AddUser("outsider", permissionChannel(permission), outsider)
+	}
 	socket.AddUser("owner", ownersChannel, owner)
+	socket.AddUser("scoped-without-read", userChannel("scoped-without-read"), scopedWithoutRead)
 	socket.AddUser("outsider", userChannel("outsider"), outsider)
 
 	resourceevents.Emit(events, resourceevents.Change{
@@ -34,14 +41,14 @@ func TestPublisherDeliversScopedEventOncePerConnection(t *testing.T) {
 		WorkspaceID:  "workspace-1",
 		CollectionID: "collection-1",
 		Audience: resourceevents.Audience{
-			Owners:         true,
-			UserIDs:        []string{"member"},
-			PermissionKeys: []string{"collections.read"},
+			Owners:  true,
+			UserIDs: []string{"member", "scoped-without-read"},
 		},
 	})
 
 	waitForMessages(t, member, 1)
 	waitForMessages(t, owner, 1)
+	assertMessageCount(t, scopedWithoutRead, 0)
 	assertMessageCount(t, outsider, 0)
 	assertMessageCount(t, member, 1)
 
@@ -68,6 +75,43 @@ func TestPublisherDeliversScopedEventOncePerConnection(t *testing.T) {
 		len(received.Data.Audience.UserIDs) != 0 || len(received.Data.Audience.RoleIDs) != 0 ||
 		len(received.Data.Audience.PermissionKeys) != 0 {
 		t.Fatalf("private audience leaked into the published payload: %+v", received.Data.Audience)
+	}
+}
+
+func TestRequiredPermissionsFollowReadEndpoints(t *testing.T) {
+	tests := []struct {
+		resource resourceevents.Resource
+		want     []string
+	}{
+		{
+			resource: resourceevents.ResourceCollection,
+			want: []string{
+				identity.PermissionWorkspacesRead,
+				identity.PermissionCollectionsRead,
+				identity.PermissionRequestsRead,
+			},
+		},
+		{resource: resourceevents.ResourceRequest, want: []string{identity.PermissionRequestsRead}},
+		{resource: resourceevents.ResourceEnvironment, want: []string{identity.PermissionEnvironmentsRead}},
+		{resource: resourceevents.ResourceUser, want: []string{identity.PermissionUsersRead}},
+		{resource: resourceevents.ResourceRole, want: []string{identity.PermissionRolesRead}},
+		{resource: resourceevents.ResourceRequestExecution, want: []string{identity.PermissionAuditRead}},
+		{resource: resourceevents.ResourceServerSettings, want: []string{identity.PermissionServerSettingsRead}},
+		{resource: resourceevents.ResourceSharedHistory, want: nil},
+	}
+
+	for _, test := range tests {
+		t.Run(string(test.resource), func(t *testing.T) {
+			got := requiredPermissions(test.resource)
+			if len(got) != len(test.want) {
+				t.Fatalf("permissions = %v, want %v", got, test.want)
+			}
+			for index := range test.want {
+				if got[index] != test.want[index] {
+					t.Fatalf("permissions = %v, want %v", got, test.want)
+				}
+			}
+		})
 	}
 }
 

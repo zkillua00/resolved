@@ -143,6 +143,8 @@ func (p *Publisher) publish(change resourceevents.Change) {
 		return
 	}
 
+	invalidated := p.invalidateAuthorization(change)
+	permitted := p.permittedConnections(change.Resource)
 	seen := make(map[string]struct{})
 	for _, channel := range audienceChannels(change.Audience) {
 		hub, ok := p.socket.GetChannel(channel)
@@ -150,6 +152,14 @@ func (p *Publisher) publish(change resourceevents.Change) {
 			continue
 		}
 		for _, client := range hub.Snapshot() {
+			if _, blocked := invalidated[client.Id()]; blocked {
+				continue
+			}
+			if permitted != nil {
+				if _, allowed := permitted[client.Id()]; !allowed {
+					continue
+				}
+			}
 			if _, exists := seen[client.Id()]; exists {
 				continue
 			}
@@ -159,10 +169,9 @@ func (p *Publisher) publish(change resourceevents.Change) {
 			}
 		}
 	}
-	p.invalidateAuthorization(change)
 }
 
-func (p *Publisher) invalidateAuthorization(change resourceevents.Change) {
+func (p *Publisher) invalidateAuthorization(change resourceevents.Change) map[string]struct{} {
 	var channel string
 	switch change.Resource {
 	case resourceevents.ResourceRole:
@@ -170,14 +179,80 @@ func (p *Publisher) invalidateAuthorization(change resourceevents.Change) {
 	case resourceevents.ResourceUser:
 		channel = userChannel(change.ResourceID)
 	default:
-		return
+		return nil
 	}
 	hub, ok := p.socket.GetChannel(channel)
 	if !ok {
-		return
+		return nil
 	}
+	invalidated := make(map[string]struct{})
 	for _, client := range hub.Snapshot() {
+		invalidated[client.Id()] = struct{}{}
 		p.socket.CloseConnection(client)
+	}
+	return invalidated
+}
+
+// permittedConnections intersects every resource event with the permissions
+// required to load that resource through the HTTP API. Audience channels
+// select the account/workspace/collection scope; permission channels are a
+// second, mandatory gate rather than another way to enter the audience.
+func (p *Publisher) permittedConnections(resource resourceevents.Resource) map[string]struct{} {
+	permissions := requiredPermissions(resource)
+	if len(permissions) == 0 {
+		return nil
+	}
+
+	var permitted map[string]struct{}
+	for _, permission := range permissions {
+		hub, ok := p.socket.GetChannel(permissionChannel(permission))
+		if !ok {
+			return map[string]struct{}{}
+		}
+		current := make(map[string]struct{})
+		for _, client := range hub.Snapshot() {
+			current[client.Id()] = struct{}{}
+		}
+		if permitted == nil {
+			permitted = current
+			continue
+		}
+		for connectionID := range permitted {
+			if _, ok := current[connectionID]; !ok {
+				delete(permitted, connectionID)
+			}
+		}
+	}
+	return permitted
+}
+
+func requiredPermissions(resource resourceevents.Resource) []string {
+	switch resource {
+	case resourceevents.ResourceUser:
+		return []string{identity.PermissionUsersRead}
+	case resourceevents.ResourceRole:
+		return []string{identity.PermissionRolesRead}
+	case resourceevents.ResourceWorkspace, resourceevents.ResourceCollection:
+		// There is no unscoped collection-list endpoint. The desktop client
+		// lists the permission-projected tree through GET /workspaces.
+		return []string{
+			identity.PermissionWorkspacesRead,
+			identity.PermissionCollectionsRead,
+			identity.PermissionRequestsRead,
+		}
+	case resourceevents.ResourceRequest:
+		return []string{identity.PermissionRequestsRead}
+	case resourceevents.ResourceEnvironment, resourceevents.ResourceEnvironmentVariable:
+		return []string{identity.PermissionEnvironmentsRead}
+	case resourceevents.ResourceRequestExecution:
+		return []string{identity.PermissionAuditRead}
+	case resourceevents.ResourceServerSettings:
+		return []string{identity.PermissionServerSettingsRead}
+	default:
+		// Shared-history recipients are resolved by a database query that
+		// already combines workspace scope with history.read_others, while
+		// still allowing the history owner to receive their own updates.
+		return nil
 	}
 }
 

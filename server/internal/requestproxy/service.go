@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"resolved-server/internal/identity"
 	"resolved-server/internal/problem"
 	"resolved-server/internal/requestproxy/proxybody"
 	"resolved-server/internal/resourceevents"
@@ -212,7 +213,15 @@ func (s *Service) Settings(ctx context.Context) (Settings, error) {
 	return s.settings.Get(ctx)
 }
 
-func (s *Service) UpdateSettings(ctx context.Context, settings Settings) (Settings, error) {
+func (s *Service) UpdateSettings(
+	ctx context.Context,
+	actorUserID string,
+	settings Settings,
+) (Settings, error) {
+	before, err := s.settings.Get(ctx)
+	if err != nil {
+		return Settings{}, err
+	}
 	updated, err := s.settings.Replace(ctx, settings)
 	if err != nil {
 		return Settings{}, err
@@ -221,6 +230,24 @@ func (s *Service) UpdateSettings(ctx context.Context, settings Settings) (Settin
 	// dial target. Discard idle connections so an updated override takes effect
 	// on the next request instead of reusing the previous destination.
 	s.client.CloseIdleConnections()
+	resourceevents.Emit(s.events, resourceevents.Change{
+		Resource:    resourceevents.ResourceServerSettings,
+		Action:      resourceevents.ActionUpdated,
+		ResourceID:  SettingsRecordID,
+		ActorUserID: actorUserID,
+		TargetName:  "request execution settings",
+		Audience: resourceevents.Audience{
+			PermissionKeys: []string{identity.PermissionServerSettingsRead},
+		},
+		Diffs: []resourceevents.Diff{
+			{Field: "mode", From: before.Mode, To: updated.Mode},
+			{
+				Field: "hostname_override_count",
+				From:  len(before.HostnameOverrides),
+				To:    len(updated.HostnameOverrides),
+			},
+		},
+	})
 	return updated, nil
 }
 
@@ -471,6 +498,9 @@ func (s *Service) recordExecution(
 		WorkspaceID: workspaceID,
 		ActorUserID: actor.UserID,
 		TargetName:  target.Host,
+		Audience: resourceevents.Audience{
+			PermissionKeys: []string{identity.PermissionAuditRead},
+		},
 		Diffs: []resourceevents.Diff{
 			{Field: "method", From: "", To: method},
 			{Field: "host", From: "", To: target.Host},

@@ -464,6 +464,50 @@ func TestAuthenticatedWebsocketPublishesResourceChanges(t *testing.T) {
 		t.Fatalf("unexpected resource change: %+v", published.Data)
 	}
 
+	collection := request[workspaces.CollectionView](
+		t,
+		app,
+		http.MethodPost,
+		"/api/v1/workspaces/"+created.ID+"/collections",
+		ownerLogin.Token,
+		map[string]any{"name": "Realtime collection"},
+		fiber.StatusCreated,
+	).Data
+	if err := client.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set collection create websocket deadline: %v", err)
+	}
+	if err := client.ReadJSON(&published); err != nil {
+		t.Fatalf("read collection create change: %v", err)
+	}
+	if published.Data.Resource != resourceevents.ResourceCollection ||
+		published.Data.Action != resourceevents.ActionCreated ||
+		published.Data.ResourceID != collection.ID ||
+		published.Data.WorkspaceID != created.ID {
+		t.Fatalf("unexpected collection create change: %+v", published.Data)
+	}
+
+	request[struct{}](
+		t,
+		app,
+		http.MethodDelete,
+		"/api/v1/workspaces/"+created.ID+"/collections/"+collection.ID,
+		ownerLogin.Token,
+		nil,
+		fiber.StatusOK,
+	)
+	if err := client.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set collection delete websocket deadline: %v", err)
+	}
+	if err := client.ReadJSON(&published); err != nil {
+		t.Fatalf("read collection delete change: %v", err)
+	}
+	if published.Data.Resource != resourceevents.ResourceCollection ||
+		published.Data.Action != resourceevents.ActionDeleted ||
+		published.Data.ResourceID != collection.ID ||
+		published.Data.WorkspaceID != created.ID {
+		t.Fatalf("unexpected collection delete change: %+v", published.Data)
+	}
+
 	request[sharedhistory.EntryView](
 		t,
 		app,

@@ -318,8 +318,11 @@ Permissions in the initial catalog are:
 The WebSocket endpoint and REST API share one Fiber application and listener.
 It publishes access-scoped `resource.changed` invalidations for user, role,
 workspace, collection, request, shared-history, environment, and
-environment-variable mutations. Each event contains identifiers and scope,
-while the REST resource remains authoritative. User or role mutations close
+environment-variable mutations, request executions, and server-setting
+changes. Resource scope and the resource's read permissions are intersected
+before delivery; collection events require the permissions used to list the
+projected collection tree. Each event contains identifiers and scope, while
+the REST resource remains authoritative. User or role mutations close
 affected connections so a reconnect reloads the current account, role,
 permission, and session state.
 
@@ -397,8 +400,9 @@ HTTP or HTTPS address reachable by the server, including private deployment
 services. Administrators should grant it only to accounts allowed to make such
 connections. Request and response bodies are buffered up to 64 MiB each, and
 the target exchange has a 60-second deadline. The execution endpoint itself
-does not persist target payloads or responses or emit them through realtime
-events. Independently, the desktop uploads the sanitized shared-history
+does not persist target payloads or responses. It emits only a metadata
+`request_execution` invalidation to `audit.read` connections. Independently,
+the desktop uploads the sanitized shared-history
 representation described above after the request completes; that upload emits
 only a scoped metadata invalidation.
 

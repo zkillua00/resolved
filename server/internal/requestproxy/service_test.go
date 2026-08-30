@@ -14,10 +14,100 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
+	"resolved-server/internal/identity"
 	"resolved-server/internal/problem"
 	"resolved-server/internal/requestproxy/proxybody"
+	"resolved-server/internal/resourceevents"
+	"resolved-server/internal/workspaces"
+
+	"github.com/google/uuid"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
+
+type capturedOperationEvents struct {
+	changes []resourceevents.Change
+}
+
+func (capture *capturedOperationEvents) FireEvent(name string, data any) {
+	if name == resourceevents.EventName {
+		capture.changes = append(capture.changes, data.(resourceevents.Change))
+	}
+}
+
+func TestServiceEmitsPermissionScopedSettingsEvent(t *testing.T) {
+	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared"
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	sqlDatabase, err := db.DB()
+	if err != nil {
+		t.Fatalf("access database: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDatabase.Close() })
+	if err := db.AutoMigrate(&SettingsRecord{}, &HostnameOverrideRecord{}); err != nil {
+		t.Fatalf("migrate settings: %v", err)
+	}
+
+	capture := &capturedOperationEvents{}
+	service := NewService(nil, NewSettingsRepository(db), WithEvents(capture))
+	actorUserID := uuid.NewString()
+	updated, err := service.UpdateSettings(t.Context(), actorUserID, Settings{
+		Mode: ModeServer,
+		HostnameOverrides: []HostnameOverride{
+			{Hostname: "api.internal", Target: "https://gateway.internal"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("update settings: %v", err)
+	}
+	if updated.Mode != ModeServer || len(updated.HostnameOverrides) != 1 {
+		t.Fatalf("updated settings = %+v", updated)
+	}
+	if len(capture.changes) != 1 {
+		t.Fatalf("captured changes = %d, want 1", len(capture.changes))
+	}
+	change := capture.changes[0]
+	if change.Resource != resourceevents.ResourceServerSettings ||
+		change.Action != resourceevents.ActionUpdated ||
+		change.ResourceID != SettingsRecordID ||
+		change.ActorUserID != actorUserID {
+		t.Fatalf("settings change = %+v", change)
+	}
+	if len(change.Audience.PermissionKeys) != 1 ||
+		change.Audience.PermissionKeys[0] != identity.PermissionServerSettingsRead {
+		t.Fatalf("settings audience = %+v", change.Audience)
+	}
+}
+
+func TestRequestExecutionEventTargetsAuditReaders(t *testing.T) {
+	capture := &capturedOperationEvents{}
+	service := &Service{events: capture}
+	target, err := url.Parse("https://api.example.test/items")
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
+	actor := workspaces.Actor{UserID: uuid.NewString()}
+	service.recordExecution(
+		t.Context(), actor, uuid.NewString(), http.MethodGet, target, http.StatusOK, time.Millisecond,
+	)
+	if len(capture.changes) != 1 {
+		t.Fatalf("captured changes = %d, want 1", len(capture.changes))
+	}
+	change := capture.changes[0]
+	if change.Resource != resourceevents.ResourceRequestExecution ||
+		change.Action != resourceevents.ActionExecuted ||
+		change.ActorUserID != actor.UserID {
+		t.Fatalf("execution change = %+v", change)
+	}
+	if len(change.Audience.PermissionKeys) != 1 ||
+		change.Audience.PermissionKeys[0] != identity.PermissionAuditRead {
+		t.Fatalf("execution audience = %+v", change.Audience)
+	}
+}
 
 func TestBuildBodyPreservesOrderedFormFields(t *testing.T) {
 	body, contentType, err := proxybody.Build(proxybody.Body{
