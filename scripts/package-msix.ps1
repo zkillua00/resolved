@@ -107,8 +107,59 @@ if (Test-Path $stagingRoot) { Remove-Item -Recurse -Force $stagingRoot }
 New-Item -ItemType Directory -Path (Join-Path $staging 'assets') -Force | Out-Null
 
 Copy-Item $exePath $staging
-Copy-Item (Join-Path $projectDir 'assets\brand\resolved-icon.png') `
-    (Join-Path $staging 'assets\resolved-icon.png')
+$sourceLogoPath = Join-Path $projectDir 'assets\brand\resolved-icon.png'
+$stagedLogoPath = Join-Path $staging 'assets\resolved-icon.png'
+Copy-Item $sourceLogoPath $stagedLogoPath
+
+# Packaged desktop apps use Square44x44Logo target-size resources for the
+# taskbar, Alt+Tab, Task View, and shell menus. Without unplated variants,
+# Windows puts the transparent logo on an accent-colored backplate. Generate
+# every documented target size from the full-resolution source and provide
+# both dark- and light-shell unplated alternatives so the rounded transparent
+# corners survive on either taskbar theme.
+Add-Type -AssemblyName System.Drawing
+$sourceLogo = [System.Drawing.Bitmap]::FromFile($sourceLogoPath)
+$targetSizes = @(16, 20, 24, 30, 32, 36, 40, 44, 48, 60, 64, 72, 80, 96, 256)
+try {
+    foreach ($targetSize in $targetSizes) {
+        $targetLogo = [System.Drawing.Bitmap]::new(
+            $targetSize,
+            $targetSize,
+            [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
+        )
+        try {
+            $graphics = [System.Drawing.Graphics]::FromImage($targetLogo)
+            try {
+                $graphics.Clear([System.Drawing.Color]::Transparent)
+                $graphics.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy
+                $graphics.CompositingQuality = `
+                    [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+                $graphics.InterpolationMode = `
+                    [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+                $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+                $graphics.DrawImage(
+                    $sourceLogo,
+                    [System.Drawing.Rectangle]::new(0, 0, $targetSize, $targetSize)
+                )
+            } finally {
+                $graphics.Dispose()
+            }
+
+            foreach ($alternateForm in @('', '_altform-unplated', '_altform-lightunplated')) {
+                $targetName = "resolved-icon.targetsize-$targetSize$alternateForm.png"
+                $targetLogo.Save(
+                    (Join-Path $staging "assets\$targetName"),
+                    [System.Drawing.Imaging.ImageFormat]::Png
+                )
+            }
+        } finally {
+            $targetLogo.Dispose()
+        }
+    }
+} finally {
+    $sourceLogo.Dispose()
+}
 
 # ProcessorArchitecture: Resolved currently ships x64; the exe's PE header is
 # not parsed because MakeAppx validates architecture separately. Keep the
@@ -156,6 +207,19 @@ $manifest = @"
 </Package>
 "@
 Set-Content -Path (Join-Path $staging 'AppxManifest.xml') -Value $manifest -Encoding utf8
+
+# Resource qualifiers such as targetsize and altform are selected through the
+# package resource index. MakeAppx does not create it automatically.
+$makePri = Find-SdkTool 'makepri.exe'
+if (-not $makePri) {
+    throw 'MakePri.exe not found; install the Windows SDK'
+}
+$priConfig = Join-Path $stagingRoot 'priconfig.xml'
+& $makePri.FullName createconfig /cf $priConfig /dq en-US /o | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "MakePri createconfig failed with $LASTEXITCODE" }
+& $makePri.FullName new /pr $staging /cf $priConfig `
+    /of (Join-Path $staging 'resources.pri') /o | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "MakePri new failed with $LASTEXITCODE" }
 
 $msixPath = Join-Path $projectDir "target\$Profile\Resolved.msix"
 Write-Host "Packing $msixPath ..."
