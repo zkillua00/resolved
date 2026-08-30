@@ -140,6 +140,7 @@ pub(super) struct ServerManagementState {
     selected_role_id: Option<String>,
     role_permission_drafts: BTreeMap<String, RolePermissionDraft>,
     selected_resource: Option<ManagementResourceSelection>,
+    realtime_refresh_pending: bool,
 }
 
 impl Default for ServerManagementState {
@@ -161,6 +162,7 @@ impl Default for ServerManagementState {
             selected_role_id: None,
             role_permission_drafts: BTreeMap::new(),
             selected_resource: None,
+            realtime_refresh_pending: false,
         }
     }
 }
@@ -574,6 +576,33 @@ impl ApiTester {
         }
     }
 
+    pub(super) fn refresh_server_management_realtime(
+        &mut self,
+        upstream_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.upstreams.active_upstream_id.as_deref() != Some(upstream_id) {
+            return;
+        }
+        if self.server_management.status.busy() {
+            self.server_management.realtime_refresh_pending = true;
+            return;
+        }
+        self.server_management.realtime_refresh_pending = false;
+        if matches!(
+            self.workspace_tabs.active(),
+            ActiveWorkspaceTab::RequestProxy | ActiveWorkspaceTab::ServerTools
+        ) {
+            self.refresh_server_management(window, cx);
+        } else if self.server_management.upstream_id.as_deref() == Some(upstream_id) {
+            // Keep the existing snapshot available to non-management surfaces,
+            // but force a fresh load before it is rendered again.
+            self.server_management.status = ServerManagementStatus::Idle;
+            cx.notify();
+        }
+    }
+
     pub(super) fn refresh_server_management(
         &mut self,
         window: &mut Window,
@@ -663,7 +692,7 @@ impl ApiTester {
 
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
-            let _ = this.update_in(cx, |this, _, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 if this.server_management_generation != generation
                     || this.server_management.upstream_id.as_deref() != Some(upstream_id.as_str())
                 {
@@ -698,7 +727,12 @@ impl ApiTester {
                         this.server_management.snapshot = None;
                     }
                 }
+                let realtime_refresh_pending =
+                    std::mem::take(&mut this.server_management.realtime_refresh_pending);
                 cx.notify();
+                if realtime_refresh_pending {
+                    this.refresh_server_management_realtime(&upstream_id, window, cx);
+                }
             });
         })
         .detach();
@@ -754,7 +788,7 @@ impl ApiTester {
 
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
-            let _ = this.update_in(cx, |this, _, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 if this.server_management_generation != generation
                     || this.server_management.upstream_id.as_deref() != Some(upstream_id.as_str())
                 {
@@ -789,7 +823,12 @@ impl ApiTester {
                             Some(format!("The server change could not be saved: {error}"));
                     }
                 }
+                let realtime_refresh_pending =
+                    std::mem::take(&mut this.server_management.realtime_refresh_pending);
                 cx.notify();
+                if realtime_refresh_pending {
+                    this.refresh_server_management_realtime(&upstream_id, window, cx);
+                }
             });
         })
         .detach();

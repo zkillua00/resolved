@@ -82,7 +82,7 @@ fn render_activity_log(
     }
     if kind == ActivityLogKind::Audit && !audit_visible {
         return management_empty(
-            "You do not have permission to view the user and role audit log.",
+            "You do not have permission to view the server audit log.",
             cx,
         );
     }
@@ -99,12 +99,12 @@ fn render_activity_log(
     let matches_target = feed.upstream_id.as_deref() == Some(upstream_id.as_str())
         && feed.workspace_id == workspace_id;
     let title = if kind == ActivityLogKind::Audit {
-        "Identity audit log"
+        "Server audit log"
     } else {
         "Workspace change log"
     };
     let description = if kind == ActivityLogKind::Audit {
-        "User and role changes, including the exact values that changed."
+        "User, role, request execution, and server-setting changes."
     } else {
         "Request, collection, and workspace changes in the active workspace."
     };
@@ -234,7 +234,7 @@ fn render_activity_log(
         } else if entries.is_empty() {
             management_empty(
                 if kind == ActivityLogKind::Audit {
-                    "No user or role changes have been recorded yet."
+                    "No server audit events have been recorded yet."
                 } else {
                     "No request, collection, or workspace changes have been recorded yet."
                 },
@@ -506,18 +506,17 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if change.is_identity_change() {
+        if change.updates_audit_log() {
             self.sync_activity_log_realtime(ActivityLogKind::Audit, window, cx);
         }
-        if matches!(
-            change.resource.as_str(),
-            "workspace" | "collection" | "request"
-        ) && self.activity_log_target(ActivityLogKind::Change).is_ok_and(
-            |(active_upstream_id, workspace_id)| {
-                active_upstream_id == upstream_id
-                    && workspace_id.as_deref() == change.workspace_id.as_deref()
-            },
-        ) {
+        if change.updates_workspace_log()
+            && self.activity_log_target(ActivityLogKind::Change).is_ok_and(
+                |(active_upstream_id, workspace_id)| {
+                    active_upstream_id == upstream_id
+                        && workspace_id.as_deref() == change.workspace_id.as_deref()
+                },
+            )
+        {
             self.sync_activity_log_realtime(ActivityLogKind::Change, window, cx);
         }
     }
@@ -784,7 +783,11 @@ fn render_activity_entry(entry: &ActivityLogEntry, cx: &mut App) -> AnyElement {
                         .child(
                             h_flex()
                                 .gap_2()
-                                .child(activity_badge(&entry.resource, cx.theme().info, cx))
+                                .child(activity_badge(
+                                    activity_resource_label(&entry.resource),
+                                    cx.theme().info,
+                                    cx,
+                                ))
                                 .child(activity_badge(&entry.action, cx.theme().warning, cx))
                                 .child(div().truncate().text_sm().font_semibold().child(target)),
                         )
@@ -1034,6 +1037,14 @@ fn activity_badge(label: &str, color: Hsla, _cx: &mut App) -> AnyElement {
         .into_any_element()
 }
 
+fn activity_resource_label(resource: &str) -> &str {
+    match resource {
+        "request_execution" => "request execution",
+        "server_settings" => "server settings",
+        resource => resource,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use gpui::{Context, Render, TestAppContext, Window, px, size};
@@ -1065,6 +1076,19 @@ mod tests {
         assert!(shortened);
         assert_eq!(preview.chars().count(), ACTIVITY_VALUE_PREVIEW_CHARS + 1);
         assert!(preview.ends_with('…'));
+    }
+
+    #[test]
+    fn activity_resource_labels_are_human_readable() {
+        assert_eq!(
+            activity_resource_label("request_execution"),
+            "request execution"
+        );
+        assert_eq!(
+            activity_resource_label("server_settings"),
+            "server settings"
+        );
+        assert_eq!(activity_resource_label("collection"), "collection");
     }
 
     #[test]

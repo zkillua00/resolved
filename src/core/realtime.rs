@@ -49,6 +49,40 @@ impl RealtimeResourceChange {
     pub fn is_shared_history_change(&self) -> bool {
         self.resource == "shared_history"
     }
+
+    pub fn refreshes_workspace(&self) -> bool {
+        matches!(
+            self.resource.as_str(),
+            "user"
+                | "role"
+                | "workspace"
+                | "collection"
+                | "request"
+                | "environment"
+                | "environment_variable"
+        )
+    }
+
+    pub fn refreshes_management(&self) -> bool {
+        matches!(
+            self.resource.as_str(),
+            "user" | "role" | "workspace" | "collection" | "request" | "server_settings"
+        )
+    }
+
+    pub fn updates_audit_log(&self) -> bool {
+        matches!(
+            self.resource.as_str(),
+            "user" | "role" | "request_execution" | "server_settings"
+        )
+    }
+
+    pub fn updates_workspace_log(&self) -> bool {
+        matches!(
+            self.resource.as_str(),
+            "workspace" | "collection" | "request"
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -307,6 +341,99 @@ mod tests {
         .unwrap();
         assert!(history.data.is_shared_history_change());
         assert_eq!(history.data.resource_id, "user-1");
+    }
+
+    #[test]
+    fn classifies_resource_changes_by_visible_client_state() {
+        let change = |resource: &str| RealtimeResourceChange {
+            event_id: format!("event-{resource}"),
+            resource: resource.to_owned(),
+            action: "updated".to_owned(),
+            resource_id: format!("resource-{resource}"),
+            workspace_id: Some("workspace-1".to_owned()),
+            collection_id: None,
+            environment_id: None,
+            occurred_at: Utc::now(),
+        };
+
+        for resource in [
+            "user",
+            "role",
+            "workspace",
+            "collection",
+            "request",
+            "environment",
+            "environment_variable",
+        ] {
+            assert!(
+                change(resource).refreshes_workspace(),
+                "{resource} must refresh active workspace state"
+            );
+        }
+        for resource in [
+            "user",
+            "role",
+            "workspace",
+            "collection",
+            "request",
+            "server_settings",
+        ] {
+            assert!(
+                change(resource).refreshes_management(),
+                "{resource} must invalidate server management"
+            );
+        }
+        for resource in ["user", "role", "request_execution", "server_settings"] {
+            assert!(
+                change(resource).updates_audit_log(),
+                "{resource} must refresh the rendered audit log"
+            );
+        }
+        for resource in ["workspace", "collection", "request"] {
+            assert!(
+                change(resource).updates_workspace_log(),
+                "{resource} must refresh the rendered workspace log"
+            );
+        }
+        for resource in [
+            "user",
+            "role",
+            "workspace",
+            "collection",
+            "request",
+            "shared_history",
+            "environment",
+            "environment_variable",
+            "request_execution",
+            "server_settings",
+        ] {
+            let change = change(resource);
+            assert!(
+                change.refreshes_workspace()
+                    || change.refreshes_management()
+                    || change.updates_audit_log()
+                    || change.updates_workspace_log()
+                    || change.is_shared_history_change(),
+                "{resource} must update at least one rendered client surface"
+            );
+        }
+
+        let collection_deleted = RealtimeResourceChange {
+            action: "deleted".to_owned(),
+            ..change("collection")
+        };
+        assert!(collection_deleted.refreshes_workspace());
+        assert!(collection_deleted.refreshes_management());
+
+        let execution = change("request_execution");
+        assert!(!execution.refreshes_workspace());
+        assert!(!execution.refreshes_management());
+        assert!(execution.updates_audit_log());
+
+        let settings = change("server_settings");
+        assert!(!settings.refreshes_workspace());
+        assert!(settings.refreshes_management());
+        assert!(settings.updates_audit_log());
     }
 
     #[tokio::test]

@@ -100,6 +100,7 @@ impl ApiTester {
                                 window,
                                 cx,
                             );
+                            this.refresh_server_management_realtime(&upstream_id, window, cx);
                             this.queue_realtime_refresh(&upstream_id, None, window, cx);
                             cx.notify();
                         }
@@ -117,13 +118,17 @@ impl ApiTester {
                                     window,
                                     cx,
                                 );
-                            } else {
+                            }
+                            if change.refreshes_workspace() {
                                 this.queue_realtime_refresh(
                                     &upstream_id,
                                     Some(&change),
                                     window,
                                     cx,
                                 );
+                            }
+                            if change.refreshes_management() {
+                                this.refresh_server_management_realtime(&upstream_id, window, cx);
                             }
                             cx.notify();
                         }
@@ -309,14 +314,6 @@ impl ApiTester {
                             window,
                             cx,
                         );
-                        if !outcome.switched_workspace
-                            && matches!(
-                                this.workspace_tabs.active(),
-                                ActiveWorkspaceTab::RequestProxy | ActiveWorkspaceTab::ServerTools
-                            )
-                        {
-                            this.refresh_server_management(window, cx);
-                        }
                         if outcome.permissions_changed && !outcome.switched_workspace {
                             this.start_realtime_for_active_upstream(window, cx);
                         }
