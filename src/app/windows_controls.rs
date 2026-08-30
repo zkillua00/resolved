@@ -15,8 +15,8 @@
 //! in charge.
 
 use gpui::{
-    App, div, px, svg, AnyElement, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Styled as _, Window, WindowControlArea,
+    AnyElement, App, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+    StatefulInteractiveElement as _, Styled as _, Window, WindowControlArea, div, px, svg,
 };
 use gpui_component::{ActiveTheme as _, IconName, IconNamed as _};
 
@@ -36,7 +36,13 @@ pub const fn leading_inset() -> Pixels {
 }
 
 const WINDOW_CONTROL_WIDTH: Pixels = px(46.);
-const GLYPH_SIZE: Pixels = px(14.);
+const GLYPH_SIZE: Pixels = px(12.);
+
+#[derive(Clone, Copy)]
+enum ControlKind {
+    Standard,
+    Close,
+}
 
 /// The trailing window-control cluster on Windows; produces nothing
 /// elsewhere.
@@ -52,15 +58,18 @@ pub(crate) fn windows_window_controls(window: &Window, cx: &App) -> AnyElement {
         return div().into_any_element();
     }
 
-    let glyph_color = glyph_color(cx);
+    let colors = ControlColors::new(cx);
     div()
         .flex()
+        .items_center()
+        .h(px(super::APP_TITLE_BAR_HEIGHT))
         .flex_shrink_0()
         .child(control_button(
             "title-window-minimize",
             IconName::WindowMinimize,
             WindowControlArea::Min,
-            glyph_color,
+            ControlKind::Standard,
+            colors,
         ))
         .child(control_button(
             "title-window-maximize",
@@ -70,29 +79,65 @@ pub(crate) fn windows_window_controls(window: &Window, cx: &App) -> AnyElement {
                 IconName::WindowMaximize
             },
             WindowControlArea::Max,
-            glyph_color,
+            ControlKind::Standard,
+            colors,
         ))
         .child(control_button(
             "title-window-close",
             IconName::WindowClose,
             WindowControlArea::Close,
-            glyph_color,
+            ControlKind::Close,
+            colors,
         ))
         .into_any_element()
 }
 
-fn glyph_color(cx: &App) -> Hsla {
-    cx.theme().muted_foreground
+#[derive(Clone, Copy)]
+struct ControlColors {
+    foreground: Hsla,
+    hover_background: Hsla,
+    active_background: Hsla,
+    close_hover_background: Hsla,
+    close_active_background: Hsla,
+    close_foreground: Hsla,
+}
+
+impl ControlColors {
+    fn new(cx: &App) -> Self {
+        Self {
+            foreground: cx.theme().foreground,
+            hover_background: cx.theme().secondary_hover,
+            active_background: cx.theme().secondary_active,
+            close_hover_background: cx.theme().danger,
+            close_active_background: cx.theme().danger_active,
+            close_foreground: cx.theme().danger_foreground,
+        }
+    }
 }
 
 fn control_button(
     id: &'static str,
     icon: IconName,
     area: WindowControlArea,
-    color: Hsla,
+    kind: ControlKind,
+    colors: ControlColors,
 ) -> impl IntoElement {
+    let (hover_background, active_background, hover_foreground) = match kind {
+        ControlKind::Standard => (
+            colors.hover_background,
+            colors.active_background,
+            colors.foreground,
+        ),
+        ControlKind::Close => (
+            colors.close_hover_background,
+            colors.close_active_background,
+            colors.close_foreground,
+        ),
+    };
+
     div()
         .id(id)
+        .group(id)
         .flex()
         .justify_center()
         .items_center()
@@ -100,6 +145,14 @@ fn control_button(
         .h_full()
         .flex_shrink_0()
         .window_control_area(area)
-        .text_color(color)
-        .child(svg().path(icon.path()).size(GLYPH_SIZE).text_color(color))
+        .text_color(colors.foreground)
+        .hover(|style| style.bg(hover_background).text_color(hover_foreground))
+        .active(|style| style.bg(active_background).text_color(hover_foreground))
+        .child(
+            svg()
+                .path(icon.path())
+                .size(GLYPH_SIZE)
+                .text_color(colors.foreground)
+                .group_hover(id, |style| style.text_color(hover_foreground)),
+        )
 }
