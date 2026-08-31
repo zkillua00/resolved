@@ -3,11 +3,9 @@
 use std::borrow::Cow;
 
 use gpui::{
-    App, AppContext as _, Application, AssetSource, Bounds, Entity, Menu, MenuItem, SharedString,
-    WindowBounds, WindowOptions, px, size,
+    App, AppContext as _, Application, AssetSource, Bounds, Entity, SharedString, WindowBounds,
+    WindowOptions, px, size,
 };
-#[cfg(target_os = "macos")]
-use gpui::SystemMenuType;
 use gpui_component::{Root, WindowExt as _};
 
 mod app;
@@ -25,6 +23,7 @@ mod snippet_intelligence;
 mod syntax_languages;
 mod template_intelligence;
 mod theme;
+mod tls;
 mod typescript_service;
 mod web_preview;
 
@@ -39,66 +38,6 @@ use shortcuts::{
 };
 
 struct AppAssets;
-
-#[cfg(target_os = "macos")]
-fn configure_menus(cx: &mut App) {
-    cx.set_menus(vec![
-        Menu {
-            name: PRODUCT_NAME.into(),
-            items: vec![
-                MenuItem::action("Settings…", ShowSettings),
-                MenuItem::separator(),
-                MenuItem::os_submenu("Services", SystemMenuType::Services),
-                MenuItem::separator(),
-                MenuItem::action(format!("Quit {PRODUCT_NAME}"), QuitApp),
-            ],
-        },
-        Menu {
-            name: "File".into(),
-            items: vec![
-                MenuItem::action("New Request Tab", NewRequestTab),
-                MenuItem::action("Close Active Tab", CloseRequestTab),
-                MenuItem::separator(),
-                MenuItem::action("Save", SaveRequest),
-                MenuItem::action("Save As…", SaveRequestAs),
-            ],
-        },
-        Menu {
-            name: "Request".into(),
-            items: vec![MenuItem::action(
-                "Send or Cancel Request",
-                SendOrCancelRequest,
-            )],
-        },
-    ]);
-}
-
-#[cfg(not(target_os = "macos"))]
-fn configure_menus(cx: &mut App) {
-    // The Services submenu and top-level app menu are macOS concepts; on
-    // Windows these menus surface through gpui-component's AppMenuBar.
-    cx.set_menus(vec![
-        Menu {
-            name: "File".into(),
-            items: vec![
-                MenuItem::action("Settings…", ShowSettings),
-                MenuItem::separator(),
-                MenuItem::action("New Request Tab", NewRequestTab),
-                MenuItem::action("Close Active Tab", CloseRequestTab),
-                MenuItem::separator(),
-                MenuItem::action("Save", SaveRequest),
-                MenuItem::action("Save As…", SaveRequestAs),
-            ],
-        },
-        Menu {
-            name: "Request".into(),
-            items: vec![MenuItem::action(
-                "Send or Cancel Request",
-                SendOrCancelRequest,
-            )],
-        },
-    ]);
-}
 
 fn register_app_action_handlers(view: &Entity<ApiTester>, cx: &mut App) {
     macro_rules! register {
@@ -207,47 +146,20 @@ impl AssetSource for AppAssets {
     }
 }
 
-#[cfg(test)]
-mod asset_tests {
-    use super::*;
-
-    #[test]
-    fn navigation_icons_are_embedded() {
-        for path in ["icons/inspector.svg", "icons/layout-dashboard.svg"] {
-            assert!(
-                AppAssets.load(path).expect("load embedded asset").is_some(),
-                "{path} must be bundled or its navigation slot renders blank"
-            );
-        }
-    }
-}
-
-/// Append a diagnostic line to the Windows panic log.
-///
-/// The packaged process has no stderr and swallows many webview/OS errors
-/// into `Result`s, so subsystems report here; a `None` from any caller is
-/// usually the only trace of a packaged-only failure. No-op elsewhere.
+/// Send native-integration diagnostics to the active platform backend.
 pub(crate) fn log_diagnostic(message: &str) {
-    #[cfg(target_os = "windows")]
-    {
-        use std::io::Write as _;
-        let path = DatabaseStore::default_path().with_file_name("api-tester-panic.log");
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-            let _ = writeln!(file, "{} {message}", chrono::Local::now().to_rfc3339());
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = message;
-    }
+    platform::log_diagnostic(message);
 }
 
 fn main() {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     if let Err(error) = platform::launch_blocker() {
         eprintln!("{error}");
         std::process::exit(1);
     }
+
+    // Platform selection and process hooks must run before GPUI creates its
+    // display client or background executors.
+    platform::install_runtime_hooks();
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -256,25 +168,10 @@ fn main() {
         )
         .init();
 
-    // A packaged GUI process has no stderr, so a Rust panic in it would die
-    // as an opaque fast-fail in Event Viewer. Route panics to a log file next
-    // to the data directory instead. Windows only; macOS keeps the debugger
-    // workflow (and this build's release profile strips symbols anyway).
-    #[cfg(target_os = "windows")]
-    std::panic::set_hook(Box::new(|info| {
-        use std::io::Write as _;
-        let path = DatabaseStore::default_path()
-            .with_file_name("api-tester-panic.log");
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-            let _ = writeln!(
-                file,
-                "{}\n{info}\nbacktrace:\n{}",
-                chrono::Local::now().to_rfc3339(),
-                std::backtrace::Backtrace::force_capture()
-            );
-        }
-        eprintln!("{info}");
-    }));
+    if let Err(error) = tls::install_crypto_provider() {
+        eprintln!("{PRODUCT_NAME} {error}.");
+        std::process::exit(1);
+    }
 
     let lock_path = DatabaseStore::default_path().with_file_name("api-tester.lock");
     let _instance_guard = match InstanceGuard::acquire(&lock_path) {
@@ -292,18 +189,6 @@ fn main() {
         }
     };
 
-    // GPUI's DirectComposition visual is composited above native child HWNDs
-    // such as the WebView2 response preview. The child still receives input,
-    // but its pixels are hidden behind the GPUI surface. Select GPUI's HWND
-    // swap-chain renderer before the Windows platform is initialized so the
-    // native child participates in normal window z-order and clipping.
-    #[cfg(target_os = "windows")]
-    // SAFETY: this runs on the single startup thread before `Application`
-    // creates GPUI's platform or any worker threads.
-    unsafe {
-        std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "1");
-    }
-
     Application::new()
         .with_assets(AppAssets)
         .run(|cx: &mut App| {
@@ -320,49 +205,44 @@ fn main() {
             .detach();
 
             let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
-            match cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(1100.0), px(720.0))),
-                    titlebar: Some(gpui::TitlebarOptions {
-                        title: Some(PRODUCT_NAME.into()),
-                        appears_transparent: true,
-                        traffic_light_position: Some(gpui::point(px(16.0), px(16.0))),
-                    }),
-                    ..Default::default()
-                },
-                |window, cx| {
-                    let view = cx.new(|cx| ApiTester::new(base_key_bindings.clone(), window, cx));
-                    register_app_action_handlers(&view, cx);
-                    configure_menus(cx);
-                    let view_for_close = view.downgrade();
-                    window.on_window_should_close(cx, move |_, cx| {
-                        view_for_close
-                            .update(cx, |view, cx| view.flush_local_state(cx))
-                            .unwrap_or_else(|error| {
-                                tracing::error!(
-                                    "could not flush local state before close: {error}"
-                                );
-                                true
-                            })
-                    });
-                    let view_for_quit = view.downgrade();
-                    cx.on_action(move |_: &QuitApp, cx| {
-                        let saved = view_for_quit
-                            .update(cx, |view, cx| view.flush_local_state(cx))
-                            .unwrap_or_else(|error| {
-                                tracing::error!(
-                                    "could not flush local state before quit: {error}"
-                                );
-                                true
-                            });
-                        if saved {
-                            cx.quit();
-                        }
-                    });
-                    cx.new(|cx| Root::new(view, window, cx))
-                },
-            ) {
+            let mut window_options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(1100.0), px(720.0))),
+                titlebar: Some(gpui::TitlebarOptions {
+                    title: Some(PRODUCT_NAME.into()),
+                    appears_transparent: true,
+                    traffic_light_position: Some(gpui::point(px(16.0), px(16.0))),
+                }),
+                ..Default::default()
+            };
+            platform::configure_main_window(&mut window_options);
+            match cx.open_window(window_options, |window, cx| {
+                let view = cx.new(|cx| ApiTester::new(base_key_bindings.clone(), window, cx));
+                register_app_action_handlers(&view, cx);
+                platform::configure_menus(cx);
+                let view_for_close = view.downgrade();
+                window.on_window_should_close(cx, move |_, cx| {
+                    view_for_close
+                        .update(cx, |view, cx| view.flush_local_state(cx))
+                        .unwrap_or_else(|error| {
+                            tracing::error!("could not flush local state before close: {error}");
+                            true
+                        })
+                });
+                let view_for_quit = view.downgrade();
+                cx.on_action(move |_: &QuitApp, cx| {
+                    let saved = view_for_quit
+                        .update(cx, |view, cx| view.flush_local_state(cx))
+                        .unwrap_or_else(|error| {
+                            tracing::error!("could not flush local state before quit: {error}");
+                            true
+                        });
+                    if saved {
+                        cx.quit();
+                    }
+                });
+                cx.new(|cx| Root::new(view, window, cx))
+            }) {
                 Ok(_) => {}
                 Err(error) => {
                     eprintln!("{PRODUCT_NAME} could not open its main window: {error}");
@@ -372,4 +252,19 @@ fn main() {
 
             cx.activate(true);
         });
+}
+
+#[cfg(test)]
+mod asset_tests {
+    use super::*;
+
+    #[test]
+    fn navigation_icons_are_embedded() {
+        for path in ["icons/inspector.svg", "icons/layout-dashboard.svg"] {
+            assert!(
+                AppAssets.load(path).expect("load embedded asset").is_some(),
+                "{path} must be bundled or its navigation slot renders blank"
+            );
+        }
+    }
 }

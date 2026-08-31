@@ -683,11 +683,7 @@ impl ApiTester {
     }
 
     fn delete_snippet_now(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(index) = self
-            .snippets
-            .iter()
-            .position(|snippet| snippet.id == id)
-        else {
+        let Some(index) = self.snippets.iter().position(|snippet| snippet.id == id) else {
             return;
         };
         self.snippets.remove(index);
@@ -829,10 +825,7 @@ impl ApiTester {
     }
 }
 
-fn snippet_draft_is_dirty(
-    draft: &SnippetDraftSnapshot,
-    baseline: &SnippetDraftSnapshot,
-) -> bool {
+fn snippet_draft_is_dirty(draft: &SnippetDraftSnapshot, baseline: &SnippetDraftSnapshot) -> bool {
     !draft.is_equivalent_to(baseline)
 }
 
@@ -1568,8 +1561,8 @@ impl ApiTester {
         h_flex()
             .h(px(APP_TITLE_BAR_HEIGHT))
             .flex_shrink_0()
-            .pl(windows_controls::leading_inset())
-            .pr(windows_controls::trailing_inset())
+            .pl(window_chrome::leading_inset())
+            .pr(window_chrome::trailing_inset())
             .border_b_1()
             .border_color(cx.theme().title_bar_border)
             .bg(cx.theme().title_bar)
@@ -1595,7 +1588,7 @@ impl ApiTester {
                             }),
                     ),
             )
-            .child(windows_controls::caption_drag_region())
+            .child(window_chrome::caption_drag_region())
             .child(
                 h_flex()
                     .h_full()
@@ -1607,7 +1600,7 @@ impl ApiTester {
                             .text_color(cx.theme().muted_foreground)
                             .child("Right-click a code editor → Snippets"),
                     )
-                    .child(windows_controls::windows_window_controls(window, cx))
+                    .child(window_chrome::window_controls(window, cx)),
             )
             .into_any_element()
     }
@@ -1966,7 +1959,8 @@ impl ApiTester {
     fn render_snippet_list_row(&self, row: &SnippetListRow, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.snippet_editor.selected_id.as_deref() == Some(&row.id);
         let id = row.id.clone();
-        let description = (!row.description.is_empty()).then(|| compact_label(&row.description, 54));
+        let description =
+            (!row.description.is_empty()).then(|| compact_label(&row.description, 54));
         let leading_icon_color = if selected {
             cx.api_primary_bright()
         } else {
@@ -2066,10 +2060,7 @@ impl ApiTester {
                             .min_w_0()
                             .gap_1()
                             .child(snippet_field_label("Name", true, cx))
-                            .child(
-                                Input::new(&self.snippet_editor.name)
-                                    .disabled(false),
-                            ),
+                            .child(Input::new(&self.snippet_editor.name).disabled(false)),
                     )
                     .child(
                         v_flex()
@@ -2077,10 +2068,7 @@ impl ApiTester {
                             .min_w_0()
                             .gap_1()
                             .child(snippet_field_label("Description", false, cx))
-                            .child(
-                                Input::new(&self.snippet_editor.description)
-                                    .disabled(false),
-                            ),
+                            .child(Input::new(&self.snippet_editor.description).disabled(false)),
                     ),
             )
             .into_any_element()

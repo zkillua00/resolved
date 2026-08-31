@@ -49,6 +49,10 @@ impl ApiTester {
                 div()
                     .flex_1()
                     .min_h_0()
+                    // WebKit is a native child window and remains hidden until
+                    // its document has painted. Keep the host pane opaque in
+                    // the meantime instead of exposing the desktop behind it.
+                    .bg(gpui::white())
                     .border_1()
                     .border_t_0()
                     .border_color(cx.theme().border)

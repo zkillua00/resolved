@@ -501,6 +501,8 @@ pub enum UpstreamLoginError {
     InvalidUrl(#[from] UpstreamUrlError),
     #[error("could not create the secure login client: {0}")]
     Client(reqwest::Error),
+    #[error("{0}")]
+    CryptoProvider(&'static str),
     #[error("could not reach the server: {0}")]
     Transport(reqwest::Error),
     #[error("the server redirected the login request; enter its canonical URL")]
@@ -630,6 +632,7 @@ fn format_upstream_error(error: LoginErrorBody) -> String {
 }
 
 pub fn build_upstream_client() -> Result<Client, UpstreamLoginError> {
+    crate::tls::install_crypto_provider().map_err(UpstreamLoginError::CryptoProvider)?;
     Client::builder()
         .user_agent(concat!(
             env!("CARGO_PKG_NAME"),
@@ -644,6 +647,8 @@ pub fn build_upstream_client() -> Result<Client, UpstreamLoginError> {
 }
 
 pub fn build_upstream_execution_client() -> Result<Client, RequestError> {
+    crate::tls::install_crypto_provider()
+        .map_err(|error| RequestError::TaskFailed(error.to_owned()))?;
     Client::builder()
         .user_agent(concat!(
             env!("CARGO_PKG_NAME"),
@@ -1866,7 +1871,7 @@ fn new_upstream_id() -> String {
 #[cfg(test)]
 mod tests {
     use std::{
-        io::{Read as _, Write as _},
+        io::Write as _,
         net::{TcpListener, TcpStream},
         thread,
     };

@@ -11,13 +11,12 @@ use zeroize::Zeroizing;
 use crate::core::{
     COLLECTIONS_ASSIGN_USERS, HISTORY_READ_OTHERS, ManagementRole, ManagementUser,
     ROLES_ASSIGN_PERMISSIONS, ROLES_CREATE, ROLES_UPDATE, SharedHistoryEntry,
-    SharedHistoryResponse, USERS_ASSIGN_ROLES,
-    USERS_CREATE, USERS_UPDATE, UpstreamCollectionView, UpstreamManagementSnapshot,
-    UpstreamSavedRequestView, UpstreamUserSummary, UpstreamWorkspaceView, WORKSPACES_ASSIGN_USERS,
-    create_management_role, create_management_user, list_shared_history, load_upstream_management,
-    replace_management_collection_users, replace_management_role_permissions,
-    replace_management_user_roles, replace_management_workspace_users, update_management_role,
-    update_management_user,
+    SharedHistoryResponse, USERS_ASSIGN_ROLES, USERS_CREATE, USERS_UPDATE, UpstreamCollectionView,
+    UpstreamManagementSnapshot, UpstreamSavedRequestView, UpstreamUserSummary,
+    UpstreamWorkspaceView, WORKSPACES_ASSIGN_USERS, create_management_role, create_management_user,
+    list_shared_history, load_upstream_management, replace_management_collection_users,
+    replace_management_role_permissions, replace_management_user_roles,
+    replace_management_workspace_users, update_management_role, update_management_user,
 };
 
 use super::*;
@@ -861,8 +860,8 @@ impl ApiTester {
         h_flex()
             .h(px(APP_TITLE_BAR_HEIGHT))
             .flex_shrink_0()
-            .pl(windows_controls::leading_inset())
-            .pr(windows_controls::trailing_inset())
+            .pl(window_chrome::leading_inset())
+            .pr(window_chrome::trailing_inset())
             .border_b_1()
             .border_color(cx.theme().title_bar_border)
             .bg(cx.theme().title_bar)
@@ -879,8 +878,8 @@ impl ApiTester {
                         .child("Server Tools"),
                 ),
             )
-            .child(windows_controls::caption_drag_region())
-            .child(windows_controls::windows_window_controls(window, cx))
+            .child(window_chrome::caption_drag_region())
+            .child(window_chrome::window_controls(window, cx))
             .into_any_element()
     }
 
@@ -906,7 +905,10 @@ impl ApiTester {
             .size_full()
             .min_h_0()
             .bg(cx.theme().background)
-            .child(super::settings_page::settings_sidebar_underlay(px(220.), cx))
+            .child(super::settings_page::settings_sidebar_underlay(
+                px(220.),
+                cx,
+            ))
             .when_some(self.settings_warning.clone(), |this, warning| {
                 this.child(super::settings_page::dismissible_settings_message(
                     warning,
@@ -1634,7 +1636,7 @@ fn management_dialog_field(label: &'static str, input: Input) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
     use super::*;
 

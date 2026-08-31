@@ -46,32 +46,31 @@ use crate::{
         AppSettings, BodyField, BodyFieldKind, BodyMode, COLLECTIONS_CREATE, COLLECTIONS_DELETE,
         COLLECTIONS_UPDATE, Collection, CollectionFolder, CredentialVault,
         DEFAULT_REQUEST_TAB_TITLE, DatabaseStore, ENVIRONMENT_VALUES_UPDATE, ENVIRONMENTS_CREATE,
-        ENVIRONMENTS_DELETE, ENVIRONMENTS_READ, ENVIRONMENTS_UPDATE,         Environment,
+        ENVIRONMENTS_DELETE, ENVIRONMENTS_READ, ENVIRONMENTS_UPDATE, Environment,
         EnvironmentMutation, FormatterSettings, HeaderEntry, HistoryEntry, HostnameOverride,
-        ImportBundle,
-        InterchangeFormat, LocalWorkspace, LocalWorkspaceProvider, MAX_INTERCHANGE_BYTES,
-        MAX_SNIPPET_NAME_BYTES, PostResponseResult, PreRequestResult, REDACTED_VALUE,
-        REQUESTS_CREATE, REQUESTS_DELETE, REQUESTS_UPDATE, RawBodyLanguage, RealtimeResourceChange,
-        RealtimeSignal, RemoteWorkspaceProvider, RequestDraft, RequestError, RequestExecutionMode,
-        RequestExecutionSettings, RequestHistory, RequestScripts, RequestTabAssociation,
-        RequestTabCloseScope, RequestTabGroup, RequestTabGroupColor, RequestTabGroupId,
-        RequestTabId, RequestTabRecord, RequestTabs, RequestTask, RequestTemplate, ResourceCreator,
-        ResponseData, SERVER_SETTINGS_UPDATE, STANDARD_HTTP_METHODS, SavedRequest, SavedTheme,
-        ScriptCancellation, ScriptDiagnostic, ScriptEnvironment, ScriptError, ScriptErrorKind,
-        ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope, SharedHistoryUpload,
-        ShortcutOverride, Snippet, SnippetCancellation, SnippetCategory, SnippetKind, SnippetLog,
-        SnippetRequirement, SnippetSelection, SnippetSelectionArea, SnippetSelectionSource,
-        SnippetTextRange, UpstreamCollectionView, UpstreamCredential, UpstreamEnvironmentView,
-        UpstreamProfile, UpstreamSavedRequestView, UpstreamWorkspaceError,
-        UpstreamWorkspaceSummary, UpstreamWorkspaceView, WORKSPACES_CREATE, WORKSPACES_DELETE,
-        WORKSPACES_UPDATE, Workspace, WorkspaceMutationError, WorkspaceProvider,
+        ImportBundle, InterchangeFormat, LocalWorkspace, LocalWorkspaceProvider,
+        MAX_INTERCHANGE_BYTES, MAX_SNIPPET_NAME_BYTES, PostResponseResult, PreRequestResult,
+        REDACTED_VALUE, REQUESTS_CREATE, REQUESTS_DELETE, REQUESTS_UPDATE, RawBodyLanguage,
+        RealtimeResourceChange, RealtimeSignal, RemoteWorkspaceProvider, RequestDraft,
+        RequestError, RequestExecutionMode, RequestExecutionSettings, RequestHistory,
+        RequestScripts, RequestTabAssociation, RequestTabCloseScope, RequestTabGroup,
+        RequestTabGroupColor, RequestTabGroupId, RequestTabId, RequestTabRecord, RequestTabs,
+        RequestTask, RequestTemplate, ResourceCreator, ResponseData, SERVER_SETTINGS_UPDATE,
+        STANDARD_HTTP_METHODS, SavedRequest, SavedTheme, ScriptCancellation, ScriptDiagnostic,
+        ScriptEnvironment, ScriptError, ScriptErrorKind, ScriptLogLevel, ScriptPhase, ScriptReport,
+        ScriptScope, SharedHistoryUpload, ShortcutOverride, Snippet, SnippetCancellation,
+        SnippetCategory, SnippetKind, SnippetLog, SnippetRequirement, SnippetSelection,
+        SnippetSelectionArea, SnippetSelectionSource, SnippetTextRange, UpstreamCollectionView,
+        UpstreamCredential, UpstreamEnvironmentView, UpstreamProfile, UpstreamSavedRequestView,
+        UpstreamWorkspaceError, UpstreamWorkspaceSummary, UpstreamWorkspaceView, WORKSPACES_CREATE,
+        WORKSPACES_DELETE, WORKSPACES_UPDATE, Workspace, WorkspaceMutationError, WorkspaceProvider,
         WorkspaceProviderId, WorkspaceProviderRegistry, build_client, build_upstream_client,
         build_upstream_execution_client, create_upstream_collection, create_upstream_environment,
         create_upstream_saved_request, create_upstream_workspace, delete_shared_history,
         delete_upstream_collection, delete_upstream_environment, delete_upstream_saved_request,
-        delete_upstream_workspace, export_request,
-        format_body, generate_snippet, get_upstream_user, get_upstream_workspace, import_requests,
-        is_probably_text, list_upstream_environments, list_upstream_workspaces, login_upstream,
+        delete_upstream_workspace, export_request, format_body, generate_snippet,
+        get_upstream_user, get_upstream_workspace, import_requests, is_probably_text,
+        list_upstream_environments, list_upstream_workspaces, login_upstream,
         move_upstream_collection, move_upstream_saved_request, normalize_upstream_url,
         resolve_request, save_upstream_environment, send_request_for_upstream_workspace,
         spawn_request, update_request_execution_settings, update_upstream_collection,
@@ -154,7 +153,7 @@ mod ui_utils;
 mod upstream_connections;
 mod upstream_workspace_actions;
 mod welcome_page;
-mod windows_controls;
+mod window_chrome;
 mod workspace_connections;
 mod workspace_panes;
 mod workspace_tab;
@@ -369,12 +368,8 @@ pub struct ApiTester {
     /// Memoized folder render indexes for the collections sidebar, keyed by
     /// (workspace version, collection id, query) so expanded collections aren't
     /// re-indexed on every frame.
-    collection_folder_index_cache: RefCell<
-        HashMap<
-            (u64, String, String),
-            Rc<collections_page::CollectionFolderRenderIndex>,
-        >,
-    >,
+    collection_folder_index_cache:
+        RefCell<HashMap<(u64, String, String), Rc<collections_page::CollectionFolderRenderIndex>>>,
     /// Memoized `parse_css` results for the Settings Appearance page, keyed by
     /// exact source text so per-frame theme rendering doesn't re-parse the full
     /// CSS document for every saved theme on every repaint.

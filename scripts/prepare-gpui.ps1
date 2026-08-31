@@ -20,7 +20,8 @@ $pinned = @(
             "$projectDir\patches\gpui-0.2.2-metal-memoryless.patch",
             "$projectDir\patches\gpui-0.2.2-retained-line-layout-cache.patch",
             "$projectDir\patches\gpui-0.2.2-reentrant-async-context.patch",
-            "$projectDir\patches\gpui-0.2.2-windows-clip-children.patch"
+            "$projectDir\patches\gpui-0.2.2-windows-clip-children.patch",
+            "$projectDir\patches\gpui-0.2.2-linux-raw-window-handle.patch"
         )
     },
     @{
@@ -72,7 +73,7 @@ function Invoke-PrepareCrate($crate) {
         if (-not $archive) {
             $archive = Join-Path $tempDir $crateArchive
             Write-Host "Downloading $($crate.name) $($crate.version) from crates.io..."
-            $url = "https://crates.io/api/v1/crates/$($crate.name)/$($crate.version)/download"
+            $url = "https://static.crates.io/crates/$($crate.name)/$crateArchive"
             Invoke-WebRequest -Uri $url -OutFile $archive -UserAgent 'resolved-setup/1.0'
         }
 

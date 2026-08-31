@@ -46,7 +46,7 @@ prepare_crate() (
         archive="$temporary_dir/$crate_archive"
         echo "Downloading $crate_name $crate_version from crates.io..."
         curl --fail --location --retry 3 \
-            "https://crates.io/api/v1/crates/$crate_name/$crate_version/download" \
+            "https://static.crates.io/crates/$crate_name/$crate_archive" \
             --output "$archive"
     fi
 
@@ -84,7 +84,8 @@ prepare_crate \
     "$project_dir/patches/gpui-0.2.2-metal-memoryless.patch" \
     "$project_dir/patches/gpui-0.2.2-retained-line-layout-cache.patch" \
     "$project_dir/patches/gpui-0.2.2-reentrant-async-context.patch" \
-    "$project_dir/patches/gpui-0.2.2-windows-clip-children.patch"
+    "$project_dir/patches/gpui-0.2.2-windows-clip-children.patch" \
+    "$project_dir/patches/gpui-0.2.2-linux-raw-window-handle.patch"
 
 prepare_crate \
     "gpui-component" \

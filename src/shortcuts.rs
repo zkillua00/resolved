@@ -174,18 +174,6 @@ pub const SHORTCUT_DESCRIPTORS: &[ShortcutDescriptor] = &[
         default_binding: "cmd-enter",
     },
     ShortcutDescriptor {
-        id: ShortcutId::SaveRequest,
-        label: "Save active context",
-        category: ShortcutCategory::Application,
-        default_binding: "cmd-s",
-    },
-    ShortcutDescriptor {
-        id: ShortcutId::SaveRequestAs,
-        label: "Save active context as",
-        category: ShortcutCategory::Application,
-        default_binding: "cmd-shift-s",
-    },
-    ShortcutDescriptor {
         id: ShortcutId::FocusRequestUrl,
         label: "Focus request URL",
         category: ShortcutCategory::ActiveRequest,
@@ -232,6 +220,18 @@ pub const SHORTCUT_DESCRIPTORS: &[ShortcutDescriptor] = &[
         label: "Toggle metrics",
         category: ShortcutCategory::Interface,
         default_binding: "cmd-shift-m",
+    },
+    ShortcutDescriptor {
+        id: ShortcutId::SaveRequest,
+        label: "Save active context",
+        category: ShortcutCategory::Application,
+        default_binding: "cmd-s",
+    },
+    ShortcutDescriptor {
+        id: ShortcutId::SaveRequestAs,
+        label: "Save active context as",
+        category: ShortcutCategory::Application,
+        default_binding: "cmd-shift-s",
     },
     ShortcutDescriptor {
         id: ShortcutId::QuitApp,
@@ -309,17 +309,11 @@ pub fn normalize_binding(source: &str) -> Result<String, ShortcutValidationError
 
 /// Canonicalize a keystroke's modifier for the running platform.
 ///
-/// GPUI parses `cmd-` into the platform modifier on every OS, but typed
-/// keystrokes only produce that modifier on macOS — Windows key events set
-/// Control — and `Keystroke::unparse` spells the platform modifier `win-`
-/// there. Normalizing defaults through the modifier flag (not the authored
-/// string) keeps conflict detection comparing identical spellings and
-/// installs bindings Windows can actually match.
+/// Defaults are authored once using macOS `cmd-` spelling. The active desktop
+/// backend maps that semantic modifier to the native user-facing convention;
+/// Linux and Windows use Control while macOS retains Command.
 fn normalize_keystroke_for_platform(keystroke: &mut Keystroke) {
-    if cfg!(target_os = "windows") && keystroke.modifiers.platform {
-        keystroke.modifiers.platform = false;
-        keystroke.modifiers.control = true;
-    }
+    crate::platform::normalize_keystroke(keystroke);
 }
 
 fn validate_keystroke(keystroke: &Keystroke, source: &str) -> Result<(), ShortcutValidationError> {
@@ -686,14 +680,14 @@ mod tests {
 
     #[test]
     fn normalization_canonicalizes_case_modifier_order_and_chords() {
-        if cfg!(not(target_os = "windows")) {
+        if cfg!(target_os = "macos") {
             assert_eq!(
                 normalize_binding(" SHIFT-CMD-S   CTRL-TAB ").unwrap(),
                 "cmd-shift-s ctrl-tab"
             );
         } else {
             // The macOS-authored Command modifier resolves to Control on
-            // Windows so installed bindings match typed keystrokes.
+            // Linux and Windows so installed bindings match typed keystrokes.
             assert_eq!(
                 normalize_binding(" SHIFT-CMD-S   CTRL-TAB ").unwrap(),
                 "ctrl-shift-s ctrl-tab"
@@ -758,10 +752,10 @@ mod tests {
         );
         let error = effective_shortcuts(&settings).unwrap_err();
 
-        let expected_binding = if cfg!(target_os = "windows") {
-            "ctrl-t".to_owned()
-        } else {
+        let expected_binding = if cfg!(target_os = "macos") {
             "cmd-t".to_owned()
+        } else {
+            "ctrl-t".to_owned()
         };
         assert_eq!(
             error.issues,

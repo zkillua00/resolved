@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Resolved
+Comment=Know exactly what you sent
+Exec=resolved
+Icon=io.github.zkillua00.resolved
+Terminal=false
+Categories=Development;
+StartupNotify=true
+StartupWMClass=io.github.zkillua00.resolved

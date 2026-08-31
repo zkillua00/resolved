@@ -1,8 +1,8 @@
-//! Windows decorations for Resolved's custom title bars.
+//! Platform-neutral integration for Resolved's in-content title bars.
 //!
-//! The macOS `.app` draws traffic lights, so each title bar reserves a wide
-//! leading inset and nothing else. Windows has no system chrome under
-//! `appears_transparent`, so the bars themselves must provide:
+//! The active platform plug-in describes its insets and whether the app needs
+//! client-drawn controls. Windows has no system chrome under its transparent
+//! titlebar, so it requests:
 //!
 //! * minimize / maximize-restore / close buttons at the trailing edge, and
 //! * a caption region over the non-interactive remainder of the bar.
@@ -20,30 +20,16 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme as _, IconName, IconNamed as _};
 
-/// Whether the Windows control buttons participate in title bars.
-pub const fn uses_windows_window_controls() -> bool {
-    cfg!(target_os = "windows")
+fn integration() -> crate::platform::TitleBarIntegration {
+    crate::platform::title_bar_integration()
 }
 
-/// The title bar's leading inset: macOS traffic-light clearance, or a compact
-/// caption strip on Windows.
-pub const fn leading_inset() -> Pixels {
-    if cfg!(target_os = "macos") {
-        px(92.)
-    } else {
-        px(12.)
-    }
+pub fn leading_inset() -> Pixels {
+    integration().leading_inset
 }
 
-/// Right-side title-bar breathing room on platforms without client-drawn
-/// Windows controls. On Windows the control cluster must touch the window's
-/// trailing edge so its native hit targets stay aligned across workspaces.
-pub const fn trailing_inset() -> Pixels {
-    if cfg!(target_os = "windows") {
-        px(0.)
-    } else {
-        px(24.)
-    }
+pub fn trailing_inset() -> Pixels {
+    integration().trailing_inset
 }
 
 /// Flexible, non-interactive title-bar space used for native window dragging.
@@ -51,7 +37,7 @@ pub const fn trailing_inset() -> Pixels {
 /// swallow their pointer events.
 pub(crate) fn caption_drag_region() -> AnyElement {
     let region = div().h_full().flex_1();
-    if uses_windows_window_controls() {
+    if integration().draggable_content {
         region
             .window_control_area(WindowControlArea::Drag)
             .into_any_element()
@@ -78,8 +64,8 @@ enum ControlKind {
 /// follows the active theme's muted foreground — gpui's `Svg` paints nothing
 /// without an explicit text color, and a fixed gray is invisible on light
 /// title bars.
-pub(crate) fn windows_window_controls(window: &Window, cx: &App) -> AnyElement {
-    if !uses_windows_window_controls() {
+pub(crate) fn window_controls(window: &Window, cx: &App) -> AnyElement {
+    if !integration().client_controls {
         return div().into_any_element();
     }
 

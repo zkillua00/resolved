@@ -294,8 +294,9 @@ impl PaneEditorState {
         self.pretty_body = runtime.pretty_body;
         self.response = runtime.response.clone();
         self.formatted_body = self.response.as_ref().and_then(|response| {
-            is_probably_text(&response.body)
-                .then(|| SharedString::from(format_body(&response.body, self.pretty_body, formatter)))
+            is_probably_text(&response.body).then(|| {
+                SharedString::from(format_body(&response.body, self.pretty_body, formatter))
+            })
         });
         self.response_request = runtime.response_request.clone();
         self.response_sensitive_values = runtime.response_sensitive_values.clone();
@@ -937,58 +938,55 @@ impl ApiTester {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        Checkbox::new(enabled_id)
-                            .checked(enabled)
-                            .small()
-                            .on_click(cx.listener(move |this, checked: &bool, window, cx| {
-                                on_toggle(this, *checked, window, cx);
-                            })),
-                    ),
+                    .child(Checkbox::new(enabled_id).checked(enabled).small().on_click(
+                        cx.listener(move |this, checked: &bool, window, cx| {
+                            on_toggle(this, *checked, window, cx);
+                        }),
+                    )),
             );
         if let Some(middle) = middle {
             row = row.child(middle);
         }
         row.child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .border_l_1()
-                    .border_color(cx.api_outline_variant())
-                    .child(name_input),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .border_l_1()
-                    .border_color(cx.api_outline_variant())
-                    .child(value_input),
-            )
-            .child(
-                div()
-                    .w(px(44.))
-                    .h_full()
-                    .flex_shrink_0()
-                    .border_l_1()
-                    .border_color(cx.api_outline_variant())
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        Button::new(delete_id)
-                            .icon(IconName::Delete)
-                            .xsmall()
-                            .ghost()
-                            .tooltip(delete_tooltip)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                on_delete(this, window, cx);
-                            })),
-                    ),
-            )
-            .into_any_element()
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .border_l_1()
+                .border_color(cx.api_outline_variant())
+                .child(name_input),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .border_l_1()
+                .border_color(cx.api_outline_variant())
+                .child(value_input),
+        )
+        .child(
+            div()
+                .w(px(44.))
+                .h_full()
+                .flex_shrink_0()
+                .border_l_1()
+                .border_color(cx.api_outline_variant())
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    Button::new(delete_id)
+                        .icon(IconName::Delete)
+                        .xsmall()
+                        .ghost()
+                        .tooltip(delete_tooltip)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            on_delete(this, window, cx);
+                        })),
+                ),
+        )
+        .into_any_element()
     }
 
     fn render_pane_header_row(
@@ -1448,11 +1446,7 @@ impl ApiTester {
         // pretty toggle changes; only binary bodies fall through to the cheap
         // size label here.
         let content = session.formatted_body.clone().unwrap_or_else(|| {
-            format!(
-                "Binary response ({}).",
-                format_bytes(response.size_bytes())
-            )
-            .into()
+            format!("Binary response ({}).", format_bytes(response.size_bytes())).into()
         });
         div()
             .id(SharedString::from(format!("{key}-response-body")))

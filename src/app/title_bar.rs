@@ -6,10 +6,10 @@ impl ApiTester {
             ActiveWorkspaceTab::Welcome => return self.render_welcome_title_bar(window, cx),
             ActiveWorkspaceTab::Snippets => return self.render_snippets_title_bar(window, cx),
             ActiveWorkspaceTab::RequestProxy => {
-                return self.render_request_proxy_title_bar(window, cx)
+                return self.render_request_proxy_title_bar(window, cx);
             }
             ActiveWorkspaceTab::ServerTools => {
-                return self.render_server_tools_title_bar(window, cx)
+                return self.render_server_tools_title_bar(window, cx);
             }
             ActiveWorkspaceTab::Settings => return self.render_settings_title_bar(window, cx),
             ActiveWorkspaceTab::ThemeCss => return self.render_theme_css_title_bar(window, cx),
@@ -93,7 +93,7 @@ impl ApiTester {
         h_flex()
             .h(px(APP_TITLE_BAR_HEIGHT))
             .flex_shrink_0()
-            .pl(windows_controls::leading_inset())
+            .pl(window_chrome::leading_inset())
             .border_b_1()
             .border_color(cx.theme().title_bar_border)
             .bg(cx.theme().title_bar)
@@ -148,7 +148,7 @@ impl ApiTester {
                                         .child("Modified"),
                                 )
                             })
-                            .child(windows_controls::caption_drag_region()),
+                            .child(window_chrome::caption_drag_region()),
                     ),
             )
             .child(
@@ -286,7 +286,7 @@ impl ApiTester {
                             })
                             .anchor(Corner::TopRight),
                     )
-                    .child(windows_controls::windows_window_controls(window, cx))
+                    .child(window_chrome::window_controls(window, cx)),
             )
             .into_any_element()
     }

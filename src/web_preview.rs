@@ -1,56 +1,54 @@
 use gpui::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Window,
-    Timer, div,
+    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Task,
+    Timer, Window, div,
 };
 use gpui_wry::WebView as GpuiWebView;
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::{cell::RefCell, sync::atomic::Ordering, time::Duration};
 use wry::{NewWindowResponse, WebContext, WebViewBuilder};
-
-/// The link-preview policy shared by every webview backend.
-///
-/// Only the Darwin builder exposes a real link-preview switch; the other
-/// backends have no such behavior, so the policy compiles to a no-op there.
-trait PreviewLinkPolicy: Sized {
-    fn with_allow_link_preview(self, allow: bool) -> Self;
-}
-
-#[cfg(target_os = "macos")]
-impl PreviewLinkPolicy for WebViewBuilder<'_> {
-    fn with_allow_link_preview(self, allow: bool) -> Self {
-        wry::WebViewBuilderExtDarwin::with_allow_link_preview(self, allow)
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-impl PreviewLinkPolicy for WebViewBuilder<'_> {
-    fn with_allow_link_preview(self, _allow: bool) -> Self {
-        self
-    }
-}
 
 const CSP_META: &str = r#"<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'>"#;
 
+thread_local! {
+    // Keep one context on the UI thread. This is particularly important on
+    // WebKitGTK, where each context owns a WebKitNetworkProcess; reusing it
+    // prevents one dormant helper from accumulating on every Preview reopen.
+    static PREVIEW_WEB_CONTEXT: RefCell<WebContext> =
+        RefCell::new(WebContext::new(crate::platform::preview_data_directory()));
+}
+
 pub struct HtmlPreview {
     webview: Option<Entity<GpuiWebView>>,
+    _platform_runtime: Option<Task<()>>,
+    reveal_task: Option<Task<()>>,
+    render_state_task: Option<Task<()>>,
 }
 
 impl HtmlPreview {
     pub fn new(html: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let platform_runtime = match crate::platform::start_webview_runtime(cx) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                crate::log_diagnostic(&format!(
+                    "web preview: runtime initialization failed: {error}"
+                ));
+                return Self {
+                    webview: None,
+                    _platform_runtime: None,
+                    reveal_task: None,
+                    render_state_task: None,
+                };
+            }
+        };
+
         // WebView2 keeps its user-data folder beside the host executable by
         // default; the Windows Store deployment puts that under
         // `C:\Program Files\WindowsApps\...`, which is read-only, so
         // environment creation fails and the pane renders nothing. Point the
         // web context at the app's own data directory on Windows (the loose
         // macOS flow is unaffected; WKWebView needs no folder there).
-        // `with_incognito(true)` below still keeps the session in WebView2's
-        // private mode on top of that folder.
-        let mut web_context = WebContext::new(preview_data_directory());
+        // The platform plug-in keeps WebView2/WKWebView private. Linux instead
+        // reuses this context because WebKitGTK otherwise leaves one network
+        // helper per ephemeral context after the web view itself is closed.
         // Build the WKWebView before creating the entity so a creation failure
         // (rare but real: window-server/display errors) degrades to an unavailable
         // preview instead of panicking the whole app on a user action. The
@@ -66,36 +64,43 @@ impl HtmlPreview {
             html.len(),
             document.len()
         ));
-        let webview = WebViewBuilder::new_with_web_context(&mut web_context)
-            .with_incognito(true)
-            // The child is created at the native default origin. Keep it
-            // hidden until gpui-wry has assigned the preview pane's real
-            // bounds, otherwise WebView2 flashes in the window's top-left
-            // corner for its first frame.
-            .with_visible(false)
-            .with_background_color((255, 255, 255, 255))
-            .with_javascript_disabled()
-            .with_devtools(false)
-            .with_autoplay(false)
-            .with_allow_link_preview(false)
-            .with_drag_drop_handler(|_| true)
-            .with_navigation_handler(|url| url.starts_with("about:blank"))
-            .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
-            .with_download_started_handler(|_, _| false)
-            .with_on_page_load_handler(|event, url| {
-                let scheme = url.split_once(':').map_or("unknown", |(scheme, _)| scheme);
-                let event = match event {
-                    wry::PageLoadEvent::Started => "started",
-                    wry::PageLoadEvent::Finished => "finished",
-                };
-                crate::log_diagnostic(&format!(
-                    "web preview: page load {event} (scheme: {scheme})"
-                ));
-            })
-            .build_as_child(window);
+        let webview = PREVIEW_WEB_CONTEXT.with(|web_context| {
+            let mut web_context = web_context.borrow_mut();
+            let webview_builder = WebViewBuilder::new_with_web_context(&mut *web_context)
+                // The child is created at the native default origin. Keep it
+                // hidden until gpui-wry has assigned the preview pane's real
+                // bounds, otherwise WebView2 flashes in the window's top-left
+                // corner for its first frame.
+                .with_visible(false)
+                .with_background_color((255, 255, 255, 255))
+                .with_javascript_disabled()
+                .with_devtools(false)
+                .with_autoplay(false);
+            crate::platform::configure_webview(webview_builder)
+                .with_drag_drop_handler(|_| true)
+                .with_navigation_handler(|url| url.starts_with("about:blank"))
+                .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
+                .with_download_started_handler(|_, _| false)
+                .with_on_page_load_handler(|event, url| {
+                    let scheme = url.split_once(':').map_or("unknown", |(scheme, _)| scheme);
+                    let event = match event {
+                        wry::PageLoadEvent::Started => "started",
+                        wry::PageLoadEvent::Finished => "finished",
+                    };
+                    crate::log_diagnostic(&format!(
+                        "web preview: page load {event} (scheme: {scheme})"
+                    ));
+                })
+                .build_as_child(window)
+        });
         let webview = match webview {
             Ok(webview) => {
                 crate::log_diagnostic("web preview: webview created");
+                if let Err(error) = crate::platform::prepare_preview_webview(&webview) {
+                    crate::log_diagnostic(&format!(
+                        "web preview: native background preparation failed: {error}"
+                    ));
+                }
                 Some(webview)
             }
             Err(error) => {
@@ -110,7 +115,7 @@ impl HtmlPreview {
         // interactive.
         let webview = webview.map(|raw| cx.new(|cx| GpuiWebView::new(raw, window, cx)));
 
-        if let Some(initial_view) = webview.clone() {
+        let reveal_task = webview.clone().map(|initial_view| {
             cx.spawn(async move |_, cx| {
                 // Wait for gpui-wry's first prepaint to assign a nonempty pane
                 // rectangle. Its logical visibility remains enabled so layout
@@ -157,19 +162,21 @@ impl HtmlPreview {
                     return;
                 }
 
-                let result =
-                    initial_view.update(cx, |view, _| load_document(view.raw(), &document));
+                let result = initial_view.update(cx, |view, _| {
+                    view.with_raw(|raw| crate::platform::load_preview_document(raw, &document))
+                });
                 let ready = match result {
-                    Ok(Ok(ready)) => {
+                    Ok(Some(Ok(ready))) => {
                         crate::log_diagnostic("web preview: initial document submitted");
                         ready
                     }
-                    Ok(Err(error)) => {
+                    Ok(Some(Err(error))) => {
                         crate::log_diagnostic(&format!(
                             "web preview: initial document submission failed: {error}"
                         ));
                         return;
                     }
+                    Ok(None) => return,
                     Err(error) => {
                         crate::log_diagnostic(&format!(
                             "web preview: initial document submission failed: {error}"
@@ -244,28 +251,31 @@ impl HtmlPreview {
                 }
 
                 if let Err(error) = initial_view.update(cx, |view, _| view.show()) {
-                    crate::log_diagnostic(&format!(
-                        "web preview: initial reveal failed: {error}"
-                    ));
+                    crate::log_diagnostic(&format!("web preview: initial reveal failed: {error}"));
+                } else {
+                    crate::log_diagnostic("web preview: initial document revealed");
                 }
             })
-            .detach();
-        }
+        });
 
         // Record the renderer's own view of the document after its first
         // layout. This deliberately logs only structure/layout metadata, not
         // response text. It distinguishes an empty/hidden DOM from a native
         // WebView2 composition failure when the preview surface is blank.
-        cx.spawn(async move |this, cx| {
+        let render_state_task = Some(cx.spawn(async move |this, cx| {
             Timer::after(Duration::from_millis(750)).await;
             let Some(this) = this.upgrade() else {
                 return;
             };
             this.update(cx, |this, cx| this.log_render_state(cx)).ok();
-        })
-        .detach();
+        }));
 
-        Self { webview }
+        Self {
+            webview,
+            _platform_runtime: platform_runtime,
+            reveal_task,
+            render_state_task,
+        }
     }
 
     fn log_render_state(&self, cx: &mut Context<Self>) {
@@ -308,15 +318,18 @@ impl HtmlPreview {
             }
         })()"#;
         let result = webview.update(cx, |view, _| {
-            view.raw().evaluate_script_with_callback(script, |state| {
-                crate::log_diagnostic(&format!("web preview: render state {state}"));
+            view.with_raw(|raw| {
+                raw.evaluate_script_with_callback(script, |state| {
+                    crate::log_diagnostic(&format!("web preview: render state {state}"));
+                })
             })
         });
         match result {
-            Ok(()) => {}
-            Err(error) => crate::log_diagnostic(&format!(
-                "web preview: render-state probe failed: {error}"
-            )),
+            Some(Ok(())) => {}
+            Some(Err(error)) => {
+                crate::log_diagnostic(&format!("web preview: render-state probe failed: {error}"))
+            }
+            None => crate::log_diagnostic("web preview: render-state probe skipped after close"),
         }
     }
 
@@ -336,15 +349,21 @@ impl HtmlPreview {
             document.len()
         ));
         let webview = webview.clone();
+        // Cancelling the previous reveal is essential: a stale delayed task
+        // must never expose an older document after this navigation starts.
+        self.reveal_task.take();
         let ready = webview.update(cx, |view, _| {
             // Keep gpui-wry logically visible so prepaint continues updating
             // bounds, but hide the native controller while WebView2 replaces
             // and lays out the document.
-            view.raw().set_visible(false)?;
-            load_document(view.raw(), &document)
+            view.with_raw(|raw| {
+                raw.set_visible(false)?;
+                crate::platform::load_preview_document(raw, &document)
+            })
+            .unwrap_or(Ok(None))
         })?;
 
-        cx.spawn(async move |_, cx| {
+        self.reveal_task = Some(cx.spawn(async move |_, cx| {
             if let Some(ready) = ready {
                 let mut completed = false;
                 for _ in 0..120 {
@@ -385,6 +404,8 @@ impl HtmlPreview {
                                 crate::log_diagnostic(&format!(
                                     "web preview: reload reveal failed: {error}"
                                 ));
+                            } else {
+                                crate::log_diagnostic("web preview: reloaded document revealed");
                             }
                             return;
                         }
@@ -398,72 +419,40 @@ impl HtmlPreview {
                 }
             }
             crate::log_diagnostic("web preview: reload layout never settled at nonempty bounds");
-        })
-        .detach();
+        }));
 
         cx.notify();
         Ok(())
     }
 
-    pub fn hide(&mut self, cx: &mut Context<Self>) {
-        if let Some(webview) = &self.webview {
-            webview.update(cx, |view, _| view.hide());
+    pub fn close(&mut self, cx: &mut Context<Self>) {
+        // Reveal jobs retain the native child and can call `show` after a tab
+        // switch. Dropping an owned GPUI task cancels it immediately, so stop
+        // all delayed work before hiding and releasing the child WebView.
+        self.reveal_task.take();
+        self.render_state_task.take();
+        if let Some(webview) = self.webview.take() {
+            webview.update(cx, |view, _| view.close());
         }
+        // Some platforms may return a preview-scoped runtime task. Linux uses
+        // one process-level GTK pump so native teardown can finish after this
+        // entity leaves GPUI's render tree.
+        self._platform_runtime.take();
+        crate::log_diagnostic("web preview: closed");
         cx.notify();
     }
 }
 
-/// Load a captured document without allowing its own scripts to execute.
-///
-/// WebView2's `NavigateToString` can successfully complete while leaving its
-/// default empty document in a child WebView hosted by GPUI. Host-injected
-/// script remains available when page JavaScript is disabled, so on Windows
-/// replace the current document directly. Other engines keep their native
-/// HTML loading path.
-#[cfg(target_os = "windows")]
-fn load_document(webview: &wry::WebView, document: &str) -> wry::Result<Option<Arc<AtomicBool>>> {
-    let encoded = serde_json::to_string(document).expect("serializing an HTML string cannot fail");
-    let ready = Arc::new(AtomicBool::new(false));
-    let callback_ready = Arc::clone(&ready);
-    webview.evaluate_script_with_callback(
-        &format!("document.open();document.write({encoded});document.close();true"),
-        move |_| callback_ready.store(true, Ordering::Release),
-    )?;
-    Ok(Some(ready))
-}
-
-#[cfg(not(target_os = "windows"))]
-fn load_document(webview: &wry::WebView, document: &str) -> wry::Result<Option<Arc<AtomicBool>>> {
-    webview.load_html(document)?;
-    Ok(None)
-}
-
 impl Render for HtmlPreview {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let mut root = div().size_full();
+        // The native child intentionally stays hidden until its first stable
+        // frame. Paint an opaque surface underneath it so that interval can
+        // never expose the desktop through the application window.
+        let mut root = div().size_full().bg(gpui::white());
         if let Some(webview) = self.webview.clone() {
             root = root.child(webview);
         }
         root
-    }
-}
-
-/// The WebView2 user-data folder: the app's own data directory, where the
-/// process has write access in every deployment (loose, unpackaged, or
-/// WindowsApps). `None` elsewhere keeps the platform default.
-fn preview_data_directory() -> Option<std::path::PathBuf> {
-    if cfg!(target_os = "windows") {
-        // The instance guard already creates this directory for the SQLite
-        // workspace, so a fresh install can't race it here.
-        Some(
-            crate::core::DatabaseStore::default_path()
-                .with_file_name("webview-data")
-                .parent()
-                .map(|directory| directory.join("webview-data"))
-                .unwrap_or_else(|| std::env::temp_dir().join("resolved-webview-data")),
-        )
-    } else {
-        None
     }
 }
 

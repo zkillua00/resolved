@@ -41,8 +41,8 @@ impl ApiTester {
         h_flex()
             .h(px(APP_TITLE_BAR_HEIGHT))
             .flex_shrink_0()
-            .pl(windows_controls::leading_inset())
-            .pr(windows_controls::trailing_inset())
+            .pl(window_chrome::leading_inset())
+            .pr(window_chrome::trailing_inset())
             .border_b_1()
             .border_color(cx.theme().title_bar_border)
             .bg(cx.theme().title_bar)
@@ -59,8 +59,8 @@ impl ApiTester {
                         .child("Settings"),
                 ),
             )
-            .child(windows_controls::caption_drag_region())
-            .child(windows_controls::windows_window_controls(window, cx))
+            .child(window_chrome::caption_drag_region())
+            .child(window_chrome::window_controls(window, cx))
             .into_any_element()
     }
 
@@ -1674,10 +1674,7 @@ pub(super) fn dismissible_settings_message(
         .into_any_element()
 }
 
-pub(super) fn settings_sidebar_underlay(
-    sidebar_width: Pixels,
-    cx: &App,
-) -> AnyElement {
+pub(super) fn settings_sidebar_underlay(sidebar_width: Pixels, cx: &App) -> AnyElement {
     div()
         .absolute()
         .top_0()

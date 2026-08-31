@@ -6,8 +6,8 @@ A native API workbench built with [GPUI 0.2.2](https://docs.rs/gpui/0.2.2/gpui/)
 [GPUI Component 0.5.1](https://docs.rs/gpui-component/0.5.1/gpui_component/).
 The request workspace, code editors, collections, environments, response views,
 and performance HUD are rendered by GPUI. Captured HTML responses use the OS
-web view (WKWebView on macOS, WebView2 on Windows) through `gpui-wry` only
-when the Preview tab is selected.
+web view (WKWebView on macOS, WebKitGTK on Linux, and WebView2 on Windows)
+through `gpui-wry` only when the Preview tab is selected.
 
 ## MVP features
 
@@ -18,7 +18,7 @@ when the Preview tab is selected.
 - None, raw, URL-encoded, and multipart form-data request body modes
 - Explicit raw-body syntax selection for text, JSON, XML, HTML, JavaScript,
   TypeScript, CSS, Markdown, GraphQL, YAML, TOML, SQL, Shell, Rust, and Python
-- Text and streamed local-file multipart fields with a native macOS file picker
+- Text and streamed local-file multipart fields with a native file picker
 - Cancelable requests with a 60-second timeout and bounded redirects
 - Status, duration, size, HTTP version, final URL, response headers, and body
 - Reusable code editors with configurable indentation, Zed-inspired Tab,
@@ -46,7 +46,7 @@ when the Preview tab is selected.
   tokens are authenticated-encrypted locally, with biometric Keychain
   protection available to provisioned builds
 - Persistent, live-configurable keyboard shortcuts, organized into five
-  task-focused sections with macOS-native defaults
+  task-focused sections with platform-native Command or Control defaults
 - A persistent CSS theme library mapped into GPUI controls and editor syntax
   colors, with instant switching, an intelligent in-app editor, and a macOS
   preferred-editor workflow
@@ -75,11 +75,12 @@ workspace when the signed-in user has permission. Settings → Servers can also
 switch between Local and a connected server.
 
 > [!WARNING]
-> Builds without an Apple-authorized Keychain entitlement—including ad-hoc and
-> self-signed alpha builds—persist server sessions using an owner-only local
+> Linux builds and macOS builds without an Apple-authorized Keychain
+> entitlement—including ad-hoc and self-signed alpha builds—persist server
+> sessions using an owner-only local
 > master-key file beside the SQLite database. This avoids repeated Keychain
 > prompts and keeps logins across restarts, but it is not equivalent to
-> Keychain protection: a process or person that can read the macOS account's
+> Keychain protection: a process or person that can read the account's
 > application-data directory can recover both the encrypted sessions and their
 > key. Provisioned builds move the key into the Data Protection Keychain and
 > remove the local key file. A session saved by an earlier unprovisioned build
@@ -641,8 +642,9 @@ can exceed 100% when the process uses more than one core.
 
 ## Local storage
 
-State is stored in the macOS local application-data directory under the legacy
-`API Tester/` path. Resolved deliberately retains this internal directory name
+State is stored in the OS local application-data directory under the legacy
+`API Tester/` path (`~/Library/Application Support/API Tester` on macOS and the
+XDG data directory on Linux). Resolved deliberately retains this internal name
 so existing history, workspaces, request tabs, settings, and themes continue to
 load after the product rename:
 
@@ -679,8 +681,10 @@ the local user account accordingly.
 
 ## Run
 
-The project uses Rust edition 2024. macOS is the primary target; Windows is
-supported through an MSIX-packaged build.
+The project uses Rust edition 2024 and has compile-time platform backends for
+Linux, macOS, and Windows. Shared feature code does not select operating
+systems directly; each backend owns native launch, menu, shortcut, window,
+diagnostic, and webview integration.
 
 ### macOS
 
@@ -691,6 +695,58 @@ scripts/cargo.sh run
 This command builds and opens `target/debug/Resolved.app`. The bare
 Cargo executable is not a supported launch target because it has no application
 bundle identity for Keychain and system-service access.
+
+### Linux
+
+Linux runs through X11, including XWayland on Wayland desktops, because Wry's
+embedded WebKitGTK child-window backend currently requires an X11 window
+handle. Resolved forces GTK onto that same display so an inherited Wayland GTK
+backend cannot conflict with GPUI. Build and run with:
+
+```sh
+scripts/cargo.sh run
+```
+
+Ubuntu/Debian build prerequisites include `build-essential`, `pkg-config`,
+`libgtk-3-dev`, `libwebkit2gtk-4.1-dev`, `libfontconfig1-dev`,
+`libvulkan-dev`, `libxkbcommon-dev`, and `libxkbcommon-x11-dev`. Runtime HTML
+Preview uses WebKitGTK. Linux uses native server-side window decorations and
+normalizes the shared macOS-authored `cmd-` shortcut defaults to `ctrl-`.
+
+Create all Linux distribution artifacts with:
+
+```sh
+scripts/package-linux.sh release
+```
+
+The script builds once and writes four artifacts to `target/release/`:
+
+- `Resolved-<version>-linux-<deb-architecture>.deb`
+- `Resolved-<version>-linux-<rpm-architecture>.rpm`
+- `Resolved-<version>-linux-<architecture>.AppImage`
+- `Resolved-<version>-linux-<architecture>.tar.xz`
+
+Pass `deb`, `rpm`, `appimage`, or `archive` as the second argument to build
+only one format. The Debian and RPM packages install the binary, desktop
+entry, AppStream metadata, and icon. The AppImage is a single-file portable
+launcher but deliberately uses the host's matched GTK 3 and WebKitGTK 4.1
+runtime so WebKit's sandboxed helper processes remain version-compatible. The
+archive is relocatable and includes a launcher plus instructions for manual
+installation under `/opt`.
+
+On an immutable host, the checked-in builder provides the complete toolchain:
+
+```sh
+docker build -t resolved-linux-builder -f linux/Dockerfile .
+docker run --rm --user "$(id -u):$(id -g)" \
+  -e HOME=/tmp/resolved-home -e CARGO_HOME=/tmp/resolved-cargo \
+  -v "$PWD:/workspace" -w /workspace \
+  resolved-linux-builder ./scripts/cargo.sh test --all-features
+docker run --rm --user "$(id -u):$(id -g)" \
+  -e HOME=/tmp/resolved-home -e CARGO_HOME=/tmp/resolved-cargo \
+  -v "$PWD:/workspace" -w /workspace \
+  resolved-linux-builder ./scripts/package-linux.sh release
+```
 
 ### Windows
 
@@ -715,13 +771,13 @@ Add-AppxPackage -Path target\debug\Resolved.msix
 ```
 
 Keyboard defaults are authored in macOS spelling and normalized at install
-time (`cmd-` becomes `ctrl-`), and the custom title bars draw their own
+time (`cmd-` becomes `ctrl-` on Linux and Windows), and the custom title bars draw their own
 minimize/maximize/close buttons on Windows, wired to the window's non-client
 commands through GPUI control-area hitboxes.
 
 On Windows, permissions for the local data directory and SQLite files come
 from NTFS ACLs rather than POSIX modes; the `0700`/`0600` restrictions apply
-to the macOS side only.
+to Linux and macOS.
 
 GPUI's `runtime_shaders` feature is enabled, so the normal build works with Apple
 Command Line Tools and does not require the full Xcode Metal command-line
@@ -780,14 +836,14 @@ override requires a Developer ID signature and notarization. TypeScript's Apache
 ## HTML preview boundary
 
 Preview renders the captured response body; it does not make a second request to
-the response URL. It is created in an incognito WKWebView with JavaScript,
+the response URL. It is created in the platform's incognito webview with JavaScript,
 navigation, new windows, downloads, autoplay, link previews, drag/drop, and
 devtools disabled. A restrictive CSP also blocks scripts, network connections,
 frames, forms, objects, external styles, fonts, images, and media. Inline CSS and
 data/blob images or media remain available so captured HTML can still be useful.
 
-Because WKWebView is a native child view above GPUI's Metal surface, Preview uses
-a dedicated rectangular pane. GPUI overlays cannot cover that pane; the app
+Because the webview is a native child above GPUI's rendering surface, Preview
+uses a dedicated rectangular pane. GPUI overlays cannot cover that pane; the app
 constructs it only when a valid captured HTML response is opened in Preview and
 destroys it when Preview is left, the response is cleared, or loading fails.
 
@@ -818,4 +874,4 @@ need permission to bind a local socket in a restricted environment.
 Cookie jars, response streaming/downloads, certificate controls, proxy
 controls, and native collection-structure import/export are not included yet.
 Specification imports open operations as request tabs rather than manufacturing
-a saved collection. macOS is the only supported target for now.
+a saved collection.

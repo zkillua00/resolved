@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.zkillua00.resolved</id>
+  <name>Resolved</name>
+  <summary>Know exactly what you sent</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <url type="homepage">https://github.com/zkillua00</url>
+  <description>
+    <p>
+      Resolved is a native API workbench that keeps request intent, wire state,
+      and responses explicit.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.zkillua00.resolved.desktop</launchable>
+  <provides>
+    <binary>resolved</binary>
+  </provides>
+</component>

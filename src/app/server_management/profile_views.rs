@@ -1,5 +1,3 @@
-use gpui::StatefulInteractiveElement as _;
-
 use super::*;
 use crate::core::{ProfileView, SharedHistoryEntry, SharedHistoryHeader, SharedHistoryRequest};
 
@@ -28,7 +26,12 @@ pub(super) fn render_profiles(this: &WeakEntity<ApiTester>, cx: &mut App) -> Any
         let selected_history_id = management
             .selected_profile_history_id
             .as_ref()
-            .and_then(|id| management.profile_history.iter().find(|entry| &entry.id == id))
+            .and_then(|id| {
+                management
+                    .profile_history
+                    .iter()
+                    .find(|entry| &entry.id == id)
+            })
             .or_else(|| management.profile_history.first())
             .map(|entry| entry.id.clone());
         (
@@ -430,7 +433,11 @@ fn render_history_list(
         .into_any_element()
 }
 
-fn render_history_entry(entry: &SharedHistoryEntry, body: Option<&str>, cx: &mut App) -> AnyElement {
+fn render_history_entry(
+    entry: &SharedHistoryEntry,
+    body: Option<&str>,
+    cx: &mut App,
+) -> AnyElement {
     let response = entry.response.as_ref();
     v_flex()
         .id(SharedString::from(format!(
@@ -693,7 +700,7 @@ fn profile_message(message: String, cx: &mut App) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use gpui::{Context, Render, TestAppContext, Window, px, size};
 
     use super::*;
@@ -776,37 +783,37 @@ mod tests {
                 app.server_management.selected_profile_history_id = Some("entry-1".to_owned());
                 app.server_management
                     .set_profile_history(vec![SharedHistoryEntry {
-                    id: "entry-1".to_owned(),
-                    created_at: now,
-                    request: SharedHistoryRequest {
-                        method: "POST".to_owned(),
-                        url: "https://api.example.test/widgets".to_owned(),
-                        headers: vec![SharedHistoryHeader {
-                            name: "Content-Type".to_owned(),
-                            value: "application/json".to_owned(),
-                        }],
-                        body: r#"{"name":"shared"}"#.to_owned(),
-                        body_mode: "raw".to_owned(),
-                        raw_body_language: "json".to_owned(),
-                        body_fields: Vec::new(),
-                        body_truncated: false,
-                    },
-                    response: Some(SharedHistoryResponse {
-                        status: 201,
-                        status_text: "Created".to_owned(),
-                        http_version: "HTTP/2".to_owned(),
-                        final_url: "https://api.example.test/widgets/1".to_owned(),
-                        headers: vec![SharedHistoryHeader {
-                            name: "Content-Type".to_owned(),
-                            value: "application/json".to_owned(),
-                        }],
-                        body_base64: BASE64_STANDARD.encode(br#"{"id":1}"#),
-                        body_truncated: false,
-                        content_type: "application/json".to_owned(),
-                        duration_micros: 1250,
-                    }),
-                    error: String::new(),
-                }]);
+                        id: "entry-1".to_owned(),
+                        created_at: now,
+                        request: SharedHistoryRequest {
+                            method: "POST".to_owned(),
+                            url: "https://api.example.test/widgets".to_owned(),
+                            headers: vec![SharedHistoryHeader {
+                                name: "Content-Type".to_owned(),
+                                value: "application/json".to_owned(),
+                            }],
+                            body: r#"{"name":"shared"}"#.to_owned(),
+                            body_mode: "raw".to_owned(),
+                            raw_body_language: "json".to_owned(),
+                            body_fields: Vec::new(),
+                            body_truncated: false,
+                        },
+                        response: Some(SharedHistoryResponse {
+                            status: 201,
+                            status_text: "Created".to_owned(),
+                            http_version: "HTTP/2".to_owned(),
+                            final_url: "https://api.example.test/widgets/1".to_owned(),
+                            headers: vec![SharedHistoryHeader {
+                                name: "Content-Type".to_owned(),
+                                value: "application/json".to_owned(),
+                            }],
+                            body_base64: BASE64_STANDARD.encode(br#"{"id":1}"#),
+                            body_truncated: false,
+                            content_type: "application/json".to_owned(),
+                            duration_micros: 1250,
+                        }),
+                        error: String::new(),
+                    }]);
             });
             let harness = cx.new(|_| ProfilesHarness { app });
             gpui_component::Root::new(harness, window, cx)

@@ -361,7 +361,7 @@ impl ApiTester {
         if rebind_shortcuts {
             shortcuts::apply_key_bindings(cx, &self.base_key_bindings, &candidate)
                 .map_err(|error| format!("Shortcut keymap could not be applied: {error}"))?;
-            crate::configure_menus(cx);
+            crate::platform::configure_menus(cx);
         }
         self.debug_overlay.update(cx, |overlay, cx| {
             overlay.set_position(candidate.metrics_position, cx);

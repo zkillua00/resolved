@@ -160,6 +160,11 @@ async fn run_connection(
     bearer_token: &str,
     sender: &UnboundedSender<RealtimeSignal>,
 ) -> ConnectionEnd {
+    if let Err(error) = crate::tls::install_crypto_provider() {
+        tracing::warn!(error, "could not initialize real-time TLS");
+        return ConnectionEnd::Unavailable;
+    }
+
     let mut request = match websocket_url.as_str().into_client_request() {
         Ok(request) => request,
         Err(error) => {

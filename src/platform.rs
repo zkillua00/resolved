@@ -1,98 +1,179 @@
-//! Runtime platform decisions used across Resolved.
+//! Compile-time desktop platform plug-ins.
 //!
-//! macOS keeps the bundle-gated, Keychain-backed model. Windows requires MSIX
-//! package identity at launch, the source of app identity for WebView2 data
-//! directories and packaged fail-fast behavior; title-bar decoration lives in
-//! `src/app/windows_controls.rs`.
+//! The application and feature modules call this facade instead of selecting
+//! operating systems themselves. Each backend owns its native launch policy,
+//! menus, window integration, shortcut convention, diagnostics, and webview
+//! behavior. Only this module selects the active backend with `cfg`.
 
+use std::{
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicBool},
+};
+
+use gpui::{App, Keystroke, Menu, MenuItem, Pixels, Task, WindowOptions, px};
+use wry::{WebView, WebViewBuilder};
+
+use crate::shortcuts::{
+    CloseRequestTab, NewRequestTab, QuitApp, SaveRequest, SaveRequestAs, SendOrCancelRequest,
+    ShowSettings,
+};
+
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "macos")]
-use std::path::Path;
-
+mod macos;
 #[cfg(target_os = "windows")]
-mod windows_probe {
-    use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, WIN32_ERROR};
-    use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
+mod windows;
 
-    /// GetCurrentPackageFullName reports the required buffer length when the
-    /// process has package identity, and APPMODEL_ERROR_NO_PACKAGE when it
-    /// does not — so a lone size query is a complete identity probe.
-    pub(super) fn has_package_identity() -> bool {
-        let mut length: u32 = 0;
-        // SAFETY: `length` is a valid, writable u32 for the duration of the
-        // call; no package-name buffer is required for the size probe.
-        let status: WIN32_ERROR = unsafe { GetCurrentPackageFullName(&mut length, None) };
-        status == WIN32_ERROR(0) || status == ERROR_INSUFFICIENT_BUFFER
-    }
-}
-
-/// Returns the human-readable reason the current launch is unsupported, if
-/// it is.
-///
-/// * macOS builds must run from an `.app` bundle so Info.plist, the icon, and
-///   provisioning metadata are present.
-/// * Windows builds require MSIX package identity; a bare exe refuses to
-///   start and `scripts/package-msix.ps1` produces a launchable package.
+#[cfg(target_os = "linux")]
+type ActiveBackend = linux::LinuxBackend;
 #[cfg(target_os = "macos")]
-pub fn launch_blocker() -> Result<(), String> {
-    let executable = std::env::current_exe()
-        .map_err(|error| format!("could not resolve the executable path: {error}"))?;
-    if containing_app_bundle(&executable).is_some() {
-        Ok(())
-    } else {
-        Err(
-            "Resolved must run from its macOS application bundle. Use scripts/cargo.sh run."
-                .to_owned(),
-        )
-    }
-}
-
+type ActiveBackend = macos::MacOsBackend;
 #[cfg(target_os = "windows")]
-pub fn launch_blocker() -> Result<(), String> {
-    if windows_probe::has_package_identity() {
+type ActiveBackend = windows::WindowsBackend;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+compile_error!("Resolved currently supports Linux, macOS, and Windows desktop targets");
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TitleBarIntegration {
+    pub leading_inset: Pixels,
+    pub trailing_inset: Pixels,
+    pub client_controls: bool,
+    pub draggable_content: bool,
+}
+
+pub(crate) trait PlatformBackend {
+    fn launch_blocker() -> Result<(), String> {
         Ok(())
-    } else {
-        Err(
-            "Resolved must run as a packaged (MSIX) application on Windows. Use \
-             scripts/cargo.ps1 run to build and launch the packaged app."
-                .to_owned(),
-        )
+    }
+
+    fn configure_menus(cx: &mut App);
+
+    fn install_runtime_hooks() {}
+
+    fn log_diagnostic(_message: &str) {}
+
+    fn normalize_keystroke(_keystroke: &mut Keystroke) {}
+
+    fn configure_main_window(_options: &mut WindowOptions) {}
+
+    fn title_bar_integration() -> TitleBarIntegration;
+
+    fn configure_webview<'a>(builder: WebViewBuilder<'a>) -> WebViewBuilder<'a> {
+        builder.with_incognito(true)
+    }
+
+    fn start_webview_runtime(_cx: &App) -> Result<Option<Task<()>>, String> {
+        Ok(None)
+    }
+
+    fn prepare_preview_webview(_webview: &WebView) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn load_preview_document(
+        webview: &WebView,
+        document: &str,
+    ) -> wry::Result<Option<Arc<AtomicBool>>> {
+        webview.load_html(document)?;
+        Ok(None)
+    }
+
+    fn preview_data_directory() -> Option<PathBuf> {
+        None
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub fn launch_blocker() -> Result<(), String> {
-    Ok(())
+pub(crate) fn launch_blocker() -> Result<(), String> {
+    ActiveBackend::launch_blocker()
 }
 
-#[cfg(target_os = "macos")]
-fn containing_app_bundle(executable: &Path) -> Option<&Path> {
-    let macos = executable.parent()?;
-    if macos.file_name()? != "MacOS" {
-        return None;
-    }
-    let contents = macos.parent()?;
-    if contents.file_name()? != "Contents" {
-        return None;
-    }
-    let bundle = contents.parent()?;
-    (bundle.extension()? == "app").then_some(bundle)
+pub(crate) fn configure_menus(cx: &mut App) {
+    ActiveBackend::configure_menus(cx);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) fn install_runtime_hooks() {
+    ActiveBackend::install_runtime_hooks();
+}
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn recognizes_only_executables_inside_macos_app_bundles() {
-        let bundled = Path::new("/tmp/Resolved.app/Contents/MacOS/api-tester");
-        assert_eq!(
-            containing_app_bundle(bundled),
-            Some(Path::new("/tmp/Resolved.app"))
-        );
-        assert!(containing_app_bundle(Path::new("/tmp/target/debug/api-tester")).is_none());
-        assert!(
-            containing_app_bundle(Path::new("/tmp/Resolved/Contents/MacOS/api-tester")).is_none()
-        );
+pub(crate) fn log_diagnostic(message: &str) {
+    ActiveBackend::log_diagnostic(message);
+}
+
+pub(crate) fn normalize_keystroke(keystroke: &mut Keystroke) {
+    ActiveBackend::normalize_keystroke(keystroke);
+}
+
+pub(crate) fn configure_main_window(options: &mut WindowOptions) {
+    ActiveBackend::configure_main_window(options);
+}
+
+pub(crate) fn title_bar_integration() -> TitleBarIntegration {
+    ActiveBackend::title_bar_integration()
+}
+
+pub(crate) fn configure_webview(builder: WebViewBuilder<'_>) -> WebViewBuilder<'_> {
+    ActiveBackend::configure_webview(builder)
+}
+
+pub(crate) fn start_webview_runtime(cx: &App) -> Result<Option<Task<()>>, String> {
+    ActiveBackend::start_webview_runtime(cx)
+}
+
+pub(crate) fn prepare_preview_webview(webview: &WebView) -> Result<(), String> {
+    ActiveBackend::prepare_preview_webview(webview)
+}
+
+pub(crate) fn load_preview_document(
+    webview: &WebView,
+    document: &str,
+) -> wry::Result<Option<Arc<AtomicBool>>> {
+    ActiveBackend::load_preview_document(webview, document)
+}
+
+pub(crate) fn preview_data_directory() -> Option<PathBuf> {
+    ActiveBackend::preview_data_directory()
+}
+
+fn configure_desktop_menus(cx: &mut App) {
+    cx.set_menus(vec![
+        Menu {
+            name: "File".into(),
+            items: vec![
+                MenuItem::action("Settings…", ShowSettings),
+                MenuItem::separator(),
+                MenuItem::action("New Request Tab", NewRequestTab),
+                MenuItem::action("Close Active Tab", CloseRequestTab),
+                MenuItem::separator(),
+                MenuItem::action("Save", SaveRequest),
+                MenuItem::action("Save As…", SaveRequestAs),
+                MenuItem::separator(),
+                MenuItem::action("Quit", QuitApp),
+            ],
+        },
+        Menu {
+            name: "Request".into(),
+            items: vec![MenuItem::action(
+                "Send or Cancel Request",
+                SendOrCancelRequest,
+            )],
+        },
+    ]);
+}
+
+fn control_shortcut(keystroke: &mut Keystroke) {
+    if keystroke.modifiers.platform {
+        keystroke.modifiers.platform = false;
+        keystroke.modifiers.control = true;
+    }
+}
+
+fn native_title_bar() -> TitleBarIntegration {
+    TitleBarIntegration {
+        leading_inset: px(12.),
+        trailing_inset: px(24.),
+        client_controls: false,
+        draggable_content: false,
     }
 }

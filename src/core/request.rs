@@ -546,6 +546,8 @@ impl From<reqwest::Error> for RequestError {
 
 /// Construct the shared client used by the application.
 pub fn build_client() -> Result<Client, RequestError> {
+    crate::tls::install_crypto_provider()
+        .map_err(|error| RequestError::TaskFailed(error.to_owned()))?;
     Client::builder()
         .user_agent(DEFAULT_USER_AGENT)
         .redirect(reqwest::redirect::Policy::limited(10))

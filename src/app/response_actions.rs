@@ -79,7 +79,7 @@ impl ApiTester {
 
     pub(super) fn hide_preview(&mut self, cx: &mut Context<Self>) {
         if let Some(preview) = self.preview.take() {
-            preview.update(cx, |preview, cx| preview.hide(cx));
+            preview.update(cx, |preview, cx| preview.close(cx));
         }
     }
 

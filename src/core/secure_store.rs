@@ -401,6 +401,7 @@ impl FileMasterKeyProvider {
         Ok(key)
     }
 
+    #[cfg(target_os = "macos")]
     fn remove(&self) -> Result<(), CredentialVaultError> {
         match fs::remove_file(&self.path) {
             Ok(()) => Ok(()),

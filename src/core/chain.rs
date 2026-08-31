@@ -617,7 +617,7 @@ mod tests {
         workspace.set_active_environment(Some(&env_id)).unwrap();
         let catalog = RequestNamespaceCatalog::from_workspace(&workspace);
 
-        let client = reqwest::Client::new();
+        let client = crate::core::request::build_client().unwrap();
         let sender = move |request: RequestDraft| {
             let client = client.clone();
             async move { crate::core::request::send_request(&client, request).await }
@@ -697,7 +697,7 @@ mod tests {
             )
             .unwrap();
         let catalog = RequestNamespaceCatalog::from_workspace(&workspace);
-        let client = reqwest::Client::new();
+        let client = crate::core::request::build_client().unwrap();
         let sender = move |request: RequestDraft| {
             let client = client.clone();
             async move { crate::core::request::send_request(&client, request).await }
@@ -746,7 +746,7 @@ mod tests {
         scheduled: Vec<ChainedRequest>,
         limits: ChainLimits,
     ) -> ChainRun {
-        let client = reqwest::Client::new();
+        let client = crate::core::request::build_client().unwrap();
         let sender = move |request: RequestDraft| {
             let client = client.clone();
             async move { crate::core::request::send_request(&client, request).await }
@@ -940,7 +940,7 @@ mod tests {
             )
             .unwrap();
         let catalog = RequestNamespaceCatalog::from_workspace(&workspace);
-        let client = reqwest::Client::new();
+        let client = crate::core::request::build_client().unwrap();
         let sender = move |request: RequestDraft| {
             let client = client.clone();
             async move { crate::core::request::send_request(&client, request).await }
@@ -992,7 +992,7 @@ mod tests {
             .unwrap();
         let catalog = RequestNamespaceCatalog::from_workspace(&workspace);
 
-        let client = reqwest::Client::new();
+        let client = crate::core::request::build_client().unwrap();
         let sender = move |request: RequestDraft| {
             let client = client.clone();
             async move { crate::core::request::send_request(&client, request).await }
