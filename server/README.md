@@ -266,9 +266,13 @@ WebSocket event to connections with `audit.read`; server-setting changes emit
 
 Grant `requests.execute` carefully. By default the proxy rejects loopback,
 link-local, private, carrier-grade NAT, unspecified, and multicast addresses.
-An administrator-configured exact hostname override is the explicit exception
-for a private destination. Proxied target requests time out after 60 seconds,
-and request and response bodies are each limited to 64 MiB.
+Every redirect is checked as a new destination. An administrator with
+`server_settings.update` can explicitly allow the exact blocked redirect URL or
+its hostname/IP from the desktop's blocking notification; those encrypted
+allowlist entries apply to future executions. An exact hostname override is
+also an explicit exception for its configured private destination. Proxied
+target requests time out after 60 seconds, and request and response bodies are
+each limited to 64 MiB.
 
 ## Backup and upgrades
 

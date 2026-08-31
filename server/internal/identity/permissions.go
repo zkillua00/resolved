@@ -72,7 +72,7 @@ var permissionCatalog = []Permission{
 	{Key: PermissionHistoryReadOthers, Description: "View other users' shared request history in accessible workspaces"},
 	{Key: PermissionAuditRead, Description: "View the user and role audit log"},
 	{Key: PermissionServerSettingsRead, Description: "View server request execution and hostname override settings"},
-	{Key: PermissionServerSettingsUpdate, Description: "Update server request execution and hostname override settings"},
+	{Key: PermissionServerSettingsUpdate, Description: "Update server request execution, hostname overrides, and destination allowlist"},
 	{Key: PermissionEnvironmentsRead, Description: "View workspace environment definitions and the account's own values"},
 	{Key: PermissionEnvironmentsCreate, Description: "Create environments within directly accessible workspaces"},
 	{Key: PermissionEnvironmentsUpdate, Description: "Update environment names and shared variable definitions"},

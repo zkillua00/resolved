@@ -295,6 +295,7 @@ Permissions in the initial catalog are:
 | `GET` | `/api/v1/request-execution` | authenticated |
 | `GET` | `/api/v1/request-execution/settings` | `server_settings.read` |
 | `PUT` | `/api/v1/request-execution/settings` | `server_settings.update` |
+| `POST` | `/api/v1/request-execution/allowlist` | `server_settings.update` |
 | `GET` | `/api/v1/profiles` | authenticated |
 | `GET` | `/api/v1/profiles/:user_id/history?workspace_id=:workspace_id` | self, or `history.read_others`; plus workspace access |
 | `POST` | `/api/v1/workspaces/:workspace_id/history` | authenticated user plus workspace access |
@@ -405,17 +406,20 @@ scheme becomes the outgoing scheme and permits a request URL with the exact
 source hostname to omit a scheme. Both target forms retain the request's
 original port, and targets cannot supply a port or path. Overrides take
 precedence over the process's HTTP-proxy selection. Redirects are bounded by the
-ten-redirect limit. In the current implementation, redirect dialing retains the
-original request target's override context; redirect destinations are not
-matched independently against the override table. Changing the configuration
-closes idle target connections so the next request cannot reuse an earlier
-destination.
+ten-redirect limit. Each redirect receives fresh target context and is checked
+independently against the override table and blocked-network policy. Changing
+the configuration closes idle target connections so the next request cannot
+reuse an earlier destination.
 
 This is intentionally a network-capability permission. By default, resolution
 rejects loopback, link-local, private, carrier-grade NAT, unspecified, and
 multicast addresses. An administrator-configured exact hostname override is the
-explicit exception for a private destination. Administrators should grant
-execution and override-management permissions carefully. Request and response
+explicit exception for a private destination. A user with
+`server_settings.update` can add either the exact blocked request URL or its
+hostname/IP to the encrypted deployment-wide allowlist through
+`POST /api/v1/request-execution/allowlist`; either match permits later calls.
+Administrators should grant execution and proxy-management permissions
+carefully. Request and response
 bodies are buffered up to 64 MiB each, and
 the target exchange has a 60-second deadline. The execution endpoint itself
 does not persist target payloads or responses. It emits only a metadata

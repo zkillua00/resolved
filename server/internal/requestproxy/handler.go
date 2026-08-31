@@ -31,6 +31,13 @@ type UpdateSettingsRequest struct {
 
 type UpdateSettingsPayload UpdateSettingsRequest
 
+type AddAllowlistEntryRequest struct {
+	Kind  string `json:"kind" validate:"required,oneof=request address"`
+	Value string `json:"value" validate:"required,max=16384"`
+}
+
+type AddAllowlistEntryPayload AddAllowlistEntryRequest
+
 func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
 }
@@ -57,6 +64,18 @@ func (request *UpdateSettingsRequest) ToPayload(*httpkit.ProcessingContext) (Upd
 }
 
 func (request *UpdateSettingsRequest) Validate() httpkit.ValidationErrors {
+	return httpkit.DefaultValidation(request)
+}
+
+func (request *AddAllowlistEntryRequest) BindFiber(c fiber.Ctx) error {
+	return c.Bind().Body(request)
+}
+
+func (request *AddAllowlistEntryRequest) ToPayload(*httpkit.ProcessingContext) (AddAllowlistEntryPayload, error) {
+	return AddAllowlistEntryPayload(*request), nil
+}
+
+func (request *AddAllowlistEntryRequest) Validate() httpkit.ValidationErrors {
 	return httpkit.DefaultValidation(request)
 }
 
@@ -138,6 +157,25 @@ func (h *Handler) ExecuteController() fiber.Handler {
 				return httpkit.NewErrorResponse[ExecuteResult](err)
 			}
 			return httpkit.NewSuccessResponse(fiber.StatusOK, result)
+		},
+	)
+}
+
+func (h *Handler) AddAllowlistEntryController() fiber.Handler {
+	return httpkit.WithProcessedPayload[
+		AllowlistEntry,
+		AddAllowlistEntryPayload,
+		AddAllowlistEntryRequest,
+	](
+		func(c fiber.Ctx, payload AddAllowlistEntryPayload) httpkit.Response[AllowlistEntry] {
+			principal := auth.PrincipalFromContext(c)
+			entry, err := h.service.AddAllowlistEntry(c.Context(), principal.User.ID, AllowlistEntry{
+				Kind: payload.Kind, Value: payload.Value,
+			})
+			if err != nil {
+				return httpkit.NewErrorResponse[AllowlistEntry](err)
+			}
+			return httpkit.NewSuccessResponse(fiber.StatusOK, entry)
 		},
 	)
 }

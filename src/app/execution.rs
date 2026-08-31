@@ -573,6 +573,32 @@ impl ApiTester {
                 self.finish_cancelled(cx);
                 return;
             }
+            Err(RequestError::ProxyDestinationBlocked {
+                request,
+                address,
+                reason,
+            }) => {
+                self.pre_script_report = Some(pre_report);
+                let allowlist_request = request.clone();
+                let display_request = resolved.redact_secrets(&request);
+                let message = format!(
+                    "Proxy blocked {display_request} because {address} is not allowed ({reason})."
+                );
+                self.show_proxy_destination_blocked(
+                    allowlist_request,
+                    address,
+                    message.clone(),
+                    window,
+                    cx,
+                );
+                self.fail_request_with_secrets(
+                    &resolved.request,
+                    message,
+                    &resolved.sensitive_values,
+                    cx,
+                );
+                return;
+            }
             Err(error) => {
                 self.pre_script_report = Some(pre_report);
                 self.fail_request_with_secrets(
@@ -852,6 +878,131 @@ impl ApiTester {
         self.persist_history();
         self.upload_shared_history_entry(shared_history, cx);
         cx.notify();
+    }
+
+    fn show_proxy_destination_blocked(
+        &mut self,
+        request: String,
+        address: String,
+        message: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let can_allowlist = self.active_upstream_has_permission(SERVER_SETTINGS_UPDATE);
+        let mut notification = Notification::error(message)
+            .title("Proxy destination blocked")
+            .autohide(false);
+        if can_allowlist {
+            let owner = cx.entity().downgrade();
+            notification = notification.content(move |_, _, _| {
+                let request_owner = owner.clone();
+                let request_value = request.clone();
+                let address_owner = owner.clone();
+                let address_value = address.clone();
+                h_flex()
+                    .mt_2()
+                    .gap_2()
+                    .child(
+                        Button::new("allow-proxy-request")
+                            .label("Allow this request")
+                            .small()
+                            .link()
+                            .on_click(move |_, window, cx| {
+                                let _ = request_owner.update(cx, |this, cx| {
+                                    this.allowlist_proxy_destination(
+                                        "request",
+                                        request_value.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new("allow-proxy-address")
+                            .label("Allow this address")
+                            .small()
+                            .link()
+                            .on_click(move |_, window, cx| {
+                                let _ = address_owner.update(cx, |this, cx| {
+                                    this.allowlist_proxy_destination(
+                                        "address",
+                                        address_value.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }),
+                    )
+                    .into_any_element()
+            });
+        }
+        window.push_notification(notification, cx);
+    }
+
+    fn allowlist_proxy_destination(
+        &mut self,
+        kind: &'static str,
+        value: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.active_upstream_has_permission(SERVER_SETTINGS_UPDATE) {
+            window.push_notification(
+                Notification::error("You do not have permission to change the proxy allowlist."),
+                cx,
+            );
+            return;
+        }
+        let target = match self.active_upstream_workspace() {
+            Ok(target) => target,
+            Err(error) => {
+                window.push_notification(Notification::error(error), cx);
+                return;
+            }
+        };
+        let vault = self.credential_vault.clone();
+        let client = self.upstream_client.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let upstream_id = target.upstream_id.clone();
+        let success_message = if kind == "request" {
+            "Allowed this proxy request.".to_owned()
+        } else {
+            format!("Allowed proxy address: {value}")
+        };
+        let task_value = value.clone();
+        let task = self.runtime.spawn(async move {
+            let credential = runtime
+                .spawn_blocking(move || vault.load_upstream(&upstream_id))
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Log in to this server again.".to_owned())?;
+            add_upstream_proxy_allowlist_entry(
+                &client,
+                &target.base_url,
+                credential.bearer_token(),
+                kind,
+                &task_value,
+            )
+            .await
+            .map_err(|error| error.to_string())
+        });
+        cx.spawn_in(window, async move |_, cx| {
+            let result = task.await;
+            let _ = cx.update(|window, cx| match result {
+                Ok(Ok(())) => window.push_notification(Notification::success(success_message), cx),
+                Ok(Err(error)) => window.push_notification(
+                    Notification::error(format!("Could not update the proxy allowlist: {error}")),
+                    cx,
+                ),
+                Err(error) => window.push_notification(
+                    Notification::error(format!("Could not update the proxy allowlist: {error}")),
+                    cx,
+                ),
+            });
+        })
+        .detach();
     }
 
     pub(super) fn apply_environment_mutations(

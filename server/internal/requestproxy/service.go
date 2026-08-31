@@ -71,6 +71,19 @@ type ExecuteResult struct {
 type hostnameOverridesContextKey struct{}
 type bypassProxyContextKey struct{}
 type requestTargetHostContextKey struct{}
+type requestTargetURLContextKey struct{}
+type allowlistedRequestsContextKey struct{}
+type allowlistedAddressesContextKey struct{}
+
+type blockedDestinationError struct {
+	Request string
+	Address string
+	Reason  string
+}
+
+func (e *blockedDestinationError) Error() string {
+	return fmt.Sprintf("destination %q is blocked (%s)", e.Address, e.Reason)
+}
 
 func NewService(
 	workspaceService *workspaces.Service,
@@ -88,6 +101,7 @@ func NewService(
 				if len(via) >= MaxRedirects {
 					return fmt.Errorf("stopped after %d redirects", MaxRedirects)
 				}
+				setRequestTargetContext(request)
 				applyHostnameOriginOverride(request)
 				return nil
 			},
@@ -139,8 +153,8 @@ func transportWithHostnameOverrides(base *http.Transport) *http.Transport {
 			// checked directly; hostnames are resolved and every address
 			// validated, then the validated address is dialed so the destination
 			// cannot change between the check and the connection (DNS rebinding).
-			if dialAddress, reason := validatedDestination(ctx, host, port); reason != "" {
-				return nil, errors.New(reason)
+			if dialAddress, blocked := validatedDestination(ctx, host, port); blocked != nil {
+				return nil, blocked
 			} else if dialAddress != "" {
 				address = dialAddress
 			}
@@ -156,28 +170,36 @@ func transportWithHostnameOverrides(base *http.Transport) *http.Transport {
 	return transport
 }
 
-// validatedDestination returns the concrete "host:port" to dial plus an empty
-// reason when the destination is allowed, or an empty address plus a non-empty
-// reason when it must be blocked.
-func validatedDestination(ctx context.Context, host, port string) (string, string) {
+// validatedDestination returns the concrete "host:port" to dial when the
+// destination is allowed, or structured details for a blocked destination.
+func validatedDestination(ctx context.Context, host, port string) (string, *blockedDestinationError) {
+	requestURL, _ := ctx.Value(requestTargetURLContextKey{}).(string)
+	requests, _ := ctx.Value(allowlistedRequestsContextKey{}).(map[string]struct{})
+	allowlistedAddresses, _ := ctx.Value(allowlistedAddressesContextKey{}).(map[string]struct{})
+	_, requestAllowed := requests[requestURL]
+	_, hostAllowed := allowlistedAddresses[normalizedHostname(host)]
+	blocked := func(address, reason string) (string, *blockedDestinationError) {
+		return "", &blockedDestinationError{Request: requestURL, Address: address, Reason: reason}
+	}
 	if ip := net.ParseIP(host); ip != nil {
-		if reason := blockedIPReason(ip); reason != "" {
-			return "", reason
+		if reason := blockedIPReason(ip); reason != "" && !requestAllowed && !hostAllowed {
+			return blocked(ip.String(), reason)
 		}
-		return net.JoinHostPort(ip.String(), port), ""
+		return net.JoinHostPort(ip.String(), port), nil
 	}
-	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if err != nil || len(addresses) == 0 {
+	resolvedAddresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil || len(resolvedAddresses) == 0 {
 		// Resolution errors surface from the dialer; nothing to block here.
-		return "", ""
+		return "", nil
 	}
-	for _, resolved := range addresses {
-		if reason := blockedIPReason(resolved.IP); reason != "" {
-			return "", fmt.Sprintf("destination %q resolves to a blocked address (%s)", host, reason)
+	for _, resolved := range resolvedAddresses {
+		_, resolvedAllowed := allowlistedAddresses[resolved.IP.String()]
+		if reason := blockedIPReason(resolved.IP); reason != "" && !requestAllowed && !hostAllowed && !resolvedAllowed {
+			return blocked(resolved.IP.String(), fmt.Sprintf("%q resolves to a blocked address (%s)", host, reason))
 		}
 	}
 	// Dial a validated address directly so a second resolution cannot change it.
-	return net.JoinHostPort(addresses[0].IP.String(), port), ""
+	return net.JoinHostPort(resolvedAddresses[0].IP.String(), port), nil
 }
 
 // blockedIPReason returns a description when `ip` must not be reachable through
@@ -251,6 +273,25 @@ func (s *Service) UpdateSettings(
 	return updated, nil
 }
 
+func (s *Service) AddAllowlistEntry(ctx context.Context, actorUserID string, entry AllowlistEntry) (AllowlistEntry, error) {
+	normalized, err := normalizeAllowlistEntry(entry)
+	if err != nil {
+		return AllowlistEntry{}, err
+	}
+	if _, err := s.settings.AddAllowlistEntry(ctx, normalized); err != nil {
+		return AllowlistEntry{}, err
+	}
+	s.client.CloseIdleConnections()
+	resourceevents.Emit(s.events, resourceevents.Change{
+		Resource: resourceevents.ResourceServerSettings, Action: resourceevents.ActionUpdated,
+		ResourceID: SettingsRecordID, ActorUserID: actorUserID,
+		TargetName: "request destination allowlist",
+		Audience:   resourceevents.Audience{PermissionKeys: []string{identity.PermissionServerSettingsRead}},
+		Diffs:      []resourceevents.Diff{{Field: "allowlist_" + normalized.Kind, From: "", To: "added"}},
+	})
+	return normalized, nil
+}
+
 func (s *Service) Execute(
 	ctx context.Context,
 	actor workspaces.Actor,
@@ -273,6 +314,7 @@ func (s *Service) Execute(
 	}
 
 	overrides := settings.overrideMap()
+	allowlistedRequests, allowlistedAddresses := settings.allowlistMaps()
 	target, err := resolveRequestURL(input.URL, overrides)
 	if err != nil {
 		return ExecuteResult{}, err
@@ -281,8 +323,20 @@ func (s *Service) Execute(
 	// targets are enforced at dial time) unless an admin override covers them.
 	if ip := net.ParseIP(target.Hostname()); ip != nil {
 		if _, overridden := overrides[normalizedHostname(target.Hostname())]; !overridden {
-			if reason := blockedIPReason(ip); reason != "" {
-				return ExecuteResult{}, invalidField("url", reason)
+			requestTarget := *target
+			requestTarget.Fragment = ""
+			_, requestAllowed := allowlistedRequests[requestTarget.String()]
+			_, addressAllowed := allowlistedAddresses[normalizedHostname(target.Hostname())]
+			if reason := blockedIPReason(ip); reason != "" && !requestAllowed && !addressAllowed {
+				return ExecuteResult{}, problem.WithFields(
+					"proxy_destination_blocked",
+					"the proxied request was blocked because its destination is not allowed",
+					map[string]string{
+						"request": requestTarget.String(),
+						"address": normalizedHostname(target.Hostname()),
+						"reason":  reason,
+					},
+				)
 			}
 		}
 	}
@@ -297,11 +351,8 @@ func (s *Service) Execute(
 		return ExecuteResult{}, err
 	}
 	requestContext := context.WithValue(ctx, hostnameOverridesContextKey{}, overrides)
-	requestContext = context.WithValue(
-		requestContext,
-		requestTargetHostContextKey{},
-		normalizedHostname(target.Hostname()),
-	)
+	requestContext = context.WithValue(requestContext, allowlistedRequestsContextKey{}, allowlistedRequests)
+	requestContext = context.WithValue(requestContext, allowlistedAddressesContextKey{}, allowlistedAddresses)
 	request, err := http.NewRequestWithContext(requestContext, method, target.String(), bytes.NewReader(body))
 	if err != nil {
 		return ExecuteResult{}, invalidField("method", "is not a valid HTTP method")
@@ -314,6 +365,7 @@ func (s *Service) Execute(
 	if contentType != "" && (input.Body.Mode == "multipart_form_data" || request.Header.Get("Content-Type") == "") {
 		request.Header.Set("Content-Type", contentType)
 	}
+	setRequestTargetContext(request)
 	applyHostnameOriginOverride(request)
 
 	startedAt := time.Now()
@@ -416,6 +468,14 @@ func applyHostnameOriginOverride(request *http.Request) {
 	markProxyBypass(request, target.Host)
 }
 
+func setRequestTargetContext(request *http.Request) {
+	targetURL := *request.URL
+	targetURL.Fragment = ""
+	ctx := context.WithValue(request.Context(), requestTargetHostContextKey{}, normalizedHostname(request.URL.Hostname()))
+	ctx = context.WithValue(ctx, requestTargetURLContextKey{}, targetURL.String())
+	*request = *request.WithContext(ctx)
+}
+
 func markProxyBypass(request *http.Request, hostname string) {
 	*request = *request.WithContext(context.WithValue(
 		request.Context(),
@@ -466,6 +526,16 @@ func responseHeaders(headers http.Header) []Header {
 }
 
 func proxyTransportError(err error) error {
+	var blocked *blockedDestinationError
+	if errors.As(err, &blocked) {
+		return problem.WithFields(
+			"proxy_destination_blocked",
+			"the proxied request was blocked because its destination is not allowed",
+			map[string]string{
+				"request": blocked.Request, "address": blocked.Address, "reason": blocked.Reason,
+			},
+		)
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return problem.New(problem.KindGatewayTimeout, "proxy_timeout", "the proxied request timed out")
 	}

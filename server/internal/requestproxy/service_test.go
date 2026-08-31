@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -496,6 +497,93 @@ func TestBlockedNetworkTargetsAreRejected(t *testing.T) {
 		if _, err := client.Do(request); err == nil {
 			t.Fatalf("expected %s to be blocked through the request proxy", target)
 		}
+	}
+}
+
+func TestRedirectDestinationIsValidatedIndependentlyFromOriginalOverride(t *testing.T) {
+	var redirectedHits atomic.Int32
+	redirected := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		redirectedHits.Add(1)
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer redirected.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Location", redirected.URL+"/private")
+		writer.WriteHeader(http.StatusFound)
+	}))
+	defer origin.Close()
+	originURL, err := url.Parse(origin.URL)
+	if err != nil {
+		t.Fatalf("parse origin URL: %v", err)
+	}
+	_, originPort, err := net.SplitHostPort(originURL.Host)
+	if err != nil {
+		t.Fatalf("split origin address: %v", err)
+	}
+
+	transport := transportWithHostnameOverrides(&http.Transport{})
+	client := &http.Client{
+		Transport: transport,
+		CheckRedirect: func(request *http.Request, via []*http.Request) error {
+			if len(via) >= MaxRedirects {
+				return errors.New("too many redirects")
+			}
+			setRequestTargetContext(request)
+			applyHostnameOriginOverride(request)
+			return nil
+		},
+	}
+	ctx := context.WithValue(
+		context.Background(),
+		hostnameOverridesContextKey{},
+		map[string]hostnameOverrideTarget{"public.example": {Host: "127.0.0.1"}},
+	)
+	ctx = context.WithValue(ctx, allowlistedRequestsContextKey{}, map[string]struct{}{})
+	ctx = context.WithValue(ctx, allowlistedAddressesContextKey{}, map[string]struct{}{})
+	request, err := http.NewRequestWithContext(
+		ctx, http.MethodGet, "http://public.example:"+originPort+"/start", nil,
+	)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	setRequestTargetContext(request)
+	applyHostnameOriginOverride(request)
+	_, err = client.Do(request)
+	if err == nil {
+		t.Fatal("redirect to loopback was allowed through the original hostname override")
+	}
+	var blocked *blockedDestinationError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("redirect error = %T %v, want blocked destination", err, err)
+	}
+	if blocked.Request != redirected.URL+"/private" || blocked.Address != "127.0.0.1" {
+		t.Fatalf("blocked destination = %+v", blocked)
+	}
+	if redirectedHits.Load() != 0 {
+		t.Fatalf("blocked redirect reached target %d times", redirectedHits.Load())
+	}
+}
+
+func TestBlockedDestinationAllowsExactRequestOrAddress(t *testing.T) {
+	const requestURL = "http://127.0.0.1/private"
+	for _, test := range []struct {
+		name      string
+		requests  map[string]struct{}
+		addresses map[string]struct{}
+	}{
+		{name: "request", requests: map[string]struct{}{requestURL: {}}, addresses: map[string]struct{}{}},
+		{name: "address", requests: map[string]struct{}{}, addresses: map[string]struct{}{"127.0.0.1": {}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.WithValue(context.Background(), requestTargetURLContextKey{}, requestURL)
+			ctx = context.WithValue(ctx, allowlistedRequestsContextKey{}, test.requests)
+			ctx = context.WithValue(ctx, allowlistedAddressesContextKey{}, test.addresses)
+			address, blocked := validatedDestination(ctx, "127.0.0.1", "80")
+			if blocked != nil || address != "127.0.0.1:80" {
+				t.Fatalf("validated destination = %q, %+v", address, blocked)
+			}
+		})
 	}
 }
 

@@ -604,6 +604,8 @@ struct LoginData {
 
 #[derive(Deserialize)]
 struct LoginErrorBody {
+    #[serde(default)]
+    code: String,
     message: String,
     #[serde(default)]
     fields: BTreeMap<String, String>,
@@ -730,6 +732,63 @@ pub async fn get_upstream_execution_policy(
             "the server response did not include its request execution policy".to_owned(),
         )
     })
+}
+
+#[derive(Serialize)]
+struct ProxyAllowlistEntry<'a> {
+    kind: &'a str,
+    value: &'a str,
+}
+
+pub async fn add_upstream_proxy_allowlist_entry(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    kind: &str,
+    value: &str,
+) -> Result<(), RequestError> {
+    let endpoint = base_url
+        .join("api/v1/request-execution/allowlist")
+        .map_err(|error| {
+            RequestError::Upstream(format!("the proxy allowlist URL is invalid: {error}"))
+        })?;
+    let mut response = client
+        .post(endpoint)
+        .bearer_auth(bearer_token)
+        .json(&ProxyAllowlistEntry { kind, value })
+        .send()
+        .await
+        .map_err(RequestError::Transport)?;
+    if response.status().is_redirection() {
+        return Err(RequestError::Upstream(
+            "the server redirected the proxy allowlist endpoint".to_owned(),
+        ));
+    }
+    let status = response.status();
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(RequestError::Transport)? {
+        if body.len().saturating_add(chunk.len()) > PROXY_POLICY_RESPONSE_LIMIT_BYTES {
+            return Err(RequestError::Upstream(
+                "the server returned an oversized proxy allowlist response".to_owned(),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let envelope: WorkspaceEnvelope<serde_json::Value> =
+        serde_json::from_slice(&body).map_err(|error| {
+            RequestError::Upstream(format!(
+                "the server returned an invalid proxy allowlist response: {error}"
+            ))
+        })?;
+    if !status.is_success() || !envelope.success {
+        let message = envelope
+            .error
+            .map(format_upstream_error)
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or_else(|| format!("could not update the proxy allowlist: HTTP {status}"));
+        return Err(RequestError::Upstream(message));
+    }
+    Ok(())
 }
 
 pub async fn send_request_for_upstream_workspace(
@@ -1011,6 +1070,15 @@ async fn parse_proxy_response(
             ))
         })?;
     if !status.is_success() || !envelope.success {
+        if let Some(error) = envelope.error.as_ref()
+            && error.code == "proxy_destination_blocked"
+        {
+            return Err(RequestError::ProxyDestinationBlocked {
+                request: error.fields.get("request").cloned().unwrap_or_default(),
+                address: error.fields.get("address").cloned().unwrap_or_default(),
+                reason: error.fields.get("reason").cloned().unwrap_or_default(),
+            });
+        }
         let message = envelope
             .error
             .map(format_upstream_error)
@@ -1890,6 +1958,7 @@ mod tests {
     #[test]
     fn upstream_validation_errors_keep_field_reasons() {
         let message = format_upstream_error(LoginErrorBody {
+            code: String::new(),
             message: "request validation failed".to_owned(),
             fields: BTreeMap::from([
                 ("url".to_owned(), "must use HTTP or HTTPS".to_owned()),
@@ -3265,6 +3334,64 @@ mod tests {
             error.to_string(),
             "request validation failed (url: must use HTTP or HTTPS)"
         );
+    }
+
+    #[test]
+    fn proxied_blocked_destination_error_remains_structured() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_http_request(&mut stream);
+            let response_body = br#"{
+                "success": false,
+                "error": {
+                    "code": "proxy_destination_blocked",
+                    "message": "the proxied request was blocked",
+                    "fields": {
+                        "request": "http://127.0.0.1/private",
+                        "address": "127.0.0.1",
+                        "reason": "loopback addresses"
+                    }
+                }
+            }"#;
+            write!(
+                stream,
+                "HTTP/1.1 422 Unprocessable Entity\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response_body.len()
+            )
+            .unwrap();
+            stream.write_all(response_body).unwrap();
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = build_upstream_execution_client().unwrap();
+        let error = runtime
+            .block_on(execute_upstream_request(
+                &client,
+                &Url::parse(&format!("http://{address}/")).unwrap(),
+                "saved-session-token",
+                "workspace-1",
+                RequestDraft::new("GET", "https://target.example.test"),
+            ))
+            .unwrap_err();
+
+        server.join().unwrap();
+        match error {
+            RequestError::ProxyDestinationBlocked {
+                request,
+                address,
+                reason,
+            } => {
+                assert_eq!(request, "http://127.0.0.1/private");
+                assert_eq!(address, "127.0.0.1");
+                assert_eq!(reason, "loopback addresses");
+            }
+            other => panic!("error = {other:?}"),
+        }
     }
 
     #[test]

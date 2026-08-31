@@ -475,6 +475,11 @@ pub enum RequestError {
         limit_bytes: usize,
     },
     ResponseBodyAllocationFailed(String),
+    ProxyDestinationBlocked {
+        request: String,
+        address: String,
+        reason: String,
+    },
     Transport(reqwest::Error),
     Upstream(String),
     Cancelled,
@@ -520,6 +525,14 @@ impl fmt::Display for RequestError {
                     "could not allocate the response body buffer: {reason}"
                 )
             }
+            Self::ProxyDestinationBlocked {
+                request,
+                address,
+                reason,
+            } => write!(
+                formatter,
+                "proxy blocked {request} because {address} is not allowed ({reason})"
+            ),
             Self::Transport(error) => write!(formatter, "{error}"),
             Self::Upstream(message) => formatter.write_str(message),
             Self::Cancelled => formatter.write_str("request cancelled"),
