@@ -76,7 +76,6 @@ RUN set -eu; \
         "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-${tool_arch}"; \
     echo "$runtime_sha256  /usr/local/lib/appimage/runtime" | sha256sum --check; \
     chmod 755 /usr/local/lib/appimage/runtime; \
-    rm -rf /tmp/linuxdeploy-extract; \
-    rm /usr/local/bin/linuxdeploy
+    rm -rf /tmp/linuxdeploy-extract
 
 WORKDIR /workspace

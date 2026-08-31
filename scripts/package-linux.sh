@@ -55,6 +55,10 @@ fi
 if wants_format appimage; then
     require_command appimagetool
 fi
+if wants_format archive; then
+    require_command linuxdeploy
+    require_command pkg-config
+fi
 
 # Intentional word splitting: this is the fixed build command selected above.
 # shellcheck disable=SC2086
@@ -172,9 +176,60 @@ fi
 if wants_format archive; then
     archive_name="Resolved-$version-linux-$portable_architecture"
     archive_root="$staging_dir/$archive_name"
-    install -d "$archive_root/bin" "$archive_root/share"
-    install -m 755 "$payload_root/usr/bin/resolved" "$archive_root/bin/resolved"
-    cp -a "$payload_root/usr/share/." "$archive_root/share/"
+    install_payload "$archive_root"
+
+    # WebKitGTK runs web content, networking, and GPU work in separate
+    # executables. They are not in the main binary's ELF dependency graph, so
+    # stage them explicitly before linuxdeploy collects their shared libraries.
+    webkit_lib_dir="$(pkg-config --variable=libdir webkit2gtk-4.1)"
+    webkit_prefix="$(pkg-config --variable=prefix webkit2gtk-4.1)"
+    webkit_helper_dir="$webkit_lib_dir/webkit2gtk-4.1"
+    if [ ! -d "$webkit_helper_dir" ]; then
+        webkit_helper_dir="$webkit_prefix/libexec/webkit2gtk-4.1"
+    fi
+    if [ ! -d "$webkit_helper_dir" ]; then
+        echo "error: WebKitGTK helper directory not found under $webkit_lib_dir or $webkit_prefix/libexec" >&2
+        exit 2
+    fi
+
+    archive_webkit_exec_dir="$archive_root/usr/libexec/webkit2gtk-4.1"
+    archive_webkit_bundle_dir="$archive_root/usr/lib/webkit2gtk-4.1/injected-bundle"
+    install -d "$archive_webkit_exec_dir" "$archive_webkit_bundle_dir"
+
+    found_webkit_helper=false
+    for webkit_helper in "$webkit_helper_dir"/WebKit*Process; do
+        if [ ! -f "$webkit_helper" ]; then
+            continue
+        fi
+        found_webkit_helper=true
+        archived_helper="$archive_webkit_exec_dir/$(basename "$webkit_helper")"
+        install -m 755 "$webkit_helper" "$archived_helper"
+    done
+    if [ "$found_webkit_helper" = false ]; then
+        echo "error: no WebKitGTK helper processes found in $webkit_helper_dir" >&2
+        exit 2
+    fi
+
+    found_injected_bundle=false
+    for injected_bundle in "$webkit_lib_dir"/webkit2gtk-4.1/injected-bundle/*.so; do
+        if [ ! -f "$injected_bundle" ]; then
+            continue
+        fi
+        found_injected_bundle=true
+        archived_bundle="$archive_webkit_bundle_dir/$(basename "$injected_bundle")"
+        install -m 755 "$injected_bundle" "$archived_bundle"
+    done
+    if [ "$found_injected_bundle" = false ]; then
+        echo "error: WebKitGTK injected bundle not found under $webkit_lib_dir" >&2
+        exit 2
+    fi
+
+    # linuxdeploy intentionally leaves glibc, the ELF loader, and low-level
+    # host/driver interfaces alone, but copies the distributable dependency
+    # closure into usr/lib and gives the copied ELF files relocatable RPATHs.
+    APPIMAGE_EXTRACT_AND_RUN=1 linuxdeploy --appdir "$archive_root"
+    rm -f "$archive_root/AppRun"
+
     install -m 755 "$project_dir/linux/archive-launcher.sh" "$archive_root/resolved"
     install -m 644 "$project_dir/linux/archive-README.txt" "$archive_root/README.txt"
 
