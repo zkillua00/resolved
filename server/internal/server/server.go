@@ -176,6 +176,12 @@ func WithRequestProxy(authService *auth.Service, handler *requestproxy.Handler) 
 			handler.UpdateSettingsController(),
 		)
 		app.Post(
+			"/api/v1/request-execution/allowlist",
+			authService.Middleware(),
+			auth.RequirePermission(identity.PermissionServerSettingsUpdate),
+			handler.AddAllowlistEntryController(),
+		)
+		app.Post(
 			"/api/v1/workspaces/:workspace_id/execute",
 			authService.Middleware(),
 			auth.RequirePermission(identity.PermissionRequestsExecute),

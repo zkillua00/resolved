@@ -126,6 +126,7 @@ impl Render for ApiTester {
             .children(self.render_template_variable_popover(cx))
             .children(upstream_login_page)
             .children(Root::render_dialog_layer(window, cx))
+            .children(Root::render_notification_layer(window, cx))
     }
 }
 

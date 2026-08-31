@@ -800,7 +800,8 @@ scripts/package-linux.sh release
 ```
 
 That all-formats command additionally requires `dpkg-deb`, `rpmbuild`,
-`appimagetool`, and an AppImage runtime at `/usr/local/lib/appimage/runtime`.
+`linuxdeploy`, `appimagetool`, and an AppImage runtime at
+`/usr/local/lib/appimage/runtime`.
 The checked-in Docker builder below is the recommended reproducible environment
 for producing the complete set. On a local host, select only a format whose
 packaging tools are installed.
@@ -813,12 +814,13 @@ The script builds once and writes four artifacts to `target/release/`:
 - `Resolved-<version>-linux-<architecture>.tar.xz`
 
 Pass `deb`, `rpm`, `appimage`, or `archive` as the second argument to build
-only one format. The Debian and RPM packages install the binary, desktop
-entry, AppStream metadata, and icon. The AppImage is a single-file portable
-launcher but deliberately uses the host's matched GTK 3 and WebKitGTK 4.1
-runtime so WebKit's sandboxed helper processes remain version-compatible. The
-archive is relocatable and includes a launcher plus instructions for manual
-installation under `/opt`.
+only one format. The Debian and RPM packages install the binary, desktop entry,
+AppStream metadata, and icon. The AppImage is a single-file portable launcher
+but uses the host's matched GTK 3 and WebKitGTK 4.1 runtime. The relocatable
+archive instead carries its distributable shared-library dependency closure
+and WebKitGTK helper processes; only glibc, graphics drivers, and other
+low-level host interfaces remain external. It includes a launcher plus
+instructions for manual installation under `/opt`.
 
 On an immutable host, the checked-in builder provides the complete toolchain:
 

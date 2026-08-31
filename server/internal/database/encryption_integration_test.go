@@ -198,6 +198,11 @@ func TestSensitiveRepositoriesPersistCiphertextOnly(t *testing.T) {
 	if _, err := settingsRepository.Replace(t.Context(), wantSettings); err != nil {
 		t.Fatalf("save encrypted request settings: %v", err)
 	}
+	if _, err := settingsRepository.AddAllowlistEntry(t.Context(), requestproxy.AllowlistEntry{
+		Kind: "request", Value: "http://127.0.0.1/private?token=allowlist-secret",
+	}); err != nil {
+		t.Fatalf("save encrypted request allowlist: %v", err)
+	}
 	gotSettings, err := settingsRepository.Get(t.Context())
 	if err != nil {
 		t.Fatalf("load encrypted request settings: %v", err)
@@ -205,12 +210,18 @@ func TestSensitiveRepositoriesPersistCiphertextOnly(t *testing.T) {
 	if len(gotSettings.HostnameOverrides) != 1 || gotSettings.HostnameOverrides[0] != wantSettings.HostnameOverrides[0] {
 		t.Fatalf("settings round trip = %+v", gotSettings)
 	}
+	if len(gotSettings.AllowlistedRequests) != 1 {
+		t.Fatalf("request allowlist round trip = %+v", gotSettings.AllowlistedRequests)
+	}
 	var rawSettings requestproxy.SettingsRecord
 	if err := db.First(&rawSettings, "id = ?", requestproxy.SettingsRecordID).Error; err != nil {
 		t.Fatalf("load raw request settings: %v", err)
 	}
 	assertCiphertextOnly(
 		t, rawSettings.OverridesCiphertext, "", "private.example.test", "10.20.30.40",
+	)
+	assertCiphertextOnly(
+		t, rawSettings.AllowlistCiphertext, "", "127.0.0.1", "allowlist-secret",
 	)
 	var overrideCount int64
 	if err := db.Model(&requestproxy.HostnameOverrideRecord{}).Count(&overrideCount).Error; err != nil {
