@@ -43,14 +43,16 @@ release work:
 
 ```sh
 scripts/version.sh bump
+scripts/version.sh current
 scripts/cargo.sh test --all-targets --all-features
 git add Cargo.toml Cargo.lock
-git commit -m "chore(release): v0.4.0"
-git tag -a v0.4.0 -m "Resolved 0.4.0"
+git commit -m "chore(release): v<version>"
+git tag -a v<version> -m "Resolved <version>"
 ```
 
-Release tags must point at their matching release commit. Tags are the boundary
-used for the next history scan.
+Replace `<version>` with the value printed by `scripts/version.sh current`.
+Release tags must point at the commit whose Cargo version exactly matches the
+tag. Tags are the boundary used for the next history scan.
 
 ## macOS bundle versions
 
@@ -61,8 +63,8 @@ used for the next history scan.
 
 The commit count makes local builds increase naturally with repository history.
 An official build from a shallow clone should provide a monotonic integer
-through `API_TESTER_BUILD_NUMBER`; CI's pipeline or run number is a suitable
-value.
+through `API_TESTER_BUILD_NUMBER`; a release-system build or run number is a
+suitable value.
 
 ```sh
 API_TESTER_BUILD_NUMBER=42 scripts/bundle-macos.sh release
@@ -70,3 +72,15 @@ API_TESTER_BUILD_NUMBER=42 scripts/bundle-macos.sh release
 
 The bundle template in `macos/Info.plist` intentionally contains no duplicated
 version strings.
+
+## Linux and Windows package versions
+
+`scripts/package-linux.sh` reads the Cargo package version and uses it in the
+Debian, RPM, AppImage, and archive filenames. Build Linux artifacts only after
+the release commit contains the final Cargo version.
+
+`scripts/package-msix.ps1` maps the Cargo `MAJOR.MINOR.PATCH` version to the
+four-part MSIX version `MAJOR.MINOR.PATCH.0`. With `-Install`, repeated local
+installs of the same Cargo version advance the fourth component so Windows does
+not retain an older local build. That local revision is packaging metadata; it
+does not replace a repository version bump for a release.

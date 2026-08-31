@@ -285,6 +285,7 @@ semantic runtime fallback.
 | Token | Required | Template default | Effect |
 | --- | --- | --- | --- |
 | `--api-editor-background` | No | `var(--api-surface-lowest)` | Code editor canvas; falls back to lowest surface. |
+| `--api-editor-gutter-background` | No | `var(--api-surface-lowest)` | Line-number and fold gutter; falls back to the editor canvas. |
 | `--api-editor-foreground` | No | `var(--api-foreground)` | Editor text; falls back to foreground. |
 | `--api-editor-active-line` | No | `var(--api-surface-container)` | Caret-line background. |
 | `--api-editor-line-number` | No | `#948f9a` | Inactive line numbers. |
@@ -329,6 +330,7 @@ Resolved uses the following semantic runtime fallback:
 | `--api-magenta-light` | `--api-magenta` |
 | `--api-cyan-light` | `--api-cyan` |
 | `--api-editor-background` | `--api-surface-lowest` |
+| `--api-editor-gutter-background` | `--api-editor-background` |
 | `--api-editor-foreground` | `--api-foreground` |
 | `--api-editor-active-line` | `--api-surface-container` |
 | `--api-editor-line-number` | `--api-muted-foreground` |

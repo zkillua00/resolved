@@ -1,5 +1,12 @@
 # Performance & Memory Audit — Resolved Rust client (`src/`)
 
+> [!NOTE]
+> This is a historical snapshot from 2026-08-26, not a description of the
+> current tree. The audited commit was not recorded when the report was written;
+> file paths, line numbers, file counts, and unresolved findings may have
+> changed. Reproduce measurements against a named commit before using them for a
+> current optimization decision.
+
 Date: 2026-08-26 · Read-only audit, nothing modified · `server/` (Go) out of scope.
 
 Method: 8 parallel agents partitioned the full Rust tree (125 files, ~89K lines) and each

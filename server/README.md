@@ -31,9 +31,11 @@ There is no hosted control plane, telemetry, or deployment registration.
 
 ## Start a local deployment
 
-From this directory, bootstrap the first owner. The command reads the password
-without echoing it when run in a terminal and creates `My Workspace` for that
-owner.
+Choose the final database and root-key provider configuration before
+bootstrapping, and use the identical configuration for every later `serve`
+invocation. From this directory, bootstrap the first owner. The command reads
+the password without echoing it when run in a terminal and creates
+`My Workspace` for that owner.
 
 ```sh
 export RESOLVED_ENCRYPTION_SECRET="$(openssl rand -base64 32)"
@@ -49,6 +51,10 @@ Then start the server:
 go run ./cmd/resolved-server serve
 ```
 
+Use these exports for both the one-time `bootstrap-admin` command and `serve`;
+bootstrapping without them creates the owner in the default SQLite database
+instead.
+
 Keep `RESOLVED_ENCRYPTION_SECRET` stable and backed up. Losing or replacing it
 makes existing encrypted environment values impossible to decrypt after login.
 
@@ -59,7 +65,14 @@ root key is not present on the database host. Losing access to the configured
 root key makes encrypted server content unreadable.
 
 The safe default listen address is `127.0.0.1:8787`. Put the service behind a
-TLS reverse proxy before exposing it to a network.
+TLS reverse proxy before exposing it to a network, and forward WebSocket
+upgrades for `/api/v1/ws`. Request execution may remain open for 60 seconds, so
+proxy timeouts must accommodate that boundary.
+
+Run one server process for a deployment. Sessions, derived environment keys,
+login rate limits, and realtime delivery include process-local state; starting
+another replica also revokes the database sessions used by the first. A server
+restart intentionally requires every user to sign in again.
 
 ## Configuration
 
@@ -68,7 +81,7 @@ Configuration is read from the process environment.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `RESOLVED_SERVER_ADDRESS` | `127.0.0.1:8787` | Listen address |
-| `RESOLVED_DATABASE_DRIVER` | `sqlite` | `sqlite`, `postgres`, `mysql`, or `sqlserver` (`mssql` is accepted as an alias) |
+| `RESOLVED_DATABASE_DRIVER` | `sqlite` | `sqlite`, `postgres`, `mysql`, or `sqlserver`; aliases: `sqlite3`, `postgresql`, and `mssql` |
 | `RESOLVED_DATABASE_DSN` | `./data/resolved-server.db?...` | GORM driver data source name |
 | `RESOLVED_SESSION_TTL` | `24h` | Bearer-session lifetime |
 | `RESOLVED_ENCRYPTION_SECRET` | none | Required deployment secret with at least 32 bytes; combines with each user's password to derive their environment key at login |
@@ -83,6 +96,8 @@ Configuration is read from the process environment.
 
 Example PostgreSQL configuration:
 
+Export this configuration before both `bootstrap-admin` and `serve`:
+
 ```sh
 export RESOLVED_DATABASE_DRIVER=postgres
 export RESOLVED_DATABASE_DSN='host=127.0.0.1 user=resolved password=secret dbname=resolved port=5432 sslmode=require'
@@ -96,9 +111,15 @@ Example Vault configuration:
 ```sh
 export RESOLVED_DATA_KEY_PROVIDER=vault
 export RESOLVED_VAULT_ADDRESS=https://vault.internal.example
-export RESOLVED_VAULT_TOKEN='short-lived-workload-token'
+export RESOLVED_VAULT_TOKEN='transit-client-token'
 export RESOLVED_VAULT_TRANSIT_KEY=resolved-server
 ```
+
+The Vault token is read once at process startup and is not renewed by Resolved.
+It must remain valid while the process runs and be allowed to call Transit
+encrypt and decrypt for the configured non-derived AEAD key (the default
+`aes256-gcm96` type is suitable). After a Vault or token failure,
+operations start failing as cached scoped keys expire (within five minutes).
 
 Driver-specific DSN examples and the security model are documented in
 [`docs/architecture.md`](docs/architecture.md).
@@ -170,8 +191,11 @@ copy of a key is stored in the database. Derived keys exist only in server
 memory for the lifetime of an authenticated session, so restarting the server
 requires every user to log in again.
 
-`GET /api/v1/profiles` exposes basic member profiles to authenticated users so
-history is reached through its author. A member can always read and clear their
+`GET /api/v1/profiles` always includes the caller. Without `users.read` or
+`history.read_others`, it additionally includes only members directly listed in
+workspaces the caller can access, and omits their login identifiers and active
+state. Either broader permission exposes the full member directory so history
+can be reached through its author. A member can always read and clear their
 own shared history inside an accessible workspace. Reading another member's
 history additionally requires `history.read_others`; that permission never
 bypasses the viewer's workspace access check.
@@ -181,9 +205,9 @@ workspace. Shared entries contain request and response headers and bodies,
 status/timing metadata, and failures. Request headers disabled for sharing are
 omitted before upload, their values are scrubbed from the rest of the request
 and response, and known sensitive headers are redacted independently. File
-paths and file bytes are rejected from shared body fields. Bodies are limited
-to 1 MiB, the newest 100 entries are retained per member and workspace, and a
-profile read returns the newest 20. Clearing local history while a server
+paths and file bytes are stripped from shared body fields and never stored.
+Bodies are limited to 1 MiB, the newest 100 entries are retained per member and
+workspace, and a profile read returns the newest 20. Clearing local history while a server
 workspace is active also clears that member's shared history for the workspace.
 Uploads and clears emit metadata-only WebSocket invalidations to the history
 owner and to users who have both workspace access and `history.read_others`.
@@ -200,6 +224,10 @@ explicitly unshared header values are redacted, multipart file paths are
 omitted, and passwords are represented only by fixed status markers. The
 server retains the newest 1,000 change entries per workspace and newest 5,000
 audit entries per deployment.
+
+These bounded logs are operational activity feeds, not a compliance ledger.
+Recording is a best-effort side effect of the domain event; a recorder or event
+delivery failure is logged but does not roll back the completed mutation.
 
 Both endpoints use opaque cursor pagination. The default page contains 30
 entries and `limit` may select 1–100. Send the returned `older_cursor` as
@@ -236,10 +264,32 @@ automatically. Each execution emits a metadata-only `request_execution`
 WebSocket event to connections with `audit.read`; server-setting changes emit
 `server_settings` events to connections with `server_settings.read`.
 
-Grant `requests.execute` carefully. A user with this permission can reach HTTP
-services visible from the server's network, including private services that may
-not be reachable from their own Mac. Proxied target requests time out after 60
-seconds, and request and response bodies are each limited to 64 MiB.
+Grant `requests.execute` carefully. By default the proxy rejects loopback,
+link-local, private, carrier-grade NAT, unspecified, and multicast addresses.
+An administrator-configured exact hostname override is the explicit exception
+for a private destination. Proxied target requests time out after 60 seconds,
+and request and response bodies are each limited to 64 MiB.
+
+## Backup and upgrades
+
+Stop the single server process before an upgrade and take a consistent database
+backup. For SQLite, use its backup mechanism or include the database together
+with its WAL state; copying only the main file while the process is live is not
+a consistent backup. Back up `RESOLVED_ENCRYPTION_SECRET` and the static root
+wrapping key through separate, access-controlled recovery paths, or back up the
+Vault deployment according to its recovery procedure. Test restoring all parts.
+
+Startup runs schema migrations and any required encryption backfill. The first
+SQLite encryption backfill checkpoints the WAL and runs `VACUUM`, which can need
+additional free disk space and startup time. Every restart revokes existing
+sessions. Do not rerun `bootstrap-admin` after the first owner exists: the
+command still initializes the application and revokes sessions before it
+reports that the deployment is already bootstrapped.
+
+Static root-key replacement or automatic rewrapping is not implemented.
+Changing `RESOLVED_DATA_ENCRYPTION_KEY` or only its key ID makes existing
+wrapped scope keys unavailable. Vault Transit may rotate versions under the
+same configured mount and key according to Vault's own policy.
 
 The complete route and permission table is in
 [`docs/architecture.md`](docs/architecture.md).

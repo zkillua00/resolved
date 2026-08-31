@@ -11,6 +11,11 @@ The server lives in a separate Go module under `server/`. Nothing in the Rust
 desktop application imports it, and the server does not read or modify the
 desktop application's local database.
 
+One deployment currently means one server process. Session-derived environment
+keys, login rate limits, and realtime fan-out are process-local, and application
+startup revokes all previously persisted sessions. Multiple replicas are not a
+supported high-availability topology.
+
 ## Request flow
 
 Fiber handlers bind and validate transport input, services enforce identity
@@ -86,8 +91,10 @@ GCM associated data binds the ciphertext to its scope, content domain, record
 ID, and key generation, so moving ciphertext between rows, columns, or
 workspaces fails authentication. Equality checks needed for login, role-name
 and environment-variable-key uniqueness, and shared-history idempotency use
-keyed blind indexes. Those indexes reveal equality but not plaintext and
-deliberately remain stable across normal payload-key rotation.
+keyed blind indexes. Those indexes reveal equality but not plaintext. The
+ciphertext format supports scope-key generations and the indexes are designed
+to remain stable if an operational scope-key rotation workflow is added; no
+such route or CLI exists today.
 
 The server unwraps scoped keys only at runtime and caches them in process memory
 for five minutes. A missing provider, unknown root-key identifier, unavailable
@@ -162,13 +169,15 @@ switch for database encryption.
 
 ## Profiles and shared history
 
-Authenticated users may list basic deployment member profiles without the
-broader `users.read` administration permission. Shared request history is
-addressed through those profiles and is always scoped to a workspace the viewer
-can access. A user may read their own history; reading a different user's
-history additionally requires `history.read_others`. The Owner role receives
-that permission through the normal complete-catalog reconciliation. RBAC is
-reloaded for every request, so revocation takes effect immediately.
+The profile route always includes the authenticated user. Without `users.read`
+or `history.read_others`, it additionally returns only members directly listed
+in workspaces the caller can access and omits their login identifiers and active
+state. Either broader permission exposes the full directory. Shared request
+history is always scoped to a workspace the viewer can access. A user may read
+their own history; reading a different user's history additionally requires
+`history.read_others`. The Owner role receives that permission through the
+normal complete-catalog reconciliation. RBAC is reloaded for every request, so
+revocation takes effect immediately.
 
 The desktop creates shared entries only for new requests run while a server
 workspace is selected. An entry contains the resolved request, response, and
@@ -220,6 +229,10 @@ credential headers and request headers marked not to share are redacted
 throughout saved-request definitions, multipart file paths are omitted, and
 password values and hashes are never placed in audit diffs. Password changes
 are represented only by fixed redacted status markers.
+
+These activity streams are operational feeds rather than a transactional
+compliance ledger. Recording is a best-effort event side effect: a recorder or
+event-delivery failure is logged and does not roll back the domain mutation.
 
 The log is written before the existing access-scoped `resource.changed`
 invalidation is delivered. A log page loads only when first opened. It sends
@@ -391,14 +404,19 @@ SNI to that target. A target may carry an `http://` or `https://` prefix. Its
 scheme becomes the outgoing scheme and permits a request URL with the exact
 source hostname to omit a scheme. Both target forms retain the request's
 original port, and targets cannot supply a port or path. Overrides take
-precedence over the process's HTTP-proxy selection and apply independently to
-redirect targets. Changing the configuration closes idle target connections so
-the next request cannot reuse an earlier destination.
+precedence over the process's HTTP-proxy selection. Redirects are bounded by the
+ten-redirect limit. In the current implementation, redirect dialing retains the
+original request target's override context; redirect destinations are not
+matched independently against the override table. Changing the configuration
+closes idle target connections so the next request cannot reuse an earlier
+destination.
 
-This is intentionally a network-capability permission. The target may be any
-HTTP or HTTPS address reachable by the server, including private deployment
-services. Administrators should grant it only to accounts allowed to make such
-connections. Request and response bodies are buffered up to 64 MiB each, and
+This is intentionally a network-capability permission. By default, resolution
+rejects loopback, link-local, private, carrier-grade NAT, unspecified, and
+multicast addresses. An administrator-configured exact hostname override is the
+explicit exception for a private destination. Administrators should grant
+execution and override-management permissions carefully. Request and response
+bodies are buffered up to 64 MiB each, and
 the target exchange has a 60-second deadline. The execution endpoint itself
 does not persist target payloads or responses. It emits only a metadata
 `request_execution` invalidation to `audit.read` connections. Independently,
@@ -410,4 +428,6 @@ only a scoped metadata invalidation.
 
 - invitations, email delivery, password recovery, and external identity/SSO;
 - central discovery, hosted administration, or telemetry;
-- TLS termination and multi-process rate-limit storage.
+- TLS termination;
+- multi-process or multi-replica deployment;
+- automated static root-key rotation or scope-key rewrapping.

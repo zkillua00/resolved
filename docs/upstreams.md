@@ -36,9 +36,10 @@ Successful login stores only the server-issued bearer token and expiry:
    Protection Keychain under `dev.apitester.desktop.secure-vault` /
    `master-key-v2`; the item requires user presence, allows biometric or device
    password unlock, and is explicitly non-synchronizing;
-2. builds without the provisioned access-group entitlement never query the
-   Keychain and instead keep the same random key in an owner-only file beside
-   the SQLite database so alpha sessions survive restarts;
+2. Linux, Windows, and macOS builds without the provisioned access-group
+   entitlement never query the Keychain and instead keep the same random key
+   in an owner-only file beside the SQLite database so sessions survive
+   restarts;
 3. SQLite stores an AES-256-GCM nonce and ciphertext in the generic
    `secure_values` table;
 4. associated data binds the ciphertext to its namespace, upstream ID, key
@@ -127,6 +128,11 @@ are expanded into stable JSON paths such as `definition.request.method`.
 Server Tools → Audit log is deployment-wide and is available only with
 `audit.read`. It records user and role creation, metadata updates, role
 assignments, and permission assignments with the same before → after model.
+Server Tools → Users creates or updates accounts and replaces their assigned
+role set when the signed-in administrator has the corresponding permissions.
+Server Tools → Resources manages direct user grants on workspaces and
+collections; request nodes appear in the tree for context but access is granted
+at the workspace or collection boundary.
 Server Tools → Roles stages permission toggles locally per role. Reset discards
 the draft, while Save changes sends one complete permission replacement to the
 server; realtime management refreshes preserve the user's unsaved intent.
@@ -149,7 +155,7 @@ workspace and is never imposed on another user.
 
 Local workspaces always use the desktop HTTP client. Before sending from a
 server workspace, Resolved reads that deployment's authenticated execution
-policy. `local`, the default, keeps the target exchange on the Mac. `server`
+policy. `local`, the default, keeps the target exchange on the desktop. `server`
 requires `requests.execute` and sends the resolved request to
 `POST /api/v1/workspaces/{workspace_id}/execute`; the self-hosted server makes
 the target connection and returns the buffered response. A server without the
@@ -166,12 +172,17 @@ the outgoing scheme and allows a request URL with that exact source hostname to
 omit its own scheme. Both forms preserve the request's original port; override
 targets cannot define a port or path.
 
+Without an exact administrator-configured override, the server rejects
+loopback, link-local, private, carrier-grade NAT, unspecified, and multicast
+destinations. Hostname overrides are therefore the explicit mechanism for
+allowing a private origin; grant server-settings permissions accordingly.
+
 Pre-request and post-response scripts, variable resolution, response rendering,
-and the full local history flow remain on the Mac in both modes. After a request
-in a server workspace completes or fails, Resolved also uploads a bounded,
-sanitized history snapshot to that workspace. This happens independently of
-whether execution mode is `local` or `server`; existing local entries are not
-backfilled.
+and the full local history flow remain on the desktop in both modes. After a
+request in a server workspace completes or fails, Resolved also uploads a
+bounded, sanitized history snapshot to that workspace. This happens
+independently of whether execution mode is `local` or `server`; existing local
+entries are not backfilled.
 
 Server Tools → Profiles lists authenticated server members. The Server Tools
 workspace is available only while an upstream server workspace is active.

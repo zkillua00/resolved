@@ -9,7 +9,19 @@ and performance HUD are rendered by GPUI. Captured HTML responses use the OS
 web view (WKWebView on macOS, WebKitGTK on Linux, and WebView2 on Windows)
 through `gpui-wry` only when the Preview tab is selected.
 
-## MVP features
+This repository contains two independent applications:
+
+- `src/` is the Rust desktop client for Linux, macOS, and Windows;
+- `server/` is the optional, standalone Go collaboration server. It has its own
+  database and security boundary and never reads the desktop client's local
+  SQLite database.
+
+For implementation-oriented navigation, build prerequisites, and test commands,
+see the [development guide](docs/development.md). Server operators should start
+with the [server README](server/README.md) and its
+[architecture and security model](server/docs/architecture.md).
+
+## Features
 
 - Editable, color-coded HTTP method control with common-method suggestions and
   support for arbitrary custom methods
@@ -22,10 +34,10 @@ through `gpui-wry` only when the Preview tab is selected.
 - Cancelable requests with a 60-second timeout and bounded redirects
 - Status, duration, size, HTTP version, final URL, response headers, and body
 - Reusable code editors with configurable indentation, Zed-inspired Tab,
-  Enter, and word-deletion behavior, line numbers, and tree-sitter syntax
-  highlighting
+  Enter, and word-deletion behavior, line numbers, syntax-aware folding, and
+  tree-sitter syntax highlighting
 - Pretty JSON, content-aware response highlighting, and clipboard copy
-- Sandboxed JavaScript pre-request and post-response scripts
+- Bounded, capability-limited JavaScript pre-request and post-response scripts
 - A persistent Snippets library with phase-aware plain JavaScript and bounded
   executable JavaScript generators, previews, applicability rules, and direct
   code-editor context-menu insertion
@@ -44,16 +56,16 @@ through `gpui-wry` only when the Preview tab is selected.
   request-tab drafts
 - Multiple switchable self-hosted server profiles with direct login; session
   tokens are authenticated-encrypted locally, with biometric Keychain
-  protection available to provisioned builds
+  protection available to provisioned macOS builds
 - Persistent, live-configurable keyboard shortcuts, organized into five
   task-focused sections with platform-native Command or Control defaults
 - A persistent CSS theme library mapped into GPUI controls and editor syntax
-  colors, with instant switching, an intelligent in-app editor, and a macOS
+  colors, with instant switching, an intelligent in-app editor, and a native
   preferred-editor workflow
 - Request identity and Save/Update actions beside the main request editor
 - Direct active-environment switching from the title bar
 - `{{variable}}` expansion in URLs, header names and values, and request bodies
-- Toggleable UI cadence, process CPU, RSS, and physical-footprint HUD
+- Toggleable UI cadence, process CPU, RSS, and macOS physical-footprint HUD
 - Restricted captured-HTML preview
 - Newest-first, persisted request history capped at 100 entries
 - Sanitized history snapshots with URL, body, header, error, and secret redaction
@@ -75,14 +87,14 @@ workspace when the signed-in user has permission. Settings → Servers can also
 switch between Local and a connected server.
 
 > [!WARNING]
-> Linux builds and macOS builds without an Apple-authorized Keychain
-> entitlement—including ad-hoc and self-signed alpha builds—persist server
-> sessions using an owner-only local
-> master-key file beside the SQLite database. This avoids repeated Keychain
+> Linux and Windows builds, plus macOS builds without an Apple-authorized
+> Keychain entitlement—including ad-hoc and self-signed alpha builds—persist
+> server sessions using an owner-only local master-key file beside the SQLite
+> database. This avoids repeated Keychain
 > prompts and keeps logins across restarts, but it is not equivalent to
 > Keychain protection: a process or person that can read the account's
 > application-data directory can recover both the encrypted sessions and their
-> key. Provisioned builds move the key into the Data Protection Keychain and
+> key. Provisioned macOS builds move the key into the Data Protection Keychain and
 > remove the local key file. A session saved by an earlier unprovisioned build
 > may require one new login after upgrading because the new alpha path does not
 > read its legacy Keychain item.
@@ -125,7 +137,7 @@ The tabs make their first request only when opened; older entries load through
 the cursor-based Load older changes control without displacing realtime inserts.
 
 Server workspaces use the deployment administrator's request-execution policy.
-The safe default runs requests directly from each user's Mac. When an
+The safe default runs requests directly from each user's desktop. When an
 administrator enables server execution, accounts with `requests.execute` run
 the resolved HTTP exchange from that self-hosted server. In that mode, exact
 hostname overrides can connect an origin hostname to another hostname or IP. An
@@ -136,15 +148,18 @@ and lets an exact matching request URL omit its own scheme. The request's
 original port is preserved. The response returns to the same local viewer,
 history, redaction, and post-response script flow. Multipart file contents are
 uploaded only for server execution; local paths are never sent or stored on the
-server.
+server. Without an exact administrator-configured override, server execution
+rejects loopback, link-local, private, carrier-grade NAT, unspecified, and
+multicast destinations.
 
 ## Code editors
 
 Raw request bodies, pre-request scripts, post-response scripts, and text
 responses use the same reusable GPUI Component editor wrapper. It provides
 multiline editing, line numbers, configurable soft wrapping, runtime language
-switching, and tree-sitter highlighting. Raw request highlighting follows the
-language selected beside the body mode and is persisted with saved requests.
+switching, syntax-aware gutter folding, and tree-sitter highlighting. Raw
+request highlighting follows the language selected beside the body mode and is
+persisted with saved requests.
 Unless an enabled `Content-Type` header overrides it, that language also supplies
 the outgoing raw media type. Script editors use JavaScript, and response
 highlighting follows the response content type. Response editors are read-only
@@ -345,7 +360,7 @@ The Appearance page offers two complementary editing workflows:
   value, and the UI surfaces it affects. Parser diagnostics update while
   editing.
 - **Open in preferred editor** materializes the current source as a `.css` file
-  and asks macOS to open it with the system's preferred application for CSS
+  and asks the operating system to open it with the preferred application for CSS
   files. **Reload from disk** brings external edits back into the in-app
   buffer. If an in-app draft has diverged from that file, opening it externally
   publishes a fresh managed copy instead of replacing a file the other editor
@@ -560,8 +575,8 @@ and Cancel interrupts the pre-script, network request, or post-script.
 
 Each invocation has these bounds:
 
-- Configurable execution deadline (default 30 s; set `script.timeout_ms` in app
-  settings). Each script phase — pre-request, post-response, and every chained
+- 30-second execution deadline. Each script phase — pre-request, post-response,
+  and every chained
   request's own scripts — plus the full-awaited-chain execution, is bounded by
   this per-phase budget. A built-in floor of 1 ms keeps a mistyped `0` from
   timing everything out instantly.
@@ -583,11 +598,11 @@ boundary for hostile code. There is no filesystem or network API, module loader,
 Node.js environment, browser DOM, `fetch`, `WebSocket`, `XMLHttpRequest`,
 `require`, `process`, or `Deno`; however, scripts still execute in-process in a
 native QuickJS engine. Only run scripts you trust. Imported collection formats
-and an isolated helper-process sandbox are not part of this MVP.
+and an isolated helper-process sandbox are not currently included.
 
 ## Snippets
 
-Open the Snippets workspace from the navigation rail to create, search,
+Open Settings → Snippets → Open snippet library to create, search,
 duplicate, preview, or delete reusable JavaScript. Every definition has a
 required target:
 
@@ -629,7 +644,8 @@ network, module-loader, DOM, process, or environment-mutation APIs.
 
 Enable Settings → Developer Settings → Metrics to show the optional in-app HUD.
 It reports UI FPS, average and p95 frame interval, process CPU, resident set
-size (RSS), and macOS Activity Monitor-style physical footprint. Resource
+size (RSS), and, on macOS, Activity Monitor-style physical footprint. The
+physical-footprint field is omitted on Linux and Windows. Resource
 sampling runs off the UI thread once per second and is inactive while the HUD
 is hidden. Its corner defaults to Bottom Right for backward compatibility and
 the selected location is restored on restart.
@@ -643,8 +659,9 @@ can exceed 100% when the process uses more than one core.
 ## Local storage
 
 State is stored in the OS local application-data directory under the legacy
-`API Tester/` path (`~/Library/Application Support/API Tester` on macOS and the
-XDG data directory on Linux). Resolved deliberately retains this internal name
+`API Tester/` path (`~/Library/Application Support/API Tester` on macOS, the
+XDG data directory on Linux, and the local application-data directory on
+Windows). Resolved deliberately retains this internal name
 so existing history, workspaces, request tabs, settings, and themes continue to
 load after the product rename:
 
@@ -661,8 +678,9 @@ metadata, schema v3 adds nested collection folders, and schema v4 adds
 persistent request-tab state. Schema v5 adds application settings, including
 shortcuts, theme selection, and navigation density; earlier rows migrate
 without losing request content. Schema v6 adds ordered snippets and normalized
-applicability rules. Schema v7 adds the encrypted-value vault, and schema v8
-adds named local workspaces plus per-upstream request-tab state. Existing local
+applicability rules. Schema v7 adds the encrypted-value vault, schema v8 adds
+named local workspaces plus per-upstream request-tab state, and schema v9
+persists each request header's shared-history choice. Existing local
 content is migrated into `My Workspace`. It is embedded behind a storage
 interface; there is no localhost database server or open port. A process-level
 workspace lock rejects a second app instance so stale in-memory aggregates
@@ -686,6 +704,12 @@ Linux, macOS, and Windows. Shared feature code does not select operating
 systems directly; each backend owns native launch, menu, shortcut, window,
 diagnostic, and webview integration.
 
+| Platform | Current target | Runtime notes |
+| --- | --- | --- |
+| macOS | macOS 13 or newer | Native `.app`; WKWebView preview |
+| Linux | x86_64 or aarch64 | X11/XWayland; GTK 3 and WebKitGTK 4.1 |
+| Windows | Windows 10 2004 or newer, x64 | Installed MSIX identity; WebView2 |
+
 ### macOS
 
 ```sh
@@ -696,100 +720,17 @@ This command builds and opens `target/debug/Resolved.app`. The bare
 Cargo executable is not a supported launch target because it has no application
 bundle identity for Keychain and system-service access.
 
-### Linux
-
-Linux runs through X11, including XWayland on Wayland desktops, because Wry's
-embedded WebKitGTK child-window backend currently requires an X11 window
-handle. Resolved forces GTK onto that same display so an inherited Wayland GTK
-backend cannot conflict with GPUI. Build and run with:
-
-```sh
-scripts/cargo.sh run
-```
-
-Ubuntu/Debian build prerequisites include `build-essential`, `pkg-config`,
-`libgtk-3-dev`, `libwebkit2gtk-4.1-dev`, `libfontconfig1-dev`,
-`libvulkan-dev`, `libxkbcommon-dev`, and `libxkbcommon-x11-dev`. Runtime HTML
-Preview uses WebKitGTK. Linux uses native server-side window decorations and
-normalizes the shared macOS-authored `cmd-` shortcut defaults to `ctrl-`.
-
-Create all Linux distribution artifacts with:
-
-```sh
-scripts/package-linux.sh release
-```
-
-The script builds once and writes four artifacts to `target/release/`:
-
-- `Resolved-<version>-linux-<deb-architecture>.deb`
-- `Resolved-<version>-linux-<rpm-architecture>.rpm`
-- `Resolved-<version>-linux-<architecture>.AppImage`
-- `Resolved-<version>-linux-<architecture>.tar.xz`
-
-Pass `deb`, `rpm`, `appimage`, or `archive` as the second argument to build
-only one format. The Debian and RPM packages install the binary, desktop
-entry, AppStream metadata, and icon. The AppImage is a single-file portable
-launcher but deliberately uses the host's matched GTK 3 and WebKitGTK 4.1
-runtime so WebKit's sandboxed helper processes remain version-compatible. The
-archive is relocatable and includes a launcher plus instructions for manual
-installation under `/opt`.
-
-On an immutable host, the checked-in builder provides the complete toolchain:
-
-```sh
-docker build -t resolved-linux-builder -f linux/Dockerfile .
-docker run --rm --user "$(id -u):$(id -g)" \
-  -e HOME=/tmp/resolved-home -e CARGO_HOME=/tmp/resolved-cargo \
-  -v "$PWD:/workspace" -w /workspace \
-  resolved-linux-builder ./scripts/cargo.sh test --all-features
-docker run --rm --user "$(id -u):$(id -g)" \
-  -e HOME=/tmp/resolved-home -e CARGO_HOME=/tmp/resolved-cargo \
-  -v "$PWD:/workspace" -w /workspace \
-  resolved-linux-builder ./scripts/package-linux.sh release
-```
-
-### Windows
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\cargo.ps1 build
-powershell -ExecutionPolicy Bypass -File scripts\cargo.ps1 run            # build + package + launch
-```
-
-Prerequisites: Visual Studio Build Tools with the C++ workload, the Rust MSVC
-toolchain, and the Windows SDK (MakeAppx/SignTool for packaging). The driver
-runs the PowerShell vendoring scripts (`scripts/prepare-gpui.ps1`,
-`scripts/prepare-typescript-service.ps1`) with the same pins and checksums as
-the macOS flow.
-
-The packaged app is required: a bare `api-tester.exe` refuses to start because
-package identity drives WebView2 data isolation and app identity. Package and
-sign with:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\package-msix.ps1 -Profile debug
-Add-AppxPackage -Path target\debug\Resolved.msix
-```
-
-Keyboard defaults are authored in macOS spelling and normalized at install
-time (`cmd-` becomes `ctrl-` on Linux and Windows), and the custom title bars draw their own
-minimize/maximize/close buttons on Windows, wired to the window's non-client
-commands through GPUI control-area hitboxes.
-
-On Windows, permissions for the local data directory and SQLite files come
-from NTFS ACLs rather than POSIX modes; the `0700`/`0600` restrictions apply
-to Linux and macOS.
-
 GPUI's `runtime_shaders` feature is enabled, so the normal build works with Apple
 Command Line Tools and does not require the full Xcode Metal command-line
 compiler. The wrapper obtains the verified crates.io GPUI 0.2.2 and GPUI
-Component 0.5.1 archives from Cargo's local cache when available (or crates.io
-otherwise), applies the small renderer, native-theme, and input-integration
-patches, and then forwards its arguments to Cargo. It also obtains the official,
+Component 0.5.1 sources from Cargo's local cache when available (or their
+upstream archives otherwise), applies the checked-in patches, and then
+forwards its arguments to Cargo. It also obtains the official,
 checksum-verified TypeScript 6.0.2 npm archive and prepares the embedded
 JavaScript language service with only `typescript.js`, its ES library
-declarations, and required notices. The generated `vendor/gpui-0.2.2/`,
-`vendor/gpui-component-0.5.1/`, and `vendor/typescript-service-6.0.2/`
-directories are ignored by Git.
+declarations, and required notices. The patched `gpui-wry` source is checked in;
+the generated GPUI, GPUI Component, and TypeScript service trees are ignored by
+Git.
 
 To build a launchable application bundle and a transfer-safe release archive:
 
@@ -827,11 +768,113 @@ release version, while the bundle script copies it into the generated app and
 uses the Git commit count as its build number. See
 [Versioning and releases](docs/versioning.md) for bump rules and release steps.
 
-The bundle is ad-hoc signed by the Rust linker. Trusted testers can run it using
-the quarantine procedure above; seamless public distribution without a security
+The bundle is ad-hoc signed by default. Trusted testers can run it using the
+quarantine procedure above; seamless public distribution without a security
 override requires a Developer ID signature and notarization. TypeScript's Apache
 2.0 license and third-party notice are copied to
 `Resolved.app/Contents/Resources/ThirdPartyLicenses/TypeScript-6.0.2/`.
+
+### Linux
+
+Linux runs through X11, including XWayland on Wayland desktops, because Wry's
+embedded WebKitGTK child-window backend currently requires an X11 window
+handle. Resolved forces GTK onto that same display so an inherited Wayland GTK
+backend cannot conflict with GPUI. Build and run with:
+
+```sh
+scripts/cargo.sh run
+```
+
+Ubuntu/Debian build prerequisites include a Rust toolchain, `build-essential`,
+`git`, `curl`, `patch`, `pkg-config`, `libgtk-3-dev`,
+`libwebkit2gtk-4.1-dev`, `libfontconfig1-dev`, `libasound2-dev`, `libssl-dev`,
+`libvulkan-dev`, the X11/XCB development packages, `libxkbcommon-dev`, and
+`libxkbcommon-x11-dev`. Runtime HTML
+Preview uses WebKitGTK. Linux uses native server-side window decorations and
+normalizes the shared macOS-authored `cmd-` shortcut defaults to `ctrl-`.
+
+Create all Linux distribution artifacts with:
+
+```sh
+scripts/package-linux.sh release
+```
+
+That all-formats command additionally requires `dpkg-deb`, `rpmbuild`,
+`appimagetool`, and an AppImage runtime at `/usr/local/lib/appimage/runtime`.
+The checked-in Docker builder below is the recommended reproducible environment
+for producing the complete set. On a local host, select only a format whose
+packaging tools are installed.
+
+The script builds once and writes four artifacts to `target/release/`:
+
+- `Resolved-<version>-linux-<deb-architecture>.deb`
+- `Resolved-<version>-linux-<rpm-architecture>.rpm`
+- `Resolved-<version>-linux-<architecture>.AppImage`
+- `Resolved-<version>-linux-<architecture>.tar.xz`
+
+Pass `deb`, `rpm`, `appimage`, or `archive` as the second argument to build
+only one format. The Debian and RPM packages install the binary, desktop
+entry, AppStream metadata, and icon. The AppImage is a single-file portable
+launcher but deliberately uses the host's matched GTK 3 and WebKitGTK 4.1
+runtime so WebKit's sandboxed helper processes remain version-compatible. The
+archive is relocatable and includes a launcher plus instructions for manual
+installation under `/opt`.
+
+On an immutable host, the checked-in builder provides the complete toolchain:
+
+```sh
+docker build -t resolved-linux-builder -f linux/Dockerfile .
+docker run --rm --user "$(id -u):$(id -g)" \
+  -e HOME=/tmp/resolved-home -e CARGO_HOME=/tmp/resolved-cargo \
+  -v "$PWD:/workspace" -w /workspace \
+  resolved-linux-builder ./scripts/cargo.sh test --all-features
+docker run --rm --user "$(id -u):$(id -g)" \
+  -e HOME=/tmp/resolved-home -e CARGO_HOME=/tmp/resolved-cargo \
+  -v "$PWD:/workspace" -w /workspace \
+  resolved-linux-builder ./scripts/package-linux.sh release
+```
+
+### Windows
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\cargo.ps1 build
+```
+
+Prerequisites: Visual Studio Build Tools with the C++ workload, the Rust MSVC
+toolchain, Git, and the Windows SDK (MakeAppx, MakePri, and SignTool for
+installable packaging). HTML Preview also requires the Microsoft Edge WebView2
+Runtime. The driver uses the PowerShell preparation scripts
+`scripts/prepare-gpui.ps1` and `scripts/prepare-typescript-service.ps1`.
+
+> [!NOTE]
+> A clean Windows checkout currently hits a known defect in
+> `prepare-typescript-service.ps1`: it validates the complete declaration set
+> after extracting only a subset. Until that script is corrected, prepare the
+> ignored TypeScript service tree with the shell driver in a compatible
+> environment before building on Windows.
+
+The packaged app is required: a bare `api-tester.exe` refuses to start because
+package identity drives WebView2 data isolation and app identity. Create the
+development signing certificate once, then package, trust, and install the
+current build:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\package-msix.ps1 -InstallCert
+powershell -ExecutionPolicy Bypass -File scripts\package-msix.ps1 -Profile debug -Install
+```
+
+Launch **Resolved** from the Start menu. The `scripts\cargo.ps1 run` path is not
+currently supported because Windows must start the installed package rather
+than the unpackaged build output.
+
+Keyboard defaults are authored in macOS spelling and normalized at install
+time (`cmd-` becomes `ctrl-` on Linux and Windows), and the custom title bars draw their own
+minimize/maximize/close buttons on Windows, wired to the window's non-client
+commands through GPUI control-area hitboxes.
+
+On Windows, permissions for the local data directory and SQLite files come
+from NTFS ACLs rather than POSIX modes; the `0700`/`0600` restrictions apply
+to Linux and macOS.
 
 ## HTML preview boundary
 
@@ -869,7 +912,7 @@ reload, pre-script mutation, environment resolution, a real loopback request,
 post-script tests/mutation, and sanitized history reload. Loopback tests may
 need permission to bind a local socket in a restricted environment.
 
-## Deliberate MVP limits
+## Deliberate limits
 
 Cookie jars, response streaming/downloads, certificate controls, proxy
 controls, and native collection-structure import/export are not included yet.
