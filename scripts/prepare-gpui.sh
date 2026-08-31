@@ -85,11 +85,13 @@ prepare_crate \
     "$project_dir/patches/gpui-0.2.2-retained-line-layout-cache.patch" \
     "$project_dir/patches/gpui-0.2.2-reentrant-async-context.patch" \
     "$project_dir/patches/gpui-0.2.2-windows-clip-children.patch" \
-    "$project_dir/patches/gpui-0.2.2-linux-raw-window-handle.patch"
+    "$project_dir/patches/gpui-0.2.2-linux-raw-window-handle.patch" \
+    "$project_dir/patches/gpui-0.2.2-configurable-tab-width.patch"
 
 prepare_crate \
     "gpui-component" \
     "0.5.1" \
     "d021d46b4088d3d93a57ccdf443da85695a77272108caca2f6fe5369f584966a" \
     "$project_dir/patches/gpui-component-0.5.1-input-integration.patch" \
-    "$project_dir/patches/gpui-component-0.5.1-code-folding.patch"
+    "$project_dir/patches/gpui-component-0.5.1-code-folding.patch" \
+    "$project_dir/patches/gpui-component-0.5.1-indent-guide-layout.patch"

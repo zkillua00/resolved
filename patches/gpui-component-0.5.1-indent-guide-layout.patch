@@ -1,0 +1,217 @@
+diff --git a/src/input/element.rs b/src/input/element.rs
+--- a/src/input/element.rs
++++ b/src/input/element.rs
+@@ -730,17 +730,16 @@ impl TextElement {
+         window: &mut Window,
+     ) -> Vec<LineLayout> {
+         let is_single_line = state.mode.is_single_line();
++        let tab_width = Self::measure_indent_width(state, &window.text_style(), window);
+         let text_wrapper = &state.text_wrapper;
+         let visible_range = &last_layout.visible_range;
+         let visible_range_offset = &last_layout.visible_range_offset;
+ 
+         if is_single_line {
+-            let shaped_line = window.text_system().shape_line(
+-                display_text.to_string().into(),
+-                font_size,
+-                &runs,
+-                None,
+-            );
++            let shaped_line = window
++                .text_system()
++                .shape_line(display_text.to_string().into(), font_size, &runs, None)
++                .with_tab_width(tab_width);
+ 
+             return vec![LineLayout::new().lines(smallvec::smallvec![shaped_line])];
+         }
+@@ -751,12 +750,10 @@ impl TextElement {
+                 .to_string()
+                 .split("\n")
+                 .map(|line| {
+-                    let shaped_line = window.text_system().shape_line(
+-                        line.to_string().into(),
+-                        font_size,
+-                        &runs,
+-                        None,
+-                    );
++                    let shaped_line = window
++                        .text_system()
++                        .shape_line(line.to_string().into(), font_size, &runs, None)
++                        .with_tab_width(tab_width);
+                     LineLayout::new().lines(smallvec::smallvec![shaped_line])
+                 })
+                 .collect();
+@@ -800,7 +797,8 @@ impl TextElement {
+                 let sub_line: SharedString = line[range.clone()].to_string().into();
+                 let shaped_line = window
+                     .text_system()
+-                    .shape_line(sub_line, font_size, &line_runs, None);
++                    .shape_line(sub_line, font_size, &line_runs, None)
++                    .with_tab_width(tab_width);
+ 
+                 wrapped_lines.push(shaped_line);
+             }
+diff --git a/src/input/indent.rs b/src/input/indent.rs
+--- a/src/input/indent.rs
++++ b/src/input/indent.rs
+@@ -66,6 +66,38 @@ impl TabSize {
+     }
+ }
+ 
++/// Return the byte offsets where indentation guides start.
++///
++/// The painter projects these offsets through the shaped line instead of
++/// estimating x positions from a separate run of spaces. That keeps guides
++/// aligned when the platform lays out a hard tab differently from spaces.
++fn indent_guide_offsets(line: &RopeSlice, tab: TabSize) -> Vec<usize> {
++    let width = tab.width();
++    let mut boundaries = vec![(0, 0)];
++    let mut column = 0;
++    let mut byte_offset = 0;
++
++    for character in line.chars() {
++        column = match character {
++            '\t' => column + width - column % width,
++            ' ' => column + 1,
++            _ => break,
++        };
++        byte_offset += character.len_utf8();
++        boundaries.push((column, byte_offset));
++    }
++
++    (0..column)
++        .step_by(width)
++        .map(|target| {
++            boundaries
++                .iter()
++                .find_map(|(column, offset)| (*column >= target).then_some(*offset))
++                .unwrap_or(byte_offset)
++        })
++        .collect()
++}
++
+ fn visual_column(text: &str, tab: TabSize) -> usize {
+     let width = tab.width();
+     text.chars().fold(0, |column, character| {
+@@ -146,24 +178,29 @@ impl InputMode {
+ }
+ 
+ impl TextElement {
+-    /// Measure the indent width in pixels for given column count.
+-    fn measure_indent_width(&self, style: &TextStyle, column: usize, window: &Window) -> Pixels {
++    pub(super) fn measure_indent_width(
++        state: &InputState,
++        style: &TextStyle,
++        window: &Window,
++    ) -> Pixels {
++        let column = state.mode.tab_size().width();
+         let font_size = style.font_size.to_pixels(window.rem_size());
+-        let layout = window.text_system().shape_line(
+-            SharedString::from(" ".repeat(column)),
+-            font_size,
+-            &[TextRun {
+-                len: column,
+-                font: style.font(),
+-                color: Hsla::default(),
+-                background_color: None,
+-                strikethrough: None,
+-                underline: None,
+-            }],
+-            None,
+-        );
+-
+-        layout.width
++        window
++            .text_system()
++            .shape_line(
++                SharedString::from(" ".repeat(column)),
++                font_size,
++                &[TextRun {
++                    len: column,
++                    font: style.font(),
++                    color: Hsla::default(),
++                    background_color: None,
++                    strikethrough: None,
++                    underline: None,
++                }],
++                None,
++            )
++            .width
+     }
+ 
+     pub(super) fn layout_indent_guides(
+@@ -171,16 +208,13 @@ impl TextElement {
+         state: &InputState,
+         bounds: &Bounds<Pixels>,
+         last_layout: &LastLayout,
+-        text_style: &TextStyle,
+-        window: &mut Window,
++        _text_style: &TextStyle,
++        _window: &mut Window,
+     ) -> Option<Path<Pixels>> {
+         if !state.mode.has_indent_guides() {
+             return None;
+         }
+ 
+-        let indent_width =
+-            self.measure_indent_width(text_style, state.mode.tab_size().tab_size, window);
+-
+         let tab_size = state.mode.tab_size();
+         let line_height = last_layout.line_height;
+         let visible_range = last_layout.visible_range.clone();
+@@ -195,13 +229,11 @@ impl TextElement {
+ 
+             let mut current_indents = vec![];
+             if line.len() > 0 {
+-                let indent_count = tab_size.indent_count(&line);
+-                for offset in (0..indent_count).step_by(tab_size.tab_size) {
+-                    let x = if indent_count > 0 {
+-                        indent_width * offset as f32 / tab_size.tab_size as f32
+-                    } else {
+-                        px(0.)
+-                    };
++                let Some(shaped_line) = line_layout.wrapped_lines.first() else {
++                    continue;
++                };
++                for offset in indent_guide_offsets(&line, tab_size) {
++                    let x = shaped_line.x_for_index(offset.min(shaped_line.len()));
+ 
+                     let pos = point(x + last_layout.line_number_width, offset_y);
+ 
+@@ -490,7 +522,7 @@ impl InputState {
+ mod tests {
+     use ropey::RopeSlice;
+ 
+-    use super::{TabSize, previous_tab_stop_offset, visual_column};
++    use super::{TabSize, indent_guide_offsets, previous_tab_stop_offset, visual_column};
+ 
+     #[test]
+     fn test_tab_size() {
+@@ -533,6 +565,27 @@ mod tests {
+     }
+ 
+     #[test]
++    fn indent_guides_use_actual_whitespace_boundaries() {
++        let tab = TabSize {
++            tab_size: 4,
++            hard_tabs: true,
++        };
++
++        assert_eq!(
++            indent_guide_offsets(&RopeSlice::from("\t\t\tvalue"), tab),
++            vec![0, 1, 2]
++        );
++        assert_eq!(
++            indent_guide_offsets(&RopeSlice::from("            value"), tab),
++            vec![0, 4, 8]
++        );
++        assert_eq!(
++            indent_guide_offsets(&RopeSlice::from("  \t    value"), tab),
++            vec![0, 3]
++        );
++    }
++
++    #[test]
+     fn inline_soft_tabs_advance_to_the_next_visual_stop() {
+         let tab = TabSize {
+             tab_size: 4,

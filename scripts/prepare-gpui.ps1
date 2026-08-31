@@ -21,7 +21,8 @@ $pinned = @(
             "$projectDir\patches\gpui-0.2.2-retained-line-layout-cache.patch",
             "$projectDir\patches\gpui-0.2.2-reentrant-async-context.patch",
             "$projectDir\patches\gpui-0.2.2-windows-clip-children.patch",
-            "$projectDir\patches\gpui-0.2.2-linux-raw-window-handle.patch"
+            "$projectDir\patches\gpui-0.2.2-linux-raw-window-handle.patch",
+            "$projectDir\patches\gpui-0.2.2-configurable-tab-width.patch"
         )
     },
     @{
@@ -30,7 +31,8 @@ $pinned = @(
         sha256  = 'd021d46b4088d3d93a57ccdf443da85695a77272108caca2f6fe5369f584966a'
         patches = @(
             "$projectDir\patches\gpui-component-0.5.1-input-integration.patch",
-            "$projectDir\patches\gpui-component-0.5.1-code-folding.patch"
+            "$projectDir\patches\gpui-component-0.5.1-code-folding.patch",
+            "$projectDir\patches\gpui-component-0.5.1-indent-guide-layout.patch"
         )
     }
 )

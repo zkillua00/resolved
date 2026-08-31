@@ -998,8 +998,8 @@ fn has_odd_escape_prefix(input: &InputState, cursor: usize) -> bool {
 mod tests {
     use super::*;
     use gpui::{
-        ListAlignment, ListState, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, div,
-        list, point, px, size,
+        Hsla, ListAlignment, ListState, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext,
+        TextRun, div, list, point, px, size,
     };
     use gpui_component::Rope;
     use gpui_component::setting::{SettingGroup, SettingItem, SettingPage, Settings};
@@ -1018,6 +1018,47 @@ mod tests {
     };
     use lsp_types::{CompletionContext, CompletionItem, CompletionResponse};
     use std::cell::Cell;
+
+    #[gpui::test]
+    fn shaped_hard_tabs_follow_the_configured_visual_width(cx: &mut TestAppContext) {
+        let mut measured = None;
+        let (_, _) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            crate::theme::configure(cx);
+            let style = window.text_style();
+            let font_size = style.font_size.to_pixels(window.rem_size());
+            let run = |len| TextRun {
+                len,
+                font: style.font(),
+                color: Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let space_width = window
+                .text_system()
+                .shape_line(" ".into(), font_size, &[run(1)], None)
+                .width;
+            let one_space_tab = window
+                .text_system()
+                .shape_line("\tX".into(), font_size, &[run(2)], None)
+                .with_tab_width(space_width)
+                .x_for_index(1);
+            let four_space_tab = window
+                .text_system()
+                .shape_line("\tX".into(), font_size, &[run(2)], None)
+                .with_tab_width(space_width * 4.)
+                .x_for_index(1);
+            measured = Some((space_width, one_space_tab, four_space_tab));
+
+            let editor = cx.new(|cx| CodeEditor::new(CodeEditorConfig::default(), window, cx));
+            gpui_component::Root::new(editor, window, cx)
+        });
+
+        let (space_width, one_space_tab, four_space_tab) = measured.expect("measure tab widths");
+        assert!((one_space_tab - space_width).abs() < px(0.01));
+        assert!((four_space_tab - space_width * 4.).abs() < px(0.01));
+    }
 
     struct FixedCompletionProvider;
 
