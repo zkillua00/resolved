@@ -360,7 +360,8 @@ impl RequestNamespaceCatalog {
     /// fed straight to the embedded language service.
     pub fn declaration_source(&self) -> String {
         let mut buffer = String::new();
-        buffer.push_str("// Resolved request-reference namespace built from the active workspace.\n");
+        buffer
+            .push_str("// Resolved request-reference namespace built from the active workspace.\n");
         for root in self.roots() {
             if root.status != NodeStatus::Exposed {
                 continue;

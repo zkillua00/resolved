@@ -354,9 +354,12 @@ impl TypeScriptServiceHandle {
     /// Fire-and-forget: the language service revalidates on its next request,
     /// which keeps script diagnostics in sync with the active workspace.
     pub fn set_request_namespace_declarations(&self, declarations: impl Into<String>) {
-        let _ = self.inner.sender.send(Command::SetRequestNamespaceDeclarations {
-            declarations: declarations.into(),
-        });
+        let _ = self
+            .inner
+            .sender
+            .send(Command::SetRequestNamespaceDeclarations {
+                declarations: declarations.into(),
+            });
     }
 }
 
@@ -390,7 +393,9 @@ enum Command {
     },
     /// Fire-and-forget push of the active workspace's request-reference
     /// namespace declarations into the script/plain-snippet projects.
-    SetRequestNamespaceDeclarations { declarations: String },
+    SetRequestNamespaceDeclarations {
+        declarations: String,
+    },
     Shutdown,
 }
 
@@ -706,10 +711,11 @@ impl TypeScriptEngine {
                 .get(SERVICE_GLOBAL)
                 .catch(&ctx)
                 .map_err(|error| TypeScriptServiceError::Engine(error.to_string()))?;
-            let setter: Function<'_> = service
-                .get("setRequestNamespaceDeclarations")
-                .catch(&ctx)
-                .map_err(|error| TypeScriptServiceError::Engine(error.to_string()))?;
+            let setter: Function<'_> =
+                service
+                    .get("setRequestNamespaceDeclarations")
+                    .catch(&ctx)
+                    .map_err(|error| TypeScriptServiceError::Engine(error.to_string()))?;
             setter
                 .call::<_, ()>((declarations,))
                 .catch(&ctx)

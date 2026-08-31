@@ -5,10 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::{
-    script::EnvironmentMutation,
-    template::RequestTemplate,
-};
+use super::{script::EnvironmentMutation, template::RequestTemplate};
 
 pub const WORKSPACE_FILE_VERSION: u32 = 1;
 

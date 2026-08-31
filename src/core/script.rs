@@ -653,11 +653,9 @@ impl SecretRedactor {
         if self.variants.is_empty() {
             return text.to_owned();
         }
-        self.variants
-            .iter()
-            .fold(text.to_owned(), |text, value| {
-                text.replace(value, REDACTED_VALUE)
-            })
+        self.variants.iter().fold(text.to_owned(), |text, value| {
+            text.replace(value, REDACTED_VALUE)
+        })
     }
 }
 

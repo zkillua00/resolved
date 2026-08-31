@@ -591,11 +591,7 @@ fn script_completion_is_active(
             .iter()
             .any(|spec| spec.label.starts_with(&context.typed))
             || (catalog.is_some()
-                && request_namespace_members_match(
-                    catalog.as_ref(),
-                    &context.path,
-                    &context.typed,
-                ))
+                && request_namespace_members_match(catalog.as_ref(), &context.path, &context.typed))
     })
 }
 
@@ -610,9 +606,9 @@ fn request_namespace_members_match(
         return false;
     };
     if path.is_empty() {
-        return catalog
-            .roots()
-            .any(|root| root.status == crate::core::NodeStatus::Exposed && root.name.starts_with(typed));
+        return catalog.roots().any(|root| {
+            root.status == crate::core::NodeStatus::Exposed && root.name.starts_with(typed)
+        });
     }
     catalog.members_at(path).is_some_and(|members| {
         members.iter().any(|member| {
@@ -3226,7 +3222,8 @@ api.variables.get("after");
                 .is_empty()
         );
 
-        let diagnostics = diagnostics_for_source(r#"api.environment.get("disabled")"#, &catalog, None);
+        let diagnostics =
+            diagnostics_for_source(r#"api.environment.get("disabled")"#, &catalog, None);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
             diagnostics[0].code,
@@ -3292,7 +3289,9 @@ api.environment.set("later", "value");
         let items = provider.completion_items_for_source(source, source.len());
 
         assert_eq!(labels(items), ["şehir"]);
-        assert!(diagnostics_for_source(r#"api.environment.get("şehir")"#, &catalog, None).is_empty());
+        assert!(
+            diagnostics_for_source(r#"api.environment.get("şehir")"#, &catalog, None).is_empty()
+        );
     }
 
     #[test]
@@ -3549,7 +3548,9 @@ api.environment.get("disabled_key");
             request: RequestDraft::new("POST", "https://a.test/login"),
             scripts: RequestScripts::default(),
         };
-        workspace.create_saved_request(&chat, "Login", login).unwrap();
+        workspace
+            .create_saved_request(&chat, "Login", login)
+            .unwrap();
         workspace
             .create_saved_request(
                 &chat,
@@ -3560,7 +3561,9 @@ api.environment.get("disabled_key");
                 },
             )
             .unwrap();
-        let users = workspace.create_collection_folder(&chat, None, "Users").unwrap();
+        let users = workspace
+            .create_collection_folder(&chat, None, "Users")
+            .unwrap();
         workspace
             .create_saved_request_in_folder(
                 &chat,
@@ -3607,8 +3610,14 @@ api.environment.get("disabled_key");
     #[test]
     fn request_namespace_completes_after_collection_dot() {
         let provider = namespace_provider(ScriptEditorPhase::PreRequest);
-        let items = provider.completion_items_for_source("api.requests.execute(ChatAdmin.", "api.requests.execute(ChatAdmin.".len());
-        let labels = items.iter().map(|item| item.label.clone()).collect::<Vec<_>>();
+        let items = provider.completion_items_for_source(
+            "api.requests.execute(ChatAdmin.",
+            "api.requests.execute(ChatAdmin.".len(),
+        );
+        let labels = items
+            .iter()
+            .map(|item| item.label.clone())
+            .collect::<Vec<_>>();
         assert!(labels.contains(&"Login".to_owned()), "got {labels:?}");
         assert!(labels.contains(&"Logout".to_owned()), "got {labels:?}");
         assert!(labels.contains(&"Users".to_owned()), "got {labels:?}");
@@ -3627,19 +3636,24 @@ api.environment.get("disabled_key");
             "api.requests.execute(ChatAdmin.Users.",
             "api.requests.execute(ChatAdmin.Users.".len(),
         );
-        let labels = items.iter().map(|item| item.label.clone()).collect::<Vec<_>>();
+        let labels = items
+            .iter()
+            .map(|item| item.label.clone())
+            .collect::<Vec<_>>();
         assert!(labels.contains(&"Create".to_owned()), "got {labels:?}");
     }
 
     #[test]
     fn api_requests_exposes_execute() {
         let provider = namespace_provider(ScriptEditorPhase::PreRequest);
-        let items =
-            provider.completion_items_for_source("api.requests.", "api.requests.".len());
+        let items = provider.completion_items_for_source("api.requests.", "api.requests.".len());
         assert!(
             items.iter().any(|item| item.label == "execute"),
             "api.requests. should offer execute: {:?}",
-            items.iter().map(|item| item.label.as_str()).collect::<Vec<_>>()
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -3678,12 +3692,14 @@ api.environment.get("disabled_key");
             diagnostics[0].message
         );
         // A valid reference stays clean.
-        assert!(diagnostics_for_source(
-            r#"api.requests.execute(ChatAdmin.Login);"#,
-            &variables,
-            Some(&catalog),
-        )
-        .is_empty());
+        assert!(
+            diagnostics_for_source(
+                r#"api.requests.execute(ChatAdmin.Login);"#,
+                &variables,
+                Some(&catalog),
+            )
+            .is_empty()
+        );
     }
 
     #[test]

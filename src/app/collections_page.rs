@@ -282,9 +282,8 @@ impl ApiTester {
                 || self
                     .expanded_collection_ids
                     .contains(collection.id.as_str());
-            let folder_index = (searching || expanded).then(|| {
-                self.folder_render_index(collection, &query)
-            });
+            let folder_index =
+                (searching || expanded).then(|| self.folder_render_index(collection, &query));
             let folder_matches = folder_index
                 .as_ref()
                 .is_some_and(|index| !index.matching_folder_ids.is_empty());
