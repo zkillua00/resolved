@@ -19,10 +19,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    AppSettings,
-    DbStringEnum,
+    AppSettings, DbStringEnum,
     history::{DEFAULT_HISTORY_LIMIT, HistoryEntry, RequestHistory, ResponseSummary},
-    request::{BodyField, HeaderEntry, RequestDraft},
+    request::{BodyField, HeaderEntry, QueryParamEntry, RequestDraft},
     request_tabs::RequestTabs,
     snippet::{Snippet, SnippetValidationError},
     template::RequestTemplate,
@@ -35,7 +34,7 @@ use super::{
 #[cfg(test)]
 use super::request_tabs::RequestTabGroupColor;
 
-const CURRENT_SCHEMA_VERSION: i64 = 9;
+const CURRENT_SCHEMA_VERSION: i64 = 10;
 static NEXT_LOCAL_WORKSPACE_ID: AtomicU64 = AtomicU64::new(0);
 const LEGACY_HISTORY_FILE_VERSION: u32 = 1;
 const LEGACY_HISTORY_IMPORT_MARKER: &str = "history-json-v1";
@@ -389,6 +388,14 @@ ADD COLUMN shared INTEGER NOT NULL DEFAULT 1 CHECK (shared IN (0, 1));
 
 ALTER TABLE history_headers
 ADD COLUMN shared INTEGER NOT NULL DEFAULT 1 CHECK (shared IN (0, 1));
+"#;
+
+const MIGRATION_10: &str = r#"
+ALTER TABLE saved_requests
+ADD COLUMN query_params_json TEXT NOT NULL DEFAULT '[]';
+
+ALTER TABLE history_entries
+ADD COLUMN query_params_json TEXT NOT NULL DEFAULT '[]';
 "#;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1277,6 +1284,7 @@ fn migrate(connection: &mut Connection) -> Result<(), DatabaseError> {
             7 => transaction.execute_batch(MIGRATION_7)?,
             8 => transaction.execute_batch(MIGRATION_8)?,
             9 => transaction.execute_batch(MIGRATION_9)?,
+            10 => transaction.execute_batch(MIGRATION_10)?,
             _ => {
                 return Err(DatabaseError::UnsupportedSchemaVersion {
                     found: next,
@@ -1409,13 +1417,14 @@ fn save_workspace_tx(
             saved_request_ids.insert(saved_request.id.clone());
             let request = &saved_request.definition.request;
             let scripts = &saved_request.definition.scripts;
+            let query_params_json = serialize_query_params(&request.query_params)?;
             transaction.execute(
                 "INSERT INTO saved_requests(
-                    id, collection_id, folder_id, name, position, method, url, body,
+                    id, collection_id, folder_id, name, position, method, url, query_params_json, body,
                     body_mode, raw_body_language, pre_request, post_response,
                     created_at, updated_at, version
                  ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 1
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 1
                  )
                  ON CONFLICT(id) DO UPDATE SET
                     collection_id = excluded.collection_id,
@@ -1424,6 +1433,7 @@ fn save_workspace_tx(
                     position = excluded.position,
                     method = excluded.method,
                     url = excluded.url,
+                    query_params_json = excluded.query_params_json,
                     body = excluded.body,
                     body_mode = excluded.body_mode,
                     raw_body_language = excluded.raw_body_language,
@@ -1440,6 +1450,7 @@ fn save_workspace_tx(
                     to_i64(request_position, "saved request position")?,
                     &request.method,
                     &request.url,
+                    query_params_json,
                     &request.body,
                     request.body_mode.as_db_str(),
                     request.raw_body_language.as_db_str(),
@@ -1592,6 +1603,20 @@ fn deserialize_request_tabs(state_json: Option<String>) -> Result<RequestTabs, D
         }
         None => Ok(RequestTabs::default()),
     }
+}
+
+fn serialize_query_params(params: &[QueryParamEntry]) -> Result<String, DatabaseError> {
+    serde_json::to_string(params).map_err(|error| DatabaseError::CorruptData {
+        field: "request query params",
+        value: error.to_string(),
+    })
+}
+
+fn deserialize_query_params(state_json: &str) -> Result<Vec<QueryParamEntry>, DatabaseError> {
+    serde_json::from_str(state_json).map_err(|error| DatabaseError::CorruptData {
+        field: "request query params",
+        value: error.to_string(),
+    })
 }
 
 fn save_request_tabs_tx(
@@ -2010,7 +2035,7 @@ fn load_workspace_tx(
         let request_rows = {
             let mut statement = transaction.prepare(
                 "SELECT
-                    id, folder_id, name, method, url, body, body_mode,
+                    id, folder_id, name, method, url, query_params_json, body, body_mode,
                     raw_body_language, pre_request, post_response,
                     created_at, updated_at
                  FROM saved_requests
@@ -2030,8 +2055,9 @@ fn load_workspace_tx(
                         row.get::<_, String>(7)?,
                         row.get::<_, String>(8)?,
                         row.get::<_, String>(9)?,
-                        row.get::<_, i64>(10)?,
+                        row.get::<_, String>(10)?,
                         row.get::<_, i64>(11)?,
+                        row.get::<_, i64>(12)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?
@@ -2044,6 +2070,7 @@ fn load_workspace_tx(
             request_name,
             method,
             url,
+            query_params_json,
             body,
             body_mode,
             raw_body_language,
@@ -2081,10 +2108,14 @@ fn load_workspace_tx(
                     request: RequestDraft {
                         method,
                         url,
+                        query_params: deserialize_query_params(&query_params_json)?,
                         headers,
                         body,
                         body_mode: enum_from_db(&body_mode, "saved request body_mode")?,
-                        raw_body_language: enum_from_db(&raw_body_language, "saved request raw_body_language")?,
+                        raw_body_language: enum_from_db(
+                            &raw_body_language,
+                            "saved request raw_body_language",
+                        )?,
                         body_fields,
                     },
                     scripts: RequestScripts {
@@ -2207,21 +2238,23 @@ fn save_history_tx(
             ),
             None => (None, None, None, None, None),
         };
+        let query_params_json = serialize_query_params(&entry.request.query_params)?;
 
         transaction.execute(
             "INSERT INTO history_entries(
-                id, position, created_at, method, url, body,
+                id, position, created_at, method, url, query_params_json, body,
                 body_mode, raw_body_language, error,
                 response_status, response_status_text, response_duration_ms,
                 response_size_bytes, response_content_type, updated_at, version
              ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 1
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 1
              )
              ON CONFLICT(id) DO UPDATE SET
                 position = excluded.position,
                 created_at = excluded.created_at,
                 method = excluded.method,
                 url = excluded.url,
+                query_params_json = excluded.query_params_json,
                 body = excluded.body,
                 body_mode = excluded.body_mode,
                 raw_body_language = excluded.raw_body_language,
@@ -2239,6 +2272,7 @@ fn save_history_tx(
                 entry.created_at.timestamp_micros(),
                 &entry.request.method,
                 &entry.request.url,
+                query_params_json,
                 &entry.request.body,
                 entry.request.body_mode.as_db_str(),
                 entry.request.raw_body_language.as_db_str(),
@@ -2303,7 +2337,7 @@ fn load_history_tx(
     let raw_entries = {
         let mut statement = transaction.prepare(
             "SELECT
-                id, created_at, method, url, body, body_mode, raw_body_language, error,
+                id, created_at, method, url, query_params_json, body, body_mode, raw_body_language, error,
                 response_status, response_status_text, response_duration_ms,
                 response_size_bytes, response_content_type
              FROM history_entries
@@ -2317,15 +2351,16 @@ fn load_history_tx(
                     created_at: row.get(1)?,
                     method: row.get(2)?,
                     url: row.get(3)?,
-                    body: row.get(4)?,
-                    body_mode: row.get(5)?,
-                    raw_body_language: row.get(6)?,
-                    error: row.get(7)?,
-                    response_status: row.get(8)?,
-                    response_status_text: row.get(9)?,
-                    response_duration_ms: row.get(10)?,
-                    response_size_bytes: row.get(11)?,
-                    response_content_type: row.get(12)?,
+                    query_params_json: row.get(4)?,
+                    body: row.get(5)?,
+                    body_mode: row.get(6)?,
+                    raw_body_language: row.get(7)?,
+                    error: row.get(8)?,
+                    response_status: row.get(9)?,
+                    response_status_text: row.get(10)?,
+                    response_duration_ms: row.get(11)?,
+                    response_size_bytes: row.get(12)?,
+                    response_content_type: row.get(13)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -2393,10 +2428,14 @@ fn load_history_tx(
             request: RequestDraft {
                 method: raw.method,
                 url: raw.url,
+                query_params: deserialize_query_params(&raw.query_params_json)?,
                 headers,
                 body: raw.body,
                 body_mode: enum_from_db(&raw.body_mode, "history body_mode")?,
-                raw_body_language: enum_from_db(&raw.raw_body_language, "history raw_body_language")?,
+                raw_body_language: enum_from_db(
+                    &raw.raw_body_language,
+                    "history raw_body_language",
+                )?,
                 body_fields,
             },
             response,
@@ -2412,6 +2451,7 @@ struct RawHistoryEntry {
     created_at: i64,
     method: String,
     url: String,
+    query_params_json: String,
     body: String,
     body_mode: String,
     raw_body_language: String,
@@ -2749,8 +2789,8 @@ mod tests {
     use super::*;
     use crate::core::snippet::{SnippetCategory, SnippetKind, SnippetRequirement};
     use crate::core::{
-        request::{BodyFieldKind, BodyMode, RawBodyLanguage},
         MetricsPosition, SavedTheme, ShortcutOverride, ThemeSettings,
+        request::{BodyFieldKind, BodyMode, RawBodyLanguage},
     };
 
     fn database() -> (tempfile::TempDir, DatabaseStore) {
@@ -2792,7 +2832,16 @@ mod tests {
                     definition: RequestTemplate {
                         request: RequestDraft {
                             method: "POST".to_owned(),
-                            url: "{{base_url}}/users".to_owned(),
+                            url: "{{base_url}}/users?expand=roles".to_owned(),
+                            query_params: vec![
+                                QueryParamEntry::new("expand", "roles"),
+                                QueryParamEntry {
+                                    enabled: false,
+                                    key: "debug".to_owned(),
+                                    value: "true".to_owned(),
+                                    description: "Enable while investigating".to_owned(),
+                                },
+                            ],
                             headers: vec![
                                 HeaderEntry::new("Content-Type", "application/json"),
                                 HeaderEntry {
@@ -2897,7 +2946,8 @@ mod tests {
                     created_at: timestamp(1_700_000_000_000_020),
                     request: RequestDraft {
                         method: "POST".to_owned(),
-                        url: "https://example.test/users".to_owned(),
+                        url: "https://example.test/users?notify=true".to_owned(),
+                        query_params: vec![QueryParamEntry::new("notify", "true")],
                         headers: vec![
                             HeaderEntry::new("Content-Type", "application/json"),
                             HeaderEntry {
@@ -2927,6 +2977,7 @@ mod tests {
                     request: RequestDraft {
                         method: "GET".to_owned(),
                         url: "https://example.test/failed".to_owned(),
+                        query_params: Vec::new(),
                         headers: vec![],
                         body: String::new(),
                         body_mode: BodyMode::None,
@@ -3754,11 +3805,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        assert_corrupt(
-            store.load_snippets(),
-            "snippet category",
-            "broken_category",
-        );
+        assert_corrupt(store.load_snippets(), "snippet category", "broken_category");
         connection
             .execute(
                 "UPDATE snippets SET category = 'pre_request', kind = 'broken_kind'
@@ -3802,11 +3849,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        assert_corrupt(
-            store.load_snippets(),
-            "snippet generator_api_version",
-            "-1",
-        );
+        assert_corrupt(store.load_snippets(), "snippet generator_api_version", "-1");
     }
 
     #[test]

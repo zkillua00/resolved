@@ -206,7 +206,7 @@ fn empty_script_console_has_a_copyable_empty_state() {
 
 #[test]
 fn snippet_list_rows_filter_case_insensitively_and_order_by_category() {
-    use super::snippets::{filter_snippet_list_rows, SnippetListRow};
+    use super::snippets::{SnippetListRow, filter_snippet_list_rows};
     use crate::core::{SnippetCategory, SnippetKind};
 
     fn row(id: &str, name: &str, description: &str, category: SnippetCategory) -> SnippetListRow {
@@ -345,4 +345,95 @@ fn body_editor_folds_nested_json_via_keyboard_chords(cx: &mut gpui::TestAppConte
             .all(|(_, _, folded)| !*folded),
         "⌘K ⌘J expands every region"
     );
+}
+
+#[gpui::test]
+fn params_editor_stays_in_sync_with_the_request_url(cx: &mut gpui::TestAppContext) {
+    use gpui::{px, size};
+
+    let directory = tempfile::tempdir().expect("create temporary settings directory");
+    let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+    store.initialize().expect("initialize test database");
+
+    let mut app = None;
+    let store_for_app = store.clone();
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        gpui_component::init(cx);
+        let base_key_bindings = shortcuts::capture_base_key_bindings(cx);
+        crate::theme::configure(cx);
+        let view = cx.new(|cx| {
+            ApiTester::new_with_database_store(base_key_bindings, store_for_app, window, cx)
+        });
+        app = Some(view.clone());
+        gpui_component::Root::new(view, window, cx)
+    });
+    let app = app.expect("capture app entity");
+    cx.update(|window, _| window.activate_window());
+    cx.simulate_resize(size(px(1_200.), px(800.)));
+
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.url.update(cx, |input, cx| {
+                input.set_value(
+                    "https://example.test/search?q=hello+world&page=2#results",
+                    window,
+                    cx,
+                );
+            });
+        });
+    });
+    cx.run_until_parked();
+
+    let (page_id, page_value, page_description) = cx.update(|_, cx| {
+        let app = app.read(cx);
+        assert_eq!(app.request_pane, RequestPane::Params);
+        assert_eq!(app.request_query_param_count(cx), 2);
+        assert_eq!(app.query_params[0].key.read(cx).value().as_ref(), "q");
+        assert_eq!(
+            app.query_params[0].value.read(cx).value().as_ref(),
+            "hello world"
+        );
+        (
+            app.query_params[1].id,
+            app.query_params[1].value.clone(),
+            app.query_params[1].description.clone(),
+        )
+    });
+
+    cx.update(|window, cx| {
+        page_value.update(cx, |input, cx| input.set_value("3", window, cx));
+        page_description.update(cx, |input, cx| {
+            input.set_value("Pagination cursor", window, cx)
+        });
+    });
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        assert_eq!(
+            app.read(cx).url.read(cx).value().as_ref(),
+            "https://example.test/search?q=hello+world&page=3#results"
+        );
+        assert_eq!(
+            app.read(cx).draft(cx).query_params[1].description,
+            "Pagination cursor"
+        );
+    });
+
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.toggle_query_param_row(page_id, false, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        let app = app.read(cx);
+        assert_eq!(
+            app.url.read(cx).value().as_ref(),
+            "https://example.test/search?q=hello+world#results"
+        );
+        assert!(!app.draft(cx).query_params[1].enabled);
+        assert_eq!(
+            app.draft(cx).query_params[1].description,
+            "Pagination cursor"
+        );
+    });
 }

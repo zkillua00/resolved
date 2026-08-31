@@ -50,9 +50,9 @@ use crate::{
         EnvironmentMutation, FormatterSettings, HeaderEntry, HistoryEntry, HostnameOverride,
         ImportBundle, InterchangeFormat, LocalWorkspace, LocalWorkspaceProvider,
         MAX_INTERCHANGE_BYTES, MAX_SNIPPET_NAME_BYTES, PostResponseResult, PreRequestResult,
-        REDACTED_VALUE, REQUESTS_CREATE, REQUESTS_DELETE, REQUESTS_UPDATE, RawBodyLanguage,
-        RealtimeResourceChange, RealtimeSignal, RemoteWorkspaceProvider, RequestDraft,
-        RequestError, RequestExecutionMode, RequestExecutionSettings, RequestHistory,
+        QueryParamEntry, REDACTED_VALUE, REQUESTS_CREATE, REQUESTS_DELETE, REQUESTS_UPDATE,
+        RawBodyLanguage, RealtimeResourceChange, RealtimeSignal, RemoteWorkspaceProvider,
+        RequestDraft, RequestError, RequestExecutionMode, RequestExecutionSettings, RequestHistory,
         RequestScripts, RequestTabAssociation, RequestTabCloseScope, RequestTabGroup,
         RequestTabGroupColor, RequestTabGroupId, RequestTabId, RequestTabRecord, RequestTabs,
         RequestTask, RequestTemplate, ResourceCreator, ResponseData, SERVER_SETTINGS_UPDATE,
@@ -72,10 +72,10 @@ use crate::{
         get_upstream_user, get_upstream_workspace, import_requests, is_probably_text,
         list_upstream_environments, list_upstream_workspaces, login_upstream,
         move_upstream_collection, move_upstream_saved_request, normalize_upstream_url,
-        resolve_request, save_upstream_environment, send_request_for_upstream_workspace,
-        spawn_request, update_request_execution_settings, update_upstream_collection,
-        update_upstream_saved_request, update_upstream_workspace, upload_shared_history,
-        watch_upstream_changes,
+        query_params_from_url, resolve_request, save_upstream_environment,
+        send_request_for_upstream_workspace, spawn_request, update_request_execution_settings,
+        update_upstream_collection, update_upstream_saved_request, update_upstream_workspace,
+        upload_shared_history, url_with_query_params, watch_upstream_changes,
     },
     debug_overlay::DebugOverlay,
     request_dirty::{RequestDirtyPart, RequestDirtyState},
@@ -115,6 +115,7 @@ mod pane_editor;
 mod pane_tree;
 mod pending_delete;
 mod persistence;
+mod query_params_editor;
 mod realtime;
 mod request_actions;
 mod request_body_editor;
@@ -165,6 +166,7 @@ use headers_editor::HeaderRow;
 use pane_editor::*;
 use pane_tree::*;
 use pending_delete::*;
+use query_params_editor::QueryParamRow;
 use request_interchange::RequestInterchangeState;
 use request_pane::*;
 use request_tab_runtime::*;
@@ -243,6 +245,9 @@ pub struct ApiTester {
     pre_request_script: Entity<CodeEditor>,
     post_response_script: Entity<CodeEditor>,
     response_editor: Entity<CodeEditor>,
+    query_params: Vec<QueryParamRow>,
+    next_query_param_id: usize,
+    syncing_query_params: bool,
     headers: Vec<HeaderRow>,
     next_header_id: usize,
     body_mode: BodyMode,

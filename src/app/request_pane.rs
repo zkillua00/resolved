@@ -1,5 +1,6 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RequestPane {
+    Params,
     Headers,
     Body,
     PreRequest,
@@ -9,19 +10,21 @@ pub(super) enum RequestPane {
 impl RequestPane {
     pub(super) fn index(self) -> usize {
         match self {
-            Self::Headers => 0,
-            Self::Body => 1,
-            Self::PreRequest => 2,
-            Self::PostResponse => 3,
+            Self::Params => 0,
+            Self::Headers => 1,
+            Self::Body => 2,
+            Self::PreRequest => 3,
+            Self::PostResponse => 4,
         }
     }
 
     pub(super) fn from_index(index: usize) -> Self {
         match index {
-            1 => Self::Body,
-            2 => Self::PreRequest,
-            3 => Self::PostResponse,
-            _ => Self::Headers,
+            1 => Self::Headers,
+            2 => Self::Body,
+            3 => Self::PreRequest,
+            4 => Self::PostResponse,
+            _ => Self::Params,
         }
     }
 }

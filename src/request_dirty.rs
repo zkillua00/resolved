@@ -6,6 +6,7 @@
 pub(crate) enum RequestDirtyPart {
     Method,
     Url,
+    Params,
     Headers,
     RawBody,
     BodyMode,
@@ -133,6 +134,7 @@ mod tests {
         let parts = [
             RequestDirtyPart::Method,
             RequestDirtyPart::Url,
+            RequestDirtyPart::Params,
             RequestDirtyPart::Headers,
             RequestDirtyPart::RawBody,
             RequestDirtyPart::BodyMode,

@@ -7,7 +7,10 @@ fn startup_or_exit<T, E: std::fmt::Display>(what: &str, result: Result<T, E>) ->
     match result {
         Ok(value) => value,
         Err(error) => {
-            eprintln!("{} could not start: {what}: {error}", env!("CARGO_PKG_NAME"));
+            eprintln!(
+                "{} could not start: {what}: {error}",
+                env!("CARGO_PKG_NAME")
+            );
             std::process::exit(1);
         }
     }
@@ -141,7 +144,8 @@ impl ApiTester {
             if let Some(service) = typescript_service.clone() {
                 intelligence = intelligence.with_typescript_service(service);
             }
-            intelligence = intelligence.with_request_namespace(Rc::clone(&script_request_namespace));
+            intelligence =
+                intelligence.with_request_namespace(Rc::clone(&script_request_namespace));
             let intelligence = Rc::new(intelligence);
             let diagnostic_intelligence = Rc::clone(&intelligence);
             CodeEditor::new(
@@ -550,6 +554,9 @@ impl ApiTester {
             if matches!(event, InputEvent::Change) {
                 let input = this.url.clone();
                 this.schedule_template_input_refresh(&input, cx);
+                if !this.syncing_query_params {
+                    this.sync_query_params_from_url(window, cx);
+                }
                 this.refresh_request_dirty_part(RequestDirtyPart::Url, cx);
             }
             if matches!(event, InputEvent::PressEnter { secondary: false }) {
@@ -662,13 +669,16 @@ impl ApiTester {
             pre_request_script,
             post_response_script,
             response_editor,
+            query_params: Vec::new(),
+            next_query_param_id: 0,
+            syncing_query_params: false,
             headers: Vec::new(),
             next_header_id: 0,
             body_mode: BodyMode::Raw,
             raw_body_language: RawBodyLanguage::Json,
             body_fields: Vec::new(),
             next_body_field_id: 0,
-            request_pane: RequestPane::Headers,
+            request_pane: RequestPane::Params,
             response_tab: ResponseTab::Body,
             pretty_body: true,
             sending: false,
@@ -803,6 +813,7 @@ impl ApiTester {
             ],
         };
         this.apply_code_editor_settings(window, cx);
+        this.push_query_param_row("", "", "", true, window, cx);
         this.push_header_row("", "", true, true, window, cx);
         this.refresh_variable_intelligence(cx);
         this.loaded_request_baseline = this.request_template(cx);

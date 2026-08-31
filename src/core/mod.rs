@@ -1,3 +1,4 @@
+mod chain;
 mod database;
 mod format;
 mod history;
@@ -6,7 +7,6 @@ mod realtime;
 mod request;
 mod request_namespace;
 mod request_tabs;
-mod chain;
 mod script;
 mod secure_store;
 mod settings;
@@ -20,6 +20,7 @@ mod workspace_provider;
 #[cfg(test)]
 mod mvp_smoke_test;
 
+pub use chain::{ChainFailure, ChainLimits, ChainRun, run_chain};
 pub use database::{DatabaseStore, LocalWorkspace};
 pub use format::{format_body, format_raw_source, format_script_source, is_probably_text};
 pub use history::{HistoryEntry, REDACTED_VALUE, RequestHistory};
@@ -28,22 +29,23 @@ pub use interchange::{
 };
 pub use realtime::{RealtimeResourceChange, RealtimeSignal, watch_upstream_changes};
 pub use request::{
-    BodyField, BodyFieldKind, BodyMode, HeaderEntry, RawBodyLanguage, RequestDraft, RequestError,
-    RequestTask, ResponseData, STANDARD_HTTP_METHODS, build_client, send_request, spawn_request,
+    BodyField, BodyFieldKind, BodyMode, HeaderEntry, QueryParamEntry, RawBodyLanguage,
+    RequestDraft, RequestError, RequestTask, ResponseData, STANDARD_HTTP_METHODS, build_client,
+    query_params_from_url, send_request, spawn_request, url_with_query_params,
+};
+#[allow(unused_imports)]
+pub use request_namespace::{
+    AccessStep, CHAIN_MAX_DEPTH, CHAIN_MAX_TOTAL, NAMESPACE_REF_MARKER, NodeKind, NodeStatus,
+    REQUEST_REF_MARKER, RequestNamespaceCatalog, RequestNamespaceNode, RequestRefInfo,
+    RuntimeNamespaceSpec, RuntimeNodeKind, is_valid_js_identifier,
 };
 pub use request_tabs::{
     DEFAULT_REQUEST_TAB_TITLE, RequestTabAssociation, RequestTabCloseScope, RequestTabGroup,
     RequestTabGroupColor, RequestTabGroupId, RequestTabId, RequestTabRecord, RequestTabs,
 };
-#[allow(unused_imports)]
-pub use request_namespace::{
-    AccessStep, CHAIN_MAX_DEPTH, CHAIN_MAX_TOTAL, NAMESPACE_REF_MARKER, REQUEST_REF_MARKER,
-    NodeKind, NodeStatus, RequestNamespaceCatalog, RequestNamespaceNode, RequestRefInfo,
-    RuntimeNamespaceSpec, RuntimeNodeKind, is_valid_js_identifier,
-};
 pub use script::{
-    ChainedRequest, EnvironmentMutation, InlineChainer, MAX_SCRIPT_SOURCE_BYTES, PostResponseResult,
-    PreRequestResult, ScriptCancellation, ScriptDiagnostic, ScriptEnvironment,
+    ChainedRequest, EnvironmentMutation, InlineChainer, MAX_SCRIPT_SOURCE_BYTES,
+    PostResponseResult, PreRequestResult, ScriptCancellation, ScriptDiagnostic, ScriptEnvironment,
     ScriptError, ScriptErrorKind, ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope,
     execute_post_response_with_chain, execute_pre_request_with_chain,
 };
@@ -104,7 +106,6 @@ pub use workspace::{
     Collection, CollectionFolder, Environment, RequestScripts, ResourceCreator, SavedRequest,
     Workspace, WorkspaceMutationError, apply_environment_mutations_to_workspace,
 };
-pub use chain::{ChainFailure, ChainLimits, ChainRun, run_chain};
 #[allow(unused_imports)]
 pub use workspace_provider::{
     LocalWorkspaceProvider, RemoteWorkspaceProvider, WorkspaceProvider, WorkspaceProviderError,

@@ -384,8 +384,7 @@ fn request_body_bytes(request: &RequestDraft) -> Option<String> {
         BodyMode::Raw => (!request.body.is_empty()).then(|| request.body.clone()),
         BodyMode::FormUrlEncoded => {
             let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-            for field in active_body_fields(request)
-            {
+            for field in active_body_fields(request) {
                 serializer.append_pair(&field.name, &field.value);
             }
             Some(serializer.finish())
@@ -396,8 +395,7 @@ fn request_body_bytes(request: &RequestDraft) -> Option<String> {
 
 fn render_multipart_body(request: &RequestDraft) -> String {
     let mut body = String::new();
-    for field in active_body_fields(request)
-    {
+    for field in active_body_fields(request) {
         let _ = write!(
             body,
             "--{MULTIPART_BOUNDARY}\r\nContent-Disposition: form-data; name=\"{}\"",
@@ -552,8 +550,7 @@ fn export_curl(name: &str, template: &RequestTemplate) -> String {
             lines.push(format!("  --data-raw {}", shell_string(&request.body)));
         }
         BodyMode::FormUrlEncoded => {
-            for field in active_body_fields(request)
-            {
+            for field in active_body_fields(request) {
                 lines
                     .last_mut()
                     .expect("request line exists")
@@ -565,8 +562,7 @@ fn export_curl(name: &str, template: &RequestTemplate) -> String {
             }
         }
         BodyMode::MultipartFormData => {
-            for field in active_body_fields(request)
-            {
+            for field in active_body_fields(request) {
                 lines
                     .last_mut()
                     .expect("request line exists")
@@ -620,8 +616,7 @@ fn export_powershell(name: &str, template: &RequestTemplate) -> String {
     }
     if request.body_mode == BodyMode::MultipartFormData {
         output.push_str("$form = @{\n");
-        for field in active_body_fields(request)
-        {
+        for field in active_body_fields(request) {
             let value = if field.kind == BodyFieldKind::File {
                 format!("Get-Item {}", powershell_string(&field.value))
             } else {
@@ -1110,8 +1105,7 @@ fn export_javascript_fetch(name: &str, template: &RequestTemplate) -> String {
     output.push('\n');
     if request.body_mode == BodyMode::MultipartFormData {
         output.push_str("const body = new FormData();\n");
-        for field in active_body_fields(request)
-        {
+        for field in active_body_fields(request) {
             if field.kind == BodyFieldKind::File {
                 let _ = writeln!(
                     output,
@@ -1152,8 +1146,7 @@ fn export_javascript_axios(name: &str, template: &RequestTemplate) -> String {
     output.push_str("\nimport axios from \"axios\";\n\n");
     if request.body_mode == BodyMode::MultipartFormData {
         output.push_str("const data = new FormData();\n");
-        for field in active_body_fields(request)
-        {
+        for field in active_body_fields(request) {
             let value = if field.kind == BodyFieldKind::File {
                 "file".to_owned()
             } else {
@@ -1186,8 +1179,7 @@ fn export_javascript_jquery(name: &str, template: &RequestTemplate) -> String {
     output.push('\n');
     if request.body_mode == BodyMode::MultipartFormData {
         output.push_str("const data = new FormData();\n");
-        for field in active_body_fields(request)
-        {
+        for field in active_body_fields(request) {
             let value = if field.kind == BodyFieldKind::File {
                 "file".to_owned()
             } else {
@@ -1264,8 +1256,7 @@ fn export_java_okhttp(name: &str, template: &RequestTemplate) -> String {
         output.push_str(
             "        RequestBody body = new MultipartBody.Builder().setType(MultipartBody.FORM)\n",
         );
-        for field in active_body_fields(request)
-        {
+        for field in active_body_fields(request) {
             if field.kind == BodyFieldKind::File {
                 let _ = writeln!(
                     output,
@@ -1353,8 +1344,7 @@ fn export_go_resty(name: &str, template: &RequestTemplate) -> String {
         );
     }
     if request.body_mode == BodyMode::MultipartFormData {
-        for field in active_body_fields(request)
-        {
+        for field in active_body_fields(request) {
             if field.kind == BodyFieldKind::File {
                 let _ = writeln!(
                     output,
@@ -1398,8 +1388,7 @@ fn export_csharp_http_client(name: &str, template: &RequestTemplate) -> String {
     );
     if request.body_mode == BodyMode::MultipartFormData {
         output.push_str("var content = new MultipartFormDataContent();\n");
-        for field in active_body_fields(request)
-        {
+        for field in active_body_fields(request) {
             if field.kind == BodyFieldKind::File {
                 let _ = writeln!(
                     output,
@@ -1478,8 +1467,7 @@ fn export_csharp_restsharp(
     }
     if request.body_mode == BodyMode::MultipartFormData {
         output.push_str("request.AlwaysMultipartFormData = true;\n");
-        for field in active_body_fields(request)
-        {
+        for field in active_body_fields(request) {
             if field.kind == BodyFieldKind::File {
                 let _ = writeln!(
                     output,
@@ -1544,8 +1532,7 @@ fn export_rust_reqwest(name: &str, template: &RequestTemplate) -> String {
     }
     if request.body_mode == BodyMode::MultipartFormData {
         output.push_str("    let mut form = reqwest::multipart::Form::new();\n");
-        for field in active_body_fields(request)
-        {
+        for field in active_body_fields(request) {
             if field.kind == BodyFieldKind::File {
                 let _ = writeln!(
                     output,
@@ -1565,8 +1552,7 @@ fn export_rust_reqwest(name: &str, template: &RequestTemplate) -> String {
         output.push_str("    request = request.multipart(form);\n");
     } else if request.body_mode == BodyMode::FormUrlEncoded {
         output.push_str("    request = request.form(&[\n");
-        for field in active_body_fields(request)
-        {
+        for field in active_body_fields(request) {
             let _ = writeln!(
                 output,
                 "        ({}, {}),",
@@ -1713,8 +1699,7 @@ fn export_php_curl(name: &str, template: &RequestTemplate) -> String {
     output.push_str("];\n");
     if request.body_mode == BodyMode::MultipartFormData {
         output.push_str("$body = [\n");
-        for field in active_body_fields(request)
-        {
+        for field in active_body_fields(request) {
             let value = if field.kind == BodyFieldKind::File {
                 format!("new CURLFile({})", php_string(&field.value))
             } else {
@@ -1762,8 +1747,7 @@ fn export_php_guzzle(name: &str, template: &RequestTemplate) -> String {
     match request.body_mode {
         BodyMode::MultipartFormData => {
             output.push_str("    'multipart' => [\n");
-            for field in active_body_fields(request)
-            {
+            for field in active_body_fields(request) {
                 let contents = if field.kind == BodyFieldKind::File {
                     format!("fopen({}, 'r')", php_string(&field.value))
                 } else {
@@ -1779,8 +1763,7 @@ fn export_php_guzzle(name: &str, template: &RequestTemplate) -> String {
         }
         BodyMode::FormUrlEncoded => {
             output.push_str("    'form_params' => [\n");
-            for field in active_body_fields(request)
-            {
+            for field in active_body_fields(request) {
                 let _ = writeln!(
                     output,
                     "        {} => {},",
@@ -1827,8 +1810,7 @@ fn export_kotlin_ktor(name: &str, template: &RequestTemplate) -> String {
     }
     if request.body_mode == BodyMode::MultipartFormData {
         output.push_str("        setBody(MultiPartFormDataContent(formData {\n");
-        for field in active_body_fields(request)
-        {
+        for field in active_body_fields(request) {
             if field.kind == BodyFieldKind::File {
                 let _ = writeln!(
                     output,
@@ -1868,8 +1850,7 @@ fn export_kotlin_okhttp(name: &str, template: &RequestTemplate) -> String {
         output.push_str(
             "    val body: RequestBody = MultipartBody.Builder().setType(MultipartBody.FORM)\n",
         );
-        for field in active_body_fields(request)
-        {
+        for field in active_body_fields(request) {
             if field.kind == BodyFieldKind::File {
                 let _ = writeln!(
                     output,
@@ -3704,6 +3685,9 @@ mod tests {
             request: RequestDraft {
                 method: "POST".to_owned(),
                 url: "https://api.example.com/v1/users?dry_run=true".to_owned(),
+                query_params: crate::core::query_params_from_url(
+                    "https://api.example.com/v1/users?dry_run=true",
+                ),
                 headers: vec![
                     HeaderEntry::new("Authorization", "Bearer {{token}}"),
                     HeaderEntry {
