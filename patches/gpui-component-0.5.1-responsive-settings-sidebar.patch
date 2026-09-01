@@ -54,7 +54,7 @@ index 6be242e..ab603aa 100644
  
          let query = state.read(cx).search_input.read(cx).value();
          let filtered_pages = self.filtered_pages(&query);
-@@ -262,9 +279,10 @@ impl RenderOnce for Settings {
+@@ -262,8 +279,9 @@ impl RenderOnce for Settings {
              group_variant: self.group_variant,
              layout: Axis::Horizontal,
          };
@@ -65,7 +65,7 @@ index 6be242e..ab603aa 100644
              .child(
                  resizable_panel()
                      .size(self.sidebar_width)
-@@ -272,11 +290,17 @@ impl RenderOnce for Settings {
+@@ -272,10 +290,16 @@ impl RenderOnce for Settings {
              )
 -            .child(resizable_panel().child(self.render_active_page(
 -                &state,
