@@ -24,7 +24,7 @@ use gpui_component::{
     clipboard::Clipboard,
     dialog::DialogButtonProps,
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputInlineAction, InputState},
     menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
     notification::Notification,
     popover::Popover,

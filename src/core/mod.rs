@@ -23,7 +23,9 @@ mod mvp_smoke_test;
 
 pub use chain::{ChainFailure, ChainLimits, ChainRun, run_chain};
 pub use database::{DatabaseStore, LocalWorkspace};
-pub use format::{format_body, format_raw_source, format_script_source, is_probably_text};
+pub use format::{
+    format_body, format_raw_source, format_script_source, is_probably_text, parse_json_lines,
+};
 pub use history::{HistoryEntry, REDACTED_VALUE, RequestHistory};
 pub use interchange::{
     ImportBundle, InterchangeFormat, MAX_INTERCHANGE_BYTES, export_request, import_requests,

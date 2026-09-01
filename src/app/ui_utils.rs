@@ -103,6 +103,7 @@ pub(super) fn code_language_for_raw_body(language: RawBodyLanguage) -> CodeLangu
     match language {
         RawBodyLanguage::Text => CodeLanguage::Plain,
         RawBodyLanguage::Json => CodeLanguage::Json,
+        RawBodyLanguage::JsonLines => CodeLanguage::Json,
         RawBodyLanguage::Xml => CodeLanguage::Html,
         RawBodyLanguage::Html => CodeLanguage::Html,
         RawBodyLanguage::JavaScript => CodeLanguage::JavaScript,

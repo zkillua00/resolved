@@ -3941,6 +3941,7 @@ mod tests {
                 id: "message-1".to_owned(),
                 name: "Ping".to_owned(),
                 payload: r#"{"type":"ping"}"#.to_owned(),
+                language: super::super::RawBodyLanguage::Json,
             }],
             ..Default::default()
         };

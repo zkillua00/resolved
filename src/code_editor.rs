@@ -10,8 +10,8 @@ use gpui_component::{
     ActiveTheme as _, RopeExt as _,
     highlighter::Diagnostic,
     input::{
-        CompletionProvider, Copy, Cut, HoverProvider, Input, InputEvent, InputState, Paste,
-        SelectAll, TabSize,
+        CompletionProvider, Copy, Cut, HoverProvider, Input, InputEvent, InputInlineAction,
+        InputState, Paste, SelectAll, TabSize,
     },
     menu::{PopupMenu, PopupMenuItem},
 };
@@ -275,6 +275,7 @@ impl CodeEditorConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeEditorEvent {
     FormatRequested,
+    InlineActionRequested { id: usize },
 }
 
 /// Reusable syntax-highlighted editor view backed by
@@ -348,6 +349,9 @@ impl CodeEditor {
 
         let input_subscription = cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
             cx.emit(event.clone());
+            if let InputEvent::InlineAction { id } = event {
+                cx.emit(CodeEditorEvent::InlineActionRequested { id: *id });
+            }
             if matches!(event, InputEvent::Change) && this.diagnostic_provider.is_some() {
                 this.schedule_diagnostic_refresh(cx);
             }
@@ -420,6 +424,11 @@ impl CodeEditor {
         self.input.update(cx, |input, cx| {
             input.set_highlighter(highlighter_language, cx)
         });
+    }
+
+    pub fn set_inline_actions(&mut self, actions: Vec<InputInlineAction>, cx: &mut Context<Self>) {
+        self.input
+            .update(cx, |input, cx| input.set_inline_actions(actions, cx));
     }
 
     pub fn set_placeholder(

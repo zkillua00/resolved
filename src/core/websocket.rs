@@ -52,6 +52,8 @@ pub struct WebSocketSavedMessage {
     pub id: String,
     pub name: String,
     pub payload: String,
+    #[serde(default)]
+    pub language: RawBodyLanguage,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

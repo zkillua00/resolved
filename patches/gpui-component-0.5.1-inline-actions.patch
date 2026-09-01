@@ -1,0 +1,164 @@
+diff --git a/src/input/state.rs b/src/input/state.rs
+--- a/src/input/state.rs
++++ b/src/input/state.rs
+@@ -123,8 +123,16 @@
+ pub enum InputEvent {
+     Change,
+     PressEnter { secondary: bool },
++    InlineAction { id: usize },
+     Focus,
+     Blur,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct InputInlineAction {
++    pub id: usize,
++    pub row: usize,
++    pub label: SharedString,
+ }
+ 
+ pub(super) const CONTEXT: &str = "Input";
+@@ -448,6 +456,8 @@
+     /// Fold chevrons drawn in the gutter, with their hit areas in text-local
+     /// pixels (origin = text bounds origin).
+     pub(super) fold_markers: Vec<FoldMarker>,
++    /// Click targets for application-provided actions painted beside a line.
++    pub(super) inline_action_hitboxes: Vec<(usize, Bounds<Pixels>)>,
+ }
+ 
+ /// A fold chevron rendered in the line-number gutter.
+@@ -536,6 +546,7 @@
+     pub(super) last_bounds: Option<Bounds<Pixels>>,
+     /// Application-provided semantic highlight ranges, stored as UTF-8 byte offsets.
+     pub(super) semantic_highlights: Vec<(Range<usize>, HighlightStyle)>,
++    pub(super) inline_actions: Vec<InputInlineAction>,
+     pub(super) last_selected_range: Option<Selection>,
+     pub(super) selecting: bool,
+     pub(super) size: Size,
+@@ -646,6 +657,7 @@
+             last_layout: None,
+             last_bounds: None,
+             semantic_highlights: Vec::new(),
++            inline_actions: Vec::new(),
+             last_selected_range: None,
+             last_cursor: None,
+             scroll_handle: ScrollHandle::new(),
+@@ -667,6 +679,17 @@
+             _context_menu_task: Task::ready(Ok(())),
+             _pending_update: false,
+             inline_completion: InlineCompletion::default(),
++        }
++    }
++
++    pub fn set_inline_actions(
++        &mut self,
++        actions: Vec<InputInlineAction>,
++        cx: &mut Context<Self>,
++    ) {
++        if self.inline_actions != actions {
++            self.inline_actions = actions;
++            cx.notify();
+         }
+     }
+ 
+@@ -1870,6 +1893,21 @@
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
++        if event.button == MouseButton::Left
++            && let Some((id, _)) = self
++                .last_layout
++                .as_ref()
++                .and_then(|layout| {
++                    layout
++                        .inline_action_hitboxes
++                        .iter()
++                        .find(|(_, bounds)| bounds.contains(&event.position))
++                })
++        {
++            cx.emit(InputEvent::InlineAction { id: *id });
++            return;
++        }
++
+         // Clear inline completion on any mouse interaction
+         self.clear_inline_completion(cx);
+ 
+diff --git a/src/input/element.rs b/src/input/element.rs
+--- a/src/input/element.rs
++++ b/src/input/element.rs
+@@ -2,9 +2,9 @@
+ 
+ use gpui::{
+     App, Bounds, Corners, Element, ElementId, ElementInputHandler, Entity, GlobalElementId, Half,
+-    HighlightStyle, Hitbox, Hsla, IntoElement, LayoutId, MouseButton, MouseMoveEvent, Path, Pixels,
+-    Point, ShapedLine, SharedString, Size, Style, TextRun, TextStyle, UnderlineStyle, Window, fill,
+-    point, px, relative, size,
++    HighlightStyle, Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId, MouseButton,
++    MouseMoveEvent, Path, Pixels, Point, ShapedLine, SharedString, Size, Style, TextRun, TextStyle,
++    UnderlineStyle, Window, fill, point, px, relative, size,
+ };
+ use ropey::Rope;
+ use smallvec::SmallVec;
+@@ -1096,6 +1096,7 @@
+             lines: Rc::new(vec![]),
+             cursor_bounds: None,
+             fold_markers: Vec::new(),
++            inline_action_hitboxes: Vec::new(),
+         };
+ 
+         let run = TextRun {
+@@ -1552,6 +1553,8 @@
+         let mut offset_y = mask_offset_y + invisible_top_padding;
+         let ghost_lines = &prepaint.ghost_lines;
+         let has_ghost_lines = !ghost_lines.is_empty();
++        let inline_actions = self.state.read(cx).inline_actions.clone();
++        prepaint.last_layout.inline_action_hitboxes.clear();
+ 
+         for (ix, line) in prepaint.last_layout.lines.iter().enumerate() {
+             let row = visible_range.start + ix;
+@@ -1562,6 +1565,45 @@
+ 
+             // Paint the actual line
+             _ = line.paint(p, line_height, window, cx);
++
++            if let Some(action) = inline_actions.iter().find(|action| action.row == row) {
++                let style = window.text_style();
++                let run = TextRun {
++                    len: action.label.len(),
++                    font: style.font(),
++                    color: cx.theme().primary,
++                    background_color: None,
++                    underline: None,
++                    strikethrough: None,
++                };
++                let label = window.text_system().shape_line(
++                    action.label.clone(),
++                    style.font_size.to_pixels(window.rem_size()),
++                    &[run],
++                    None,
++                );
++                let action_origin = point(
++                    p.x + line.longest_width + px(12.),
++                    p.y + line.size(line_height).height - line_height,
++                );
++                let action_bounds = Bounds::new(
++                    action_origin - point(px(4.), px(0.)),
++                    size(label.width + px(8.), line_height),
++                );
++                let hitbox = window.insert_hitbox(action_bounds, HitboxBehavior::Normal);
++                if hitbox.is_hovered(window) {
++                    window.paint_quad(
++                        fill(action_bounds, cx.theme().primary.opacity(0.12))
++                            .corner_radii(Corners::all(px(3.))),
++                    );
++                    window.set_cursor_style(gpui::CursorStyle::PointingHand, &hitbox);
++                }
++                _ = label.paint(action_origin, line_height, window, cx);
++                prepaint
++                    .last_layout
++                    .inline_action_hitboxes
++                    .push((action.id, action_bounds));
++            }
+             offset_y += line.size(line_height).height;
+ 
+             // After the cursor row, paint ghost lines (which shifts subsequent content down)

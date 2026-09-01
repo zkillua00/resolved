@@ -552,15 +552,19 @@ impl ApiTester {
             |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.sync_active_websocket_document(cx);
+                    this.refresh_websocket_composer_inline_actions(cx);
                 }
             },
         );
         let websocket_composer_format_subscription = cx.subscribe_in(
             &websocket_workspace.composer,
             window,
-            |this, _, event: &CodeEditorEvent, window, cx| {
-                if matches!(event, CodeEditorEvent::FormatRequested) {
+            |this, _, event: &CodeEditorEvent, window, cx| match event {
+                CodeEditorEvent::FormatRequested => {
                     this.format_websocket_composer(window, cx);
+                }
+                CodeEditorEvent::InlineActionRequested { id } => {
+                    this.send_websocket_json_record(*id, cx);
                 }
             },
         );
@@ -892,6 +896,7 @@ impl ApiTester {
             ],
         };
         this.apply_code_editor_settings(window, cx);
+        this.refresh_websocket_composer_inline_actions(cx);
         this.push_query_param_row("", "", "", true, window, cx);
         this.push_header_row("", "", true, true, window, cx);
         this.refresh_variable_intelligence(cx);

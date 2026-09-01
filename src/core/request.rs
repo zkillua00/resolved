@@ -144,6 +144,8 @@ pub enum RawBodyLanguage {
     Text,
     #[default]
     Json,
+    #[serde(rename = "jsonl")]
+    JsonLines,
     Xml,
     Html,
     #[serde(rename = "javascript")]
@@ -167,6 +169,7 @@ impl RawBodyLanguage {
         &[
             Self::Text,
             Self::Json,
+            Self::JsonLines,
             Self::Xml,
             Self::Html,
             Self::JavaScript,
@@ -187,6 +190,7 @@ impl RawBodyLanguage {
         match self {
             Self::Text => "text",
             Self::Json => "json",
+            Self::JsonLines => "jsonl",
             Self::Xml => "xml",
             Self::Html => "html",
             Self::JavaScript => "javascript",
@@ -214,6 +218,7 @@ impl RawBodyLanguage {
         match self {
             Self::Text => "Text",
             Self::Json => "JSON",
+            Self::JsonLines => "JSONL",
             Self::Xml => "XML",
             Self::Html => "HTML",
             Self::JavaScript => "JavaScript",
@@ -234,6 +239,7 @@ impl RawBodyLanguage {
         match self {
             Self::Text => "text/plain; charset=utf-8",
             Self::Json => "application/json",
+            Self::JsonLines => "application/x-ndjson",
             Self::Xml => "application/xml",
             Self::Html => "text/html; charset=utf-8",
             Self::JavaScript => "application/javascript",

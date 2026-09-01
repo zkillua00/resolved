@@ -4,6 +4,7 @@ use std::{
 };
 
 use super::*;
+use crate::core::parse_json_lines;
 use base64::Engine as _;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -271,6 +272,7 @@ impl ApiTester {
                 editor.set_value(document.automation_source.clone(), window, cx)
             });
         self.websocket_workspace.document = document;
+        self.refresh_websocket_composer_inline_actions(cx);
         self.websocket_workspace.notice = None;
         self.websocket_workspace.timeline.clear();
         self.websocket_workspace
@@ -295,6 +297,7 @@ impl ApiTester {
         self.websocket_workspace.composer.update(cx, |editor, cx| {
             editor.set_language(code_language_for_raw_body(language), cx)
         });
+        self.refresh_websocket_composer_inline_actions(cx);
         self.persist_websocket_document(cx);
         cx.notify();
     }
@@ -621,6 +624,10 @@ impl ApiTester {
                 return;
             }
         };
+        self.send_resolved_websocket_payload(payload, cx);
+    }
+
+    fn send_resolved_websocket_payload(&mut self, payload: String, cx: &mut Context<Self>) {
         let Some(sender) = self.websocket_workspace.command_sender.as_ref() else {
             self.websocket_workspace.notice = Some("Connect before sending a message.".to_owned());
             cx.notify();
@@ -643,6 +650,93 @@ impl ApiTester {
         cx.notify();
     }
 
+    fn resolve_websocket_json_lines(&self, source: &str) -> Result<Vec<String>, String> {
+        let resolved = self.resolve_websocket_text(source)?;
+        let records = parse_json_lines(&resolved)?;
+        if records.is_empty() {
+            return Err("The JSONL composer has no messages to send.".to_owned());
+        }
+        Ok(records
+            .into_iter()
+            .map(|record| resolved[record.range].to_owned())
+            .collect())
+    }
+
+    fn send_websocket_json_lines(&mut self, source: &str, cx: &mut Context<Self>) -> bool {
+        let payloads = match self.resolve_websocket_json_lines(source) {
+            Ok(payloads) => payloads,
+            Err(error) => {
+                self.websocket_workspace.notice = Some(error);
+                cx.notify();
+                return false;
+            }
+        };
+        if self.websocket_workspace.command_sender.is_none() {
+            self.websocket_workspace.notice = Some("Connect before sending a message.".to_owned());
+            cx.notify();
+            return false;
+        }
+        for payload in payloads {
+            self.send_resolved_websocket_payload(payload, cx);
+            if self.websocket_workspace.notice.is_some() {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(super) fn refresh_websocket_composer_inline_actions(&mut self, cx: &mut Context<Self>) {
+        let actions =
+            if self.websocket_workspace.document.composer_language == RawBodyLanguage::JsonLines {
+                let source = self.websocket_workspace.composer.read(cx).value(cx);
+                parse_json_lines(&source)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(id, record)| InputInlineAction {
+                        id,
+                        row: source[..record.range.end]
+                            .bytes()
+                            .filter(|byte| *byte == b'\n')
+                            .count(),
+                        label: "▷ Send".into(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        self.websocket_workspace
+            .composer
+            .update(cx, |editor, cx| editor.set_inline_actions(actions, cx));
+    }
+
+    pub(super) fn send_websocket_json_record(&mut self, id: usize, cx: &mut Context<Self>) {
+        let source = self.websocket_workspace.composer.read(cx).value(cx);
+        let resolved = match self.resolve_websocket_text(&source) {
+            Ok(payload) => payload,
+            Err(error) => {
+                self.websocket_workspace.notice = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let records = match parse_json_lines(&resolved) {
+            Ok(records) => records,
+            Err(error) => {
+                self.websocket_workspace.notice = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let Some(record) = records.get(id) else {
+            self.websocket_workspace.notice =
+                Some("That JSONL record changed before it could be sent.".to_owned());
+            cx.notify();
+            return;
+        };
+        self.send_resolved_websocket_payload(resolved[record.range.clone()].to_owned(), cx);
+    }
+
     fn send_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let payload = self
             .websocket_workspace
@@ -653,10 +747,14 @@ impl ApiTester {
         if payload.is_empty() {
             return;
         }
-        self.send_websocket_payload(payload, false, cx);
-        if self.websocket_workspace.document.reset_input_after_send
-            && self.websocket_workspace.notice.is_none()
-        {
+        let sent =
+            if self.websocket_workspace.document.composer_language == RawBodyLanguage::JsonLines {
+                self.send_websocket_json_lines(&payload, cx)
+            } else {
+                self.send_websocket_payload(payload, false, cx);
+                self.websocket_workspace.notice.is_none()
+            };
+        if self.websocket_workspace.document.reset_input_after_send && sent {
             self.websocket_workspace
                 .composer
                 .update(cx, |editor, cx| editor.set_value("", window, cx));
@@ -690,6 +788,7 @@ impl ApiTester {
                 id: new_websocket_id("message"),
                 name,
                 payload,
+                language: self.websocket_workspace.document.composer_language,
             });
         self.persist_websocket_document(cx);
     }
@@ -938,14 +1037,14 @@ impl ApiTester {
                         .mx_4()
                         .mt_2()
                         .min_w_0()
-                        .overflow_hidden()
+                        .flex_shrink_0()
                         .px_3()
                         .py_2()
                         .rounded_md()
                         .bg(cx.theme().danger.opacity(0.08))
                         .text_xs()
                         .text_color(cx.theme().danger)
-                        .child(div().truncate().child(notice)),
+                        .child(div().w_full().whitespace_normal().child(notice)),
                 )
             })
             .child(
@@ -989,6 +1088,7 @@ impl ApiTester {
             .iter()
             .map(|message| {
                 let payload = message.payload.clone();
+                let language = message.language;
                 h_flex()
                     .gap_2()
                     .px_3()
@@ -1016,7 +1116,11 @@ impl ApiTester {
                             .label("Send")
                             .small()
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.send_websocket_payload(payload.clone(), false, cx)
+                                if language == RawBodyLanguage::JsonLines {
+                                    this.send_websocket_json_lines(&payload, cx);
+                                } else {
+                                    this.send_websocket_payload(payload.clone(), false, cx);
+                                }
                             })),
                     )
             })
@@ -1306,232 +1410,298 @@ impl ApiTester {
                     .child(div().w(px(112.)).text_right().child("Time")),
             )
             .child(
-                v_flex()
-                    .id("websocket-timeline-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .track_scroll(&scroll_handle)
-                    .overflow_y_scrollbar()
-                    .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
-                        let delta = event.delta.pixel_delta(window.line_height()).y;
-                        let max_offset =
-                            this.websocket_workspace.timeline_scroll.max_offset().height;
-                        if max_offset <= px(2.) {
-                            this.websocket_workspace.timeline_following = true;
-                        } else if delta > px(0.) {
-                            this.websocket_workspace.timeline_following = false;
-                        } else if delta < px(0.) {
-                            let handle = &this.websocket_workspace.timeline_scroll;
-                            let distance = handle.max_offset().height + handle.offset().y;
-                            if distance <= -delta + px(2.) {
-                                this.websocket_workspace.timeline_following = true;
-                            }
-                        }
-                        cx.notify();
-                    }))
-                    .when(timeline_empty, |this| {
-                        this.child(
+                v_resizable("websocket-console-composer-split")
+                    .child(
+                        resizable_panel().size_range(px(120.)..px(1_400.)).child(
                             v_flex()
-                                .flex_1()
-                                .items_center()
-                                .justify_center()
-                                .gap_1()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(div().text_sm().font_semibold().child("No messages yet"))
-                                .child(div().text_xs().child("Connect and send a frame.")),
-                        )
-                    })
-                    .when(no_matches, |this| {
-                        this.child(
-                            v_flex()
-                                .flex_1()
-                                .items_center()
-                                .justify_center()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("No matching frames"),
-                        )
-                    })
-                    .children(entries.into_iter().map(|entry| {
-                        let (direction, marker, color) = match entry.direction {
-                            WebSocketTimelineDirection::Sent => ("Sent", "↑", cx.theme().primary),
-                            WebSocketTimelineDirection::Received => {
-                                ("Received", "↓", cx.theme().success)
-                            }
-                            WebSocketTimelineDirection::System => {
-                                ("System", "•", cx.theme().muted_foreground)
-                            }
-                        };
-                        let selected =
-                            self.websocket_workspace.selected_timeline_entry == Some(entry.id);
-                        let id = entry.id;
-                        let inspect_payload = entry.payload.clone();
-                        let context_payload = entry.payload.clone();
-                        let context_owner = cx.entity().downgrade();
-                        v_flex()
-                            .id(SharedString::from(format!(
-                                "websocket-frame-container-{}",
-                                entry.id
-                            )))
-                            .border_b_1()
-                            .border_color(cx.api_outline_variant())
-                            .when(selected, |this| this.bg(cx.api_surface_low()))
-                            .child(
-                                h_flex()
-                                    .id(SharedString::from(format!(
-                                        "websocket-frame-row-{}",
-                                        entry.id
-                                    )))
-                                    .min_w_0()
-                                    .px_3()
-                                    .py_2()
-                                    .text_xs()
-                                    .child(
-                                        h_flex()
-                                            .w(px(72.))
+                                .id("websocket-timeline-scroll")
+                                .size_full()
+                                .min_h_0()
+                                .track_scroll(&scroll_handle)
+                                .overflow_y_scrollbar()
+                                .on_scroll_wheel(cx.listener(
+                                    |this, event: &ScrollWheelEvent, window, cx| {
+                                        let delta = event.delta.pixel_delta(window.line_height()).y;
+                                        let max_offset = this
+                                            .websocket_workspace
+                                            .timeline_scroll
+                                            .max_offset()
+                                            .height;
+                                        if max_offset <= px(2.) {
+                                            this.websocket_workspace.timeline_following = true;
+                                        } else if delta > px(0.) {
+                                            this.websocket_workspace.timeline_following = false;
+                                        } else if delta < px(0.) {
+                                            let handle = &this.websocket_workspace.timeline_scroll;
+                                            let distance =
+                                                handle.max_offset().height + handle.offset().y;
+                                            if distance <= -delta + px(2.) {
+                                                this.websocket_workspace.timeline_following = true;
+                                            }
+                                        }
+                                        cx.notify();
+                                    },
+                                ))
+                                .when(timeline_empty, |this| {
+                                    this.child(
+                                        v_flex()
+                                            .flex_1()
+                                            .items_center()
+                                            .justify_center()
                                             .gap_1()
-                                            .font_semibold()
-                                            .text_color(color)
-                                            .child(marker)
-                                            .child(direction),
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_semibold()
+                                                    .child("No messages yet"),
+                                            )
+                                            .child(
+                                                div().text_xs().child("Connect and send a frame."),
+                                            ),
                                     )
+                                })
+                                .when(no_matches, |this| {
+                                    this.child(
+                                        v_flex()
+                                            .flex_1()
+                                            .items_center()
+                                            .justify_center()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("No matching frames"),
+                                    )
+                                })
+                                .children(entries.into_iter().map(|entry| {
+                                    let (direction, marker, color) = match entry.direction {
+                                        WebSocketTimelineDirection::Sent => {
+                                            ("Sent", "↑", cx.theme().primary)
+                                        }
+                                        WebSocketTimelineDirection::Received => {
+                                            ("Received", "↓", cx.theme().success)
+                                        }
+                                        WebSocketTimelineDirection::System => {
+                                            ("System", "•", cx.theme().muted_foreground)
+                                        }
+                                    };
+                                    let selected = self.websocket_workspace.selected_timeline_entry
+                                        == Some(entry.id);
+                                    let id = entry.id;
+                                    let inspect_payload = entry.payload.clone();
+                                    let context_payload = entry.payload.clone();
+                                    let context_owner = cx.entity().downgrade();
+                                    v_flex()
+                                        .id(SharedString::from(format!(
+                                            "websocket-frame-container-{}",
+                                            entry.id
+                                        )))
+                                        .border_b_1()
+                                        .border_color(cx.api_outline_variant())
+                                        .when(selected, |this| this.bg(cx.api_surface_low()))
+                                        .child(
+                                            h_flex()
+                                                .id(SharedString::from(format!(
+                                                    "websocket-frame-row-{}",
+                                                    entry.id
+                                                )))
+                                                .min_w_0()
+                                                .px_3()
+                                                .py_2()
+                                                .text_xs()
+                                                .child(
+                                                    h_flex()
+                                                        .w(px(72.))
+                                                        .gap_1()
+                                                        .font_semibold()
+                                                        .text_color(color)
+                                                        .child(marker)
+                                                        .child(direction),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .font_family(
+                                                            cx.theme().mono_font_family.clone(),
+                                                        )
+                                                        .child(entry.payload.clone()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .w(px(80.))
+                                                        .text_right()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(format!(
+                                                            "{} B",
+                                                            entry.payload.len()
+                                                        )),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .w(px(112.))
+                                                        .text_right()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(
+                                                            entry
+                                                                .at
+                                                                .format("%H:%M:%S%.3f")
+                                                                .to_string(),
+                                                        ),
+                                                )
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        if this
+                                                            .websocket_workspace
+                                                            .selected_timeline_entry
+                                                            == Some(id)
+                                                        {
+                                                            this.websocket_workspace
+                                                                .selected_timeline_entry = None;
+                                                            cx.notify();
+                                                            return;
+                                                        }
+                                                        let language = if serde_json::from_str::<
+                                                            serde_json::Value,
+                                                        >(
+                                                            &inspect_payload
+                                                        )
+                                                        .is_ok()
+                                                        {
+                                                            CodeLanguage::Json
+                                                        } else {
+                                                            CodeLanguage::Plain
+                                                        };
+                                                        this.websocket_workspace
+                                                            .timeline_preview
+                                                            .update(cx, |editor, cx| {
+                                                                editor.set_language(language, cx);
+                                                                editor.set_value(
+                                                                    inspect_payload.clone(),
+                                                                    window,
+                                                                    cx,
+                                                                );
+                                                            });
+                                                        this.websocket_workspace
+                                                            .selected_timeline_entry = Some(id);
+                                                        cx.notify();
+                                                    },
+                                                )),
+                                        )
+                                        .when(selected, |this| {
+                                            this.child(
+                                                div()
+                                                    .h(px(180.))
+                                                    .min_h_0()
+                                                    .overflow_hidden()
+                                                    .border_t_1()
+                                                    .border_color(cx.api_outline_variant())
+                                                    .child(
+                                                        self.websocket_workspace
+                                                            .timeline_preview
+                                                            .clone(),
+                                                    ),
+                                            )
+                                        })
+                                        .context_menu(move |menu, _, _| {
+                                            websocket_frame_context_menu(
+                                                menu,
+                                                context_owner.clone(),
+                                                context_payload.clone(),
+                                            )
+                                        })
+                                })),
+                        ),
+                    )
+                    .child(
+                        resizable_panel()
+                            .size(px(240.))
+                            .size_range(px(140.)..px(720.))
+                            .child(
+                                v_flex()
+                                    .size_full()
+                                    .min_h_0()
+                                    .border_t_1()
+                                    .border_color(cx.api_outline_variant())
+                                    .bg(cx.api_surface_lowest())
                                     .child(
                                         div()
                                             .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .font_family(cx.theme().mono_font_family.clone())
-                                            .child(entry.payload.clone()),
+                                            .min_h_0()
+                                            .overflow_hidden()
+                                            .child(self.websocket_workspace.composer.clone()),
                                     )
                                     .child(
-                                        div()
-                                            .w(px(80.))
-                                            .text_right()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(format!("{} B", entry.payload.len())),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(112.))
-                                            .text_right()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(entry.at.format("%H:%M:%S%.3f").to_string()),
-                                    )
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        if this.websocket_workspace.selected_timeline_entry
-                                            == Some(id)
-                                        {
-                                            this.websocket_workspace.selected_timeline_entry = None;
-                                            cx.notify();
-                                            return;
-                                        }
-                                        let language = if serde_json::from_str::<serde_json::Value>(
-                                            &inspect_payload,
-                                        )
-                                        .is_ok()
-                                        {
-                                            CodeLanguage::Json
-                                        } else {
-                                            CodeLanguage::Plain
-                                        };
-                                        this.websocket_workspace.timeline_preview.update(
-                                            cx,
-                                            |editor, cx| {
-                                                editor.set_language(language, cx);
-                                                editor.set_value(
-                                                    inspect_payload.clone(),
-                                                    window,
-                                                    cx,
-                                                );
-                                            },
-                                        );
-                                        this.websocket_workspace.selected_timeline_entry = Some(id);
-                                        cx.notify();
-                                    })),
-                            )
-                            .when(selected, |this| {
-                                this.child(
-                                    div()
-                                        .h(px(180.))
-                                        .min_h_0()
-                                        .overflow_hidden()
-                                        .border_t_1()
-                                        .border_color(cx.api_outline_variant())
-                                        .child(self.websocket_workspace.timeline_preview.clone()),
-                                )
-                            })
-                            .context_menu(move |menu, _, _| {
-                                websocket_frame_context_menu(
-                                    menu,
-                                    context_owner.clone(),
-                                    context_payload.clone(),
-                                )
-                            })
-                    })),
-            )
-            .child(
-                v_flex()
-                    .flex_shrink_0()
-                    .gap_2()
-                    .p_3()
-                    .border_t_1()
-                    .border_color(cx.api_outline_variant())
-                    .bg(cx.api_surface_low())
-                    .child(
-                        div()
-                            .h(px(132.))
-                            .overflow_hidden()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(cx.api_outline_variant())
-                            .child(self.websocket_workspace.composer.clone()),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Checkbox::new("websocket-reset-input")
-                                    .label("Clear after send")
-                                    .checked(
-                                        self.websocket_workspace.document.reset_input_after_send,
-                                    )
-                                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                        this.websocket_workspace.document.reset_input_after_send =
-                                            *checked;
-                                        this.persist_websocket_document(cx);
-                                    })),
-                            )
-                            .child(div().flex_1())
-                            .child(language_selector)
-                            .child(
-                                Button::new("format-websocket-composer")
-                                    .label("Format")
-                                    .small()
-                                    .outline()
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.format_websocket_composer(window, cx)
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .w(px(220.))
-                                    .child(Input::new(&self.websocket_workspace.message_name)),
-                            )
-                            .child(
-                                Button::new("save-websocket-message")
-                                    .label("Save")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.save_websocket_message(cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("websocket-send")
-                                    .label("Send")
-                                    .primary()
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.send_composer(window, cx)
-                                    })),
+                                        h_flex()
+                                            .h(px(52.))
+                                            .flex_shrink_0()
+                                            .gap_2()
+                                            .px_3()
+                                            .border_t_1()
+                                            .border_color(cx.api_outline_variant())
+                                            .bg(cx.api_surface_low())
+                                            .child(
+                                                Checkbox::new("websocket-reset-input")
+                                                    .label("Clear after send")
+                                                    .checked(
+                                                        self.websocket_workspace
+                                                            .document
+                                                            .reset_input_after_send,
+                                                    )
+                                                    .on_click(cx.listener(
+                                                        |this, checked: &bool, _, cx| {
+                                                            this.websocket_workspace
+                                                                .document
+                                                                .reset_input_after_send = *checked;
+                                                            this.persist_websocket_document(cx);
+                                                        },
+                                                    )),
+                                            )
+                                            .child(div().flex_1())
+                                            .child(language_selector)
+                                            .child(
+                                                Button::new("format-websocket-composer")
+                                                    .label("Format")
+                                                    .small()
+                                                    .outline()
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.format_websocket_composer(
+                                                                window, cx,
+                                                            )
+                                                        },
+                                                    )),
+                                            )
+                                            .child(div().w(px(220.)).child(Input::new(
+                                                &self.websocket_workspace.message_name,
+                                            )))
+                                            .child(
+                                                Button::new("save-websocket-message")
+                                                    .label("Save")
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.save_websocket_message(cx)
+                                                    })),
+                                            )
+                                            .child(
+                                                Button::new("websocket-send")
+                                                    .label(
+                                                        if composer_language
+                                                            == RawBodyLanguage::JsonLines
+                                                        {
+                                                            "Send all"
+                                                        } else {
+                                                            "Send"
+                                                        },
+                                                    )
+                                                    .primary()
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.send_composer(window, cx)
+                                                        },
+                                                    )),
+                                            ),
+                                    ),
                             ),
                     ),
             )
