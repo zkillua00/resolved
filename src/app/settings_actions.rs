@@ -237,6 +237,29 @@ impl ApiTester {
         self.commit_editor_settings_change(candidate, "Editor pair insertion updated.", window, cx);
     }
 
+    pub(super) fn set_editor_inline_action_placement(
+        &mut self,
+        placement: EditorInlineActionPlacement,
+        cx: &mut Context<Self>,
+    ) {
+        let mut candidate = self.settings.clone();
+        candidate.editor.inline_action_placement = placement;
+        if candidate.editor == self.settings.editor {
+            return;
+        }
+        match self.commit_settings(candidate, false, cx) {
+            Ok(()) => {
+                self.refresh_websocket_composer_inline_actions(cx);
+                self.settings_notice = Some(format!(
+                    "Inline editor actions now appear {}.",
+                    placement.label().to_lowercase()
+                ));
+            }
+            Err(error) => self.settings_notice = Some(error),
+        }
+        cx.notify();
+    }
+
     pub(super) fn set_formatter_indent_size(&mut self, indent_size: u8, cx: &mut Context<Self>) {
         let mut candidate = self.settings.clone();
         candidate.formatter.set_indent_size(indent_size);

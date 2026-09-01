@@ -129,6 +129,7 @@ pub struct EditorSettings {
         deserialize_with = "deserialize_bool_default_true"
     )]
     pub auto_close_pairs: bool,
+    pub inline_action_placement: EditorInlineActionPlacement,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -142,7 +143,27 @@ impl Default for EditorSettings {
             line_numbers: true,
             indent_guides: true,
             auto_close_pairs: true,
+            inline_action_placement: EditorInlineActionPlacement::Above,
             extra: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EditorInlineActionPlacement {
+    #[default]
+    Above,
+    After,
+}
+
+impl EditorInlineActionPlacement {
+    pub const ALL: [Self; 2] = [Self::Above, Self::After];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Above => "Above record",
+            Self::After => "After record",
         }
     }
 }
@@ -998,6 +1019,29 @@ mod tests {
         let unknown: AppSettings =
             serde_json::from_str(r#"{"metrics_position":"future_corner"}"#).unwrap();
         assert_eq!(unknown.metrics_position, MetricsPosition::BottomRight);
+    }
+
+    #[test]
+    fn inline_action_placement_round_trips_with_above_as_the_legacy_default() {
+        let legacy: EditorSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            legacy.inline_action_placement,
+            EditorInlineActionPlacement::Above
+        );
+
+        for placement in EditorInlineActionPlacement::ALL {
+            let settings = EditorSettings {
+                inline_action_placement: placement,
+                ..Default::default()
+            };
+            let encoded = serde_json::to_value(&settings).unwrap();
+            assert_eq!(
+                serde_json::from_value::<EditorSettings>(encoded)
+                    .unwrap()
+                    .inline_action_placement,
+                placement
+            );
+        }
     }
 
     #[test]

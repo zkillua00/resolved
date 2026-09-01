@@ -92,6 +92,7 @@ impl ApiTester {
                         self.editor_line_numbers_setting_item(cx),
                         self.editor_indent_guides_setting_item(cx),
                         self.editor_auto_close_pairs_setting_item(cx),
+                        self.editor_inline_action_placement_setting_item(cx),
                     ]),
             )
             .group(
@@ -343,6 +344,58 @@ impl ApiTester {
             }),
         )
         .description("Wrap long lines visually without changing their contents.")
+    }
+
+    fn editor_inline_action_placement_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Inline actions",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let selected = state.settings.editor.inline_action_placement;
+                let writable = state.settings_writable;
+                let menu_this = this.clone();
+
+                Button::new("editor-inline-action-placement-picker")
+                    .label(selected.label())
+                    .dropdown_caret(true)
+                    .outline()
+                    .w(px(220.))
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        "Choose where editor actions are inserted relative to their record",
+                    ))
+                    .dropdown_menu(move |mut menu, _, _| {
+                        menu = menu.min_w(px(220.));
+                        for placement in crate::core::EditorInlineActionPlacement::ALL {
+                            let item_this = menu_this.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(placement.label())
+                                    .checked(placement == selected)
+                                    .on_click(move |_, _, cx| {
+                                        if placement == selected {
+                                            return;
+                                        }
+                                        if let Some(this) = item_this.upgrade() {
+                                            this.update(cx, |this, cx| {
+                                                this.set_editor_inline_action_placement(
+                                                    placement, cx,
+                                                );
+                                            });
+                                        }
+                                    }),
+                            );
+                        }
+                        menu
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description("Place JSONL send actions above each record or after its closing line.")
     }
 
     fn editor_line_numbers_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {

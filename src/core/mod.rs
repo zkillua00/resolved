@@ -58,9 +58,10 @@ pub use script::{ScriptLog, ScriptTestResult};
 pub use secure_store::{CredentialVault, CredentialVaultError, UpstreamCredential};
 #[allow(unused_imports)]
 pub use settings::{
-    AppSettings, DEFAULT_ZOOM_PERCENT, EditorSettings, FormatterQuoteStyle, FormatterSemicolons,
-    FormatterSettings, FormatterTrailingCommas, MAX_ZOOM_PERCENT, MIN_ZOOM_PERCENT, MetricsPosition,
-    SavedTheme, ShortcutOverride, ThemeSettings, ZOOM_STEP_PERCENT, ZoomSettings,
+    AppSettings, DEFAULT_ZOOM_PERCENT, EditorInlineActionPlacement, EditorSettings,
+    FormatterQuoteStyle, FormatterSemicolons, FormatterSettings, FormatterTrailingCommas,
+    MAX_ZOOM_PERCENT, MIN_ZOOM_PERCENT, MetricsPosition, SavedTheme, ShortcutOverride,
+    ThemeSettings, ZOOM_STEP_PERCENT, ZoomSettings,
 };
 pub(crate) use snippet::{GENERATOR_WRAPPER_PREFIX, GENERATOR_WRAPPER_SUFFIX};
 pub use snippet::{
