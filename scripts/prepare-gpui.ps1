@@ -32,7 +32,8 @@ $pinned = @(
         patches = @(
             "$projectDir\patches\gpui-component-0.5.1-input-integration.patch",
             "$projectDir\patches\gpui-component-0.5.1-code-folding.patch",
-            "$projectDir\patches\gpui-component-0.5.1-indent-guide-layout.patch"
+            "$projectDir\patches\gpui-component-0.5.1-indent-guide-layout.patch",
+            "$projectDir\patches\gpui-component-0.5.1-responsive-settings-sidebar.patch"
         )
     }
 )
