@@ -2,6 +2,12 @@ use gpui_component::setting::{SettingField, SettingItem};
 
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ZoomTarget {
+    Interface,
+    Editor,
+}
+
 impl ApiTester {
     pub(crate) fn on_zoom_ui_in(
         &mut self,
@@ -9,7 +15,7 @@ impl ApiTester {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.adjust_zoom(true, 1, cx);
+        self.adjust_zoom(ZoomTarget::Interface, 1, cx);
     }
 
     pub(crate) fn on_zoom_ui_out(
@@ -18,7 +24,7 @@ impl ApiTester {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.adjust_zoom(true, -1, cx);
+        self.adjust_zoom(ZoomTarget::Interface, -1, cx);
     }
 
     pub(crate) fn on_zoom_ui_reset(
@@ -27,7 +33,7 @@ impl ApiTester {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.adjust_zoom(true, 0, cx);
+        self.adjust_zoom(ZoomTarget::Interface, 0, cx);
     }
 
     pub(crate) fn on_zoom_editor_in(
@@ -36,7 +42,7 @@ impl ApiTester {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.adjust_zoom(false, 1, cx);
+        self.adjust_zoom(ZoomTarget::Editor, 1, cx);
     }
 
     pub(crate) fn on_zoom_editor_out(
@@ -45,7 +51,7 @@ impl ApiTester {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.adjust_zoom(false, -1, cx);
+        self.adjust_zoom(ZoomTarget::Editor, -1, cx);
     }
 
     pub(crate) fn on_zoom_editor_reset(
@@ -54,7 +60,7 @@ impl ApiTester {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.adjust_zoom(false, 0, cx);
+        self.adjust_zoom(ZoomTarget::Editor, 0, cx);
     }
 
     /// Adjust one zoom surface by `ZOOM_STEP_PERCENT` steps and persist it.
@@ -62,7 +68,7 @@ impl ApiTester {
     /// `steps == 0` resets that surface to the baseline percentage. The theme
     /// is re-applied from its stored source so the new scale takes effect
     /// immediately without ever rewriting the user's theme CSS.
-    fn adjust_zoom(&mut self, ui: bool, steps: i16, cx: &mut Context<Self>) {
+    fn adjust_zoom(&mut self, target: ZoomTarget, steps: i16, cx: &mut Context<Self>) {
         if !self.settings_writable {
             self.settings_notice =
                 Some("Zoom is read-only because settings could not be loaded safely.".to_owned());
@@ -72,12 +78,12 @@ impl ApiTester {
         let previous = self.settings.zoom.clone();
         let mut candidate = self.settings.clone();
         if steps == 0 {
-            if ui {
+            if target == ZoomTarget::Interface {
                 candidate.zoom.ui = crate::core::DEFAULT_ZOOM_PERCENT;
             } else {
                 candidate.zoom.editor = crate::core::DEFAULT_ZOOM_PERCENT;
             }
-        } else if ui {
+        } else if target == ZoomTarget::Interface {
             candidate.zoom.step_ui(steps);
         } else {
             candidate.zoom.step_editor(steps);
@@ -86,7 +92,7 @@ impl ApiTester {
             return;
         }
         match self.commit_settings(candidate, false, cx) {
-            Ok(()) => self.reapply_theme_zoom(ui, cx),
+            Ok(()) => self.reapply_theme_zoom(target, cx),
             Err(error) => self.settings_notice = Some(error),
         }
         cx.notify();
@@ -94,7 +100,7 @@ impl ApiTester {
 
     /// Publish the persisted zoom and re-apply the active theme at the new
     /// scale so every open window repaints with it live.
-    fn reapply_theme_zoom(&mut self, ui: bool, cx: &mut Context<Self>) {
+    fn reapply_theme_zoom(&mut self, target: ZoomTarget, cx: &mut Context<Self>) {
         crate::theme::set_zoom(
             crate::theme::ThemeZoom {
                 ui: self.settings.zoom.effective_ui(),
@@ -113,7 +119,7 @@ impl ApiTester {
             }
             None => crate::theme::configure(cx),
         }
-        let (label, percent) = if ui {
+        let (label, percent) = if target == ZoomTarget::Interface {
             ("Interface zoom", self.settings.zoom.ui)
         } else {
             ("Editor zoom", self.settings.zoom.editor)
@@ -123,13 +129,13 @@ impl ApiTester {
 
     /// Settings row exposing the interface zoom controls.
     pub(super) fn ui_zoom_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
-        zoom_setting_item(cx, "Interface zoom", "ui-zoom", true)
+        zoom_setting_item(cx, "Interface zoom", "ui-zoom", ZoomTarget::Interface)
             .description("Zoom the whole interface; the assigned shortcut is shown under Keyboard.")
     }
 
     /// Settings row exposing the code editor zoom controls.
     pub(super) fn editor_zoom_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
-        zoom_setting_item(cx, "Editor zoom", "editor-zoom", false)
+        zoom_setting_item(cx, "Editor zoom", "editor-zoom", ZoomTarget::Editor)
             .description("Adjust code editor text size independently; the assigned shortcut is shown under Keyboard.")
     }
 }
@@ -141,7 +147,7 @@ fn zoom_setting_item(
     cx: &mut Context<ApiTester>,
     title: &'static str,
     element_id: &'static str,
-    editor: bool,
+    target: ZoomTarget,
 ) -> SettingItem {
     let this = cx.entity().downgrade();
     let row_this = this.clone();
@@ -158,7 +164,7 @@ fn zoom_setting_item(
             };
             let state = entity.read(cx);
             let writable = state.settings_writable;
-            let current = if editor {
+            let current = if target == ZoomTarget::Editor {
                 state.settings.zoom.editor
             } else {
                 state.settings.zoom.ui
@@ -175,11 +181,11 @@ fn zoom_setting_item(
                         .small()
                         .outline()
                         .disabled(!writable)
-                        .tooltip(zoom_control_tooltip(writable, "Make the interface larger"))
+                        .tooltip(zoom_control_tooltip(writable, target, Some(true)))
                         .on_click(move |_, window, cx| {
                             let _ = window;
                             if let Some(this) = in_this.upgrade() {
-                                this.update(cx, |this, cx| this.adjust_zoom(editor, 1, cx));
+                                this.update(cx, |this, cx| this.adjust_zoom(target, 1, cx));
                             }
                         }),
                 )
@@ -189,11 +195,11 @@ fn zoom_setting_item(
                         .small()
                         .outline()
                         .disabled(!writable)
-                        .tooltip(zoom_control_tooltip(writable, "Make the interface smaller"))
+                        .tooltip(zoom_control_tooltip(writable, target, Some(false)))
                         .on_click(move |_, window, cx| {
                             let _ = window;
                             if let Some(this) = out_this.upgrade() {
-                                this.update(cx, |this, cx| this.adjust_zoom(editor, -1, cx));
+                                this.update(cx, |this, cx| this.adjust_zoom(target, -1, cx));
                             }
                         }),
                 )
@@ -210,14 +216,11 @@ fn zoom_setting_item(
                         .small()
                         .ghost()
                         .disabled(!writable || current == crate::core::DEFAULT_ZOOM_PERCENT)
-                        .tooltip(zoom_control_tooltip(
-                            writable,
-                            "Return to the theme's baseline size (100%)",
-                        ))
+                        .tooltip(zoom_control_tooltip(writable, target, None))
                         .on_click(move |_, window, cx| {
                             let _ = window;
                             if let Some(this) = reset_this.upgrade() {
-                                this.update(cx, |this, cx| this.adjust_zoom(editor, 0, cx));
+                                this.update(cx, |this, cx| this.adjust_zoom(target, 0, cx));
                             }
                         }),
                 )
@@ -226,18 +229,25 @@ fn zoom_setting_item(
     )
 }
 
-fn zoom_control_tooltip(writable: bool, action: &'static str) -> &'static str {
-    if writable {
-        action
-    } else {
+fn zoom_control_tooltip(writable: bool, target: ZoomTarget, zoom_in: Option<bool>) -> &'static str {
+    if !writable {
         "Settings are read-only because they could not be loaded safely"
+    } else {
+        match (target, zoom_in) {
+            (_, None) => "Return to the theme's baseline size (100%)",
+            (ZoomTarget::Interface, Some(true)) => "Make the interface larger",
+            (ZoomTarget::Interface, Some(false)) => "Make the interface smaller",
+            (ZoomTarget::Editor, Some(true)) => "Make editor text larger",
+            (ZoomTarget::Editor, Some(false)) => "Make editor text smaller",
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{px, size, TestAppContext};
+    use crate::core::ZoomSettings;
+    use gpui::{TestAppContext, px, size};
 
     #[gpui::test]
     fn zoom_steps_persist_and_reapply_the_theme_at_the_new_scale(cx: &mut TestAppContext) {
@@ -306,5 +316,82 @@ mod tests {
         let reloaded = store.load_app_settings().expect("reload persisted zoom");
         assert_eq!(reloaded.zoom.ui, 90);
         assert_eq!(reloaded.zoom.editor, crate::core::DEFAULT_ZOOM_PERCENT);
+    }
+
+    #[gpui::test]
+    fn default_zoom_shortcuts_dispatch_to_the_correct_surface(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("create temporary database directory");
+        let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+        store.initialize().expect("initialize test database");
+
+        let mut app = None;
+        let store_for_app = store;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            let base_key_bindings = shortcuts::capture_base_key_bindings(cx);
+            crate::theme::configure(cx);
+            let view = cx.new(|cx| {
+                ApiTester::new_with_database_store(base_key_bindings, store_for_app, window, cx)
+            });
+            crate::register_app_action_handlers(&view, cx);
+            app = Some(view.clone());
+            gpui_component::Root::new(view, window, cx)
+        });
+        let app = app.expect("capture app entity");
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_resize(size(px(1_200.), px(800.)));
+        cx.run_until_parked();
+
+        let shortcut = |id| {
+            shortcuts::normalize_binding(shortcuts::shortcut_descriptor(id).default_binding)
+                .expect("default shortcut must normalize")
+        };
+        let ui_in = shortcut(shortcuts::ShortcutId::ZoomUiIn);
+        let ui_out = shortcut(shortcuts::ShortcutId::ZoomUiOut);
+        let ui_reset = shortcut(shortcuts::ShortcutId::ZoomUiReset);
+        let editor_in = shortcut(shortcuts::ShortcutId::ZoomEditorIn);
+        let editor_out = shortcut(shortcuts::ShortcutId::ZoomEditorOut);
+        let editor_reset = shortcut(shortcuts::ShortcutId::ZoomEditorReset);
+
+        cx.simulate_keystrokes(&ui_in);
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| app.read(cx).settings.zoom.clone()),
+            ZoomSettings {
+                ui: 110,
+                editor: 100,
+                ..Default::default()
+            }
+        );
+
+        cx.simulate_keystrokes(&editor_in);
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| app.read(cx).settings.zoom.clone()),
+            ZoomSettings {
+                ui: 110,
+                editor: 110,
+                ..Default::default()
+            }
+        );
+
+        cx.simulate_keystrokes(&ui_out);
+        cx.simulate_keystrokes(&editor_out);
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| app.read(cx).settings.zoom.clone()),
+            ZoomSettings::default()
+        );
+
+        cx.simulate_keystrokes(&ui_in);
+        cx.simulate_keystrokes(&editor_in);
+        cx.run_until_parked();
+        cx.simulate_keystrokes(&ui_reset);
+        cx.simulate_keystrokes(&editor_reset);
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| app.read(cx).settings.zoom.clone()),
+            ZoomSettings::default()
+        );
     }
 }
