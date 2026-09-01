@@ -12,9 +12,9 @@ use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Corner, Entity, EntityId,
     EntityInputHandler, ExternalPaths, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _,
-    PathPromptOptions, Pixels, Point, Rems, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, Timer, WeakEntity, Window, anchored, deferred, div, img,
-    point, prelude::FluentBuilder as _, px, rems,
+    PathPromptOptions, Pixels, Point, Rems, Render, ScrollHandle, ScrollWheelEvent, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Timer, WeakEntity, Window,
+    anchored, deferred, div, img, point, prelude::FluentBuilder as _, px, rems,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Root, RopeExt as _, Selectable as _,

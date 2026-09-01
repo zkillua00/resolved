@@ -555,11 +555,40 @@ impl ApiTester {
                 }
             },
         );
+        let websocket_composer_format_subscription = cx.subscribe_in(
+            &websocket_workspace.composer,
+            window,
+            |this, _, event: &CodeEditorEvent, window, cx| {
+                if matches!(event, CodeEditorEvent::FormatRequested) {
+                    this.format_websocket_composer(window, cx);
+                }
+            },
+        );
+        let websocket_timeline_preview_format_subscription = cx.subscribe_in(
+            &websocket_workspace.timeline_preview,
+            window,
+            |this, _, event: &CodeEditorEvent, window, cx| {
+                if matches!(event, CodeEditorEvent::FormatRequested) {
+                    this.format_websocket_timeline_preview(window, cx);
+                }
+            },
+        );
         let websocket_automation_subscription = cx.subscribe(
             &websocket_workspace.automation,
             |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.sync_active_websocket_document(cx);
+                }
+            },
+        );
+        let websocket_timeline_filter_subscription = cx.subscribe(
+            &websocket_workspace.timeline_filter,
+            |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    if this.websocket_workspace.timeline_following {
+                        this.websocket_workspace.timeline_scroll.scroll_to_bottom();
+                    }
+                    cx.notify();
                 }
             },
         );
@@ -856,7 +885,10 @@ impl ApiTester {
                 websocket_url_subscription,
                 websocket_headers_subscription,
                 websocket_composer_subscription,
+                websocket_composer_format_subscription,
+                websocket_timeline_preview_format_subscription,
                 websocket_automation_subscription,
+                websocket_timeline_filter_subscription,
             ],
         };
         this.apply_code_editor_settings(window, cx);

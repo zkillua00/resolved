@@ -24,7 +24,7 @@ use tokio_tungstenite::{
     },
 };
 
-use super::HeaderEntry;
+use super::{HeaderEntry, RawBodyLanguage};
 
 pub const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_WEBSOCKET_TIMELINE_ENTRIES: usize = 2_000;
@@ -38,6 +38,7 @@ pub struct WebSocketWorkspace {
     pub url: String,
     pub headers: Vec<HeaderEntry>,
     pub composer: String,
+    pub composer_language: RawBodyLanguage,
     pub messages: Vec<WebSocketSavedMessage>,
     pub templates: Vec<WebSocketMessageTemplate>,
     pub replays: Vec<WebSocketReplay>,

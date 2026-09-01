@@ -3935,6 +3935,7 @@ mod tests {
         let document = super::super::WebSocketWorkspace {
             url: "wss://example.test/{{room}}".to_owned(),
             composer: r#"{"type":"ping"}"#.to_owned(),
+            composer_language: super::super::RawBodyLanguage::Json,
             reset_input_after_send: true,
             messages: vec![super::super::WebSocketSavedMessage {
                 id: "message-1".to_owned(),
