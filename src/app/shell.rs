@@ -179,6 +179,7 @@ mod tests {
 
     struct RetainedSettingsHarness {
         settings_visible: bool,
+        sidebar_width: Pixels,
         background_clicks: Rc<Cell<usize>>,
         rendered_page: Rc<Cell<usize>>,
     }
@@ -190,7 +191,7 @@ mod tests {
             let first_page_rendered = Rc::clone(&self.rendered_page);
             let second_page_rendered = Rc::clone(&self.rendered_page);
             let settings = Settings::new("retained-settings-test")
-                .sidebar_width(px(180.))
+                .sidebar_width(self.sidebar_width)
                 .pages([
                     SettingPage::new("First")
                         .resettable(false)
@@ -247,6 +248,7 @@ mod tests {
             crate::theme::configure(cx);
             let view = cx.new(|_| RetainedSettingsHarness {
                 settings_visible: true,
+                sidebar_width: px(180.),
                 background_clicks: Rc::clone(&background_clicks),
                 rendered_page: Rc::clone(&rendered_page),
             });
@@ -282,6 +284,19 @@ mod tests {
         assert_eq!(rendered_page.get(), 2);
 
         let harness = harness.expect("the window builder installs the settings harness");
+        cx.update(|_, cx| {
+            harness.update(cx, |harness, cx| {
+                harness.sidebar_width = px(126.);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            rendered_page.get(),
+            2,
+            "changing the sidebar width must preserve Settings page/search state"
+        );
+
         cx.update(|_, cx| {
             harness.update(cx, |harness, cx| {
                 harness.settings_visible = false;

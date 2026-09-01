@@ -12,9 +12,9 @@ use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Corner, Entity, EntityId,
     EntityInputHandler, ExternalPaths, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _,
-    PathPromptOptions, Pixels, Point, Render, SharedString, StatefulInteractiveElement as _,
+    PathPromptOptions, Pixels, Point, Rems, Render, SharedString, StatefulInteractiveElement as _,
     Styled as _, Subscription, Task, Timer, WeakEntity, Window, anchored, deferred, div, img,
-    point, prelude::FluentBuilder as _, px,
+    point, prelude::FluentBuilder as _, px, rems,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Root, RopeExt as _, Selectable as _,
@@ -160,6 +160,7 @@ mod workspace_connections;
 mod workspace_panes;
 mod workspace_tab;
 mod workspace_tab_actions;
+mod zoom_settings;
 
 use environment_variable_grid::EnvironmentVariableRow;
 use execution_stage::*;
@@ -187,7 +188,8 @@ const TEMPLATE_HOVER_DEBOUNCE: Duration = Duration::from_millis(120);
 const REQUEST_TABS_PERSIST_DEBOUNCE: Duration = Duration::from_millis(450);
 const THEME_EDITOR_VALIDATION_DEBOUNCE: Duration = Duration::from_millis(100);
 const THEME_EDITOR_PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
-const APP_TITLE_BAR_HEIGHT: f32 = 52.;
+/// Height of every in-app title bar, in rems so interface zoom scales it.
+const APP_TITLE_BAR_HEIGHT: Rems = Rems(3.25);
 
 struct ThemeEditorSession {
     theme_id: Option<String>,

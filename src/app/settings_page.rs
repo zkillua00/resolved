@@ -6,7 +6,8 @@ use gpui_component::switch::Switch;
 
 use super::*;
 
-const SETTINGS_SIDEBAR_WIDTH: Pixels = px(220.);
+pub(super) const SETTINGS_SIDEBAR_WIDTH: Rems = Rems(13.75);
+const SETTINGS_MESSAGE_ROW_INSET: Rems = Rems(3.5);
 
 impl ApiTester {
     /// Memoized parse of a theme's CSS source. Parsing happens once per
@@ -39,7 +40,7 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         h_flex()
-            .h(px(APP_TITLE_BAR_HEIGHT))
+            .h(APP_TITLE_BAR_HEIGHT)
             .flex_shrink_0()
             .pl(window_chrome::leading_inset())
             .pr(window_chrome::trailing_inset())
@@ -107,6 +108,12 @@ impl ApiTester {
                         self.formatter_semicolons_setting_item(cx),
                         self.formatter_trailing_commas_setting_item(cx),
                     ]),
+            )
+            .group(
+                SettingGroup::new()
+                    .title("Zoom")
+                    .description("Adjust code editor text size independently of the interface.")
+                    .item(self.editor_zoom_setting_item(cx)),
             );
         let mut keyboard_page = SettingPage::new("Keyboard")
             .description("Record shortcuts directly. Defaults follow familiar macOS conventions.")
@@ -128,14 +135,24 @@ impl ApiTester {
             );
         }
 
-        let appearance_page = SettingPage::new("Appearance").resettable(false).group(
-            SettingGroup::new()
-                .with_variant(GroupBoxVariant::Normal)
-                .items([
-                    self.theme_global_actions_setting_item(cx),
-                    self.theme_library_setting_item(cx),
-                ]),
-        );
+        let appearance_page = SettingPage::new("Appearance")
+            .resettable(false)
+            .group(
+                SettingGroup::new()
+                    .with_variant(GroupBoxVariant::Normal)
+                    .items([
+                        self.theme_global_actions_setting_item(cx),
+                        self.theme_library_setting_item(cx),
+                    ]),
+            )
+            .group(
+                SettingGroup::new()
+                    .title("Zoom")
+                    .description(
+                        "Make the whole interface larger or smaller without changing the theme.",
+                    )
+                    .item(self.ui_zoom_setting_item(cx)),
+            );
         let developer_page = SettingPage::new("Developer Settings")
             .description("Enable diagnostics for inspecting Resolved while it is running.")
             .resettable(false)
@@ -159,36 +176,27 @@ impl ApiTester {
             developer_page,
         ]);
 
+        let (message_inset, message_overlay) = settings_message_overlay(
+            self.settings_warning.clone(),
+            self.settings_notice.clone(),
+            cx,
+        );
+
         v_flex()
             .relative()
             .size_full()
             .min_h_0()
             .bg(cx.theme().background)
-            .child(settings_sidebar_underlay(SETTINGS_SIDEBAR_WIDTH, cx))
-            .when_some(self.settings_warning.clone(), |this, warning| {
-                this.child(dismissible_settings_message(
-                    warning,
-                    cx.theme().danger,
-                    SettingsMessageKind::Warning,
-                    cx,
-                ))
-            })
-            .when_some(self.settings_notice.clone(), |this, notice| {
-                this.child(dismissible_settings_message(
-                    notice,
-                    cx.theme().info,
-                    SettingsMessageKind::Notice,
-                    cx,
-                ))
-            })
             .child(
                 div().flex_1().min_h_0().child(
                     SettingsView::new("api-tester-settings")
-                        .sidebar_width(SETTINGS_SIDEBAR_WIDTH)
+                        .sidebar_width(SETTINGS_SIDEBAR_WIDTH.to_pixels(cx.theme().font_size))
+                        .content_top_inset(message_inset)
                         .with_group_variant(GroupBoxVariant::Outline)
                         .pages(pages),
                 ),
             )
+            .when_some(message_overlay, |this, overlay| this.child(overlay))
             .into_any_element()
     }
 
@@ -238,7 +246,7 @@ impl ApiTester {
                     .label(format!("{selected} spaces"))
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(settings_control_tooltip(
                         writable,
@@ -453,7 +461,7 @@ impl ApiTester {
                     .label(format!("{selected} spaces"))
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(settings_control_tooltip(
                         writable,
@@ -536,7 +544,7 @@ impl ApiTester {
                     .label(format!("{selected} columns"))
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(settings_control_tooltip(
                         writable,
@@ -586,7 +594,7 @@ impl ApiTester {
                     .label(selected.label())
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(settings_control_tooltip(
                         writable,
@@ -641,7 +649,7 @@ impl ApiTester {
                     .label(selected.label())
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(settings_control_tooltip(
                         writable,
@@ -693,7 +701,7 @@ impl ApiTester {
                     .label(selected.label())
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(settings_control_tooltip(
                         writable,
@@ -900,7 +908,7 @@ impl ApiTester {
                     .label(selected.label())
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(if writable {
                         "Choose which workspace corner contains the Metrics HUD"
@@ -1633,6 +1641,49 @@ pub(super) enum SettingsMessageKind {
     Notice,
 }
 
+pub(super) fn settings_message_overlay(
+    warning: Option<String>,
+    notice: Option<String>,
+    cx: &mut Context<ApiTester>,
+) -> (Pixels, Option<AnyElement>) {
+    let mut messages = Vec::with_capacity(2);
+    if let Some(warning) = warning {
+        messages.push(dismissible_settings_message(
+            warning,
+            cx.theme().danger,
+            SettingsMessageKind::Warning,
+            cx,
+        ));
+    }
+    if let Some(notice) = notice {
+        messages.push(dismissible_settings_message(
+            notice,
+            cx.theme().info,
+            SettingsMessageKind::Notice,
+            cx,
+        ));
+    }
+
+    if messages.is_empty() {
+        return (px(0.), None);
+    }
+
+    let inset =
+        Rems(SETTINGS_MESSAGE_ROW_INSET.0 * messages.len() as f32).to_pixels(cx.theme().font_size);
+    let overlay = deferred(
+        v_flex()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .children(messages),
+    )
+    .with_priority(1)
+    .into_any_element();
+
+    (inset, Some(overlay))
+}
+
 pub(super) fn dismissible_settings_message(
     message: String,
     color: Hsla,
@@ -1643,8 +1694,10 @@ pub(super) fn dismissible_settings_message(
         SettingsMessageKind::Warning => "dismiss-settings-warning",
         SettingsMessageKind::Notice => "dismiss-settings-notice",
     };
+    let background = cx.theme().background.blend(color.opacity(0.1));
 
     h_flex()
+        .occlude()
         .mx_4()
         .mt_3()
         .px_3()
@@ -1653,7 +1706,7 @@ pub(super) fn dismissible_settings_message(
         .rounded_md()
         .border_1()
         .border_color(color.opacity(0.45))
-        .bg(color.opacity(0.1))
+        .bg(background)
         .text_sm()
         .text_color(color)
         .child(div().flex_1().min_w_0().child(message))
@@ -1671,18 +1724,5 @@ pub(super) fn dismissible_settings_message(
                     cx.notify();
                 })),
         )
-        .into_any_element()
-}
-
-pub(super) fn settings_sidebar_underlay(sidebar_width: Pixels, cx: &App) -> AnyElement {
-    div()
-        .absolute()
-        .top_0()
-        .bottom_0()
-        .left_0()
-        .w(sidebar_width)
-        .bg(cx.theme().sidebar)
-        .border_r_1()
-        .border_color(cx.theme().sidebar_border)
         .into_any_element()
 }

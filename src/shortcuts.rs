@@ -33,6 +33,12 @@ actions!(
         ShowSettings,
         ToggleNavigation,
         ToggleMetrics,
+        ZoomUiIn,
+        ZoomUiOut,
+        ZoomUiReset,
+        ZoomEditorIn,
+        ZoomEditorOut,
+        ZoomEditorReset,
         QuitApp,
     ]
 );
@@ -54,6 +60,12 @@ pub enum ShortcutId {
     ShowSettings,
     ToggleNavigation,
     ToggleMetrics,
+    ZoomUiIn,
+    ZoomUiOut,
+    ZoomUiReset,
+    ZoomEditorIn,
+    ZoomEditorOut,
+    ZoomEditorReset,
     QuitApp,
 }
 
@@ -75,6 +87,12 @@ impl ShortcutId {
             Self::ShowSettings => "navigation.settings",
             Self::ToggleNavigation => "view.toggle_navigation",
             Self::ToggleMetrics => "view.toggle_metrics",
+            Self::ZoomUiIn => "view.zoom_ui_in",
+            Self::ZoomUiOut => "view.zoom_ui_out",
+            Self::ZoomUiReset => "view.zoom_ui_reset",
+            Self::ZoomEditorIn => "editor.zoom_in",
+            Self::ZoomEditorOut => "editor.zoom_out",
+            Self::ZoomEditorReset => "editor.zoom_reset",
             Self::QuitApp => "app.quit",
         }
     }
@@ -220,6 +238,42 @@ pub const SHORTCUT_DESCRIPTORS: &[ShortcutDescriptor] = &[
         label: "Toggle metrics",
         category: ShortcutCategory::Interface,
         default_binding: "cmd-shift-m",
+    },
+    ShortcutDescriptor {
+        id: ShortcutId::ZoomUiIn,
+        label: "Zoom interface in",
+        category: ShortcutCategory::Interface,
+        default_binding: "cmd-=",
+    },
+    ShortcutDescriptor {
+        id: ShortcutId::ZoomUiOut,
+        label: "Zoom interface out",
+        category: ShortcutCategory::Interface,
+        default_binding: "cmd--",
+    },
+    ShortcutDescriptor {
+        id: ShortcutId::ZoomUiReset,
+        label: "Reset interface zoom",
+        category: ShortcutCategory::Interface,
+        default_binding: "cmd-0",
+    },
+    ShortcutDescriptor {
+        id: ShortcutId::ZoomEditorIn,
+        label: "Zoom editor in",
+        category: ShortcutCategory::Interface,
+        default_binding: "cmd-alt-=",
+    },
+    ShortcutDescriptor {
+        id: ShortcutId::ZoomEditorOut,
+        label: "Zoom editor out",
+        category: ShortcutCategory::Interface,
+        default_binding: "cmd-alt--",
+    },
+    ShortcutDescriptor {
+        id: ShortcutId::ZoomEditorReset,
+        label: "Reset editor zoom",
+        category: ShortcutCategory::Interface,
+        default_binding: "cmd-alt-0",
     },
     ShortcutDescriptor {
         id: ShortcutId::SaveRequest,
@@ -586,6 +640,12 @@ fn key_binding(id: ShortcutId, binding: &str, context: Option<&str>) -> KeyBindi
         ShortcutId::ShowSettings => KeyBinding::new(binding, ShowSettings, context),
         ShortcutId::ToggleNavigation => KeyBinding::new(binding, ToggleNavigation, context),
         ShortcutId::ToggleMetrics => KeyBinding::new(binding, ToggleMetrics, context),
+        ShortcutId::ZoomUiIn => KeyBinding::new(binding, ZoomUiIn, context),
+        ShortcutId::ZoomUiOut => KeyBinding::new(binding, ZoomUiOut, context),
+        ShortcutId::ZoomUiReset => KeyBinding::new(binding, ZoomUiReset, context),
+        ShortcutId::ZoomEditorIn => KeyBinding::new(binding, ZoomEditorIn, context),
+        ShortcutId::ZoomEditorOut => KeyBinding::new(binding, ZoomEditorOut, context),
+        ShortcutId::ZoomEditorReset => KeyBinding::new(binding, ZoomEditorReset, context),
         ShortcutId::QuitApp => KeyBinding::new(binding, QuitApp, context),
     }
 }

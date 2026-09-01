@@ -84,7 +84,7 @@ impl ApiTester {
             });
 
         h_flex()
-            .h(px(42.))
+            .h(rems(2.625))
             .w_full()
             .flex_shrink_0()
             .border_b_1()

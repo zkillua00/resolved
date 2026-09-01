@@ -94,4 +94,5 @@ prepare_crate \
     "d021d46b4088d3d93a57ccdf443da85695a77272108caca2f6fe5369f584966a" \
     "$project_dir/patches/gpui-component-0.5.1-input-integration.patch" \
     "$project_dir/patches/gpui-component-0.5.1-code-folding.patch" \
-    "$project_dir/patches/gpui-component-0.5.1-indent-guide-layout.patch"
+    "$project_dir/patches/gpui-component-0.5.1-indent-guide-layout.patch" \
+    "$project_dir/patches/gpui-component-0.5.1-responsive-settings-sidebar.patch"
