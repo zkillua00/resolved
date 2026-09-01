@@ -39,6 +39,13 @@ enum WebSocketTimelineFilter {
     Received,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum WebSocketLibrarySelection {
+    Message(String),
+    Template(String),
+    NewTemplate,
+}
+
 struct WebSocketTimelineEntry {
     id: u64,
     direction: WebSocketTimelineDirection,
@@ -53,8 +60,11 @@ pub(in crate::app) struct WebSocketWorkspaceState {
     pub(in crate::app) headers: Entity<CodeEditor>,
     pub(in crate::app) composer: Entity<CodeEditor>,
     message_name: Entity<InputState>,
+    pub(in crate::app) library_search: Entity<InputState>,
+    library_selection: Option<WebSocketLibrarySelection>,
+    pub(in crate::app) library_preview: Entity<CodeEditor>,
     template_name: Entity<InputState>,
-    template_payload: Entity<CodeEditor>,
+    pub(in crate::app) template_payload: Entity<CodeEditor>,
     replay_name: Entity<InputState>,
     pub(in crate::app) automation: Entity<CodeEditor>,
     section: WebSocketSection,
@@ -132,6 +142,20 @@ impl WebSocketWorkspaceState {
                 cx,
             )
         });
+        let library_preview = cx.new(|cx| {
+            CodeEditor::new(
+                CodeEditorConfig::default()
+                    .language(CodeLanguage::Plain)
+                    .placeholder("Select a saved message")
+                    .rows(12)
+                    .soft_wrap(false)
+                    .line_numbers(true)
+                    .read_only(true)
+                    .format_action(true),
+                window,
+                cx,
+            )
+        });
         let automation = cx.new(|cx| {
             CodeEditor::new(
                 CodeEditorConfig::default()
@@ -170,6 +194,9 @@ impl WebSocketWorkspaceState {
             composer,
             message_name: cx
                 .new(|cx| InputState::new(window, cx).placeholder("Saved message name")),
+            library_search: cx.new(|cx| InputState::new(window, cx).placeholder("Search messages")),
+            library_selection: None,
+            library_preview,
             template_name: cx.new(|cx| InputState::new(window, cx).placeholder("Template name")),
             template_payload,
             replay_name: cx.new(|cx| InputState::new(window, cx).placeholder("Replay name")),
@@ -285,6 +312,10 @@ impl ApiTester {
         self.websocket_workspace.sent_session.clear();
         self.websocket_workspace.active_template_id = None;
         self.websocket_workspace.template_values.clear();
+        self.websocket_workspace.library_selection = None;
+        self.websocket_workspace
+            .library_search
+            .update(cx, |input, cx| input.set_value("", window, cx));
         self.websocket_workspace.hydrating = false;
     }
 
@@ -325,6 +356,30 @@ impl ApiTester {
             _ => RawBodyLanguage::Text,
         };
         self.format_websocket_editor(editor, language, "frame payload", window, cx);
+    }
+
+    pub(super) fn format_websocket_library_preview(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editor = self.websocket_workspace.library_preview.clone();
+        let language = match editor.read(cx).language() {
+            CodeLanguage::Json => RawBodyLanguage::Json,
+            CodeLanguage::JavaScript => RawBodyLanguage::JavaScript,
+            CodeLanguage::TypeScript => RawBodyLanguage::TypeScript,
+            _ => RawBodyLanguage::Text,
+        };
+        self.format_websocket_editor(editor, language, "saved message", window, cx);
+    }
+
+    pub(super) fn format_websocket_template(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editor = self.websocket_workspace.template_payload.clone();
+        self.format_websocket_editor(editor, RawBodyLanguage::Json, "template", window, cx);
     }
 
     fn format_websocket_editor(
@@ -830,15 +885,151 @@ impl ApiTester {
             cx.notify();
             return;
         }
+        let selected_id = match &self.websocket_workspace.library_selection {
+            Some(WebSocketLibrarySelection::Template(id)) => Some(id.clone()),
+            _ => None,
+        };
+        if let Some(template) = selected_id.as_deref().and_then(|id| {
+            self.websocket_workspace
+                .document
+                .templates
+                .iter_mut()
+                .find(|template| template.id == id)
+        }) {
+            template.name = name;
+            template.payload = payload;
+        } else {
+            let id = new_websocket_id("template");
+            self.websocket_workspace
+                .document
+                .templates
+                .push(WebSocketMessageTemplate {
+                    id: id.clone(),
+                    name,
+                    payload,
+                });
+            self.websocket_workspace.library_selection =
+                Some(WebSocketLibrarySelection::Template(id));
+        }
+        self.persist_websocket_document(cx);
+    }
+
+    fn new_websocket_template(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.websocket_workspace.library_selection = Some(WebSocketLibrarySelection::NewTemplate);
+        self.websocket_workspace.active_template_id = None;
+        self.websocket_workspace.template_values.clear();
         self.websocket_workspace
+            .template_name
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.websocket_workspace
+            .template_payload
+            .update(cx, |editor, cx| editor.set_value("", window, cx));
+        cx.notify();
+    }
+
+    fn select_websocket_library_message(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(message) = self
+            .websocket_workspace
+            .document
+            .messages
+            .iter()
+            .find(|message| message.id == id)
+        else {
+            return;
+        };
+        let payload = message.payload.clone();
+        let language = message.language;
+        self.websocket_workspace.library_selection = Some(WebSocketLibrarySelection::Message(id));
+        self.websocket_workspace.active_template_id = None;
+        self.websocket_workspace.template_values.clear();
+        self.websocket_workspace
+            .library_preview
+            .update(cx, |editor, cx| {
+                editor.set_language(code_language_for_raw_body(language), cx);
+                editor.set_value(payload, window, cx);
+            });
+        cx.notify();
+    }
+
+    fn select_websocket_library_template(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(template) = self
+            .websocket_workspace
             .document
             .templates
-            .push(WebSocketMessageTemplate {
-                id: new_websocket_id("template"),
-                name,
-                payload,
-            });
+            .iter()
+            .find(|template| template.id == id)
+        else {
+            return;
+        };
+        let name = template.name.clone();
+        let payload = template.payload.clone();
+        self.websocket_workspace.library_selection = Some(WebSocketLibrarySelection::Template(id));
+        self.websocket_workspace.active_template_id = None;
+        self.websocket_workspace.template_values.clear();
+        self.websocket_workspace
+            .template_name
+            .update(cx, |input, cx| input.set_value(name, window, cx));
+        self.websocket_workspace
+            .template_payload
+            .update(cx, |editor, cx| editor.set_value(payload, window, cx));
+        cx.notify();
+    }
+
+    fn delete_selected_websocket_library_item(&mut self, cx: &mut Context<Self>) {
+        match self.websocket_workspace.library_selection.take() {
+            Some(WebSocketLibrarySelection::Message(id)) => self
+                .websocket_workspace
+                .document
+                .messages
+                .retain(|message| message.id != id),
+            Some(WebSocketLibrarySelection::Template(id)) => self
+                .websocket_workspace
+                .document
+                .templates
+                .retain(|template| template.id != id),
+            Some(WebSocketLibrarySelection::NewTemplate) | None => return,
+        }
+        self.websocket_workspace.active_template_id = None;
+        self.websocket_workspace.template_values.clear();
         self.persist_websocket_document(cx);
+    }
+
+    fn load_saved_websocket_message(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(message) = self
+            .websocket_workspace
+            .document
+            .messages
+            .iter()
+            .find(|message| message.id == id)
+        else {
+            return;
+        };
+        let payload = message.payload.clone();
+        let language = message.language;
+        self.websocket_workspace.document.composer_language = language;
+        self.websocket_workspace.composer.update(cx, |editor, cx| {
+            editor.set_language(code_language_for_raw_body(language), cx);
+            editor.set_value(payload, window, cx);
+        });
+        self.refresh_websocket_composer_inline_actions(cx);
+        self.persist_websocket_document(cx);
+        self.websocket_workspace.section = WebSocketSection::Console;
+        cx.notify();
     }
 
     fn select_websocket_template(
@@ -1110,170 +1301,530 @@ impl ApiTester {
     }
 
     fn render_websocket_messages(&self, cx: &mut Context<Self>) -> AnyElement {
-        let message_rows = self
+        let query = self
             .websocket_workspace
-            .document
-            .messages
-            .iter()
-            .map(|message| {
-                let payload = message.payload.clone();
-                let language = message.language;
-                h_flex()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(cx.api_outline_variant())
-                    .child(
-                        div()
-                            .w(px(180.))
-                            .font_semibold()
-                            .child(message.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .child(message.payload.clone()),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("send-saved-{}", message.id)))
-                            .label("Send")
-                            .small()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if language == RawBodyLanguage::JsonLines {
-                                    this.send_websocket_json_lines(&payload, cx);
-                                } else {
-                                    this.send_websocket_payload(payload.clone(), false, cx);
-                                }
-                            })),
-                    )
-            })
-            .collect::<Vec<_>>();
-        let template_rows = self
-            .websocket_workspace
-            .document
-            .templates
-            .iter()
-            .map(|template| {
-                let id = template.id.clone();
-                h_flex()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(cx.api_outline_variant())
-                    .child(
-                        div()
-                            .w(px(180.))
-                            .font_semibold()
-                            .child(template.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .child(template.payload.clone()),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("use-template-{}", template.id)))
-                            .label("Fill & send")
-                            .small()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.select_websocket_template(id.clone(), window, cx)
-                            })),
-                    )
-            })
-            .collect::<Vec<_>>();
-        let template_inputs = self
-            .websocket_workspace
-            .active_template_id
-            .as_ref()
-            .map(|_| {
-                v_flex()
-                    .gap_2()
-                    .p_3()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(cx.api_outline_variant())
-                    .child(div().font_semibold().child("Template values"))
-                    .children(self.websocket_workspace.template_values.iter().map(
-                        |(name, input)| {
-                            h_flex()
-                                .gap_2()
-                                .child(div().w(px(140.)).text_sm().child(name.clone()))
-                                .child(div().flex_1().child(Input::new(input)))
-                        },
-                    ))
-                    .child(
-                        Button::new("send-filled-template")
-                            .label("Send rendered message")
-                            .primary()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.send_active_websocket_template(cx)
-                            })),
-                    )
+            .library_search
+            .read(cx)
+            .value()
+            .trim()
+            .to_lowercase();
+        let selected = self.websocket_workspace.library_selection.clone();
+        let mut rows = Vec::new();
+        for message in &self.websocket_workspace.document.messages {
+            if !websocket_library_item_matches(&message.name, &message.payload, &query) {
+                continue;
+            }
+            let id = message.id.clone();
+            let is_selected = selected.as_ref().is_some_and(|selection| {
+                selection == &WebSocketLibrarySelection::Message(id.clone())
             });
-        v_flex()
+            rows.push(
+                div()
+                    .id(SharedString::from(format!(
+                        "websocket-message-row-{}",
+                        message.id
+                    )))
+                    .w_full()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select_websocket_library_message(id.clone(), window, cx);
+                    }))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .px_2()
+                            .py_2()
+                            .rounded_md()
+                            .when(is_selected, |this| this.bg(cx.theme().sidebar_accent))
+                            .hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.62)))
+                            .child(
+                                div()
+                                    .w(px(22.))
+                                    .h(px(22.))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .bg(cx.theme().info.opacity(0.14))
+                                    .text_xs()
+                                    .font_semibold()
+                                    .text_color(cx.theme().info)
+                                    .child("M"),
+                            )
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .whitespace_nowrap()
+                                            .overflow_hidden()
+                                            .text_sm()
+                                            .font_semibold()
+                                            .child(message.name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .whitespace_nowrap()
+                                            .overflow_hidden()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(compact_label(&message.payload, 42)),
+                                    ),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        for template in &self.websocket_workspace.document.templates {
+            if !websocket_library_item_matches(&template.name, &template.payload, &query) {
+                continue;
+            }
+            let id = template.id.clone();
+            let is_selected = selected.as_ref().is_some_and(|selection| {
+                selection == &WebSocketLibrarySelection::Template(id.clone())
+            });
+            rows.push(
+                div()
+                    .id(SharedString::from(format!(
+                        "websocket-template-row-{}",
+                        template.id
+                    )))
+                    .w_full()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select_websocket_library_template(id.clone(), window, cx);
+                    }))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .px_2()
+                            .py_2()
+                            .rounded_md()
+                            .when(is_selected, |this| this.bg(cx.theme().sidebar_accent))
+                            .hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.62)))
+                            .child(
+                                div()
+                                    .w(px(22.))
+                                    .h(px(22.))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .bg(cx.theme().warning.opacity(0.14))
+                                    .text_xs()
+                                    .font_semibold()
+                                    .text_color(cx.theme().warning)
+                                    .child("T"),
+                            )
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .whitespace_nowrap()
+                                            .overflow_hidden()
+                                            .text_sm()
+                                            .font_semibold()
+                                            .child(template.name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .whitespace_nowrap()
+                                            .overflow_hidden()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(compact_label(&template.payload, 42)),
+                                    ),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        let no_matches = rows.is_empty()
+            && (!self.websocket_workspace.document.messages.is_empty()
+                || !self.websocket_workspace.document.templates.is_empty());
+
+        let detail = match selected {
+            Some(WebSocketLibrarySelection::Message(id)) => self
+                .websocket_workspace
+                .document
+                .messages
+                .iter()
+                .find(|message| message.id == id)
+                .map(|message| self.render_websocket_saved_message_detail(message, cx))
+                .unwrap_or_else(|| self.render_websocket_library_empty(cx)),
+            Some(WebSocketLibrarySelection::Template(id)) => self
+                .websocket_workspace
+                .document
+                .templates
+                .iter()
+                .find(|template| template.id == id)
+                .map(|template| self.render_websocket_template_detail(Some(template), cx))
+                .unwrap_or_else(|| self.render_websocket_library_empty(cx)),
+            Some(WebSocketLibrarySelection::NewTemplate) => {
+                self.render_websocket_template_detail(None, cx)
+            }
+            None => self.render_websocket_library_empty(cx),
+        };
+
+        h_flex()
+            .id("websocket-messages-workspace")
+            .debug_selector(|| "websocket-messages-workspace".to_owned())
             .size_full()
             .min_h_0()
-            .overflow_y_scrollbar()
-            .p_4()
-            .gap_4()
-            .children(template_inputs)
             .child(
-                h_flex()
-                    .child(div().flex_1().font_semibold().child("Saved messages"))
+                v_flex()
+                    .id("websocket-message-library")
+                    .debug_selector(|| "websocket-message-library".to_owned())
+                    .w(px(288.))
+                    .h_full()
+                    .flex_shrink_0()
+                    .border_r_1()
+                    .border_color(cx.theme().sidebar_border)
+                    .bg(cx.api_surface_low())
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Send directly from your library"),
-                    ),
-            )
-            .children(message_rows)
-            .child(
-                h_flex()
-                    .pt_2()
-                    .child(div().flex_1().font_semibold().child("Templates"))
+                        h_flex()
+                            .h(px(56.))
+                            .px_4()
+                            .flex_shrink_0()
+                            .justify_between()
+                            .border_b_1()
+                            .border_color(cx.theme().sidebar_border)
+                            .child(div().text_base().font_semibold().child("Messages"))
+                            .child(
+                                Button::new("new-websocket-template")
+                                    .icon(IconName::Plus)
+                                    .small()
+                                    .ghost()
+                                    .rounded_full()
+                                    .tooltip("New template")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.new_websocket_template(window, cx);
+                                    })),
+                            ),
+                    )
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Use %{name}% for prompted values"),
+                        h_flex()
+                            .h(px(56.))
+                            .px_3()
+                            .flex_shrink_0()
+                            .border_b_1()
+                            .border_color(cx.theme().sidebar_border)
+                            .child(
+                                div().flex_1().min_w_0().child(
+                                    Input::new(&self.websocket_workspace.library_search)
+                                        .prefix(IconName::Search)
+                                        .cleanable(true),
+                                ),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scrollbar()
+                            .gap_1()
+                            .p_2()
+                            .children(rows)
+                            .when(no_matches, |this| {
+                                this.child(
+                                    v_flex()
+                                        .items_center()
+                                        .px_5()
+                                        .py_10()
+                                        .text_center()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("No matches"),
+                                )
+                            })
+                            .when(
+                                self.websocket_workspace.document.messages.is_empty()
+                                    && self.websocket_workspace.document.templates.is_empty(),
+                                |this| {
+                                    this.child(
+                                        v_flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .px_5()
+                                            .py_10()
+                                            .text_center()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(div().text_sm().child("No saved messages"))
+                                            .child(
+                                                div().text_xs().child(
+                                                    "Save from Console or create a template.",
+                                                ),
+                                            ),
+                                    )
+                                },
+                            ),
                     ),
             )
             .child(
                 div()
-                    .h(px(140.))
-                    .overflow_hidden()
-                    .child(self.websocket_workspace.template_payload.clone()),
+                    .id("websocket-message-detail")
+                    .debug_selector(|| "websocket-message-detail".to_owned())
+                    .h_full()
+                    .flex_1()
+                    .min_w_0()
+                    .child(detail),
             )
+            .into_any_element()
+    }
+
+    fn render_websocket_library_empty(&self, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .p_8()
+            .text_center()
+            .child(div().text_base().font_semibold().child("Select a message"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Saved messages and templates open here."),
+            )
+            .into_any_element()
+    }
+
+    fn render_websocket_saved_message_detail(
+        &self,
+        message: &WebSocketSavedMessage,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let send_payload = message.payload.clone();
+        let send_language = message.language;
+        let load_id = message.id.clone();
+        v_flex()
+            .size_full()
+            .min_h_0()
             .child(
                 h_flex()
+                    .h(px(56.))
+                    .flex_shrink_0()
                     .gap_2()
+                    .px_4()
+                    .border_b_1()
+                    .border_color(cx.api_outline_variant())
                     .child(
-                        div()
+                        v_flex()
                             .flex_1()
-                            .child(Input::new(&self.websocket_workspace.template_name)),
+                            .min_w_0()
+                            .child(div().font_semibold().child(message.name.clone()))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(message.language.label()),
+                            ),
                     )
                     .child(
-                        Button::new("save-websocket-template")
-                            .label("Save template")
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.save_websocket_template(cx)),
+                        h_flex()
+                            .flex_shrink_0()
+                            .gap_2()
+                            .child(
+                                Button::new("load-saved-websocket-message")
+                                    .label("Edit in Console")
+                                    .small()
+                                    .outline()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.load_saved_websocket_message(&load_id, window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("delete-saved-websocket-message")
+                                    .label("Delete")
+                                    .small()
+                                    .ghost()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.delete_selected_websocket_library_item(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("send-saved-websocket-message")
+                                    .label("Send")
+                                    .small()
+                                    .primary()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if send_language == RawBodyLanguage::JsonLines {
+                                            this.send_websocket_json_lines(&send_payload, cx);
+                                        } else {
+                                            this.send_websocket_payload(
+                                                send_payload.clone(),
+                                                false,
+                                                cx,
+                                            );
+                                        }
+                                    })),
                             ),
                     ),
             )
-            .children(template_rows)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(self.websocket_workspace.library_preview.clone()),
+            )
+            .into_any_element()
+    }
+
+    fn render_websocket_template_detail(
+        &self,
+        template: Option<&WebSocketMessageTemplate>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let template_id = template.map(|template| template.id.clone());
+        let fill_id = template_id.clone();
+        let is_filling = websocket_template_is_filling(
+            template_id.as_deref(),
+            self.websocket_workspace.active_template_id.as_deref(),
+        );
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .child(
+                h_flex()
+                    .h(px(56.))
+                    .flex_shrink_0()
+                    .gap_2()
+                    .px_4()
+                    .border_b_1()
+                    .border_color(cx.api_outline_variant())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .font_semibold()
+                            .child(if template.is_some() {
+                                "Template"
+                            } else {
+                                "New template"
+                            }),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_shrink_0()
+                            .gap_2()
+                            .when_some(fill_id, |this, id| {
+                                this.child(
+                                    Button::new("fill-websocket-template")
+                                        .label(if is_filling {
+                                            "Hide values"
+                                        } else {
+                                            "Fill & send"
+                                        })
+                                        .small()
+                                        .outline()
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            if this
+                                                .websocket_workspace
+                                                .active_template_id
+                                                .as_deref()
+                                                == Some(id.as_str())
+                                            {
+                                                this.websocket_workspace.active_template_id = None;
+                                                this.websocket_workspace.template_values.clear();
+                                                cx.notify();
+                                            } else {
+                                                this.select_websocket_template(
+                                                    id.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
+                                        })),
+                                )
+                            })
+                            .when(template.is_some(), |this| {
+                                this.child(
+                                    Button::new("delete-websocket-template")
+                                        .label("Delete")
+                                        .small()
+                                        .ghost()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.delete_selected_websocket_library_item(cx);
+                                        })),
+                                )
+                            })
+                            .child(
+                                Button::new("save-websocket-template")
+                                    .label(if template.is_some() {
+                                        "Save changes"
+                                    } else {
+                                        "Create"
+                                    })
+                                    .small()
+                                    .primary()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.save_websocket_template(cx);
+                                    })),
+                            ),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .h(px(56.))
+                    .flex_shrink_0()
+                    .px_4()
+                    .border_b_1()
+                    .border_color(cx.api_outline_variant())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(&self.websocket_workspace.template_name)),
+                    ),
+            )
+            .when(is_filling, |this| {
+                this.child(
+                    v_flex()
+                        .debug_selector(|| "websocket-template-values".to_owned())
+                        .flex_shrink_0()
+                        .max_h(px(220.))
+                        .overflow_y_scrollbar()
+                        .gap_2()
+                        .p_4()
+                        .border_b_1()
+                        .border_color(cx.api_outline_variant())
+                        .children(self.websocket_workspace.template_values.iter().map(
+                            |(name, input)| {
+                                h_flex()
+                                    .gap_2()
+                                    .child(div().w(px(140.)).text_sm().child(name.clone()))
+                                    .child(div().flex_1().child(Input::new(input)))
+                            },
+                        ))
+                        .child(
+                            Button::new("send-filled-template")
+                                .label("Send rendered message")
+                                .small()
+                                .primary()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.send_active_websocket_template(cx);
+                                })),
+                        ),
+                )
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(self.websocket_workspace.template_payload.clone()),
+            )
             .into_any_element()
     }
 
@@ -1964,6 +2515,16 @@ fn websocket_timeline_entry_matches(
         || contains_ascii_case_insensitive(&entry.payload, query)
 }
 
+fn websocket_library_item_matches(name: &str, payload: &str, query: &str) -> bool {
+    query.is_empty()
+        || contains_ascii_case_insensitive(name, query)
+        || contains_ascii_case_insensitive(payload, query)
+}
+
+fn websocket_template_is_filling(template_id: Option<&str>, active_id: Option<&str>) -> bool {
+    template_id.is_some() && template_id == active_id
+}
+
 fn websocket_timeline_kind_label(kind: &'static str) -> &'static str {
     match kind {
         "open" => "Open",
@@ -2070,6 +2631,33 @@ mod tests {
     }
 
     #[test]
+    fn message_library_filter_matches_names_and_payloads_case_insensitively() {
+        assert!(websocket_library_item_matches(
+            "Authenticate guest",
+            r#"{"type":"auth"}"#,
+            "GUEST"
+        ));
+        assert!(websocket_library_item_matches(
+            "Authenticate guest",
+            r#"{"type":"auth"}"#,
+            "AUTH"
+        ));
+        assert!(!websocket_library_item_matches(
+            "Authenticate guest",
+            r#"{"type":"auth"}"#,
+            "subscribe"
+        ));
+    }
+
+    #[test]
+    fn a_new_template_is_not_an_active_fill_session() {
+        assert!(!websocket_template_is_filling(None, None));
+        assert!(!websocket_template_is_filling(Some("one"), None));
+        assert!(!websocket_template_is_filling(Some("one"), Some("two")));
+        assert!(websocket_template_is_filling(Some("one"), Some("one")));
+    }
+
+    #[test]
     fn timeline_labels_every_supported_frame_and_event_type() {
         assert_eq!(websocket_timeline_kind_label("open"), "Open");
         assert_eq!(websocket_timeline_kind_label("text"), "Text");
@@ -2106,5 +2694,71 @@ mod tests {
 
         assert!(split_viewport.is_contained_within(&console));
         assert!(footer.is_contained_within(&split_viewport));
+    }
+
+    #[gpui::test]
+    fn message_library_and_detail_stay_inside_the_workspace(cx: &mut TestAppContext) {
+        let (app, cx, _directory) = mount_app(cx);
+        cx.simulate_resize(size(px(900.), px(560.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| app.open_blank_websocket_tab(window, cx));
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.websocket_workspace.section = WebSocketSection::Messages;
+                app.websocket_workspace
+                    .document
+                    .messages
+                    .push(WebSocketSavedMessage {
+                        id: "message-one".to_owned(),
+                        name: "Authenticate".to_owned(),
+                        payload: r#"{"type":"auth"}"#.to_owned(),
+                        language: RawBodyLanguage::Json,
+                    });
+                app.select_websocket_library_message("message-one".to_owned(), window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            assert_eq!(
+                app.read(cx).websocket_workspace.section,
+                WebSocketSection::Messages
+            );
+        });
+
+        let workspace = cx
+            .debug_bounds("websocket-messages-workspace")
+            .expect("message workspace should be laid out");
+        let library = cx
+            .debug_bounds("websocket-message-library")
+            .expect("message library should be laid out");
+        let detail = cx
+            .debug_bounds("websocket-message-detail")
+            .expect("message detail should be laid out");
+
+        assert!(library.is_contained_within(&workspace));
+        assert!(detail.is_contained_within(&workspace));
+        assert!(library.right() <= detail.left());
+    }
+
+    #[gpui::test]
+    fn new_template_does_not_render_fill_controls(cx: &mut TestAppContext) {
+        let (app, cx, _directory) = mount_app(cx);
+        cx.simulate_resize(size(px(900.), px(560.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| app.open_blank_websocket_tab(window, cx));
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.websocket_workspace.section = WebSocketSection::Messages;
+                app.new_websocket_template(window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("websocket-template-values").is_none());
     }
 }

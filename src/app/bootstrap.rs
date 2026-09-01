@@ -577,6 +577,24 @@ impl ApiTester {
                 }
             },
         );
+        let websocket_library_preview_format_subscription = cx.subscribe_in(
+            &websocket_workspace.library_preview,
+            window,
+            |this, _, event: &CodeEditorEvent, window, cx| {
+                if matches!(event, CodeEditorEvent::FormatRequested) {
+                    this.format_websocket_library_preview(window, cx);
+                }
+            },
+        );
+        let websocket_template_format_subscription = cx.subscribe_in(
+            &websocket_workspace.template_payload,
+            window,
+            |this, _, event: &CodeEditorEvent, window, cx| {
+                if matches!(event, CodeEditorEvent::FormatRequested) {
+                    this.format_websocket_template(window, cx);
+                }
+            },
+        );
         let websocket_automation_subscription = cx.subscribe(
             &websocket_workspace.automation,
             |this, _, event: &InputEvent, cx| {
@@ -592,6 +610,14 @@ impl ApiTester {
                     if this.websocket_workspace.timeline_following {
                         this.websocket_workspace.timeline_scroll.scroll_to_bottom();
                     }
+                    cx.notify();
+                }
+            },
+        );
+        let websocket_library_search_subscription = cx.subscribe(
+            &websocket_workspace.library_search,
+            |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
                     cx.notify();
                 }
             },
@@ -891,8 +917,11 @@ impl ApiTester {
                 websocket_composer_subscription,
                 websocket_composer_format_subscription,
                 websocket_timeline_preview_format_subscription,
+                websocket_library_preview_format_subscription,
+                websocket_template_format_subscription,
                 websocket_automation_subscription,
                 websocket_timeline_filter_subscription,
+                websocket_library_search_subscription,
             ],
         };
         this.apply_code_editor_settings(window, cx);
