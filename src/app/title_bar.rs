@@ -91,7 +91,7 @@ impl ApiTester {
         let request_actions_disabled = self.sending;
 
         h_flex()
-            .h(px(APP_TITLE_BAR_HEIGHT))
+            .h(APP_TITLE_BAR_HEIGHT)
             .flex_shrink_0()
             .pl(window_chrome::leading_inset())
             .border_b_1()
@@ -114,12 +114,12 @@ impl ApiTester {
                             .child(
                                 h_flex()
                                     .min_w_0()
-                                    .max_w(px(520.))
+                                    .max_w(rems(32.5))
                                     .gap_1()
                                     .child(
                                         div()
                                             .min_w_0()
-                                            .max_w(px(300.))
+                                            .max_w(rems(18.75))
                                             .overflow_hidden()
                                             .whitespace_nowrap()
                                             .text_sm()
@@ -131,7 +131,7 @@ impl ApiTester {
                                             .small()
                                             .appearance(false)
                                             .focus_bordered(false)
-                                            .w(px(request_name_width))
+                                            .w(rems(request_name_width / 16.))
                                             .px_0(),
                                     ),
                             )
@@ -160,7 +160,7 @@ impl ApiTester {
                             .icon(IconName::Settings2)
                             .label(active_environment)
                             .large()
-                            .h(px(38.))
+                            .h(rems(2.375))
                             .outline()
                             .rounded(px(20.))
                             .tooltip(active_environment_full)
@@ -221,7 +221,7 @@ impl ApiTester {
                         Button::new("title-save-request")
                             .label(if has_saved_request { "Update" } else { "Save" })
                             .large()
-                            .h(px(38.))
+                            .h(rems(2.375))
                             .outline()
                             .rounded(px(20.))
                             .disabled(!can_save)
@@ -233,8 +233,8 @@ impl ApiTester {
                         Button::new("title-request-actions")
                             .icon(IconName::EllipsisVertical)
                             .small()
-                            .h(px(38.))
-                            .w(px(38.))
+                            .h(rems(2.375))
+                            .w(rems(2.375))
                             .ghost()
                             .rounded_full()
                             .tooltip("Request actions")

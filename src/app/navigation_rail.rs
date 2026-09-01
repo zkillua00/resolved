@@ -18,9 +18,9 @@ impl ApiTester {
             WorkspaceProviderId::Upstream { .. }
         );
         let compact = self.navigation_compact;
-        let rail_width = if compact { px(56.) } else { px(116.) };
-        let item_width = if compact { px(44.) } else { px(100.) };
-        let item_height = if compact { px(44.) } else { px(56.) };
+        let rail_width = if compact { rems(3.5) } else { rems(7.25) };
+        let item_width = if compact { rems(2.75) } else { rems(6.25) };
+        let item_height = if compact { rems(2.75) } else { rems(3.5) };
 
         v_flex()
             .w(rail_width)
@@ -225,7 +225,12 @@ impl ApiTester {
                     }),
             )
             .child(div().flex_1())
-            .child(self.render_upstream_navigation_control(item_width, item_height, compact, cx))
+            .child(self.render_upstream_navigation_control(
+                item_width.to_pixels(cx.theme().font_size),
+                item_height.to_pixels(cx.theme().font_size),
+                compact,
+                cx,
+            ))
             .child(
                 h_flex()
                     .id("rail-compact-toggle")

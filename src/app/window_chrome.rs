@@ -15,7 +15,7 @@
 //! in charge.
 
 use gpui::{
-    AnyElement, App, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+    AnyElement, App, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Rems,
     StatefulInteractiveElement as _, Styled as _, Window, WindowControlArea, div, px, svg,
 };
 use gpui_component::{ActiveTheme as _, IconName, IconNamed as _};
@@ -46,7 +46,9 @@ pub(crate) fn caption_drag_region() -> AnyElement {
     }
 }
 
-const WINDOW_CONTROL_WIDTH: Pixels = px(46.);
+/// Width of each non-client window control button, in rems so interface zoom
+/// scales the whole cluster.
+const WINDOW_CONTROL_WIDTH: Rems = Rems(2.875);
 const GLYPH_SIZE: Pixels = px(12.);
 
 #[derive(Clone, Copy)]
@@ -73,7 +75,7 @@ pub(crate) fn window_controls(window: &Window, cx: &App) -> AnyElement {
     div()
         .flex()
         .items_center()
-        .h(px(super::APP_TITLE_BAR_HEIGHT))
+        .h(super::APP_TITLE_BAR_HEIGHT)
         .flex_shrink_0()
         .child(control_button(
             "title-window-minimize",

@@ -32,6 +32,56 @@ impl GlobalApiTheme {
     }
 }
 
+/// Typography zoom applied on top of the active theme's baseline font sizes.
+///
+/// Kept out of the CSS theme so changing zoom never rewrites a user's saved
+/// theme source, and stored as a GPUI global so every [`apply`] call —
+/// startup, theme switches, and live CSS edits — honors the current zoom
+/// automatically.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThemeZoom {
+    /// Interface zoom multiplier applied to the theme's `.app` font size.
+    pub ui: f32,
+    /// Editor zoom multiplier applied to the theme's `.editor` font size.
+    pub editor: f32,
+}
+
+impl Default for ThemeZoom {
+    fn default() -> Self {
+        Self {
+            ui: 1.0,
+            editor: 1.0,
+        }
+    }
+}
+
+impl Global for ThemeZoom {}
+
+impl ThemeZoom {
+    /// Publish the zoom used by subsequent [`apply`] calls. The caller keeps
+    /// responsibility for re-applying the active theme source; see
+    /// [`set_zoom`].
+    pub fn set(zoom: Self, cx: &mut App) {
+        if cx.has_global::<Self>() {
+            cx.update_global::<Self, _>(|current, _| *current = zoom);
+        } else {
+            cx.set_global(zoom);
+        }
+    }
+
+    /// The currently published zoom, or unity when nothing published yet.
+    pub fn current(cx: &App) -> Self {
+        cx.try_global::<Self>().copied().unwrap_or_default()
+    }
+}
+
+/// Publish a new typography zoom. Follow this with a re-application of the
+/// active theme source (via [`parse_and_apply`] or [`configure`]) so the new
+/// scale takes effect immediately.
+pub fn set_zoom(zoom: ThemeZoom, cx: &mut App) {
+    ThemeZoom::set(zoom, cx);
+}
+
 /// Context-aware access to application-specific semantic colors.
 #[allow(dead_code)]
 pub trait ApiThemeExt {
@@ -187,8 +237,12 @@ fn unique_catalog_name(saved_themes: &[SavedTheme], requested: &str) -> String {
 }
 
 /// Atomically install a previously validated theme and redraw all GPUI windows.
+///
+/// The theme's typography is scaled by the active [`ThemeZoom`] global before
+/// installation, so callers feed in a freshly parsed theme and the scale is
+/// applied exactly once no matter how often zoom or theme changes re-apply it.
 pub fn apply(theme: ApiTheme, cx: &mut App) {
-    let theme = Arc::new(theme);
+    let theme = Arc::new(theme.scaled(ThemeZoom::current(cx)));
     if cx.has_global::<GlobalApiTheme>() {
         let next = Arc::clone(&theme);
         cx.update_global::<GlobalApiTheme, _>(|active, _| active.0 = next);
@@ -202,6 +256,7 @@ pub fn apply(theme: ApiTheme, cx: &mut App) {
     component_theme.highlight_theme = Arc::clone(&theme.palette.highlight_theme);
     component_theme.font_family = theme.classes.app.font_family.clone();
     component_theme.font_size = theme.classes.app.font_size;
+    component_theme.mono_font_size = theme.classes.editor.font_size;
     component_theme.button_style = theme.classes.button.clone();
     cx.refresh_windows();
 }

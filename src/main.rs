@@ -35,6 +35,7 @@ use shortcuts::{
     ActivateNextRequestTab, ActivatePreviousRequestTab, CloseRequestTab, FocusRequestUrl,
     FormatRawBody, NewRequestTab, QuitApp, SaveRequest, SaveRequestAs, SendOrCancelRequest,
     ShowCollections, ShowEnvironments, ShowHistory, ShowSettings, ToggleMetrics, ToggleNavigation,
+    ZoomEditorIn, ZoomEditorOut, ZoomEditorReset, ZoomUiIn, ZoomUiOut, ZoomUiReset,
 };
 
 struct AppAssets;
@@ -97,6 +98,12 @@ fn register_app_action_handlers(view: &Entity<ApiTester>, cx: &mut App) {
     register!(ShowSettings, on_show_settings);
     register!(ToggleNavigation, on_toggle_navigation);
     register!(ToggleMetrics, on_toggle_metrics);
+    register!(ZoomUiIn, on_zoom_ui_in);
+    register!(ZoomUiOut, on_zoom_ui_out);
+    register!(ZoomUiReset, on_zoom_ui_reset);
+    register!(ZoomEditorIn, on_zoom_editor_in);
+    register!(ZoomEditorOut, on_zoom_editor_out);
+    register!(ZoomEditorReset, on_zoom_editor_reset);
 }
 
 impl AssetSource for AppAssets {

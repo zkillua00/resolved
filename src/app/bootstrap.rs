@@ -383,6 +383,13 @@ impl ApiTester {
                 tracing::error!("built-in shortcuts could not be applied: {error}");
             }
         }
+        crate::theme::set_zoom(
+            crate::theme::ThemeZoom {
+                ui: settings.zoom.effective_ui(),
+                editor: settings.zoom.effective_editor(),
+            },
+            cx,
+        );
         if let Some(css_source) = settings.theme.css_source.as_deref()
             && let Err(error) = crate::theme::parse_and_apply(css_source, cx)
         {

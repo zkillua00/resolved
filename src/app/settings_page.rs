@@ -6,7 +6,7 @@ use gpui_component::switch::Switch;
 
 use super::*;
 
-const SETTINGS_SIDEBAR_WIDTH: Pixels = px(220.);
+const SETTINGS_SIDEBAR_WIDTH: Rems = Rems(13.75);
 
 impl ApiTester {
     /// Memoized parse of a theme's CSS source. Parsing happens once per
@@ -39,7 +39,7 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         h_flex()
-            .h(px(APP_TITLE_BAR_HEIGHT))
+            .h(APP_TITLE_BAR_HEIGHT)
             .flex_shrink_0()
             .pl(window_chrome::leading_inset())
             .pr(window_chrome::trailing_inset())
@@ -107,6 +107,12 @@ impl ApiTester {
                         self.formatter_semicolons_setting_item(cx),
                         self.formatter_trailing_commas_setting_item(cx),
                     ]),
+            )
+            .group(
+                SettingGroup::new()
+                    .title("Zoom")
+                    .description("Adjust code editor text size independently of the interface.")
+                    .item(self.editor_zoom_setting_item(cx)),
             );
         let mut keyboard_page = SettingPage::new("Keyboard")
             .description("Record shortcuts directly. Defaults follow familiar macOS conventions.")
@@ -128,14 +134,24 @@ impl ApiTester {
             );
         }
 
-        let appearance_page = SettingPage::new("Appearance").resettable(false).group(
-            SettingGroup::new()
-                .with_variant(GroupBoxVariant::Normal)
-                .items([
-                    self.theme_global_actions_setting_item(cx),
-                    self.theme_library_setting_item(cx),
-                ]),
-        );
+        let appearance_page = SettingPage::new("Appearance")
+            .resettable(false)
+            .group(
+                SettingGroup::new()
+                    .with_variant(GroupBoxVariant::Normal)
+                    .items([
+                        self.theme_global_actions_setting_item(cx),
+                        self.theme_library_setting_item(cx),
+                    ]),
+            )
+            .group(
+                SettingGroup::new()
+                    .title("Zoom")
+                    .description(
+                        "Make the whole interface larger or smaller without changing the theme.",
+                    )
+                    .item(self.ui_zoom_setting_item(cx)),
+            );
         let developer_page = SettingPage::new("Developer Settings")
             .description("Enable diagnostics for inspecting Resolved while it is running.")
             .resettable(false)
@@ -164,7 +180,10 @@ impl ApiTester {
             .size_full()
             .min_h_0()
             .bg(cx.theme().background)
-            .child(settings_sidebar_underlay(SETTINGS_SIDEBAR_WIDTH, cx))
+            .child(settings_sidebar_underlay(
+                SETTINGS_SIDEBAR_WIDTH.to_pixels(cx.theme().font_size),
+                cx,
+            ))
             .when_some(self.settings_warning.clone(), |this, warning| {
                 this.child(dismissible_settings_message(
                     warning,
@@ -184,7 +203,7 @@ impl ApiTester {
             .child(
                 div().flex_1().min_h_0().child(
                     SettingsView::new("api-tester-settings")
-                        .sidebar_width(SETTINGS_SIDEBAR_WIDTH)
+                        .sidebar_width(SETTINGS_SIDEBAR_WIDTH.to_pixels(cx.theme().font_size))
                         .with_group_variant(GroupBoxVariant::Outline)
                         .pages(pages),
                 ),
@@ -238,7 +257,7 @@ impl ApiTester {
                     .label(format!("{selected} spaces"))
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(settings_control_tooltip(
                         writable,
@@ -453,7 +472,7 @@ impl ApiTester {
                     .label(format!("{selected} spaces"))
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(settings_control_tooltip(
                         writable,
@@ -536,7 +555,7 @@ impl ApiTester {
                     .label(format!("{selected} columns"))
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(settings_control_tooltip(
                         writable,
@@ -586,7 +605,7 @@ impl ApiTester {
                     .label(selected.label())
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(settings_control_tooltip(
                         writable,
@@ -641,7 +660,7 @@ impl ApiTester {
                     .label(selected.label())
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(settings_control_tooltip(
                         writable,
@@ -693,7 +712,7 @@ impl ApiTester {
                     .label(selected.label())
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(settings_control_tooltip(
                         writable,
@@ -900,7 +919,7 @@ impl ApiTester {
                     .label(selected.label())
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(if writable {
                         "Choose which workspace corner contains the Metrics HUD"
