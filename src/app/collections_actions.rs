@@ -313,7 +313,11 @@ impl ApiTester {
         let definition = self.request_template(cx);
         let entered_name = self.saved_request_name.read(cx).value().trim().to_owned();
         let name = if entered_name.is_empty() {
-            default_request_name(&definition.request)
+            if definition.is_websocket() {
+                "WebSocket request".to_owned()
+            } else {
+                default_request_name(&definition.request)
+            }
         } else {
             entered_name
         };

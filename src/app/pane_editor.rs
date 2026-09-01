@@ -461,6 +461,7 @@ impl PaneEditorState {
                 pre_request: self.pre_request_script.read(cx).value(cx).to_string(),
                 post_response: self.post_response_script.read(cx).value(cx).to_string(),
             },
+            websocket: None,
         }
     }
 
@@ -2142,6 +2143,7 @@ mod tests {
                 pre_request: "api.log('pre');".to_owned(),
                 post_response: "api.log('post');".to_owned(),
             },
+            websocket: None,
         }
     }
 

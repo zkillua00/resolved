@@ -50,33 +50,38 @@ use crate::{
         ENVIRONMENTS_DELETE, ENVIRONMENTS_READ, ENVIRONMENTS_UPDATE, Environment,
         EnvironmentMutation, FormatterSettings, HeaderEntry, HistoryEntry, HostnameOverride,
         ImportBundle, InterchangeFormat, LocalWorkspace, LocalWorkspaceProvider,
-        MAX_INTERCHANGE_BYTES, MAX_SNIPPET_NAME_BYTES, PostResponseResult, PreRequestResult,
-        QueryParamEntry, REDACTED_VALUE, REQUESTS_CREATE, REQUESTS_DELETE, REQUESTS_UPDATE,
-        RawBodyLanguage, RealtimeResourceChange, RealtimeSignal, RemoteWorkspaceProvider,
-        RequestDraft, RequestError, RequestExecutionMode, RequestExecutionSettings, RequestHistory,
-        RequestScripts, RequestTabAssociation, RequestTabCloseScope, RequestTabGroup,
-        RequestTabGroupColor, RequestTabGroupId, RequestTabId, RequestTabRecord, RequestTabs,
-        RequestTask, RequestTemplate, ResourceCreator, ResponseData, SERVER_SETTINGS_UPDATE,
-        STANDARD_HTTP_METHODS, SavedRequest, SavedTheme, ScriptCancellation, ScriptDiagnostic,
-        ScriptEnvironment, ScriptError, ScriptErrorKind, ScriptLogLevel, ScriptPhase, ScriptReport,
-        ScriptScope, SharedHistoryUpload, ShortcutOverride, Snippet, SnippetCancellation,
-        SnippetCategory, SnippetKind, SnippetLog, SnippetRequirement, SnippetSelection,
-        SnippetSelectionArea, SnippetSelectionSource, SnippetTextRange, UpstreamCollectionView,
-        UpstreamCredential, UpstreamEnvironmentView, UpstreamProfile, UpstreamSavedRequestView,
-        UpstreamWorkspaceError, UpstreamWorkspaceSummary, UpstreamWorkspaceView, WORKSPACES_CREATE,
-        WORKSPACES_DELETE, WORKSPACES_UPDATE, Workspace, WorkspaceMutationError, WorkspaceProvider,
-        WorkspaceProviderId, WorkspaceProviderRegistry, add_upstream_proxy_allowlist_entry,
-        build_client, build_upstream_client, build_upstream_execution_client,
-        create_upstream_collection, create_upstream_environment, create_upstream_saved_request,
-        create_upstream_workspace, delete_shared_history, delete_upstream_collection,
-        delete_upstream_environment, delete_upstream_saved_request, delete_upstream_workspace,
-        export_request, format_body, generate_snippet, get_upstream_user, get_upstream_workspace,
-        import_requests, is_probably_text, list_upstream_environments, list_upstream_workspaces,
-        login_upstream, move_upstream_collection, move_upstream_saved_request,
-        normalize_upstream_url, query_params_from_url, resolve_request, save_upstream_environment,
-        send_request_for_upstream_workspace, spawn_request, update_request_execution_settings,
-        update_upstream_collection, update_upstream_saved_request, update_upstream_workspace,
-        upload_shared_history, url_with_query_params, watch_upstream_changes,
+        MAX_INTERCHANGE_BYTES, MAX_SNIPPET_NAME_BYTES, MAX_WEBSOCKET_TIMELINE_ENTRIES,
+        PostResponseResult, PreRequestResult, QueryParamEntry, REDACTED_VALUE, REQUESTS_CREATE,
+        REQUESTS_DELETE, REQUESTS_UPDATE, RawBodyLanguage, RealtimeResourceChange, RealtimeSignal,
+        RemoteWorkspaceProvider, RequestDraft, RequestError, RequestExecutionMode,
+        RequestExecutionSettings, RequestHistory, RequestScripts, RequestTabAssociation,
+        RequestTabCloseScope, RequestTabGroup, RequestTabGroupColor, RequestTabGroupId,
+        RequestTabId, RequestTabRecord, RequestTabs, RequestTask, RequestTemplate, ResourceCreator,
+        ResponseData, SERVER_SETTINGS_UPDATE, STANDARD_HTTP_METHODS, SavedRequest, SavedTheme,
+        ScriptCancellation, ScriptDiagnostic, ScriptEnvironment, ScriptError, ScriptErrorKind,
+        ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope, SharedHistoryUpload,
+        ShortcutOverride, Snippet, SnippetCancellation, SnippetCategory, SnippetKind, SnippetLog,
+        SnippetRequirement, SnippetSelection, SnippetSelectionArea, SnippetSelectionSource,
+        SnippetTextRange, UpstreamCollectionView, UpstreamCredential, UpstreamEnvironmentView,
+        UpstreamProfile, UpstreamSavedRequestView, UpstreamWorkspaceError,
+        UpstreamWorkspaceSummary, UpstreamWorkspaceView, WORKSPACES_CREATE, WORKSPACES_DELETE,
+        WORKSPACES_UPDATE, WebSocketAutomationEvent, WebSocketCommand, WebSocketMessageTemplate,
+        WebSocketReplay, WebSocketSavedMessage, WebSocketSignal, WebSocketWorkspace, Workspace,
+        WorkspaceMutationError, WorkspaceProvider, WorkspaceProviderId, WorkspaceProviderRegistry,
+        add_upstream_proxy_allowlist_entry, binary_preview, build_client, build_upstream_client,
+        build_upstream_execution_client, create_upstream_collection, create_upstream_environment,
+        create_upstream_saved_request, create_upstream_workspace, delete_shared_history,
+        delete_upstream_collection, delete_upstream_environment, delete_upstream_saved_request,
+        delete_upstream_workspace, execute_websocket_automation, export_request, format_body,
+        generate_snippet, get_upstream_user, get_upstream_workspace, import_requests,
+        is_probably_text, list_upstream_environments, list_upstream_workspaces, login_upstream,
+        move_upstream_collection, move_upstream_saved_request, normalize_upstream_url,
+        query_params_from_url, render_message_template, replay_frames, replay_websocket_frames,
+        resolve_request, run_websocket_connection, save_upstream_environment,
+        send_request_for_upstream_workspace, spawn_request, template_variable_names,
+        update_request_execution_settings, update_upstream_collection,
+        update_upstream_saved_request, update_upstream_workspace, upload_shared_history,
+        url_with_query_params, watch_upstream_changes,
     },
     debug_overlay::DebugOverlay,
     request_dirty::{RequestDirtyPart, RequestDirtyState},
@@ -154,6 +159,7 @@ mod title_bar;
 mod ui_utils;
 mod upstream_connections;
 mod upstream_workspace_actions;
+mod websocket_workspace;
 mod welcome_page;
 mod window_chrome;
 mod workspace_connections;
@@ -180,6 +186,7 @@ use template_variable_popover_model::*;
 use template_variables::*;
 use ui_utils::*;
 use upstream_connections::*;
+use websocket_workspace::*;
 use workspace_connections::*;
 use workspace_tab::*;
 
@@ -297,6 +304,7 @@ pub struct ApiTester {
     realtime_status: RealtimeConnectionStatus,
     realtime_refresh_generation: u64,
     realtime_refresh_abort_handle: Option<AbortHandle>,
+    websocket_workspace: WebSocketWorkspaceState,
     workspace_name: Entity<InputState>,
     sidebar_tab: SidebarTab,
     navigation_compact: bool,

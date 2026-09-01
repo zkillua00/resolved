@@ -45,6 +45,18 @@ impl ApiTester {
                             })),
                     )
                     .child(
+                        Button::new("welcome-title-new-websocket")
+                            .label("New WebSocket")
+                            .large()
+                            .h(px(38.))
+                            .outline()
+                            .rounded(px(20.))
+                            .disabled(self.sending)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_blank_websocket_tab(window, cx);
+                            })),
+                    )
+                    .child(
                         Button::new("welcome-title-new-request")
                             .icon(IconName::Plus)
                             .label("New request")
@@ -106,6 +118,16 @@ impl ApiTester {
                                     .disabled(self.sending)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.open_blank_request_tab(window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("welcome-new-websocket")
+                                    .label("New WebSocket")
+                                    .large()
+                                    .outline()
+                                    .disabled(self.sending)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_blank_websocket_tab(window, cx);
                                     })),
                             )
                             .child(

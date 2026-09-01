@@ -34,7 +34,7 @@ use super::{
 #[cfg(test)]
 use super::request_tabs::RequestTabGroupColor;
 
-const CURRENT_SCHEMA_VERSION: i64 = 10;
+const CURRENT_SCHEMA_VERSION: i64 = 11;
 static NEXT_LOCAL_WORKSPACE_ID: AtomicU64 = AtomicU64::new(0);
 const LEGACY_HISTORY_FILE_VERSION: u32 = 1;
 const LEGACY_HISTORY_IMPORT_MARKER: &str = "history-json-v1";
@@ -396,6 +396,11 @@ ADD COLUMN query_params_json TEXT NOT NULL DEFAULT '[]';
 
 ALTER TABLE history_entries
 ADD COLUMN query_params_json TEXT NOT NULL DEFAULT '[]';
+"#;
+
+const MIGRATION_11: &str = r#"
+ALTER TABLE saved_requests
+ADD COLUMN websocket_json TEXT NOT NULL DEFAULT 'null';
 "#;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1285,6 +1290,7 @@ fn migrate(connection: &mut Connection) -> Result<(), DatabaseError> {
             8 => transaction.execute_batch(MIGRATION_8)?,
             9 => transaction.execute_batch(MIGRATION_9)?,
             10 => transaction.execute_batch(MIGRATION_10)?,
+            11 => transaction.execute_batch(MIGRATION_11)?,
             _ => {
                 return Err(DatabaseError::UnsupportedSchemaVersion {
                     found: next,
@@ -1418,13 +1424,14 @@ fn save_workspace_tx(
             let request = &saved_request.definition.request;
             let scripts = &saved_request.definition.scripts;
             let query_params_json = serialize_query_params(&request.query_params)?;
+            let websocket_json = serialize_websocket(&saved_request.definition.websocket)?;
             transaction.execute(
                 "INSERT INTO saved_requests(
                     id, collection_id, folder_id, name, position, method, url, query_params_json, body,
-                    body_mode, raw_body_language, pre_request, post_response,
+                    body_mode, raw_body_language, pre_request, post_response, websocket_json,
                     created_at, updated_at, version
                  ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 1
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 1
                  )
                  ON CONFLICT(id) DO UPDATE SET
                     collection_id = excluded.collection_id,
@@ -1439,6 +1446,7 @@ fn save_workspace_tx(
                     raw_body_language = excluded.raw_body_language,
                     pre_request = excluded.pre_request,
                     post_response = excluded.post_response,
+                    websocket_json = excluded.websocket_json,
                     created_at = excluded.created_at,
                     updated_at = excluded.updated_at,
                     version = saved_requests.version + 1",
@@ -1456,6 +1464,7 @@ fn save_workspace_tx(
                     request.raw_body_language.as_db_str(),
                     &scripts.pre_request,
                     &scripts.post_response,
+                    websocket_json,
                     saved_request.created_at.timestamp_micros(),
                     saved_request.updated_at.timestamp_micros(),
                 ],
@@ -1615,6 +1624,24 @@ fn serialize_query_params(params: &[QueryParamEntry]) -> Result<String, Database
 fn deserialize_query_params(state_json: &str) -> Result<Vec<QueryParamEntry>, DatabaseError> {
     serde_json::from_str(state_json).map_err(|error| DatabaseError::CorruptData {
         field: "request query params",
+        value: error.to_string(),
+    })
+}
+
+fn serialize_websocket(
+    document: &Option<super::websocket::WebSocketWorkspace>,
+) -> Result<String, DatabaseError> {
+    serde_json::to_string(document).map_err(|error| DatabaseError::CorruptData {
+        field: "WebSocket request",
+        value: error.to_string(),
+    })
+}
+
+fn deserialize_websocket(
+    state_json: &str,
+) -> Result<Option<super::websocket::WebSocketWorkspace>, DatabaseError> {
+    serde_json::from_str(state_json).map_err(|error| DatabaseError::CorruptData {
+        field: "WebSocket request",
         value: error.to_string(),
     })
 }
@@ -2036,7 +2063,7 @@ fn load_workspace_tx(
             let mut statement = transaction.prepare(
                 "SELECT
                     id, folder_id, name, method, url, query_params_json, body, body_mode,
-                    raw_body_language, pre_request, post_response,
+                    raw_body_language, pre_request, post_response, websocket_json,
                     created_at, updated_at
                  FROM saved_requests
                  WHERE collection_id = ?1
@@ -2056,8 +2083,9 @@ fn load_workspace_tx(
                         row.get::<_, String>(8)?,
                         row.get::<_, String>(9)?,
                         row.get::<_, String>(10)?,
-                        row.get::<_, i64>(11)?,
+                        row.get::<_, String>(11)?,
                         row.get::<_, i64>(12)?,
+                        row.get::<_, i64>(13)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?
@@ -2076,6 +2104,7 @@ fn load_workspace_tx(
             raw_body_language,
             pre_request,
             post_response,
+            websocket_json,
             created_at,
             updated_at,
         ) in request_rows
@@ -2122,6 +2151,7 @@ fn load_workspace_tx(
                         pre_request,
                         post_response,
                     },
+                    websocket: deserialize_websocket(&websocket_json)?,
                 },
                 created_at: datetime_from_micros(created_at, "saved request created_at")?,
                 updated_at: datetime_from_micros(updated_at, "saved request updated_at")?,
@@ -2872,6 +2902,7 @@ mod tests {
                                 "api.test('created', () => api.assert(api.response.status === 201));"
                                     .to_owned(),
                         },
+                        websocket: None,
                     },
                     created_at: timestamp(1_700_000_000_000_001),
                     updated_at: timestamp(1_700_000_000_000_002),
@@ -3895,6 +3926,36 @@ mod tests {
             .optional()
             .unwrap();
         assert_eq!(foreign_key_violation, None);
+    }
+
+    #[test]
+    fn websocket_request_round_trips_inside_a_collection() {
+        let (_directory, store) = database();
+        let mut workspace = sample_workspace();
+        let document = super::super::WebSocketWorkspace {
+            url: "wss://example.test/{{room}}".to_owned(),
+            composer: r#"{"type":"ping"}"#.to_owned(),
+            reset_input_after_send: true,
+            messages: vec![super::super::WebSocketSavedMessage {
+                id: "message-1".to_owned(),
+                name: "Ping".to_owned(),
+                payload: r#"{"type":"ping"}"#.to_owned(),
+            }],
+            ..Default::default()
+        };
+        workspace.collections[0].requests.push(SavedRequest {
+            id: "websocket-1".to_owned(),
+            folder_id: None,
+            name: "Events".to_owned(),
+            created_by: None,
+            definition: RequestTemplate::websocket(document),
+            created_at: timestamp(1_700_000_000_000_003),
+            updated_at: timestamp(1_700_000_000_000_004),
+        });
+
+        store.save_workspace(&workspace).unwrap();
+
+        assert_eq!(store.load_workspace().unwrap(), workspace);
     }
 
     #[test]

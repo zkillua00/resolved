@@ -143,6 +143,9 @@ impl ApiTester {
             ActiveWorkspaceTab::Request if self.sidebar_tab == SidebarTab::Environments => {
                 self.render_environment_workspace(cx)
             }
+            ActiveWorkspaceTab::Request if self.request_tabs.active().template().is_websocket() => {
+                self.render_websocket_workspace(cx)
+            }
             ActiveWorkspaceTab::Request => v_flex()
                 .size_full()
                 .min_h_0()

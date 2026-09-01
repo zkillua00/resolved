@@ -189,6 +189,11 @@ impl ApiTester {
         if self.sending {
             return;
         }
+        if self.request_tabs.active().template().is_websocket() {
+            self.request_notice = Some("WebSocket export is not available yet.".to_owned());
+            cx.notify();
+            return;
+        }
         self.request_interchange.open = true;
         self.request_interchange.tab = RequestInterchangeTab::Export;
         self.sync_request_export_preview(window, cx);

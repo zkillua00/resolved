@@ -171,8 +171,14 @@ impl ApiTester {
     fn saved_request_matches_query(request: &SavedRequest, query: &str) -> bool {
         let draft = &request.definition.request;
         request.name.to_lowercase().contains(query)
+            || (request.definition.is_websocket() && "websocket".contains(query))
             || draft.method.to_lowercase().contains(query)
-            || draft.url.to_lowercase().contains(query)
+            || request
+                .definition
+                .websocket
+                .as_ref()
+                .map(|document| document.url.to_lowercase().contains(query))
+                .unwrap_or_else(|| draft.url.to_lowercase().contains(query))
     }
 
     #[allow(clippy::too_many_arguments)]

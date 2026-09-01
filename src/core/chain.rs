@@ -522,6 +522,7 @@ mod tests {
                 pre_request: pre.to_owned(),
                 post_response: post.to_owned(),
             },
+            websocket: None,
         }
     }
 
@@ -609,6 +610,7 @@ mod tests {
                 pre_request: "api.requests.execute(Auth.Refresh);".to_owned(),
                 post_response: String::new(),
             },
+            websocket: None,
         };
         let me_id = workspace
             .create_saved_request(&auth, "Me", me_template)

@@ -3706,6 +3706,7 @@ mod tests {
                 pre_request: "api.variables.set('nonce', '1');".to_owned(),
                 post_response: "api.test('ok', () => true);".to_owned(),
             },
+            websocket: None,
         }
     }
 

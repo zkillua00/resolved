@@ -89,6 +89,8 @@ impl ApiTester {
         let dirty = self.request_is_dirty();
         let request_actions_this = this.clone();
         let request_actions_disabled = self.sending;
+        let export_disabled =
+            request_actions_disabled || self.request_tabs.active().template().is_websocket();
 
         h_flex()
             .h(APP_TITLE_BAR_HEIGHT)
@@ -258,7 +260,7 @@ impl ApiTester {
                                     .item(
                                         PopupMenuItem::new("Export request…")
                                             .icon(IconName::SquareTerminal)
-                                            .disabled(request_actions_disabled)
+                                            .disabled(export_disabled)
                                             .on_click(move |_, window, cx| {
                                                 if let Some(this) = export_this.upgrade() {
                                                     this.update(cx, |this, cx| {

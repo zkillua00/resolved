@@ -14,6 +14,7 @@ mod snippet;
 mod template;
 mod upstream;
 mod upstream_management;
+mod websocket;
 mod workspace;
 mod workspace_provider;
 
@@ -103,6 +104,12 @@ pub use upstream_management::{
     replace_management_collection_users, replace_management_role_permissions,
     replace_management_user_roles, replace_management_workspace_users, update_management_role,
     update_management_user, update_request_execution_settings, upload_shared_history,
+};
+pub use websocket::{
+    MAX_WEBSOCKET_TIMELINE_ENTRIES, WebSocketAutomationEvent, WebSocketCommand,
+    WebSocketMessageTemplate, WebSocketReplay, WebSocketSavedMessage, WebSocketSignal,
+    WebSocketWorkspace, binary_preview, execute_websocket_automation, render_message_template,
+    replay_frames, replay_websocket_frames, run_websocket_connection, template_variable_names,
 };
 pub use workspace::{
     Collection, CollectionFolder, Environment, RequestScripts, ResourceCreator, SavedRequest,

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::request::{BodyMode, RequestDraft};
+use super::websocket::WebSocketWorkspace;
 use super::workspace::{Environment, RequestScripts};
 
 const MAX_VARIABLE_DEPTH: usize = 32;
@@ -20,6 +21,8 @@ pub struct RequestTemplate {
     pub request: RequestDraft,
     #[serde(default)]
     pub scripts: RequestScripts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket: Option<WebSocketWorkspace>,
 }
 
 impl RequestTemplate {
@@ -27,7 +30,19 @@ impl RequestTemplate {
         Self {
             request,
             scripts: RequestScripts::default(),
+            websocket: None,
         }
+    }
+
+    pub fn websocket(document: WebSocketWorkspace) -> Self {
+        Self {
+            websocket: Some(document),
+            ..Self::default()
+        }
+    }
+
+    pub fn is_websocket(&self) -> bool {
+        self.websocket.is_some()
     }
 
     #[allow(dead_code)]

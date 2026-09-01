@@ -1587,6 +1587,7 @@ mod tests {
                     RequestTemplate {
                         request: RequestDraft::new("POST", "https://a.test/login"),
                         scripts: RequestScripts::default(),
+                        websocket: None,
                     },
                 )
                 .unwrap();

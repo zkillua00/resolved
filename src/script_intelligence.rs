@@ -3547,6 +3547,7 @@ api.environment.get("disabled_key");
         let login = RequestTemplate {
             request: RequestDraft::new("POST", "https://a.test/login"),
             scripts: RequestScripts::default(),
+            websocket: None,
         };
         workspace
             .create_saved_request(&chat, "Login", login)
@@ -3558,6 +3559,7 @@ api.environment.get("disabled_key");
                 RequestTemplate {
                     request: RequestDraft::new("POST", "https://a.test/logout"),
                     scripts: RequestScripts::default(),
+                    websocket: None,
                 },
             )
             .unwrap();
@@ -3572,6 +3574,7 @@ api.environment.get("disabled_key");
                 RequestTemplate {
                     request: RequestDraft::new("POST", "https://a.test/users"),
                     scripts: RequestScripts::default(),
+                    websocket: None,
                 },
             )
             .unwrap();
@@ -3583,6 +3586,7 @@ api.environment.get("disabled_key");
                 RequestTemplate {
                     request: RequestDraft::new("POST", "https://p.test/login"),
                     scripts: RequestScripts::default(),
+                    websocket: None,
                 },
             )
             .unwrap();

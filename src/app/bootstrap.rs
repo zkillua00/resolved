@@ -529,6 +529,40 @@ impl ApiTester {
                 .placeholder("Password")
                 .masked(true)
         });
+        let websocket_workspace =
+            WebSocketWorkspaceState::new(&WebSocketWorkspace::default(), window, cx);
+        let websocket_url_subscription = cx.subscribe(
+            &websocket_workspace.url,
+            |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.sync_active_websocket_document(cx);
+                }
+            },
+        );
+        let websocket_headers_subscription = cx.subscribe(
+            &websocket_workspace.headers,
+            |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.sync_active_websocket_document(cx);
+                }
+            },
+        );
+        let websocket_composer_subscription = cx.subscribe(
+            &websocket_workspace.composer,
+            |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.sync_active_websocket_document(cx);
+                }
+            },
+        );
+        let websocket_automation_subscription = cx.subscribe(
+            &websocket_workspace.automation,
+            |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.sync_active_websocket_document(cx);
+                }
+            },
+        );
 
         let client = startup_or_exit("failed to create the HTTP client", build_client());
         let upstream_client = startup_or_exit(
@@ -651,6 +685,7 @@ impl ApiTester {
         );
         let quit_subscription = cx.on_app_quit(|this, cx| {
             this.stop_realtime();
+            this.stop_websocket();
             this.flush_local_state(cx);
             async {}
         });
@@ -725,6 +760,7 @@ impl ApiTester {
             realtime_status: RealtimeConnectionStatus::Inactive,
             realtime_refresh_generation: 0,
             realtime_refresh_abort_handle: None,
+            websocket_workspace,
             workspace_name,
             sidebar_tab: SidebarTab::Collections,
             navigation_compact,
@@ -817,6 +853,10 @@ impl ApiTester {
                 quit_subscription,
                 shortcut_capture_subscription,
                 upstream_login_password_subscription,
+                websocket_url_subscription,
+                websocket_headers_subscription,
+                websocket_composer_subscription,
+                websocket_automation_subscription,
             ],
         };
         this.apply_code_editor_settings(window, cx);

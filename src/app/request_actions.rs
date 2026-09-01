@@ -562,12 +562,16 @@ impl ApiTester {
     }
 
     pub(super) fn request_template(&self, cx: &App) -> RequestTemplate {
+        if self.request_tabs.active().template().is_websocket() {
+            return RequestTemplate::websocket(self.websocket_workspace.document.clone());
+        }
         RequestTemplate {
             request: self.draft(cx),
             scripts: RequestScripts {
                 pre_request: self.pre_request_script.read(cx).value(cx).to_string(),
                 post_response: self.post_response_script.read(cx).value(cx).to_string(),
             },
+            websocket: None,
         }
     }
 
@@ -798,7 +802,16 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) {
         self.request_dirty.begin_hydration();
-        let RequestTemplate { request, scripts } = template;
+        let RequestTemplate {
+            request,
+            scripts,
+            websocket,
+        } = template;
+        if let Some(document) = websocket {
+            self.load_websocket_document(document, window, cx);
+        } else {
+            self.stop_websocket();
+        }
         let query_params = if request.query_params.is_empty() {
             query_params_from_url(&request.url)
         } else {

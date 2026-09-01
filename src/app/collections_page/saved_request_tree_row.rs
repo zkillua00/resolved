@@ -17,7 +17,11 @@ impl ApiTester {
         let load_id = request_id.clone();
         let load_collection_id = collection_id.clone();
         let selected = self.active_saved_request_id.as_deref() == Some(&request.id);
-        let method = request.definition.request.method.clone();
+        let method = if request.definition.is_websocket() {
+            "WS".to_owned()
+        } else {
+            request.definition.request.method.clone()
+        };
         let color = method_color(&method, cx);
         let row_element_id: SharedString =
             format!("saved-request-row-{}-{}", collection.id, request.id).into();

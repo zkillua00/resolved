@@ -65,6 +65,7 @@ impl ApiTester {
         }
 
         let context_owner = cx.entity().downgrade();
+        let new_request_owner = context_owner.clone();
         let empty_pane_drop_zone = pane_id
             .filter(|_| tabs.is_empty())
             .map(|pane_id| tab_drag::render_empty_pane_tab_drop_zone(pane_id, cx));
@@ -115,11 +116,32 @@ impl ApiTester {
                             .small()
                             .ghost()
                             .rounded_full()
-                            .tooltip("New request tab")
+                            .tooltip("New request")
                             .disabled(self.sending)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_blank_request_tab(window, cx);
-                            })),
+                            .dropdown_menu(move |menu, _, _| {
+                                let http_owner = new_request_owner.clone();
+                                let websocket_owner = new_request_owner.clone();
+                                menu.item(PopupMenuItem::new("HTTP request").on_click(
+                                    move |_, window, cx| {
+                                        if let Some(owner) = http_owner.upgrade() {
+                                            owner.update(cx, |this, cx| {
+                                                this.open_blank_request_tab(window, cx)
+                                            });
+                                        }
+                                    },
+                                ))
+                                .item(
+                                    PopupMenuItem::new("WebSocket request").on_click(
+                                        move |_, window, cx| {
+                                            if let Some(owner) = websocket_owner.upgrade() {
+                                                owner.update(cx, |this, cx| {
+                                                    this.open_blank_websocket_tab(window, cx)
+                                                });
+                                            }
+                                        },
+                                    ),
+                                )
+                            }),
                     ),
             )
             .into_any_element()
