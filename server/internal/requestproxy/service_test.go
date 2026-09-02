@@ -3,6 +3,7 @@ package requestproxy
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -107,6 +109,43 @@ func TestRequestExecutionEventTargetsAuditReaders(t *testing.T) {
 	if len(change.Audience.PermissionKeys) != 1 ||
 		change.Audience.PermissionKeys[0] != identity.PermissionAuditRead {
 		t.Fatalf("execution audience = %+v", change.Audience)
+	}
+}
+
+func TestWebSocketProxySelectionUsesHTTPSemantics(t *testing.T) {
+	var schemes []string
+	selector := webSocketProxySelector(func(request *http.Request) (*url.URL, error) {
+		schemes = append(schemes, request.URL.Scheme)
+		return nil, nil
+	})
+	for _, rawURL := range []string{"ws://example.test/socket", "wss://example.test/socket"} {
+		request, err := http.NewRequest(http.MethodGet, rawURL, nil)
+		if err != nil {
+			t.Fatalf("create request: %v", err)
+		}
+		if _, err := selector(request); err != nil {
+			t.Fatalf("select proxy: %v", err)
+		}
+		if request.URL.Scheme != strings.SplitN(rawURL, ":", 2)[0] {
+			t.Fatalf("selector mutated WebSocket request scheme to %q", request.URL.Scheme)
+		}
+	}
+	if want := []string{"http", "https"}; !slices.Equal(schemes, want) {
+		t.Fatalf("proxy selector schemes = %v, want %v", schemes, want)
+	}
+}
+
+func TestWebSocketTLSConfigForcesHTTP11WithoutMutatingHTTPTransport(t *testing.T) {
+	base := &tls.Config{NextProtos: []string{"h2", "http/1.1"}}
+	config := webSocketTLSClientConfig(base)
+	if config == base {
+		t.Fatal("WebSocket TLS config reused the HTTP transport config")
+	}
+	if want := []string{"http/1.1"}; !slices.Equal(config.NextProtos, want) {
+		t.Fatalf("WebSocket ALPN protocols = %v, want %v", config.NextProtos, want)
+	}
+	if want := []string{"h2", "http/1.1"}; !slices.Equal(base.NextProtos, want) {
+		t.Fatalf("HTTP transport ALPN protocols were mutated to %v", base.NextProtos)
 	}
 }
 

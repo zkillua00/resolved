@@ -23,6 +23,7 @@ actions!(
         ActivateNextRequestTab,
         ActivatePreviousRequestTab,
         SendOrCancelRequest,
+        QuickSendWebSocketTemplate,
         SaveRequest,
         SaveRequestAs,
         FocusRequestUrl,
@@ -50,6 +51,7 @@ pub enum ShortcutId {
     ActivateNextRequestTab,
     ActivatePreviousRequestTab,
     SendOrCancelRequest,
+    QuickSendWebSocketTemplate,
     SaveRequest,
     SaveRequestAs,
     FocusRequestUrl,
@@ -77,6 +79,7 @@ impl ShortcutId {
             Self::ActivateNextRequestTab => "request.next_tab",
             Self::ActivatePreviousRequestTab => "request.previous_tab",
             Self::SendOrCancelRequest => "request.send_or_cancel",
+            Self::QuickSendWebSocketTemplate => "websocket.quick_send_template",
             Self::SaveRequest => "request.save",
             Self::SaveRequestAs => "request.save_as",
             Self::FocusRequestUrl => "request.focus_url",
@@ -190,6 +193,12 @@ pub const SHORTCUT_DESCRIPTORS: &[ShortcutDescriptor] = &[
         label: "Send or cancel request",
         category: ShortcutCategory::ActiveRequest,
         default_binding: "cmd-enter",
+    },
+    ShortcutDescriptor {
+        id: ShortcutId::QuickSendWebSocketTemplate,
+        label: "Quick send WebSocket template",
+        category: ShortcutCategory::ActiveRequest,
+        default_binding: "cmd-shift-enter",
     },
     ShortcutDescriptor {
         id: ShortcutId::FocusRequestUrl,
@@ -630,6 +639,9 @@ fn key_binding(id: ShortcutId, binding: &str, context: Option<&str>) -> KeyBindi
             KeyBinding::new(binding, ActivatePreviousRequestTab, context)
         }
         ShortcutId::SendOrCancelRequest => KeyBinding::new(binding, SendOrCancelRequest, context),
+        ShortcutId::QuickSendWebSocketTemplate => {
+            KeyBinding::new(binding, QuickSendWebSocketTemplate, context)
+        }
         ShortcutId::SaveRequest => KeyBinding::new(binding, SaveRequest, context),
         ShortcutId::SaveRequestAs => KeyBinding::new(binding, SaveRequestAs, context),
         ShortcutId::FocusRequestUrl => KeyBinding::new(binding, FocusRequestUrl, context),

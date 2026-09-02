@@ -33,9 +33,10 @@ use core::DatabaseStore;
 use instance_guard::InstanceGuard;
 use shortcuts::{
     ActivateNextRequestTab, ActivatePreviousRequestTab, CloseRequestTab, FocusRequestUrl,
-    FormatRawBody, NewRequestTab, QuitApp, SaveRequest, SaveRequestAs, SendOrCancelRequest,
-    ShowCollections, ShowEnvironments, ShowHistory, ShowSettings, ToggleMetrics, ToggleNavigation,
-    ZoomEditorIn, ZoomEditorOut, ZoomEditorReset, ZoomUiIn, ZoomUiOut, ZoomUiReset,
+    FormatRawBody, NewRequestTab, QuickSendWebSocketTemplate, QuitApp, SaveRequest, SaveRequestAs,
+    SendOrCancelRequest, ShowCollections, ShowEnvironments, ShowHistory, ShowSettings,
+    ToggleMetrics, ToggleNavigation, ZoomEditorIn, ZoomEditorOut, ZoomEditorReset, ZoomUiIn,
+    ZoomUiOut, ZoomUiReset,
 };
 
 struct AppAssets;
@@ -88,6 +89,7 @@ fn register_app_action_handlers(view: &Entity<ApiTester>, cx: &mut App) {
     register!(ActivateNextRequestTab, on_activate_next_request_tab);
     register!(ActivatePreviousRequestTab, on_activate_previous_request_tab);
     register!(SendOrCancelRequest, on_send_or_cancel_request);
+    register!(QuickSendWebSocketTemplate, on_quick_send_websocket_template);
     register!(SaveRequest, on_save_request);
     register!(SaveRequestAs, on_save_request_as);
     register!(FocusRequestUrl, on_focus_request_url);

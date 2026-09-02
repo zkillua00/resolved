@@ -56,12 +56,22 @@ pub(super) fn script_console_model(
                 ScriptLogLevel::Error => ("ERROR", ScriptConsoleTone::Danger),
                 ScriptLogLevel::Debug => ("DEBUG", ScriptConsoleTone::Debug),
             };
+            let values = log
+                .values
+                .iter()
+                .map(|value| ScriptConsoleValue {
+                    kind: value.kind.clone(),
+                    preview: value.preview.clone(),
+                })
+                .collect::<Vec<_>>();
+            let detail = script_console_values_detail(&values);
             rows.push(ScriptConsoleRow {
                 label: label.to_owned(),
                 message: log.message.clone(),
-                detail: None,
+                detail,
                 copy_value: log.message.clone(),
                 tone,
+                values,
             });
         }
 
@@ -82,6 +92,7 @@ pub(super) fn script_console_model(
                 } else {
                     ScriptConsoleTone::Danger
                 },
+                values: Vec::new(),
             });
         }
 
@@ -93,6 +104,7 @@ pub(super) fn script_console_model(
                 detail: None,
                 copy_value: message,
                 tone: ScriptConsoleTone::Warning,
+                values: Vec::new(),
             });
         }
 
@@ -109,6 +121,7 @@ pub(super) fn script_console_model(
                 detail: None,
                 copy_value: message,
                 tone: ScriptConsoleTone::Neutral,
+                values: Vec::new(),
             });
         }
 
@@ -144,6 +157,7 @@ pub(super) fn script_console_model(
                 detail: None,
                 copy_value: error.to_owned(),
                 tone: ScriptConsoleTone::Danger,
+                values: Vec::new(),
             }],
         });
     }
@@ -165,7 +179,21 @@ pub(super) fn script_diagnostic_console_row(diagnostic: &ScriptDiagnostic) -> Sc
         detail: diagnostic.stack.clone(),
         copy_value,
         tone: ScriptConsoleTone::Danger,
+        values: Vec::new(),
     }
+}
+
+fn script_console_values_detail(values: &[ScriptConsoleValue]) -> Option<String> {
+    let expandable = values.iter().filter_map(|value| {
+        if !matches!(value.kind.as_str(), "array" | "object") {
+            return None;
+        }
+        serde_json::from_str::<serde_json::Value>(&value.preview)
+            .ok()
+            .and_then(|parsed| serde_json::to_string_pretty(&parsed).ok())
+    });
+    let detail = expandable.collect::<Vec<_>>().join("\n");
+    (!detail.is_empty()).then_some(detail)
 }
 
 pub(super) fn script_phase_title(phase: ScriptPhase) -> &'static str {
@@ -224,27 +252,52 @@ pub(super) fn script_console_tone_icon(tone: ScriptConsoleTone) -> IconName {
     }
 }
 
+pub(super) fn script_console_value_color(kind: &str, cx: &App) -> Hsla {
+    match kind {
+        "string" => cx.theme().success,
+        "number" | "bigint" => cx.theme().warning,
+        "boolean" => cx.theme().info,
+        "error" => cx.theme().danger,
+        "null" | "undefined" => cx.theme().muted_foreground,
+        _ => cx.theme().foreground,
+    }
+}
+
 impl ApiTester {
     pub(super) fn copy_script_results(&mut self, cx: &mut Context<Self>) {
-        let model = script_console_model(
+        let mut model = script_console_model(
             self.pre_script_report.as_ref(),
             self.post_script_report.as_ref(),
             self.script_diagnostic.as_ref(),
             self.request_error.as_deref(),
         );
+        if self.script_console_cleared_key
+            == Some(script_console_content_key(
+                self.request_generation,
+                &model,
+            ))
+        {
+            model = ScriptConsoleModel::default();
+        }
         cx.write_to_clipboard(ClipboardItem::new_string(model.copy_all_text()));
         self.copied = true;
         cx.notify();
     }
 
     pub(super) fn render_script_results(&self, cx: &mut Context<Self>) -> AnyElement {
-        let model = script_console_model(
+        let mut model = script_console_model(
             self.pre_script_report.as_ref(),
             self.post_script_report.as_ref(),
             self.script_diagnostic.as_ref(),
             self.request_error.as_deref(),
         );
+        let console_content_key = script_console_content_key(self.request_generation, &model);
+        if self.script_console_cleared_key == Some(console_content_key) {
+            model = ScriptConsoleModel::default();
+        }
         let row_count = model.row_count();
+        let copy_all_text = model.copy_all_text();
+        let context_owner = cx.entity().downgrade();
         let copy_label = if self.copied { "Copied" } else { "Copy all" };
         let generation = self.request_generation;
         let sections = model
@@ -279,6 +332,13 @@ impl ApiTester {
                     )
                 };
                 let rows = section.rows.iter().enumerate().map(|(row_index, row)| {
+                    let expansion_key = format!(
+                        "{generation}-{section_key}-{section_index}-{row_index}"
+                    );
+                    let expandable = !row.values.is_empty() && row.detail.is_some();
+                    let expanded = self
+                        .script_console_expanded_rows
+                        .contains(&expansion_key);
                     let group_id: SharedString = format!(
                         "script-console-row-group-{generation}-{section_key}-{section_index}-{row_index}"
                     )
@@ -297,45 +357,67 @@ impl ApiTester {
                     .into();
                     let tone_color = script_console_tone_color(row.tone, cx);
                     let tone_background = script_console_tone_background(row.tone, cx);
+                    let row_owner = context_owner.clone();
+                    let row_copy_value = row.copy_value.clone();
+                    let row_copy_all = copy_all_text.clone();
+                    let value_elements = row
+                        .values
+                        .iter()
+                        .map(|value| {
+                            div()
+                                .text_color(script_console_value_color(&value.kind, cx))
+                                .child(value.preview.clone())
+                        })
+                        .collect::<Vec<_>>();
+                    let toggle_key = expansion_key.clone();
 
                     h_flex()
                         .id(row_id)
                         .group(group_id.clone())
                         .w_full()
-                        .min_h(px(42.))
+                        .min_h(px(30.))
                         .items_start()
-                        .px_3()
-                        .py_2()
+                        .px_2()
+                        .py_1()
                         .gap_2()
                         .border_b_1()
                         .border_color(cx.api_outline_variant())
                         .bg(tone_background)
                         .hover(|style| style.bg(cx.api_surface_low()))
+                        .when(expandable, |this| {
+                            this.cursor_pointer().on_click(cx.listener(
+                                move |this, _: &ClickEvent, _, cx| {
+                                    if !this
+                                        .script_console_expanded_rows
+                                        .insert(toggle_key.clone())
+                                    {
+                                        this.script_console_expanded_rows.remove(&toggle_key);
+                                    }
+                                    cx.notify();
+                                },
+                            ))
+                        })
                         .child(
                             div()
                                 .w(px(20.))
-                                .h(px(22.))
+                                .h(px(20.))
                                 .flex_shrink_0()
                                 .flex()
                                 .items_center()
                                 .justify_center()
                                 .child(
-                                    gpui_component::Icon::new(script_console_tone_icon(row.tone))
+                                    gpui_component::Icon::new(if expandable {
+                                        if expanded {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        }
+                                    } else {
+                                        script_console_tone_icon(row.tone)
+                                    })
                                         .with_size(px(14.))
                                         .text_color(tone_color),
                                 ),
-                        )
-                        .child(
-                            div()
-                                .w(px(64.))
-                                .h(px(22.))
-                                .flex_shrink_0()
-                                .flex()
-                                .items_center()
-                                .text_xs()
-                                .font_semibold()
-                                .text_color(tone_color)
-                                .child(row.label.clone()),
                         )
                         .child(
                             v_flex()
@@ -344,13 +426,23 @@ impl ApiTester {
                                 .font_family(cx.theme().mono_font_family.clone())
                                 .text_size(cx.theme().mono_font_size)
                                 .line_height(px(19.))
-                                .child(
+                                .child(if value_elements.is_empty() {
                                     div()
                                         .min_w_0()
                                         .whitespace_normal()
-                                        .child(row.message.clone()),
-                                )
-                                .when_some(row.detail.clone(), |this, detail| {
+                                        .child(row.message.clone())
+                                        .into_any_element()
+                                } else {
+                                    h_flex()
+                                        .min_w_0()
+                                        .flex_wrap()
+                                        .gap_x_2()
+                                        .children(value_elements)
+                                        .into_any_element()
+                                })
+                                .when_some(
+                                    row.detail.clone().filter(|_| !expandable || expanded),
+                                    |this, detail| {
                                     this.child(
                                         div()
                                             .mt_1()
@@ -362,6 +454,16 @@ impl ApiTester {
                                             .child(detail),
                                     )
                                 }),
+                        )
+                        .child(
+                            div()
+                                .h(px(20.))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(row.label.clone()),
                         )
                         .child(
                             div()
@@ -378,6 +480,15 @@ impl ApiTester {
                                     Clipboard::new(copy_id).value(row.copy_value.clone()),
                                 ),
                         )
+                        .context_menu(move |menu, _, _| {
+                            script_console_context_menu(
+                                menu,
+                                row_owner.clone(),
+                                Some(row_copy_value.clone()),
+                                row_copy_all.clone(),
+                                console_content_key,
+                            )
+                        })
                         .into_any_element()
                 });
 
@@ -385,7 +496,7 @@ impl ApiTester {
                     .w_full()
                     .child(
                         h_flex()
-                            .h(px(34.))
+                            .h(px(28.))
                             .flex_shrink_0()
                             .px_3()
                             .gap_2()
@@ -473,8 +584,63 @@ impl ApiTester {
                             .child("No script has run yet.")
                     })
                     .children(sections)
-                    .overflow_y_scrollbar(),
+                    .overflow_y_scrollbar()
+                    .context_menu(move |menu, _, _| {
+                        script_console_context_menu(
+                            menu,
+                            context_owner.clone(),
+                            None,
+                            copy_all_text.clone(),
+                            console_content_key,
+                        )
+                    }),
             )
             .into_any_element()
     }
+}
+
+fn script_console_context_menu(
+    mut menu: PopupMenu,
+    owner: WeakEntity<ApiTester>,
+    row: Option<String>,
+    all: String,
+    console_content_key: u64,
+) -> PopupMenu {
+    if let Some(row) = row {
+        menu = menu.item(
+            PopupMenuItem::new("Copy message").on_click(move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(row.clone()));
+            }),
+        );
+    }
+    let clear_owner = owner.clone();
+    menu.item(PopupMenuItem::new("Copy all").on_click(move |_, _, cx| {
+        cx.write_to_clipboard(ClipboardItem::new_string(all.clone()));
+        if let Some(owner) = owner.upgrade() {
+            owner.update(cx, |this, cx| {
+                this.copied = true;
+                cx.notify();
+            });
+        }
+    }))
+    .separator()
+    .item(PopupMenuItem::new("Clear console").on_click(move |_, _, cx| {
+        if let Some(owner) = clear_owner.upgrade() {
+            owner.update(cx, |this, cx| {
+                this.script_console_cleared_key = Some(console_content_key);
+                this.script_console_expanded_rows.clear();
+                this.copied = false;
+                cx.notify();
+            });
+        }
+    }))
+}
+
+fn script_console_content_key(generation: u64, model: &ScriptConsoleModel) -> u64 {
+    use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+
+    let mut hasher = DefaultHasher::new();
+    generation.hash(&mut hasher);
+    model.copy_all_text().hash(&mut hasher);
+    hasher.finish()
 }

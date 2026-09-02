@@ -622,6 +622,18 @@ impl ApiTester {
                 }
             },
         );
+        let websocket_quick_send_query_subscription = cx.subscribe_in(
+            &websocket_workspace.quick_send_query,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+                if matches!(event, InputEvent::PressEnter { secondary: false }) {
+                    this.select_first_websocket_quick_send_template(window, cx);
+                }
+            },
+        );
 
         let client = startup_or_exit("failed to create the HTTP client", build_client());
         let upstream_client = startup_or_exit(
@@ -762,6 +774,21 @@ impl ApiTester {
                 this.capture_shortcut_keystroke(keystroke, cx);
             });
         });
+        let quick_send_escape_target = cx.entity().downgrade();
+        let websocket_quick_send_escape_subscription =
+            cx.intercept_keystrokes(move |event, _, cx| {
+                if event.keystroke.key != "escape" {
+                    return;
+                }
+                let Some(target) = quick_send_escape_target.upgrade() else {
+                    return;
+                };
+                if !target.read(cx).websocket_workspace.quick_send_open {
+                    return;
+                }
+                cx.stop_propagation();
+                target.update(cx, |this, cx| this.close_websocket_quick_send(cx));
+            });
 
         let mut this = Self {
             method,
@@ -796,6 +823,8 @@ impl ApiTester {
             script_diagnostic: None,
             pre_script_report: None,
             post_script_report: None,
+            script_console_expanded_rows: HashSet::new(),
+            script_console_cleared_key: None,
             preview_error: None,
             copied: false,
             client,
@@ -911,6 +940,7 @@ impl ApiTester {
                 request_interchange_subscription,
                 quit_subscription,
                 shortcut_capture_subscription,
+                websocket_quick_send_escape_subscription,
                 upstream_login_password_subscription,
                 websocket_url_subscription,
                 websocket_headers_subscription,
@@ -922,6 +952,7 @@ impl ApiTester {
                 websocket_automation_subscription,
                 websocket_timeline_filter_subscription,
                 websocket_library_search_subscription,
+                websocket_quick_send_query_subscription,
             ],
         };
         this.apply_code_editor_settings(window, cx);

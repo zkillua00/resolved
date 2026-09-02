@@ -34,22 +34,27 @@ fn script_console_builds_level_and_test_rows_with_stable_copy_text() {
             ScriptLog {
                 level: ScriptLogLevel::Log,
                 message: "plain".to_owned(),
+                values: Vec::new(),
             },
             ScriptLog {
                 level: ScriptLogLevel::Info,
                 message: "bilgi 🧪".to_owned(),
+                values: Vec::new(),
             },
             ScriptLog {
                 level: ScriptLogLevel::Warn,
                 message: "careful".to_owned(),
+                values: Vec::new(),
             },
             ScriptLog {
                 level: ScriptLogLevel::Error,
                 message: "boom".to_owned(),
+                values: Vec::new(),
             },
             ScriptLog {
                 level: ScriptLogLevel::Debug,
                 message: "details".to_owned(),
+                values: Vec::new(),
             },
         ],
         tests: vec![
@@ -109,6 +114,7 @@ fn script_console_keeps_diagnostics_copyable_without_an_http_response() {
         logs: vec![ScriptLog {
             level: ScriptLogLevel::Info,
             message: "before failure".to_owned(),
+            values: Vec::new(),
         }],
         tests: Vec::new(),
         response_body_truncated: false,
@@ -166,6 +172,7 @@ fn script_console_keeps_pre_request_before_post_response() {
         logs: vec![ScriptLog {
             level: ScriptLogLevel::Log,
             message: "pre".to_owned(),
+            values: Vec::new(),
         }],
         tests: Vec::new(),
         response_body_truncated: false,
@@ -176,6 +183,7 @@ fn script_console_keeps_pre_request_before_post_response() {
         logs: vec![ScriptLog {
             level: ScriptLogLevel::Info,
             message: "post".to_owned(),
+            values: Vec::new(),
         }],
         tests: Vec::new(),
         response_body_truncated: false,

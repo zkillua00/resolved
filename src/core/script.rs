@@ -322,6 +322,7 @@ const PRELUDE: &str = r#"
     if (typeof value === "string") return value;
     if (typeof value === "undefined") return "undefined";
     if (typeof value === "bigint") return `${value}n`;
+    if (value instanceof Error) return value.stack || `${value.name}: ${value.message}`;
     try {
       const json = JSON.stringify(value);
       return json === undefined ? String(value) : json;
@@ -334,13 +335,30 @@ const PRELUDE: &str = r#"
     }
   }
 
+  function consoleValueKind(value) {
+    if (value === null) return "null";
+    if (Array.isArray(value)) return "array";
+    if (value instanceof Error) return "error";
+    const kind = typeof value;
+    return kind === "object" ? "object" : kind;
+  }
+
   function writeLog(level, values) {
     if (logs.length >= input.maxLogEntries || logCharacters >= input.maxLogBytes) return;
-    let message = values.map(printable).join(" ");
-    const remaining = input.maxLogBytes - logCharacters;
-    if (message.length > remaining) message = message.slice(0, remaining);
+    let remaining = input.maxLogBytes - logCharacters;
+    const inspectedValues = [];
+    for (const value of values) {
+      if (remaining <= 0) break;
+      if (inspectedValues.length > 0) remaining -= 1;
+      if (remaining <= 0) break;
+      let preview = printable(value);
+      if (preview.length > remaining) preview = preview.slice(0, remaining);
+      remaining -= preview.length;
+      inspectedValues.push({ kind: consoleValueKind(value), preview });
+    }
+    const message = inspectedValues.map(value => value.preview).join(" ");
     logCharacters += message.length;
-    logs.push({ level, message });
+    logs.push({ level, message, values: inspectedValues });
   }
 
   const scriptConsole = Object.freeze({
@@ -696,9 +714,17 @@ pub enum ScriptLogLevel {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ScriptLogValue {
+    pub kind: String,
+    pub preview: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ScriptLog {
     pub level: ScriptLogLevel,
     pub message: String,
+    #[serde(default)]
+    pub values: Vec<ScriptLogValue>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1673,6 +1699,14 @@ fn report_from_output(
             Some(ScriptLog {
                 level: log.level,
                 message,
+                values: log
+                    .values
+                    .iter()
+                    .map(|value| ScriptLogValue {
+                        kind: value.kind.clone(),
+                        preview: redactor.scrub(&value.preview),
+                    })
+                    .collect(),
             })
         })
         .collect();
@@ -1958,6 +1992,35 @@ console.log("prepared", api.request.method);
             ]
         );
         assert_eq!(result.report.logs[0].message, "prepared POST");
+        assert_eq!(
+            result.report.logs[0]
+                .values
+                .iter()
+                .map(|value| (value.kind.as_str(), value.preview.as_str()))
+                .collect::<Vec<_>>(),
+            [("string", "prepared"), ("string", "POST")]
+        );
+    }
+
+    #[test]
+    fn console_logs_retain_bounded_object_shape_for_inspection() {
+        let result = execute_pre_request(
+            r#"console.log("state", { connected: true, attempts: [1, 2] });"#,
+            &request(),
+            &ScriptScope::default(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
+        )
+        .expect("console object should be captured");
+
+        let log = &result.report.logs[0];
+        assert_eq!(log.message, r#"state {"connected":true,"attempts":[1,2]}"#);
+        assert_eq!(log.values[0].kind, "string");
+        assert_eq!(log.values[1].kind, "object");
+        assert_eq!(
+            log.values[1].preview,
+            r#"{"connected":true,"attempts":[1,2]}"#
+        );
     }
 
     #[test]

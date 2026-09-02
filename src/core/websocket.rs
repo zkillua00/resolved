@@ -19,7 +19,7 @@ use tokio_tungstenite::{
     tungstenite::{
         Message,
         client::IntoClientRequest as _,
-        http::{HeaderName, HeaderValue},
+        http::{HeaderName, HeaderValue, header::AUTHORIZATION},
         protocol::WebSocketConfig,
     },
 };
@@ -93,6 +93,26 @@ pub enum WebSocketSignal {
     Pong(Vec<u8>),
     Closed(Option<String>),
     Failed(String),
+}
+
+#[derive(Serialize)]
+struct UpstreamWebSocketOpen {
+    url: String,
+    headers: Vec<UpstreamWebSocketHeader>,
+}
+
+#[derive(Serialize)]
+struct UpstreamWebSocketHeader {
+    name: String,
+    value: String,
+}
+
+#[derive(Deserialize)]
+struct UpstreamWebSocketOpenResponse {
+    #[serde(rename = "type")]
+    response_type: String,
+    #[serde(default)]
+    message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -277,7 +297,7 @@ const AUTOMATION_PRELUDE: &str = r#"
 pub async fn run_websocket_connection(
     url: &str,
     headers: &[HeaderEntry],
-    mut commands: UnboundedReceiver<WebSocketCommand>,
+    commands: UnboundedReceiver<WebSocketCommand>,
     signals: UnboundedSender<WebSocketSignal>,
 ) -> Result<(), WebSocketConnectError> {
     if let Err(error) = crate::tls::install_crypto_provider() {
@@ -320,14 +340,130 @@ pub async fn run_websocket_connection(
             return Ok(());
         }
     };
-    if signals.send(WebSocketSignal::Connected).is_err() {
+    drive_websocket_connection(stream, commands, signals).await;
+    Ok(())
+}
+
+pub async fn run_upstream_websocket_connection(
+    base_url: &url::Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    url: &str,
+    headers: &[HeaderEntry],
+    commands: UnboundedReceiver<WebSocketCommand>,
+    signals: UnboundedSender<WebSocketSignal>,
+) -> Result<(), WebSocketConnectError> {
+    if let Err(error) = crate::tls::install_crypto_provider() {
+        let _ = signals.send(WebSocketSignal::Failed(error.to_owned()));
         return Ok(());
+    }
+    let mut endpoint = base_url
+        .join(&format!("api/v1/workspaces/{workspace_id}/execute"))
+        .map_err(|error| WebSocketConnectError::InvalidUrl(error.to_string()))?;
+    let socket_scheme = match endpoint.scheme() {
+        "http" => "ws",
+        "https" => "wss",
+        _ => return Err(WebSocketConnectError::UnsupportedScheme),
+    };
+    endpoint
+        .set_scheme(socket_scheme)
+        .map_err(|_| WebSocketConnectError::UnsupportedScheme)?;
+    let mut request = endpoint
+        .as_str()
+        .into_client_request()
+        .map_err(|error| WebSocketConnectError::InvalidUrl(error.to_string()))?;
+    request.headers_mut().insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {bearer_token}")).map_err(|error| {
+            WebSocketConnectError::InvalidHeaderValue {
+                name: "Authorization".to_owned(),
+                reason: error.to_string(),
+            }
+        })?,
+    );
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(MAX_WEBSOCKET_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_WEBSOCKET_MESSAGE_BYTES));
+    let (mut stream, _) = match connect_async_with_config(request, Some(config), true).await {
+        Ok(connection) => connection,
+        Err(error) => {
+            let _ = signals.send(WebSocketSignal::Failed(error.to_string()));
+            return Ok(());
+        }
+    };
+    let descriptor = UpstreamWebSocketOpen {
+        url: url.to_owned(),
+        headers: headers
+            .iter()
+            .filter(|header| header.enabled && !header.name.trim().is_empty())
+            .map(|header| UpstreamWebSocketHeader {
+                name: header.name.clone(),
+                value: header.value.clone(),
+            })
+            .collect(),
+    };
+    let payload = serde_json::to_string(&descriptor)
+        .map_err(|error| WebSocketConnectError::InvalidUrl(error.to_string()))?;
+    if let Err(error) = stream.send(Message::Text(payload.into())).await {
+        let _ = signals.send(WebSocketSignal::Failed(error.to_string()));
+        return Ok(());
+    }
+    let response = match stream.next().await {
+        Some(Ok(Message::Text(response))) => response,
+        Some(Ok(_)) => {
+            let _ = signals.send(WebSocketSignal::Failed(
+                "the server returned an invalid WebSocket execution response".to_owned(),
+            ));
+            return Ok(());
+        }
+        Some(Err(error)) => {
+            let _ = signals.send(WebSocketSignal::Failed(error.to_string()));
+            return Ok(());
+        }
+        None => {
+            let _ = signals.send(WebSocketSignal::Failed(
+                "the server closed the WebSocket execution connection".to_owned(),
+            ));
+            return Ok(());
+        }
+    };
+    let response: UpstreamWebSocketOpenResponse = match serde_json::from_str(&response) {
+        Ok(response) => response,
+        Err(error) => {
+            let _ = signals.send(WebSocketSignal::Failed(format!(
+                "the server returned an invalid WebSocket execution response: {error}"
+            )));
+            return Ok(());
+        }
+    };
+    if response.response_type != "opened" {
+        let message = if response.message.trim().is_empty() {
+            "the server could not open the WebSocket connection".to_owned()
+        } else {
+            response.message
+        };
+        let _ = signals.send(WebSocketSignal::Failed(message));
+        return Ok(());
+    }
+    drive_websocket_connection(stream, commands, signals).await;
+    Ok(())
+}
+
+async fn drive_websocket_connection<S>(
+    stream: tokio_tungstenite::WebSocketStream<S>,
+    mut commands: UnboundedReceiver<WebSocketCommand>,
+    signals: UnboundedSender<WebSocketSignal>,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    if signals.send(WebSocketSignal::Connected).is_err() {
+        return;
     }
     let (mut writer, mut reader) = stream.split();
     loop {
         tokio::select! {
             command = commands.recv() => {
-                let Some(command) = command else { return Ok(()); };
+                let Some(command) = command else { return; };
                 let message = match command {
                     WebSocketCommand::SendText(text) => Message::Text(text.into()),
                     WebSocketCommand::SendBinary(bytes) => Message::Binary(bytes.into()),
@@ -335,13 +471,13 @@ pub async fn run_websocket_connection(
                 };
                 if let Err(error) = writer.send(message).await {
                     let _ = signals.send(WebSocketSignal::Failed(error.to_string()));
-                    return Ok(());
+                    return;
                 }
             }
             incoming = reader.next() => {
                 let Some(incoming) = incoming else {
                     let _ = signals.send(WebSocketSignal::Closed(None));
-                    return Ok(());
+                    return;
                 };
                 let signal = match incoming {
                     Ok(Message::Text(text)) => WebSocketSignal::Text(text.to_string()),
@@ -351,15 +487,15 @@ pub async fn run_websocket_connection(
                     Ok(Message::Close(frame)) => {
                         let reason = frame.map(|frame| format!("{} {}", u16::from(frame.code), frame.reason));
                         let _ = signals.send(WebSocketSignal::Closed(reason));
-                        return Ok(());
+                        return;
                     }
                     Ok(Message::Frame(_)) => continue,
                     Err(error) => {
                         let _ = signals.send(WebSocketSignal::Failed(error.to_string()));
-                        return Ok(());
+                        return;
                     }
                 };
-                if signals.send(signal).is_err() { return Ok(()); }
+                if signals.send(signal).is_err() { return; }
             }
         }
     }
@@ -502,5 +638,72 @@ mod tests {
             authorization.lock().unwrap().as_deref(),
             Some("Bearer test")
         );
+    }
+
+    #[tokio::test]
+    async fn upstream_connection_opens_with_descriptor_before_relaying_frames() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_hdr_async(
+                stream,
+                |request: &Request, response: Response| {
+                    assert_eq!(request.uri().path(), "/api/v1/workspaces/workspace-1/execute");
+                    assert_eq!(
+                        request
+                            .headers()
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok()),
+                        Some("Bearer server-session")
+                    );
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+            let descriptor = socket.next().await.unwrap().unwrap();
+            let Message::Text(descriptor) = descriptor else {
+                panic!("expected an execution descriptor");
+            };
+            let descriptor: serde_json::Value = serde_json::from_str(&descriptor).unwrap();
+            assert_eq!(descriptor["url"], "wss://target.example/socket");
+            assert_eq!(descriptor["headers"][0]["name"], "X-Target");
+            assert_eq!(descriptor["headers"][0]["value"], "yes");
+            socket
+                .send(Message::Text(r#"{"type":"opened"}"#.into()))
+                .await
+                .unwrap();
+            let message = socket.next().await.unwrap().unwrap();
+            socket.send(message).await.unwrap();
+        });
+
+        let (command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (signal_sender, mut signal_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let base_url = url::Url::parse(&format!("http://{address}/")).unwrap();
+        let client = tokio::spawn(async move {
+            run_upstream_websocket_connection(
+                &base_url,
+                "server-session",
+                "workspace-1",
+                "wss://target.example/socket",
+                &[HeaderEntry::new("X-Target", "yes")],
+                command_receiver,
+                signal_sender,
+            )
+            .await
+            .unwrap();
+        });
+
+        assert_eq!(signal_receiver.recv().await, Some(WebSocketSignal::Connected));
+        command_sender
+            .send(WebSocketCommand::SendText("hello".to_owned()))
+            .unwrap();
+        assert_eq!(
+            signal_receiver.recv().await,
+            Some(WebSocketSignal::Text("hello".to_owned()))
+        );
+        server.await.unwrap();
+        client.await.unwrap();
     }
 }
