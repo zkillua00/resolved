@@ -44,7 +44,7 @@ enum WebSocketLibrarySelection {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum WebSocketQuickSendStage {
+pub(in crate::app) enum WebSocketQuickSendStage {
     #[default]
     Picker,
     Fill,
@@ -69,7 +69,9 @@ pub(in crate::app) struct WebSocketWorkspaceState {
     pub(in crate::app) library_preview: Entity<CodeEditor>,
     pub(in crate::app) quick_send_query: Entity<InputState>,
     pub(in crate::app) quick_send_open: bool,
-    quick_send_stage: WebSocketQuickSendStage,
+    pub(in crate::app) quick_send_stage: WebSocketQuickSendStage,
+    quick_send_selected_template_id: Option<String>,
+    quick_send_scroll: ScrollHandle,
     template_name: Entity<InputState>,
     pub(in crate::app) template_payload: Entity<CodeEditor>,
     replay_name: Entity<InputState>,
@@ -209,6 +211,8 @@ impl WebSocketWorkspaceState {
                 .new(|cx| InputState::new(window, cx).placeholder("Find a template")),
             quick_send_open: false,
             quick_send_stage: WebSocketQuickSendStage::Picker,
+            quick_send_selected_template_id: None,
+            quick_send_scroll: ScrollHandle::new(),
             template_name: cx.new(|cx| InputState::new(window, cx).placeholder("Template name")),
             template_payload,
             replay_name: cx.new(|cx| InputState::new(window, cx).placeholder("Replay name")),
@@ -502,20 +506,24 @@ impl ApiTester {
         let upstream_client = self.upstream_execution_client.clone();
         let task = self.runtime.spawn(async move {
             let result = match upstream_target {
-                None => run_websocket_connection(
-                    &url,
-                    &headers,
-                    command_receiver,
-                    signal_sender.clone(),
-                )
-                .await,
+                None => {
+                    run_websocket_connection(
+                        &url,
+                        &headers,
+                        command_receiver,
+                        signal_sender.clone(),
+                    )
+                    .await
+                }
                 Some(target) => {
                     let upstream_id = target.upstream_id.clone();
                     let credential = match runtime
                         .spawn_blocking(move || vault.load_upstream(&upstream_id))
                         .await
                     {
-                        Ok(Ok(Some(credential))) if credential.expires_at > Utc::now() => credential,
+                        Ok(Ok(Some(credential))) if credential.expires_at > Utc::now() => {
+                            credential
+                        }
                         Ok(Ok(_)) => {
                             let _ = signal_sender.send(WebSocketSignal::Failed(
                                 "Log in to this server again.".to_owned(),
@@ -538,23 +546,27 @@ impl ApiTester {
                     )
                     .await
                     {
-                        Ok(RequestExecutionMode::Local) => run_websocket_connection(
-                            &url,
-                            &headers,
-                            command_receiver,
-                            signal_sender.clone(),
-                        )
-                        .await,
-                        Ok(RequestExecutionMode::Server) => run_upstream_websocket_connection(
-                            &target.base_url,
-                            credential.bearer_token(),
-                            &target.workspace_id,
-                            &url,
-                            &headers,
-                            command_receiver,
-                            signal_sender.clone(),
-                        )
-                        .await,
+                        Ok(RequestExecutionMode::Local) => {
+                            run_websocket_connection(
+                                &url,
+                                &headers,
+                                command_receiver,
+                                signal_sender.clone(),
+                            )
+                            .await
+                        }
+                        Ok(RequestExecutionMode::Server) => {
+                            run_upstream_websocket_connection(
+                                &target.base_url,
+                                credential.bearer_token(),
+                                &target.workspace_id,
+                                &url,
+                                &headers,
+                                command_receiver,
+                                signal_sender.clone(),
+                            )
+                            .await
+                        }
                         Err(error) => {
                             let _ = signal_sender.send(WebSocketSignal::Failed(error.to_string()));
                             return;
@@ -1258,6 +1270,12 @@ impl ApiTester {
         }
         self.websocket_workspace.quick_send_open = true;
         self.websocket_workspace.quick_send_stage = WebSocketQuickSendStage::Picker;
+        self.websocket_workspace.quick_send_selected_template_id = self
+            .websocket_workspace
+            .document
+            .templates
+            .first()
+            .map(|template| template.id.clone());
         self.websocket_workspace.active_template_id = None;
         self.websocket_workspace.template_values.clear();
         self.websocket_workspace
@@ -1282,6 +1300,7 @@ impl ApiTester {
     ) {
         self.websocket_workspace.quick_send_open = true;
         self.websocket_workspace.quick_send_stage = WebSocketQuickSendStage::Fill;
+        self.websocket_workspace.quick_send_selected_template_id = Some(id.clone());
         self.select_websocket_template(id, window, cx);
         if let Some((_, input)) = self.websocket_workspace.template_values.first() {
             input.read(cx).focus_handle(cx).focus(window);
@@ -1289,11 +1308,7 @@ impl ApiTester {
         cx.notify();
     }
 
-    pub(super) fn select_first_websocket_quick_send_template(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn websocket_quick_send_matches(&self, cx: &App) -> Vec<String> {
         let query = self
             .websocket_workspace
             .quick_send_query
@@ -1301,15 +1316,63 @@ impl ApiTester {
             .value()
             .trim()
             .to_lowercase();
-        let id = self
-            .websocket_workspace
+        self.websocket_workspace
             .document
             .templates
             .iter()
-            .find(|template| {
+            .filter(|template| {
                 websocket_library_item_matches(&template.name, &template.payload, &query)
             })
-            .map(|template| template.id.clone());
+            .map(|template| template.id.clone())
+            .collect()
+    }
+
+    pub(super) fn reset_websocket_quick_send_selection(&mut self, cx: &mut Context<Self>) {
+        self.websocket_workspace.quick_send_selected_template_id =
+            self.websocket_quick_send_matches(cx).into_iter().next();
+        self.websocket_workspace.quick_send_scroll.scroll_to_item(0);
+        cx.notify();
+    }
+
+    pub(super) fn move_websocket_quick_send_selection(
+        &mut self,
+        direction: isize,
+        cx: &mut Context<Self>,
+    ) {
+        let matches = self.websocket_quick_send_matches(cx);
+        if matches.is_empty() {
+            self.websocket_workspace.quick_send_selected_template_id = None;
+            cx.notify();
+            return;
+        }
+        let current = self
+            .websocket_workspace
+            .quick_send_selected_template_id
+            .as_ref()
+            .and_then(|selected| matches.iter().position(|id| id == selected))
+            .unwrap_or(0);
+        let selected = current
+            .saturating_add_signed(direction)
+            .min(matches.len() - 1);
+        self.websocket_workspace.quick_send_selected_template_id = Some(matches[selected].clone());
+        self.websocket_workspace
+            .quick_send_scroll
+            .scroll_to_item(selected);
+        cx.notify();
+    }
+
+    pub(super) fn select_websocket_quick_send_template(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let matches = self.websocket_quick_send_matches(cx);
+        let id = self
+            .websocket_workspace
+            .quick_send_selected_template_id
+            .clone()
+            .filter(|selected| matches.iter().any(|id| id == selected))
+            .or_else(|| matches.into_iter().next());
         if let Some(id) = id {
             self.open_websocket_quick_send_for(id, window, cx);
         }
@@ -1318,6 +1381,7 @@ impl ApiTester {
     pub(super) fn close_websocket_quick_send(&mut self, cx: &mut Context<Self>) {
         self.websocket_workspace.quick_send_open = false;
         self.websocket_workspace.quick_send_stage = WebSocketQuickSendStage::Picker;
+        self.websocket_workspace.quick_send_selected_template_id = None;
         self.websocket_workspace.active_template_id = None;
         self.websocket_workspace.template_values.clear();
         self.websocket_workspace
@@ -1363,7 +1427,7 @@ impl ApiTester {
             return false;
         }
         if self.websocket_workspace.quick_send_stage == WebSocketQuickSendStage::Picker {
-            self.select_first_websocket_quick_send_template(window, cx);
+            self.select_websocket_quick_send_template(window, cx);
         } else {
             self.submit_websocket_quick_send(cx);
         }
@@ -1636,6 +1700,11 @@ impl ApiTester {
             .iter()
             .map(|template| {
                 let id = template.id.clone();
+                let selected = self
+                    .websocket_workspace
+                    .quick_send_selected_template_id
+                    .as_deref()
+                    == Some(template.id.as_str());
                 div()
                     .id(SharedString::from(format!(
                         "quick-send-template-{}",
@@ -1644,6 +1713,9 @@ impl ApiTester {
                     .w_full()
                     .cursor_pointer()
                     .rounded_md()
+                    .when(selected, |this| {
+                        this.bg(cx.theme().sidebar_accent.opacity(0.82))
+                    })
                     .hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.62)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_websocket_quick_send_for(id.clone(), window, cx);
@@ -1700,9 +1772,11 @@ impl ApiTester {
             )
             .child(
                 v_flex()
+                    .id("websocket-quick-send-scroll")
                     .flex_1()
                     .min_h_0()
                     .max_h(px(380.))
+                    .track_scroll(&self.websocket_workspace.quick_send_scroll)
                     .overflow_y_scrollbar()
                     .gap_1()
                     .p_2()
@@ -1728,7 +1802,7 @@ impl ApiTester {
                     .border_color(cx.api_outline_variant())
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Enter selects the first match"),
+                    .child("↑↓ Navigate  ·  Enter select  ·  Esc close"),
             )
             .into_any_element()
     }
@@ -3354,6 +3428,72 @@ mod tests {
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         assert!(!cx.update(|_, cx| app.read(cx).websocket_workspace.quick_send_open));
+    }
+
+    #[gpui::test]
+    fn quick_send_arrow_keys_move_selection_and_enter_uses_it(cx: &mut TestAppContext) {
+        let (app, cx, _directory) = mount_app(cx);
+        cx.update(|window, _| window.activate_window());
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.open_blank_websocket_tab(window, cx);
+                for (id, name) in [
+                    ("template-one", "One"),
+                    ("template-two", "Two"),
+                    ("template-three", "Three"),
+                ] {
+                    app.websocket_workspace
+                        .document
+                        .templates
+                        .push(WebSocketMessageTemplate {
+                            id: id.to_owned(),
+                            name: name.to_owned(),
+                            payload: format!(r#"{{"message":"%{{{name}}}%"}}"#),
+                        });
+                }
+                app.open_websocket_quick_send(window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.update(|_, cx| {
+                app.read(cx)
+                    .websocket_workspace
+                    .quick_send_selected_template_id
+                    .clone()
+            }),
+            Some("template-one".to_owned())
+        );
+
+        cx.update(|window, cx| {
+            let query = app.read(cx).websocket_workspace.quick_send_query.clone();
+            query.update(cx, |input, cx| input.set_value("Three", window, cx));
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| {
+                app.read(cx)
+                    .websocket_workspace
+                    .quick_send_selected_template_id
+                    .clone()
+            }),
+            Some("template-three".to_owned())
+        );
+        cx.update(|window, cx| {
+            let query = app.read(cx).websocket_workspace.quick_send_query.clone();
+            query.update(cx, |input, cx| input.set_value("", window, cx));
+        });
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("down down up enter");
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            let state = &app.read(cx).websocket_workspace;
+            assert_eq!(state.quick_send_stage, WebSocketQuickSendStage::Fill);
+            assert_eq!(state.active_template_id.as_deref(), Some("template-two"));
+        });
     }
 
     #[gpui::test]

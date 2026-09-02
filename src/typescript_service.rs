@@ -129,17 +129,19 @@ pub enum TypeScriptScriptPhase {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TypeScriptDocumentKind {
     Script(TypeScriptScriptPhase),
+    InteractiveConsole,
     PlainSnippet(TypeScriptScriptPhase),
     ExecutableSnippet(TypeScriptScriptPhase),
 }
 
 impl TypeScriptDocumentKind {
-    const COUNT: usize = 6;
+    const COUNT: usize = 7;
 
     const fn bridge_name(self) -> &'static str {
         match self {
             Self::Script(TypeScriptScriptPhase::PreRequest) => "script-pre",
             Self::Script(TypeScriptScriptPhase::PostResponse) => "script-post",
+            Self::InteractiveConsole => "interactive-console",
             Self::PlainSnippet(TypeScriptScriptPhase::PreRequest) => "plain-snippet-pre",
             Self::PlainSnippet(TypeScriptScriptPhase::PostResponse) => "plain-snippet-post",
             Self::ExecutableSnippet(TypeScriptScriptPhase::PreRequest) => "executable-snippet-pre",
@@ -153,10 +155,11 @@ impl TypeScriptDocumentKind {
         match self {
             Self::Script(TypeScriptScriptPhase::PreRequest) => 0,
             Self::Script(TypeScriptScriptPhase::PostResponse) => 1,
-            Self::PlainSnippet(TypeScriptScriptPhase::PreRequest) => 2,
-            Self::PlainSnippet(TypeScriptScriptPhase::PostResponse) => 3,
-            Self::ExecutableSnippet(TypeScriptScriptPhase::PreRequest) => 4,
-            Self::ExecutableSnippet(TypeScriptScriptPhase::PostResponse) => 5,
+            Self::InteractiveConsole => 2,
+            Self::PlainSnippet(TypeScriptScriptPhase::PreRequest) => 3,
+            Self::PlainSnippet(TypeScriptScriptPhase::PostResponse) => 4,
+            Self::ExecutableSnippet(TypeScriptScriptPhase::PreRequest) => 5,
+            Self::ExecutableSnippet(TypeScriptScriptPhase::PostResponse) => 6,
         }
     }
 

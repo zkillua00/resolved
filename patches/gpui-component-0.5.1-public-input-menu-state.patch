@@ -1,0 +1,6 @@
+diff --git a/src/input/lsp/mod.rs b/src/input/lsp/mod.rs
+--- a/src/input/lsp/mod.rs
++++ b/src/input/lsp/mod.rs
+@@ -81 +81 @@
+-    pub(crate) fn is_context_menu_open(&self, cx: &App) -> bool {
++    pub fn is_context_menu_open(&self, cx: &App) -> bool {

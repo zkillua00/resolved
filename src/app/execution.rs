@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 // Keeping the unboxed error preserves that context across the background task.
 #[allow(clippy::result_large_err)]
 impl ApiTester {
-    fn script_scope(environment: Option<&Environment>) -> ScriptScope {
+    pub(super) fn script_scope(environment: Option<&Environment>) -> ScriptScope {
         let mut script_environment = ScriptEnvironment::default();
         if let Some(environment) = environment {
             for variable in environment
@@ -390,7 +390,10 @@ impl ApiTester {
     /// to `run_chain` so chained scripts can await further. Each pipeline is
     /// bounded by the script timeout. Returns one `Result` per request, in
     /// input order; `Err` on chain failure so the awaiting script rejects.
-    fn build_inline_chainer(&self, environment_id: &Option<String>) -> InlineChainRunner {
+    pub(super) fn build_inline_chainer(
+        &self,
+        environment_id: &Option<String>,
+    ) -> InlineChainRunner {
         let workspace = self.workspace.clone();
         let namespace = self.request_namespace.clone();
         let environment_id = environment_id.clone();
@@ -784,7 +787,7 @@ impl ApiTester {
         cx.notify();
     }
 
-    fn run_post_chain(
+    pub(super) fn run_post_chain(
         &mut self,
         generation: u64,
         environment_id: Option<String>,
@@ -1145,7 +1148,7 @@ impl ApiTester {
     }
 }
 
-struct InlineChainRunner {
+pub(super) struct InlineChainRunner {
     workspace: crate::core::Workspace,
     namespace: crate::core::RequestNamespaceCatalog,
     environment_id: Option<String>,

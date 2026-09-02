@@ -1078,6 +1078,46 @@ pub fn execute_post_response_with_chain(
     )
 }
 
+/// Evaluates one interactive console entry against the post-response API.
+/// Expressions print their completion value; statement blocks retain normal
+/// script semantics and can write through `console` / `api.console`.
+pub fn execute_post_response_console_with_chain(
+    source: &str,
+    request: &RequestDraft,
+    response: &ResponseData,
+    scope: &ScriptScope,
+    request_namespace: &RequestNamespaceCatalog,
+    cancellation: &ScriptCancellation,
+    chain_inline: Option<&dyn InlineChainer>,
+) -> Result<PostResponseResult, ScriptError> {
+    let encoded = serde_json::to_string(source).unwrap_or_else(|_| "\"\"".to_owned());
+    let wrapped = format!(
+        r#"
+const __resolvedConsoleSource = {encoded};
+const __ResolvedAsyncFunction = Object.getPrototypeOf(async function() {{}}).constructor;
+let __resolvedConsoleRunner;
+try {{
+  __resolvedConsoleRunner = new __ResolvedAsyncFunction(
+    "return (" + __resolvedConsoleSource + "\n);"
+  );
+}} catch (_) {{
+  __resolvedConsoleRunner = new __ResolvedAsyncFunction(__resolvedConsoleSource);
+}}
+const __resolvedConsoleValue = await __resolvedConsoleRunner();
+console.log(__resolvedConsoleValue);
+"#
+    );
+    execute_post_response_inner(
+        &wrapped,
+        request,
+        response,
+        scope,
+        request_namespace,
+        cancellation,
+        chain_inline,
+    )
+}
+
 fn extend_redactor_with_secret_mutations(
     redactor: &mut SecretRedactor,
     scope: &ScriptScope,
@@ -2107,6 +2147,65 @@ console.info(api.response.durationMs);
                 value: "next-token".to_owned(),
             }]
         );
+    }
+
+    #[test]
+    fn interactive_console_prints_expression_values_with_post_response_api() {
+        let response = ResponseData {
+            status: 201,
+            status_text: "Created".to_owned(),
+            http_version: "HTTP/2".to_owned(),
+            final_url: "https://example.test/users".to_owned(),
+            headers: Vec::new(),
+            content_type: Some("application/json".to_owned()),
+            body: br#"{"ok":true}"#.to_vec().into(),
+            duration: Duration::from_millis(42),
+        };
+
+        let result = execute_post_response_console_with_chain(
+            "({ status: api.response.status, body: api.response.json() })",
+            &request(),
+            &response,
+            &ScriptScope::default(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
+            None,
+        )
+        .expect("console expression should use the post-response API");
+
+        assert_eq!(result.report.logs.len(), 1);
+        assert_eq!(result.report.logs[0].values[0].kind, "object");
+        assert_eq!(
+            result.report.logs[0].message,
+            r#"{"status":201,"body":{"ok":true}}"#
+        );
+    }
+
+    #[test]
+    fn interactive_console_accepts_awaited_statement_blocks() {
+        let response = ResponseData {
+            status: 200,
+            status_text: "OK".to_owned(),
+            http_version: "HTTP/1.1".to_owned(),
+            final_url: "https://example.test".to_owned(),
+            headers: Vec::new(),
+            content_type: None,
+            body: Vec::new().into(),
+            duration: Duration::from_millis(1),
+        };
+
+        let result = execute_post_response_console_with_chain(
+            "await Promise.resolve(); api.console.info('ready');",
+            &request(),
+            &response,
+            &ScriptScope::default(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
+            None,
+        )
+        .expect("console statements should support top-level await");
+
+        assert_eq!(result.report.logs[0].message, "ready");
     }
 
     #[test]

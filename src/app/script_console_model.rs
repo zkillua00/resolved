@@ -8,6 +8,7 @@ pub(super) enum ScriptConsoleTone {
     Danger,
     Success,
     Debug,
+    Command,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

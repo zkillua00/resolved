@@ -139,6 +139,8 @@ pub struct CodeEditorConfig {
     tab_size: TabSize,
     indent_guides: bool,
     framed: bool,
+    embedded: bool,
+    active_line: bool,
     format_action: bool,
     completion_provider: Option<Rc<dyn CompletionProvider>>,
     hover_provider: Option<Rc<dyn HoverProvider>>,
@@ -160,6 +162,8 @@ impl Default for CodeEditorConfig {
             tab_size: TabSize::default(),
             indent_guides: true,
             framed: true,
+            embedded: false,
+            active_line: true,
             format_action: false,
             completion_provider: None,
             hover_provider: None,
@@ -228,6 +232,19 @@ impl CodeEditorConfig {
         self
     }
 
+    /// Render the buffer flush inside a host-owned surface. The host provides
+    /// its own border, background, and spacing (for example a console prompt).
+    pub fn embedded(mut self, embedded: bool) -> Self {
+        self.embedded = embedded;
+        self
+    }
+
+    /// Controls the editor's full-width active-line fill.
+    pub fn active_line(mut self, active_line: bool) -> Self {
+        self.active_line = active_line;
+        self
+    }
+
     pub fn format_action(mut self, format_action: bool) -> Self {
         self.format_action = format_action;
         self
@@ -291,6 +308,7 @@ pub struct CodeEditor {
     read_only: bool,
     auto_close: bool,
     framed: bool,
+    embedded: bool,
     completion_enabled: bool,
     format_action: bool,
     context_menu: Option<Entity<PopupMenu>>,
@@ -318,6 +336,8 @@ impl CodeEditor {
             tab_size,
             indent_guides,
             framed,
+            embedded,
+            active_line,
             format_action,
             completion_provider,
             hover_provider,
@@ -334,7 +354,8 @@ impl CodeEditor {
                 .soft_wrap(soft_wrap)
                 .line_number(line_numbers)
                 .tab_size(tab_size)
-                .indent_guides(indent_guides);
+                .indent_guides(indent_guides)
+                .active_line(active_line);
 
             if !placeholder.is_empty() {
                 state = state.placeholder(placeholder);
@@ -364,6 +385,7 @@ impl CodeEditor {
             read_only,
             auto_close,
             framed,
+            embedded,
             completion_enabled,
             format_action,
             context_menu: None,
@@ -382,6 +404,10 @@ impl CodeEditor {
     /// Returns the underlying input entity for focus and advanced editor APIs.
     pub fn input_state(&self) -> Entity<InputState> {
         self.input.clone()
+    }
+
+    pub fn has_open_input_menu(&self, cx: &App) -> bool {
+        self.input.read(cx).is_context_menu_open(cx)
     }
 
     pub fn language(&self) -> &CodeLanguage {
@@ -761,18 +787,20 @@ impl Render for CodeEditor {
                     .border_1()
                     .border_color(cx.api_outline_variant())
             })
-            .when_some(editor_style.border_radius, |this, radius| {
-                this.rounded(radius)
+            .when(!self.embedded, |this| {
+                this.when_some(editor_style.border_radius, |this, radius| {
+                    this.rounded(radius)
+                })
+                .mt(editor_style.margin.top)
+                .mr(editor_style.margin.right)
+                .mb(editor_style.margin.bottom)
+                .ml(editor_style.margin.left)
+                .pt(editor_style.padding.top)
+                .pr(editor_style.padding.right)
+                .pb(editor_style.padding.bottom)
+                .pl(editor_style.padding.left)
+                .bg(cx.api_surface_lowest())
             })
-            .mt(editor_style.margin.top)
-            .mr(editor_style.margin.right)
-            .mb(editor_style.margin.bottom)
-            .ml(editor_style.margin.left)
-            .pt(editor_style.padding.top)
-            .pr(editor_style.padding.right)
-            .pb(editor_style.padding.bottom)
-            .pl(editor_style.padding.left)
-            .bg(cx.api_surface_lowest())
             .overflow_hidden()
             .child(
                 Input::new(&self.input)

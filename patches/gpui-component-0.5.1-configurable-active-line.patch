@@ -1,0 +1,21 @@
+--- a/src/input/state.rs
++++ b/src/input/state.rs
+@@ -577,0 +578 @@
++    pub(super) active_line: bool,
+@@ -671,0 +673 @@
++            active_line: true,
+@@ -779,0 +782,6 @@
++        self
++    }
++
++    /// Set whether code editors paint the active line background.
++    pub fn active_line(mut self, active_line: bool) -> Self {
++        self.active_line = active_line;
+--- a/src/input/element.rs
++++ b/src/input/element.rs
+@@ -1573 +1573,4 @@
+-        let active_line_color = cx.theme().highlight_theme.style.editor_active_line;
++        let active_line_color = state
++            .active_line
++            .then_some(cx.theme().highlight_theme.style.editor_active_line)
++            .flatten();

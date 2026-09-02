@@ -56,6 +56,11 @@ fn script_console_builds_level_and_test_rows_with_stable_copy_text() {
                 message: "details".to_owned(),
                 values: Vec::new(),
             },
+            ScriptLog {
+                level: ScriptLogLevel::Debug,
+                message: "> api.response.status".to_owned(),
+                values: Vec::new(),
+            },
         ],
         tests: vec![
             ScriptTestResult {
@@ -80,12 +85,14 @@ fn script_console_builds_level_and_test_rows_with_stable_copy_text() {
             .map(|row| row.label.as_str())
             .collect::<Vec<_>>(),
         [
-            "LOG", "INFO", "WARN", "ERROR", "DEBUG", "PASS", "FAIL", "NOTICE"
+            "LOG", "INFO", "WARN", "ERROR", "DEBUG", "", "PASS", "FAIL", "NOTICE"
         ]
     );
+    assert_eq!(model.sections[0].rows[5].message, "api.response.status");
+    assert_eq!(model.sections[0].rows[5].tone, ScriptConsoleTone::Command);
     assert_eq!(model.sections[0].rows[1].copy_value, "bilgi 🧪");
     assert_eq!(
-        model.sections[0].rows[6].copy_value,
+        model.sections[0].rows[7].copy_value,
         "[FAIL] has token\nexpected value\nreceived none"
     );
     assert_eq!(
@@ -97,6 +104,7 @@ fn script_console_builds_level_and_test_rows_with_stable_copy_text() {
             "[WARN] careful\n",
             "[ERROR] boom\n",
             "[DEBUG] details\n",
+            "> api.response.status\n",
             "[PASS] created\n",
             "[FAIL] has token\n",
             "    expected value\n",

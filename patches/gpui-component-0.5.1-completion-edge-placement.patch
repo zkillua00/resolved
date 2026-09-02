@@ -1,0 +1,31 @@
+--- a/src/input/popovers/completion_menu.rs
++++ b/src/input/popovers/completion_menu.rs
+@@ -451 +451,11 @@
+-        let abs_pos = self.editor.read(cx).input_bounds.origin + pos;
++        let (abs_pos, line_height) = {
++            let editor = self.editor.read(cx);
++            (
++                editor.input_bounds.origin + pos,
++                editor
++                    .last_layout
++                    .as_ref()
++                    .map(|layout| layout.line_height)
++                    .unwrap_or(px(20.)),
++            )
++        };
+@@ -454,0 +465,12 @@
++        let popup_height = if vertical_layout && selected_documentation.is_some() {
++            MAX_MENU_HEIGHT + POPOVER_GAP + MAX_MENU_HEIGHT
++        } else {
++            MAX_MENU_HEIGHT
++        };
++        let opens_above = abs_pos.y + popup_height + POPOVER_GAP > window.bounds().size.height
++            && abs_pos.y > popup_height;
++        let popup_y = if opens_above {
++            (pos.y - line_height - popup_height - POPOVER_GAP).max(px(0.))
++        } else {
++            pos.y
++        };
+@@ -460 +482 @@
+-                .top(pos.y)
++                .top(popup_y)

@@ -272,6 +272,13 @@ impl ScriptCompletionProvider {
         }
     }
 
+    pub fn for_interactive_console(variables: ScriptVariableCatalogHandle) -> Self {
+        Self {
+            typescript_document: TypeScriptDocumentKind::InteractiveConsole,
+            ..Self::new(ScriptEditorPhase::PostResponse, variables)
+        }
+    }
+
     /// Adds Microsoft's embedded TypeScript Language Service for ordinary
     /// JavaScript semantics. Resolved-specific API and live variable
     /// completion remains a narrow overlay.
@@ -2735,6 +2742,20 @@ mod tests {
             provider.typescript_document,
             TypeScriptDocumentKind::PlainSnippet(TypeScriptScriptPhase::PreRequest)
         );
+    }
+
+    #[test]
+    fn interactive_console_has_an_isolated_post_response_document() {
+        let provider = ScriptCompletionProvider::for_interactive_console(
+            ScriptVariableCatalog::default().shared(),
+        );
+        assert_eq!(
+            provider.typescript_document,
+            TypeScriptDocumentKind::InteractiveConsole
+        );
+        let items = provider.completion_items_for_source("api.", 4);
+        assert!(items.iter().any(|item| item.label == "response"));
+        assert!(items.iter().any(|item| item.label == "test"));
     }
 
     #[test]

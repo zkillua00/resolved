@@ -46,14 +46,15 @@ pub use request_tabs::{
     DEFAULT_REQUEST_TAB_TITLE, RequestTabAssociation, RequestTabCloseScope, RequestTabGroup,
     RequestTabGroupColor, RequestTabGroupId, RequestTabId, RequestTabRecord, RequestTabs,
 };
+#[cfg(test)]
+pub use script::ScriptTestResult;
 pub use script::{
     ChainedRequest, EnvironmentMutation, InlineChainer, MAX_SCRIPT_SOURCE_BYTES,
     PostResponseResult, PreRequestResult, ScriptCancellation, ScriptDiagnostic, ScriptEnvironment,
-    ScriptError, ScriptErrorKind, ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope,
-    execute_post_response_with_chain, execute_pre_request_with_chain,
+    ScriptError, ScriptErrorKind, ScriptLog, ScriptLogLevel, ScriptPhase, ScriptReport,
+    ScriptScope, execute_post_response_console_with_chain, execute_post_response_with_chain,
+    execute_pre_request_with_chain,
 };
-#[cfg(test)]
-pub use script::{ScriptLog, ScriptTestResult};
 #[allow(unused_imports)]
 pub use secure_store::{CredentialVault, CredentialVaultError, UpstreamCredential};
 #[allow(unused_imports)]

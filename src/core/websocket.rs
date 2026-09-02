@@ -646,20 +646,20 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = accept_hdr_async(
-                stream,
-                |request: &Request, response: Response| {
-                    assert_eq!(request.uri().path(), "/api/v1/workspaces/workspace-1/execute");
-                    assert_eq!(
-                        request
-                            .headers()
-                            .get("authorization")
-                            .and_then(|value| value.to_str().ok()),
-                        Some("Bearer server-session")
-                    );
-                    Ok(response)
-                },
-            )
+            let mut socket = accept_hdr_async(stream, |request: &Request, response: Response| {
+                assert_eq!(
+                    request.uri().path(),
+                    "/api/v1/workspaces/workspace-1/execute"
+                );
+                assert_eq!(
+                    request
+                        .headers()
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok()),
+                    Some("Bearer server-session")
+                );
+                Ok(response)
+            })
             .await
             .unwrap();
             let descriptor = socket.next().await.unwrap().unwrap();
@@ -695,7 +695,10 @@ mod tests {
             .unwrap();
         });
 
-        assert_eq!(signal_receiver.recv().await, Some(WebSocketSignal::Connected));
+        assert_eq!(
+            signal_receiver.recv().await,
+            Some(WebSocketSignal::Connected)
+        );
         command_sender
             .send(WebSocketCommand::SendText("hello".to_owned()))
             .unwrap();
