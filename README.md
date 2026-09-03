@@ -17,8 +17,9 @@ This repository contains two independent applications:
   SQLite database.
 
 For implementation-oriented navigation, build prerequisites, and test commands,
-see the [development guide](docs/development.md). Server operators should start
-with the [server README](server/README.md) and its
+see the [development guide](docs/development.md). Local agent integrations are
+covered by the [MCP guide](docs/mcp.md). Server operators should start with the
+[server README](server/README.md) and its
 [architecture and security model](server/docs/architecture.md).
 
 ## Features
@@ -54,6 +55,8 @@ with the [server README](server/README.md) and its
 - Persistent collections, saved requests, environments, and secret variables
 - Named local workspaces with isolated collections, environments, snippets, and
   request-tab drafts
+- Opt-in local MCP control with an independently configurable tool catalog for
+  semantic request, collection, script, and environment automation
 - Multiple switchable self-hosted server profiles with direct login; session
   tokens are authenticated-encrypted locally, with biometric Keychain
   protection available to provisioned macOS builds
@@ -324,6 +327,11 @@ immediately, including while an input or code editor is focused.
 
 The Developer Settings page contains the Metrics switch and HUD location
 selector. `⌘⇧M` remains available as a customizable quick toggle.
+
+The MCP page controls the experimental local agent connection and its individual
+tools. MCP is disabled by default. Turning off a tool removes it from subsequent
+MCP discovery responses and also rejects calls from clients with a stale cached
+tool list.
 
 Bindings are divided into five sections so related commands remain easy to
 scan:
@@ -701,35 +709,35 @@ the local user account accordingly.
 
 ### Local agent control (experimental)
 
-When MCP is enabled under **Settings → MCP**, the desktop app exposes a semantic
-local-control channel for agent clients. The app remains the only owner of its
-in-memory workspace and SQLite database; control clients call the same workspace
-mutation and persistence paths as the UI. MCP is disabled by default, and each
-tool can be enabled or disabled independently on the same settings page.
+Resolved provides an optional MCP stdio adapter for semantic control of the
+running desktop app. MCP is disabled by default. Start Resolved, open
+**Settings -> MCP**, enable the connection, and select only the tools the agent
+needs.
 
-Build the MCP stdio adapter with:
+Build the adapter separately; it is not currently included in application
+packages:
 
-```bash
-./scripts/cargo.sh build --bin resolved-mcp
+```sh
+./scripts/cargo.sh build --release --bin resolved-mcp
 ```
 
-Configure an MCP client to launch `target/debug/resolved-mcp` (or the release
-binary). The adapter discovers the running desktop app through a per-user control
-descriptor. Unix builds use a user-only Unix-domain socket; Windows uses an
-authenticated loopback socket. A new random token is generated for every app
-launch, and the Unix descriptor and socket are mode `0600`.
+Configure the MCP client with the adapter's absolute path:
 
-Only enabled tools are advertised by the adapter, and Resolved enforces the
-allowlist again when a call arrives. The initial tools cover workspace and collection discovery, request
-search/read/create/update, pre-request and post-response scripts, and environment
-and variable management. Secret environment values can be set and used by the
-app but are never returned through local control. Request updates require the
-`updated_at` value returned by `get_request`, preventing an agent from silently
-overwriting a newer edit.
+```json
+{
+  "mcpServers": {
+    "resolved": {
+      "command": "/absolute/path/to/api_tester/target/release/resolved-mcp"
+    }
+  }
+}
+```
 
-Request execution and history inspection are intentionally not exposed yet; they
-need an explicit side-effect policy and complete script/history result envelope
-before agents can use them safely.
+Only enabled tools are advertised. Clients that cache discovery may need to be
+refreshed or reconnected after a switch changes. Resolved also rejects disabled
+tools server-side. See the [local MCP control guide](docs/mcp.md) for the full
+tool catalog, request and environment workflows, revision checks, secret
+redaction, security boundary, current limits, and troubleshooting.
 
 The project uses Rust edition 2024 and has compile-time platform backends for
 Linux, macOS, and Windows. Shared feature code does not select operating

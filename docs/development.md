@@ -12,6 +12,8 @@ workspaces, execution, and persistence work without it.
 | `src/main.rs` | Desktop composition root, platform startup, actions, and assets |
 | `src/app.rs`, `src/app/` | GPUI application state, pages, workspaces, editors, tabs, and UI actions |
 | `src/core/` | Request modeling and execution, scripts, persistence, history, interchange, settings, upstream clients, and realtime signals |
+| `src/control_server.rs`, `src/control_tools.rs` | Authenticated per-user local control transport and the authoritative MCP tool catalog |
+| `src/app/control.rs`, `src/bin/resolved-mcp.rs` | Desktop semantic control handlers and the standalone MCP stdio adapter |
 | `src/platform.rs`, `src/platform/` | Compile-time Linux, macOS, and Windows integration |
 | `src/theme/` | Constrained CSS parsing, schema, palette mapping, and editor intelligence |
 | `scripts/` | Reproducible dependency preparation, builds, packaging, audits, releases, and profiling |
@@ -35,6 +37,18 @@ Local and server workspaces implement the same `WorkspaceProvider` boundary.
 Server-backed providers use the deployment's REST API for authoritative state;
 WebSocket messages are scoped invalidations that trigger REST refreshes, not
 resource payloads.
+
+The optional local MCP path keeps the desktop process authoritative too:
+
+```text
+MCP client -> resolved-mcp stdio adapter -> authenticated local IPC
+  -> GPUI application state -> active workspace provider and persistence
+```
+
+The adapter discovers only tools enabled in the desktop's MCP settings. It does
+not access SQLite directly, and the self-hosted collaboration server is not part
+of this local transport. See the [local MCP guide](mcp.md) for its contract and
+security boundary.
 
 ## Desktop builds
 
@@ -107,6 +121,13 @@ scripts/cargo.sh clippy --all-targets --all-features -- -D warnings
 scripts/check-rustsec.sh
 ```
 
+For changes isolated to the MCP adapter or tool catalog, include its focused
+contract test:
+
+```sh
+scripts/cargo.sh test --bin resolved-mcp
+```
+
 `scripts/check-rustsec.sh` requires `cargo-audit`. Tests that exercise real
 loopback HTTP may need permission to bind a local socket in restricted
 environments.
@@ -126,6 +147,7 @@ desktop client, read its SQLite database, or depend on a local workspace.
 ## Related documentation
 
 - [Theme CSS reference](theme-css.md)
+- [Local MCP control](mcp.md)
 - [Upstreams and secure local credentials](upstreams.md)
 - [Versioning and releases](versioning.md)
 - [macOS memory profiling](memory-profiling.md)
