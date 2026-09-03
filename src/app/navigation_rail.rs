@@ -35,6 +35,7 @@ impl ApiTester {
             .child(
                 v_flex()
                     .id("rail-collections")
+                    .debug_selector(|| "rail-collections".to_owned())
                     .w(item_width)
                     .h(item_height)
                     .items_center()
@@ -44,7 +45,9 @@ impl ApiTester {
                     .cursor_pointer()
                     .text_color(cx.theme().muted_foreground)
                     .when(
-                        request_workspace_active && self.sidebar_tab == SidebarTab::Collections,
+                        request_workspace_active
+                            && self.navigation_sidebar_open
+                            && self.sidebar_tab == SidebarTab::Collections,
                         |this| {
                             this.bg(cx.theme().sidebar_accent)
                                 .text_color(cx.theme().foreground)
@@ -52,7 +55,7 @@ impl ApiTester {
                     )
                     .hover(|style| style.bg(cx.theme().sidebar_accent))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.activate_request_workspace(SidebarTab::Collections, window, cx);
+                        this.toggle_navigation_sidebar(SidebarTab::Collections, window, cx);
                     }))
                     .when(compact, |this| {
                         this.tooltip(|window, cx| Tooltip::new("Collections").build(window, cx))
@@ -114,7 +117,9 @@ impl ApiTester {
                     .cursor_pointer()
                     .text_color(cx.theme().muted_foreground)
                     .when(
-                        request_workspace_active && self.sidebar_tab == SidebarTab::History,
+                        request_workspace_active
+                            && self.navigation_sidebar_open
+                            && self.sidebar_tab == SidebarTab::History,
                         |this| {
                             this.bg(cx.theme().sidebar_accent)
                                 .text_color(cx.theme().foreground)
@@ -122,7 +127,7 @@ impl ApiTester {
                     )
                     .hover(|style| style.bg(cx.theme().sidebar_accent))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.activate_request_workspace(SidebarTab::History, window, cx);
+                        this.toggle_navigation_sidebar(SidebarTab::History, window, cx);
                     }))
                     .when(compact, |this| {
                         this.tooltip(|window, cx| Tooltip::new("History").build(window, cx))
@@ -264,5 +269,91 @@ impl ApiTester {
                     ),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, px, size};
+
+    #[gpui::test]
+    fn sidebar_rail_buttons_toggle_their_active_sidebar(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("create temporary database directory");
+        let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+        store.initialize().expect("initialize test database");
+
+        let mut app = None;
+        let store_for_app = store.clone();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            let base_key_bindings = shortcuts::capture_base_key_bindings(cx);
+            crate::theme::configure(cx);
+            let view = cx.new(|cx| {
+                ApiTester::new_with_database_store(base_key_bindings, store_for_app, window, cx)
+            });
+            crate::register_app_action_handlers(&view, cx);
+            app = Some(view.clone());
+            gpui_component::Root::new(view, window, cx)
+        });
+        let app = app.expect("capture app entity");
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_resize(size(px(1_200.), px(800.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.activate_request_workspace(SidebarTab::Collections, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("workspace-navigation-sidebar").is_some());
+        assert!(cx.debug_bounds("rail-collections").is_some());
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.toggle_navigation_sidebar(SidebarTab::Collections, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            !cx.update(|_, cx| app.read(cx).navigation_sidebar_open),
+            "clicking the active Collections button must close the sidebar",
+        );
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.toggle_navigation_sidebar(SidebarTab::Collections, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.update(|_, cx| app.read(cx).navigation_sidebar_open),
+            "clicking Collections again must reopen the sidebar",
+        );
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.activate_request_workspace(SidebarTab::History, window, cx);
+                app.toggle_navigation_sidebar(SidebarTab::History, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            !cx.update(|_, cx| app.read(cx).navigation_sidebar_open),
+            "clicking the active History button must close the sidebar",
+        );
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.toggle_navigation_sidebar(SidebarTab::History, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.update(|_, cx| {
+                let app = app.read(cx);
+                app.navigation_sidebar_open && app.sidebar_tab == SidebarTab::History
+            }),
+            "clicking History again must reopen the History sidebar",
+        );
     }
 }

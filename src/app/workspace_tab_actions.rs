@@ -58,6 +58,7 @@ impl ApiTester {
 
         let was_welcome = self.workspace_tabs.browse_requests();
         self.sidebar_tab = sidebar_tab;
+        self.navigation_sidebar_open = sidebar_tab != SidebarTab::Environments;
         if was_welcome {
             self.hide_preview(cx);
             self.restore_active_request_tab(window, cx);
@@ -71,6 +72,23 @@ impl ApiTester {
             self.show_preview(window, cx);
         }
         cx.notify();
+    }
+
+    pub(super) fn toggle_navigation_sidebar(
+        &mut self,
+        sidebar_tab: SidebarTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspace_tabs.active() == ActiveWorkspaceTab::Request
+            && self.sidebar_tab == sidebar_tab
+            && self.navigation_sidebar_open
+        {
+            self.navigation_sidebar_open = false;
+            cx.notify();
+        } else {
+            self.activate_request_workspace(sidebar_tab, window, cx);
+        }
     }
 
     pub(super) fn activate_workspace_tab(

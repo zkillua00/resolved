@@ -314,6 +314,7 @@ pub struct ApiTester {
     websocket_workspace: WebSocketWorkspaceState,
     workspace_name: Entity<InputState>,
     sidebar_tab: SidebarTab,
+    navigation_sidebar_open: bool,
     navigation_compact: bool,
     selected_collection_id: Option<String>,
     selected_folder_id: Option<String>,

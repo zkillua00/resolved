@@ -948,6 +948,7 @@ impl ApiTester {
             websocket_workspace,
             workspace_name,
             sidebar_tab: SidebarTab::Collections,
+            navigation_sidebar_open: true,
             navigation_compact,
             selected_collection_id,
             selected_folder_id,

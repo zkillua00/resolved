@@ -12,6 +12,7 @@ impl ApiTester {
     pub(super) fn render_workspace_panes(&self, cx: &mut Context<Self>) -> AnyElement {
         let pane_area = self.render_workspace_pane_area(cx);
         let show_navigation_sidebar = self.workspace_tabs.active() == ActiveWorkspaceTab::Request
+            && self.navigation_sidebar_open
             && self.sidebar_tab != SidebarTab::Environments;
         if !show_navigation_sidebar {
             return pane_area;
