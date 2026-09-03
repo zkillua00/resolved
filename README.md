@@ -699,6 +699,38 @@ the local user account accordingly.
 
 ## Run
 
+### Local agent control (experimental)
+
+When MCP is enabled under **Settings → MCP**, the desktop app exposes a semantic
+local-control channel for agent clients. The app remains the only owner of its
+in-memory workspace and SQLite database; control clients call the same workspace
+mutation and persistence paths as the UI. MCP is disabled by default, and each
+tool can be enabled or disabled independently on the same settings page.
+
+Build the MCP stdio adapter with:
+
+```bash
+./scripts/cargo.sh build --bin resolved-mcp
+```
+
+Configure an MCP client to launch `target/debug/resolved-mcp` (or the release
+binary). The adapter discovers the running desktop app through a per-user control
+descriptor. Unix builds use a user-only Unix-domain socket; Windows uses an
+authenticated loopback socket. A new random token is generated for every app
+launch, and the Unix descriptor and socket are mode `0600`.
+
+Only enabled tools are advertised by the adapter, and Resolved enforces the
+allowlist again when a call arrives. The initial tools cover workspace and collection discovery, request
+search/read/create/update, pre-request and post-response scripts, and environment
+and variable management. Secret environment values can be set and used by the
+app but are never returned through local control. Request updates require the
+`updated_at` value returned by `get_request`, preventing an agent from silently
+overwriting a newer edit.
+
+Request execution and history inspection are intentionally not exposed yet; they
+need an explicit side-effect policy and complete script/history result envelope
+before agents can use them safely.
+
 The project uses Rust edition 2024 and has compile-time platform backends for
 Linux, macOS, and Windows. Shared feature code does not select operating
 systems directly; each backend owns native launch, menu, shortcut, window,

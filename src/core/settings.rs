@@ -24,6 +24,7 @@ pub struct AppSettings {
     pub formatter: FormatterSettings,
     pub zoom: ZoomSettings,
     pub script: ScriptSettings,
+    pub mcp: McpSettings,
     pub navigation_compact: bool,
     pub metrics_position: MetricsPosition,
     pub upstreams: UpstreamSettings,
@@ -31,6 +32,43 @@ pub struct AppSettings {
     /// build changes a setting it understands.
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// Local Model Context Protocol exposure. The transport is absent unless
+/// `enabled` is true, and every call is checked against `enabled_tools` inside
+/// the desktop process as well as filtered from MCP discovery.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct McpSettings {
+    pub enabled: bool,
+    #[serde(default = "default_mcp_tools")]
+    pub enabled_tools: std::collections::BTreeSet<String>,
+    /// Preserve fields written by a newer application version.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl McpSettings {
+    pub fn tool_enabled(&self, name: &str) -> bool {
+        self.enabled && self.enabled_tools.contains(name)
+    }
+}
+
+impl Default for McpSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            enabled_tools: default_mcp_tools(),
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
+fn default_mcp_tools() -> std::collections::BTreeSet<String> {
+    crate::control_tools::CONTROL_TOOLS
+        .iter()
+        .map(|tool| tool.name.to_owned())
+        .collect()
 }
 
 const DEFAULT_EDITOR_TAB_SIZE: u8 = 2;
@@ -763,9 +801,41 @@ mod tests {
         assert_eq!(settings.theme, ThemeSettings::default());
         assert_eq!(settings.editor, EditorSettings::default());
         assert_eq!(settings.formatter, FormatterSettings::default());
+        assert_eq!(settings.mcp, McpSettings::default());
+        assert!(!settings.mcp.enabled);
+        assert_eq!(
+            settings.mcp.enabled_tools.len(),
+            crate::control_tools::CONTROL_TOOLS.len()
+        );
         assert_eq!(settings.upstreams, UpstreamSettings::default());
         assert!(!settings.navigation_compact);
         assert_eq!(settings.metrics_position, MetricsPosition::BottomRight);
+    }
+
+    #[test]
+    fn mcp_settings_round_trip_and_preserve_unknown_tools() {
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "mcp": {
+                "enabled": true,
+                "enabled_tools": ["status", "future_tool"],
+                "future_policy": "prompt"
+            }
+        }))
+        .unwrap();
+
+        assert!(settings.mcp.enabled);
+        assert!(settings.mcp.tool_enabled("status"));
+        assert!(!settings.mcp.tool_enabled("get_request"));
+        assert!(settings.mcp.enabled_tools.contains("future_tool"));
+        assert_eq!(
+            settings.mcp.extra.get("future_policy"),
+            Some(&serde_json::json!("prompt"))
+        );
+        let encoded = serde_json::to_value(&settings).unwrap();
+        assert_eq!(
+            serde_json::from_value::<AppSettings>(encoded).unwrap(),
+            settings
+        );
     }
 
     #[test]

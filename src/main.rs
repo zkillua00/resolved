@@ -11,6 +11,8 @@ use gpui_component::{Root, WindowExt as _};
 mod app;
 mod brand;
 mod code_editor;
+mod control_server;
+mod control_tools;
 mod core;
 mod debug_overlay;
 mod editor_util;

@@ -61,7 +61,7 @@ pub use secure_store::{CredentialVault, CredentialVaultError, UpstreamCredential
 pub use settings::{
     AppSettings, DEFAULT_ZOOM_PERCENT, EditorInlineActionPlacement, EditorSettings,
     FormatterQuoteStyle, FormatterSemicolons, FormatterSettings, FormatterTrailingCommas,
-    MAX_ZOOM_PERCENT, MIN_ZOOM_PERCENT, MetricsPosition, SavedTheme, ShortcutOverride,
+    MAX_ZOOM_PERCENT, MIN_ZOOM_PERCENT, McpSettings, MetricsPosition, SavedTheme, ShortcutOverride,
     ThemeSettings, ZOOM_STEP_PERCENT, ZoomSettings,
 };
 pub(crate) use snippet::{GENERATOR_WRAPPER_PREFIX, GENERATOR_WRAPPER_SUFFIX};
@@ -117,8 +117,9 @@ pub use websocket::{
     run_websocket_connection, template_variable_names,
 };
 pub use workspace::{
-    Collection, CollectionFolder, Environment, RequestScripts, ResourceCreator, SavedRequest,
-    Workspace, WorkspaceMutationError, apply_environment_mutations_to_workspace,
+    Collection, CollectionFolder, Environment, EnvironmentVariable, RequestScripts,
+    ResourceCreator, SavedRequest, Workspace, WorkspaceMutationError,
+    apply_environment_mutations_to_workspace,
 };
 #[allow(unused_imports)]
 pub use workspace_provider::{

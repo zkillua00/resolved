@@ -154,6 +154,30 @@ impl ApiTester {
                     )
                     .item(self.ui_zoom_setting_item(cx)),
             );
+        let mcp_page = SettingPage::new("MCP")
+            .description(
+                "Let local agent clients inspect or change Resolved through explicit tools.",
+            )
+            .resettable(false)
+            .group(
+                SettingGroup::new()
+                    .title("Connection")
+                    .description(
+                        "No local control socket or session token exists while MCP is disabled.",
+                    )
+                    .item(self.mcp_enabled_setting_item(cx)),
+            )
+            .group(
+                SettingGroup::new()
+                    .title("Tools")
+                    .description("Disabled tools are neither advertised nor accepted by Resolved.")
+                    .items(
+                        crate::control_tools::CONTROL_TOOLS
+                            .iter()
+                            .map(|tool| self.mcp_tool_setting_item(*tool, cx))
+                            .collect::<Vec<_>>(),
+                    ),
+            );
         let developer_page = SettingPage::new("Developer Settings")
             .description("Enable diagnostics for inspecting Resolved while it is running.")
             .resettable(false)
@@ -167,13 +191,14 @@ impl ApiTester {
                     ]),
             );
 
-        let mut pages = Vec::with_capacity(6);
+        let mut pages = Vec::with_capacity(7);
         pages.push(servers_page);
         pages.extend([
             snippets_page,
             editor_page,
             keyboard_page,
             appearance_page,
+            mcp_page,
             developer_page,
         ]);
 
@@ -199,6 +224,76 @@ impl ApiTester {
             )
             .when_some(message_overlay, |this, overlay| this.child(overlay))
             .into_any_element()
+    }
+
+    fn mcp_enabled_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Enable MCP",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let checked = state.settings.mcp.enabled;
+                let writable = state.settings_writable;
+                let change_this = this.clone();
+                Switch::new("mcp-enabled")
+                    .checked(checked)
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        "Allow configured local MCP clients to connect",
+                    ))
+                    .on_click(move |checked, _, cx| {
+                        if let Some(this) = change_this.upgrade() {
+                            this.update(cx, |this, cx| this.set_mcp_enabled(*checked, cx));
+                        }
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description("Starts a per-user authenticated control channel for the MCP adapter.")
+    }
+
+    fn mcp_tool_setting_item(
+        &self,
+        tool: crate::control_tools::ControlToolDescriptor,
+        cx: &mut Context<Self>,
+    ) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            tool.label,
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let checked = state.settings.mcp.enabled_tools.contains(tool.name);
+                let writable = state.settings_writable;
+                let change_this = this.clone();
+                Switch::new(SharedString::from(format!("mcp-tool-{}", tool.name)))
+                    .checked(checked)
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        if tool.read_only {
+                            "Allow this read-only MCP tool"
+                        } else {
+                            "Allow this MCP tool to change workspace data"
+                        },
+                    ))
+                    .on_click(move |checked, _, cx| {
+                        if let Some(this) = change_this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.set_mcp_tool_enabled(tool.name, *checked, cx);
+                            });
+                        }
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description(tool.description)
     }
 
     fn snippet_library_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {

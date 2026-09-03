@@ -220,6 +220,233 @@ fn empty_script_console_has_a_copyable_empty_state() {
     assert_eq!(model.copy_all_text(), "No script has run yet.");
 }
 
+#[gpui::test]
+fn local_control_mutations_persist_and_redact_secret_values(cx: &mut gpui::TestAppContext) {
+    let directory = tempfile::tempdir().expect("create temporary control database directory");
+    let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+    store.initialize().expect("initialize test database");
+
+    let mut app = None;
+    let store_for_app = store.clone();
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        gpui_component::init(cx);
+        let base_key_bindings = shortcuts::capture_base_key_bindings(cx);
+        crate::theme::configure(cx);
+        let view = cx.new(|cx| {
+            ApiTester::new_with_database_store(base_key_bindings, store_for_app, window, cx)
+        });
+        app = Some(view.clone());
+        gpui_component::Root::new(view, window, cx)
+    });
+    let app = app.expect("capture app entity");
+    cx.update(|_, cx| {
+        app.update(cx, |app, _| app.settings.mcp.enabled = true);
+    });
+    let enabled_tools = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call("__list_enabled_tools", serde_json::json!({}), cx)
+        })
+    });
+    assert_eq!(
+        enabled_tools.result.unwrap()["tools"]
+            .as_array()
+            .unwrap()
+            .len(),
+        crate::control_tools::CONTROL_TOOLS.len()
+    );
+
+    let collection = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call(
+                "create_collection",
+                serde_json::json!({ "name": "Agent collection" }),
+                cx,
+            )
+        })
+    });
+    assert!(collection.ok, "{:?}", collection.error);
+    let collection_id = collection.result.unwrap()["collection_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let created_request = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call(
+                "create_request",
+                serde_json::json!({
+                    "collection_id": collection_id,
+                    "name": "Scripted request",
+                    "request": { "method": "GET", "url": "https://example.test/{{token}}" },
+                    "scripts": {
+                        "pre_request": "console.log('before');",
+                        "post_response": "api.test('ok', () => true);"
+                    }
+                }),
+                cx,
+            )
+        })
+    });
+    assert!(created_request.ok, "{:?}", created_request.error);
+    let request = created_request.result.unwrap();
+    assert_eq!(request["scripts"]["pre_request"], "console.log('before');");
+    let request_id = request["id"].as_str().unwrap().to_owned();
+    let initial_revision = request["updated_at"].as_str().unwrap().to_owned();
+    let saved_request = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call(
+                "save_request",
+                serde_json::json!({
+                    "request_id": request_id,
+                    "expected_updated_at": initial_revision,
+                    "name": "Updated scripted request"
+                }),
+                cx,
+            )
+        })
+    });
+    assert!(saved_request.ok, "{:?}", saved_request.error);
+    let stale_save = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call(
+                "save_request",
+                serde_json::json!({
+                    "request_id": request_id,
+                    "expected_updated_at": initial_revision,
+                    "name": "Stale overwrite"
+                }),
+                cx,
+            )
+        })
+    });
+    assert!(!stale_save.ok);
+    assert!(
+        stale_save
+            .error
+            .unwrap()
+            .contains("changed since it was read")
+    );
+
+    let environment = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call(
+                "create_environment",
+                serde_json::json!({ "name": "Agent environment" }),
+                cx,
+            )
+        })
+    });
+    let environment_id = environment.result.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let variable = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call(
+                "set_environment_variable",
+                serde_json::json!({
+                    "environment_id": environment_id,
+                    "key": "token",
+                    "value": "never-return-this",
+                    "secret": true
+                }),
+                cx,
+            )
+        })
+    });
+    let variable = variable.result.unwrap();
+    assert!(variable["value"].is_null());
+    assert_eq!(variable["has_value"], true);
+    let read_environment = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call(
+                "get_environment",
+                serde_json::json!({ "environment_id": environment_id }),
+                cx,
+            )
+        })
+    });
+    assert!(read_environment.result.unwrap()["variables"][0]["value"].is_null());
+
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.set_mcp_tool_enabled("create_collection", false, cx)
+        });
+    });
+    let denied = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call(
+                "create_collection",
+                serde_json::json!({ "name": "Must not be created" }),
+                cx,
+            )
+        })
+    });
+    assert!(!denied.ok);
+    assert!(
+        denied
+            .error
+            .unwrap()
+            .contains("disabled in Resolved settings")
+    );
+    assert!(
+        !store
+            .load_app_settings()
+            .unwrap()
+            .mcp
+            .enabled_tools
+            .contains("create_collection")
+    );
+
+    let persisted = store.load_workspace().expect("reload persisted workspace");
+    assert!(
+        persisted
+            .collections
+            .iter()
+            .any(|collection| collection.id == collection_id)
+    );
+    let persisted_environment = persisted.environment(&environment_id).unwrap();
+    assert_eq!(
+        persisted_environment.variables[0].value,
+        "never-return-this"
+    );
+}
+
+#[gpui::test]
+fn mcp_setting_starts_and_stops_the_local_control_transport(cx: &mut gpui::TestAppContext) {
+    let directory = tempfile::tempdir().expect("create temporary MCP settings directory");
+    let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+    store.initialize().expect("initialize test database");
+
+    let mut app = None;
+    let store_for_app = store.clone();
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        gpui_component::init(cx);
+        let base_key_bindings = shortcuts::capture_base_key_bindings(cx);
+        crate::theme::configure(cx);
+        let view = cx.new(|cx| {
+            ApiTester::new_with_database_store(base_key_bindings, store_for_app, window, cx)
+        });
+        app = Some(view.clone());
+        gpui_component::Root::new(view, window, cx)
+    });
+    let app = app.expect("capture app entity");
+    let descriptor = directory.path().join("resolved-control.json");
+    assert!(!descriptor.exists());
+
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| app.set_mcp_enabled(true, cx));
+    });
+    assert!(descriptor.exists());
+    assert!(store.load_app_settings().unwrap().mcp.enabled);
+
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| app.set_mcp_enabled(false, cx));
+    });
+    assert!(!descriptor.exists());
+    assert!(!store.load_app_settings().unwrap().mcp.enabled);
+}
+
 #[test]
 fn snippet_list_rows_filter_case_insensitively_and_order_by_category() {
     use super::snippets::{SnippetListRow, filter_snippet_list_rows};

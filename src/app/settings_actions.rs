@@ -10,6 +10,61 @@ enum ShortcutRecorderCommand {
 }
 
 impl ApiTester {
+    pub(super) fn set_mcp_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.settings.mcp.enabled == enabled {
+            return;
+        }
+        let mut candidate = self.settings.clone();
+        candidate.mcp.enabled = enabled;
+        match self.commit_settings(candidate, false, cx) {
+            Ok(()) => match self.sync_control_server(cx) {
+                Ok(()) => {
+                    self.settings_notice = Some(if enabled {
+                        "MCP agent control enabled.".to_owned()
+                    } else {
+                        "MCP agent control disabled.".to_owned()
+                    });
+                }
+                Err(error) => {
+                    self.settings_notice = Some(format!("MCP could not start: {error}"));
+                }
+            },
+            Err(error) => self.settings_notice = Some(error),
+        }
+        cx.notify();
+    }
+
+    pub(super) fn set_mcp_tool_enabled(
+        &mut self,
+        tool_name: &str,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tool) = crate::control_tools::tool(tool_name) else {
+            return;
+        };
+        let mut candidate = self.settings.clone();
+        if enabled {
+            candidate.mcp.enabled_tools.insert(tool.name.to_owned());
+        } else {
+            candidate.mcp.enabled_tools.remove(tool.name);
+        }
+        if candidate.mcp == self.settings.mcp {
+            return;
+        }
+        match self.commit_settings(candidate, false, cx) {
+            Ok(()) => {
+                self.settings_notice = Some(format!(
+                    "{} MCP tool {}.",
+                    tool.label,
+                    if enabled { "enabled" } else { "disabled" }
+                ));
+            }
+            Err(error) => self.settings_notice = Some(error),
+        }
+        cx.notify();
+    }
+
     pub(super) fn begin_recording_shortcut(
         &mut self,
         shortcut_id: ShortcutId,

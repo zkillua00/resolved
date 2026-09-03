@@ -36,7 +36,14 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_with_database_store(base_key_bindings, DatabaseStore::default(), window, cx)
+        let database_store = DatabaseStore::default();
+        let mut this =
+            Self::new_with_database_store(base_key_bindings, database_store.clone(), window, cx);
+        if let Err(error) = this.sync_control_server(cx) {
+            tracing::warn!(%error, "local agent control is unavailable");
+            this.settings_warning = Some(format!("MCP could not start: {error}"));
+        }
+        this
     }
 
     pub(super) fn new_with_database_store(
@@ -932,6 +939,7 @@ impl ApiTester {
             snippets,
             workspace,
             database_store,
+            _control_server: None,
             workspace_providers,
             local_workspaces,
             credential_vault,
