@@ -104,6 +104,18 @@ impl Pane {
         self.active_index = self.tabs.len() - 1;
     }
 
+    /// Activate a tab already owned by this pane without changing membership.
+    pub(super) fn activate(&mut self, tab: &WorkspaceTab) -> bool {
+        let Some(position) = self.tabs.iter().position(|entry| &entry.tab == tab) else {
+            return false;
+        };
+        if self.active_index == position {
+            return false;
+        }
+        self.active_index = position;
+        true
+    }
+
     fn clamp_active(&mut self) {
         if self.tabs.is_empty() {
             self.active_index = 0;
@@ -597,6 +609,27 @@ mod tests {
         assert!(!root.reorder_within_pane(pane_id, &tab(&a), &tab(&a), false));
         let missing = RequestTabId::new();
         assert!(!root.reorder_within_pane(pane_id, &tab(&missing), &tab(&a), false));
+    }
+
+    #[test]
+    fn pane_activation_changes_only_the_local_active_tab() {
+        let a = RequestTabId::new();
+        let b = RequestTabId::new();
+        let mut root = PaneRoot::from_tabs(vec![tab(&a), tab(&b)], 0);
+        let pane_id = root.panes()[0].id();
+
+        assert!(root.pane_mut(pane_id).unwrap().activate(&tab(&b)));
+        assert_eq!(
+            root.pane(pane_id).and_then(|pane| pane.active_tab()),
+            Some(tab(&b))
+        );
+        assert!(!root.pane_mut(pane_id).unwrap().activate(&tab(&b)));
+        assert!(
+            !root
+                .pane_mut(pane_id)
+                .unwrap()
+                .activate(&WorkspaceTab::Welcome)
+        );
     }
 
     #[test]

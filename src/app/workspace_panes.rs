@@ -215,6 +215,41 @@ impl ApiTester {
         let strip = self.render_request_tab_strip_with(&tabs, Some(pane_id), cx);
         let content = self.render_pane_content(pane, is_primary, cx);
         let split_overlay = render_pane_dock_overlays(pane_id, cx);
+        let is_request = matches!(pane.active_tab(), Some(WorkspaceTab::Request(_)));
+        let scroll_handle = if is_primary {
+            Some(&self.primary_pane_scroll)
+        } else {
+            self.pane_editors
+                .get(&pane_id)
+                .map(|session| &session.pane_scroll)
+        };
+        let content = if is_request {
+            if let Some(scroll_handle) = scroll_handle {
+                div()
+                    .id(SharedString::from(format!(
+                        "workspace-pane-scroll-{}",
+                        pane_id.0
+                    )))
+                    .size_full()
+                    .min_h_0()
+                    .relative()
+                    .track_scroll(scroll_handle)
+                    .overflow_y_scroll()
+                    .vertical_scrollbar(scroll_handle)
+                    .child(
+                        div()
+                            .w_full()
+                            .h_full()
+                            .min_h(MIN_DOCKED_REQUEST_SURFACE_HEIGHT)
+                            .child(content),
+                    )
+                    .into_any_element()
+            } else {
+                content
+            }
+        } else {
+            content
+        };
         v_flex()
             .size_full()
             .min_h_0()

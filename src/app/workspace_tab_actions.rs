@@ -140,6 +140,45 @@ impl ApiTester {
         }
     }
 
+    /// Activate a tab in the strip that owns it. Secondary panes keep their
+    /// selection local; only the pane hosting the global request surface uses
+    /// the legacy global activation path.
+    pub(super) fn activate_workspace_tab_in_pane(
+        &mut self,
+        tab: WorkspaceTab,
+        pane_id: Option<PaneId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane_id) = pane_id else {
+            self.activate_workspace_tab(tab, window, cx);
+            return;
+        };
+        let global_tab = self.workspace_tabs.active_tab(&self.request_tabs);
+        let primary_pane_id = self.panes.pane_for_tab(&global_tab);
+        if primary_pane_id == Some(pane_id) {
+            self.activate_workspace_tab(tab, window, cx);
+            return;
+        }
+        if !self
+            .panes
+            .pane(pane_id)
+            .is_some_and(|pane| pane.contains(&tab))
+        {
+            return;
+        }
+        let changed = self
+            .panes
+            .pane_mut(pane_id)
+            .is_some_and(|pane| pane.activate(&tab));
+        if let WorkspaceTab::Request(tab_id) = tab {
+            self.ensure_pane_editor_for(pane_id, tab_id, window, cx);
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
     pub(super) fn close_workspace_tool_tab(
         &mut self,
         tab: WorkspaceToolTab,
