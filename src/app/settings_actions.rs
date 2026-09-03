@@ -54,6 +54,14 @@ impl ApiTester {
         }
         match self.commit_settings(candidate, false, cx) {
             Ok(()) => {
+                if !enabled {
+                    match tool.name {
+                        "connect_websocket" => self.stop_mcp_websocket(),
+                        "execute_http_request" => self.stop_mcp_http_request(cx),
+                        "run_script_console" => self.stop_mcp_script_console(),
+                        _ => {}
+                    }
+                }
                 self.settings_notice = Some(format!(
                     "{} MCP tool {}.",
                     tool.label,
@@ -77,6 +85,14 @@ impl ApiTester {
         candidate.mcp.allow_remote_workspaces = enabled;
         match self.commit_settings(candidate, false, cx) {
             Ok(()) => {
+                if !enabled
+                    && matches!(
+                        self.workspace_providers.active_id(),
+                        WorkspaceProviderId::Upstream { .. }
+                    )
+                {
+                    self.stop_mcp_runtime_operations(cx);
+                }
                 self.settings_notice = Some(if enabled {
                     "MCP access to server workspaces enabled.".to_owned()
                 } else {

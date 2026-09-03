@@ -56,6 +56,55 @@ impl ApiTester {
         self.dismiss_template_variable_popover();
         self.request_notice = None;
         let template = self.request_template(cx);
+        self.begin_request_template(template, window, cx);
+    }
+
+    pub(super) fn start_control_http_request(
+        &mut self,
+        request_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<u64, String> {
+        if self.sending || self.script_console_running {
+            return Err(
+                "Another request or script-console evaluation is already running.".to_owned(),
+            );
+        }
+        if self.active_environment_editor_is_dirty(cx) {
+            return Err(
+                "The active environment has unsaved changes. Save or Revert them before executing through MCP."
+                    .to_owned(),
+            );
+        }
+        let (collection, request) = self
+            .workspace
+            .saved_request(request_id)
+            .ok_or_else(|| format!("request '{request_id}' was not found"))?;
+        let collection_id = collection.id.clone();
+        if request.definition.is_websocket() {
+            return Err(format!(
+                "request '{request_id}' is a WebSocket document; use connect_websocket"
+            ));
+        }
+        let template = request.definition.clone();
+        if template.request.method.trim().is_empty() {
+            return Err("HTTP method cannot be empty.".to_owned());
+        }
+        self.dismiss_template_variable_popover();
+        self.request_notice = None;
+        self.open_saved_request_tab(collection_id, request_id.to_owned(), window, cx);
+        let operation_id = self.begin_request_template(template, window, cx);
+        self.mcp_http_operation_id = Some(operation_id);
+        self.mcp_http_exchange = None;
+        Ok(operation_id)
+    }
+
+    fn begin_request_template(
+        &mut self,
+        template: RequestTemplate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> u64 {
         let environment_id = self.workspace.active_environment_id.clone();
         let mut scope = Self::script_scope(
             environment_id
@@ -106,6 +155,7 @@ impl ApiTester {
             });
         })
         .detach();
+        generation
     }
 
     pub(super) fn finish_pre_request(
@@ -300,8 +350,10 @@ impl ApiTester {
         };
         let vault = self.credential_vault.clone();
         let runtime = Arc::clone(&self.runtime);
-        let mut limits = crate::core::ChainLimits::default();
-        limits.script_timeout = self.settings.script.timeout();
+        let limits = crate::core::ChainLimits {
+            script_timeout: self.settings.script.timeout(),
+            ..Default::default()
+        };
 
         let task = self.runtime.spawn(async move {
             let sender = move |request: crate::core::RequestDraft| {
@@ -397,10 +449,7 @@ impl ApiTester {
         let workspace = self.workspace.clone();
         let namespace = self.request_namespace.clone();
         let environment_id = environment_id.clone();
-        let chain_cancellation = self
-            .script_cancellation
-            .clone()
-            .unwrap_or_else(crate::core::ScriptCancellation::new);
+        let chain_cancellation = self.script_cancellation.clone().unwrap_or_default();
         let budget = Arc::clone(&self.chain_budget);
         let local_client = self.client.clone();
         let upstream_client = self.upstream_execution_client.clone();
@@ -413,8 +462,10 @@ impl ApiTester {
                 Err(_) => None,
             },
         };
-        let mut limits = crate::core::ChainLimits::default();
-        limits.script_timeout = self.settings.script.timeout();
+        let limits = crate::core::ChainLimits {
+            script_timeout: self.settings.script.timeout(),
+            ..Default::default()
+        };
         InlineChainRunner {
             workspace,
             namespace,
@@ -439,15 +490,15 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !run.environment_mutations.is_empty() {
-            if let Some(environment_id) = self.workspace.active_environment_id.clone() {
-                let _ = self.apply_environment_mutations(
-                    Some(&environment_id),
-                    &run.environment_mutations,
-                    window,
-                    cx,
-                );
-            }
+        if !run.environment_mutations.is_empty()
+            && let Some(environment_id) = self.workspace.active_environment_id.clone()
+        {
+            let _ = self.apply_environment_mutations(
+                Some(&environment_id),
+                &run.environment_mutations,
+                window,
+                cx,
+            );
         }
         for entry in &run.history {
             self.history.push(entry.clone());
@@ -784,6 +835,7 @@ impl ApiTester {
         } else {
             self.hide_preview(cx);
         }
+        self.capture_mcp_http_exchange(generation);
         cx.notify();
     }
 
@@ -831,8 +883,13 @@ impl ApiTester {
             // as "Request cancelled" and silently dropping the history entry.
             return;
         }
+        let mcp_operation_id = (self.mcp_http_operation_id == Some(self.request_generation))
+            .then_some(self.request_generation);
         self.request_generation = self.request_generation.wrapping_add(1);
         self.finish_cancelled(cx);
+        if let Some(operation_id) = mcp_operation_id {
+            self.capture_mcp_http_exchange(operation_id);
+        }
     }
 
     pub(super) fn finish_cancelled(&mut self, cx: &mut Context<Self>) {
@@ -844,6 +901,7 @@ impl ApiTester {
         self.request_error = Some("Request cancelled".to_owned());
         self.preview_error = None;
         self.hide_preview(cx);
+        self.capture_mcp_http_exchange(self.request_generation);
         cx.notify();
     }
 
@@ -880,6 +938,7 @@ impl ApiTester {
         self.request_error = Some(message);
         self.persist_history();
         self.upload_shared_history_entry(shared_history, cx);
+        self.capture_mcp_http_exchange(self.request_generation);
         cx.notify();
     }
 

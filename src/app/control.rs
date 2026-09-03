@@ -1,8 +1,72 @@
 use super::*;
 use crate::control_server::{ControlCall, ControlResponse};
+use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedReceiver;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ControlWebSocketStatus {
+    Connecting,
+    Connected,
+    Closing,
+    Disconnected,
+    Failed,
+}
+
+impl ControlWebSocketStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Connecting => "connecting",
+            Self::Connected => "connected",
+            Self::Closing => "closing",
+            Self::Disconnected => "disconnected",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ControlWebSocketEvent {
+    id: u64,
+    at: chrono::DateTime<Utc>,
+    direction: &'static str,
+    kind: &'static str,
+    payload: Option<String>,
+    binary: Option<Vec<u8>>,
+}
+
+pub(super) struct ControlWebSocketConnection {
+    id: u64,
+    request_id: String,
+    status: ControlWebSocketStatus,
+    notice: Option<String>,
+    sender: tokio::sync::mpsc::UnboundedSender<WebSocketCommand>,
+    event_sender: tokio::sync::mpsc::UnboundedSender<ControlWebSocketIncoming>,
+    abort_handle: AbortHandle,
+    events: Vec<ControlWebSocketEvent>,
+    next_event_id: u64,
+}
+
+enum ControlWebSocketIncoming {
+    Wire(WebSocketSignal),
+    SentText(String),
+    ScriptLog(String),
+    ScriptError(String),
+}
+
+#[derive(Clone)]
+pub(super) struct McpHttpExchangeSnapshot {
+    operation_id: u64,
+    state: &'static str,
+    stage: Option<&'static str>,
+    request: Option<RequestDraft>,
+    response: Option<ResponseData>,
+    error: Option<String>,
+    diagnostic: Option<ScriptDiagnostic>,
+    pre_request_report: Option<ScriptReport>,
+    post_response_report: Option<ScriptReport>,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -11,7 +75,10 @@ struct CreateRequestParams {
     #[serde(default)]
     folder_id: Option<String>,
     name: String,
-    request: RequestDraft,
+    #[serde(default)]
+    request: Option<RequestDraft>,
+    #[serde(default)]
+    websocket: Option<WebSocketWorkspace>,
     #[serde(default)]
     scripts: RequestScripts,
 }
@@ -25,6 +92,10 @@ struct SaveRequestParams {
     name: Option<String>,
     #[serde(default)]
     request: Option<RequestDraft>,
+    #[serde(default)]
+    websocket: Option<WebSocketWorkspace>,
+    #[serde(default)]
+    clear_websocket: bool,
     #[serde(default)]
     scripts: Option<RequestScripts>,
 }
@@ -325,15 +396,42 @@ async fn reload_remote_environments(
 }
 
 impl ApiTester {
+    pub(super) fn capture_mcp_http_exchange(&mut self, operation_id: u64) {
+        if self.mcp_http_operation_id != Some(operation_id) {
+            return;
+        }
+        self.mcp_http_exchange = Some(McpHttpExchangeSnapshot {
+            operation_id,
+            state: if self.sending {
+                "running"
+            } else if self.response.is_some() {
+                "completed"
+            } else if self.request_error.is_some() {
+                "failed"
+            } else {
+                "idle"
+            },
+            stage: self.execution_stage.map(ExecutionStage::label),
+            request: self.response_request.clone(),
+            response: self.response.clone(),
+            error: self.request_error.clone(),
+            diagnostic: self.script_diagnostic.clone(),
+            pre_request_report: self.pre_script_report.clone(),
+            post_response_report: self.post_script_report.clone(),
+        });
+    }
+
     pub(super) fn sync_control_server(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         let data_directory = self
             .database_store
             .path()
             .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
         if !self.settings.mcp.enabled {
+            self.stop_mcp_runtime_operations(cx);
             self._control_server = None;
-            crate::control_server::ControlServer::remove_stale_files(data_directory)
+            crate::control_server::ControlServer::remove_stale_files(&data_directory)
                 .map_err(|error| error.to_string())?;
             return Ok(());
         }
@@ -341,11 +439,39 @@ impl ApiTester {
             return Ok(());
         }
 
-        let (server, receiver) = crate::control_server::ControlServer::start(data_directory)
+        let (server, receiver) = crate::control_server::ControlServer::start(&data_directory)
             .map_err(|error| error.to_string())?;
         self._control_server = Some(server);
         self.attach_control_plane(receiver, cx);
         Ok(())
+    }
+
+    pub(super) fn stop_mcp_websocket(&mut self) {
+        if let Some(connection) = self.mcp_websocket.take() {
+            let _ = connection.sender.send(WebSocketCommand::Close);
+            connection.abort_handle.abort();
+        }
+    }
+
+    pub(super) fn stop_mcp_runtime_operations(&mut self, cx: &mut Context<Self>) {
+        self.stop_mcp_websocket();
+        self.stop_mcp_script_console();
+        self.stop_mcp_http_request(cx);
+    }
+
+    pub(super) fn stop_mcp_script_console(&mut self) {
+        if self.script_console_running
+            && self.mcp_script_console_owned
+            && let Some(cancellation) = self.script_cancellation.as_ref()
+        {
+            cancellation.cancel();
+        }
+    }
+
+    pub(super) fn stop_mcp_http_request(&mut self, cx: &mut Context<Self>) {
+        if self.sending && self.mcp_http_operation_id == Some(self.request_generation) {
+            self.cancel_request(cx);
+        }
     }
 
     pub(super) fn attach_control_plane(
@@ -359,13 +485,42 @@ impl ApiTester {
                     call.respond(ControlResponse::error("Resolved is shutting down"));
                     break;
                 };
-                let dispatch = this
-                    .update(cx, |this, cx| {
+                let dispatch = if matches!(
+                    call.method.as_str(),
+                    "execute_http_request" | "run_script_console"
+                ) {
+                    let result = cx.update(|cx| {
+                        let window_handle = cx
+                            .active_window()
+                            .or_else(|| cx.windows().first().copied())
+                            .ok_or_else(|| "Resolved has no open window".to_owned())?;
+                        window_handle
+                            .update(cx, |_, window, cx| {
+                                this.update(cx, |this, cx| {
+                                    this.handle_window_control_call(
+                                        &call.method,
+                                        call.params.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                })
+                            })
+                            .map_err(|error| error.to_string())
+                    });
+                    let response = match result {
+                        Ok(Ok(response)) => response,
+                        Ok(Err(error)) => ControlResponse::error(error),
+                        Err(error) => ControlResponse::error(error.to_string()),
+                    };
+                    ControlDispatch::Immediate(response)
+                } else {
+                    this.update(cx, |this, cx| {
                         this.dispatch_control_call(&call.method, call.params.clone(), cx)
                     })
                     .unwrap_or_else(|error| {
                         ControlDispatch::Immediate(ControlResponse::error(error.to_string()))
-                    });
+                    })
+                };
                 let response = match dispatch {
                     ControlDispatch::Immediate(response) => response,
                     ControlDispatch::Remote(pending) => {
@@ -401,6 +556,14 @@ impl ApiTester {
             )
             || !is_mutating_control_method(method)
             || method == "set_active_environment"
+            || matches!(
+                method,
+                "cancel_http_request"
+                    | "connect_websocket"
+                    | "send_websocket_message"
+                    | "run_websocket_replay"
+                    | "disconnect_websocket"
+            )
         {
             return ControlDispatch::Immediate(self.handle_control_call(method, params, cx));
         }
@@ -410,6 +573,35 @@ impl ApiTester {
         match self.prepare_remote_control_call(method, params, cx) {
             Ok(pending) => ControlDispatch::Remote(pending),
             Err(error) => ControlDispatch::Immediate(ControlResponse::error(error)),
+        }
+    }
+
+    fn handle_window_control_call(
+        &mut self,
+        method: &str,
+        params: Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ControlResponse {
+        if let Some(response) = self.validate_control_method(method) {
+            return response;
+        }
+        let result = match method {
+            "execute_http_request" => {
+                required_string(&params, "request_id").and_then(|request_id| {
+                    self.start_control_http_request(&request_id, window, cx)
+                    .map(|operation_id| json!({ "operation_id": operation_id, "state": "running" }))
+                })
+            }
+            "run_script_console" => required_string(&params, "source").and_then(|source| {
+                self.start_control_script_console(source, window, cx)
+                    .map(|operation_id| json!({ "operation_id": operation_id, "state": "running" }))
+            }),
+            _ => Err(format!("unknown window control method '{method}'")),
+        };
+        match result {
+            Ok(result) => ControlResponse::success(result),
+            Err(error) => ControlResponse::error(error),
         }
     }
 
@@ -534,12 +726,13 @@ impl ApiTester {
                 let target_collection_id = params
                     .folder_id
                     .unwrap_or_else(|| params.collection_id.clone());
+                let definition =
+                    request_definition(params.request, params.websocket, params.scripts)?;
                 Ok((
                     RemoteControlMutation::CreateRequest {
                         target_collection_id,
                         name: params.name,
-                        definition: RequestTemplate::new(params.request)
-                            .with_scripts(params.scripts),
+                        definition,
                     },
                     vec![WORKSPACES_READ, REQUESTS_CREATE],
                 ))
@@ -555,6 +748,8 @@ impl ApiTester {
                     expected_updated_at: params.expected_updated_at,
                     name: None,
                     request: None,
+                    websocket: None,
+                    clear_websocket: false,
                     scripts: Some(RequestScripts {
                         pre_request: params.pre_request,
                         post_response: params.post_response,
@@ -599,6 +794,13 @@ impl ApiTester {
         let mut definition = existing.definition.clone();
         if let Some(request) = params.request {
             definition.request = request;
+            definition.websocket = None;
+        }
+        if let Some(websocket) = params.websocket {
+            definition.request = RequestDraft::default();
+            definition.websocket = Some(websocket);
+        } else if params.clear_websocket {
+            definition.websocket = None;
         }
         if let Some(scripts) = params.scripts {
             definition.scripts = scripts;
@@ -850,6 +1052,18 @@ impl ApiTester {
             "create_request" => self.control_create_request(params, cx),
             "save_request" => self.control_save_request(params, cx),
             "set_request_scripts" => self.control_set_request_scripts(params, cx),
+            "get_http_exchange" => self.control_get_http_exchange(params),
+            "cancel_http_request" => self.control_cancel_http_request(cx),
+            "list_request_history" => self.control_list_request_history(params),
+            "get_script_console" => self.control_get_script_console(params),
+            "connect_websocket" => self.control_connect_websocket(params, cx),
+            "send_websocket_message" => self.control_send_websocket_message(params, cx),
+            "get_websocket_events" => self.control_get_websocket_events(params),
+            "run_websocket_replay" => self.control_run_websocket_replay(params),
+            "disconnect_websocket" => self.control_disconnect_websocket(params),
+            "execute_http_request" | "run_script_console" => Err(format!(
+                "the MCP tool '{method}' requires an active Resolved window"
+            )),
             "list_environments" => self.control_list_environments(),
             "get_environment" => self.control_get_environment(params),
             "create_environment" => self.control_create_environment(params, cx),
@@ -881,6 +1095,11 @@ impl ApiTester {
                 self.workspace_writable
             },
             "remote_workspace_access": self.settings.mcp.allow_remote_workspaces,
+            "mcp_websocket": self.mcp_websocket.as_ref().map(|connection| json!({
+                "connection_id": connection.id,
+                "request_id": connection.request_id,
+                "state": connection.status.as_str()
+            })),
             "enabled_tools": crate::control_tools::CONTROL_TOOLS
                 .iter()
                 .filter(|tool| self.control_tool_advertised(tool.name))
@@ -1020,7 +1239,7 @@ impl ApiTester {
     ) -> Result<Value, String> {
         let params: CreateRequestParams = decode(params)?;
         let mut candidate = self.workspace.clone();
-        let definition = RequestTemplate::new(params.request).with_scripts(params.scripts);
+        let definition = request_definition(params.request, params.websocket, params.scripts)?;
         let id = candidate
             .create_saved_request_in_folder(
                 &params.collection_id,
@@ -1052,6 +1271,13 @@ impl ApiTester {
         let mut definition = existing.definition.clone();
         if let Some(request) = params.request {
             definition.request = request;
+            definition.websocket = None;
+        }
+        if let Some(websocket) = params.websocket {
+            definition.request = RequestDraft::default();
+            definition.websocket = Some(websocket);
+        } else if params.clear_websocket {
+            definition.websocket = None;
         }
         if let Some(scripts) = params.scripts {
             definition.scripts = scripts;
@@ -1090,6 +1316,745 @@ impl ApiTester {
             }),
             cx,
         )
+    }
+
+    pub(super) fn control_get_http_exchange(&self, params: Value) -> Result<Value, String> {
+        #[derive(Deserialize)]
+        #[serde(default, deny_unknown_fields)]
+        struct Params {
+            operation_id: Option<u64>,
+            max_body_bytes: usize,
+        }
+        impl Default for Params {
+            fn default() -> Self {
+                Self {
+                    operation_id: None,
+                    max_body_bytes: 256 * 1024,
+                }
+            }
+        }
+        let params: Params = decode(params)?;
+        let operation_id = params
+            .operation_id
+            .or(self.mcp_http_operation_id)
+            .unwrap_or(self.request_generation);
+        if let Some(snapshot) = self
+            .mcp_http_exchange
+            .as_ref()
+            .filter(|snapshot| snapshot.operation_id == operation_id)
+        {
+            return Ok(http_exchange_value(
+                snapshot,
+                params.max_body_bytes.min(512 * 1024),
+            ));
+        }
+        if Some(operation_id) != self.mcp_http_operation_id
+            || operation_id != self.request_generation
+        {
+            return Err(format!(
+                "HTTP operation {operation_id} is no longer current"
+            ));
+        }
+        let max_body_bytes = params.max_body_bytes.min(512 * 1024);
+        Ok(http_exchange_value(
+            &McpHttpExchangeSnapshot {
+                operation_id,
+                state: if self.sending { "running" } else { "idle" },
+                stage: self.execution_stage.map(ExecutionStage::label),
+                request: self.response_request.clone(),
+                response: self.response.clone(),
+                error: self.request_error.clone(),
+                diagnostic: self.script_diagnostic.clone(),
+                pre_request_report: self.pre_script_report.clone(),
+                post_response_report: self.post_script_report.clone(),
+            },
+            max_body_bytes,
+        ))
+    }
+
+    fn control_cancel_http_request(&mut self, cx: &mut Context<Self>) -> Result<Value, String> {
+        if self.script_console_running {
+            if let Some(cancellation) = self.script_cancellation.as_ref() {
+                cancellation.cancel();
+            }
+            return Ok(json!({ "cancelled": true, "operation": "script_console" }));
+        }
+        if !self.sending {
+            return Ok(json!({ "cancelled": false, "reason": "no HTTP request is running" }));
+        }
+        self.cancel_request(cx);
+        Ok(json!({ "cancelled": true, "operation": "http" }))
+    }
+
+    fn control_list_request_history(&self, params: Value) -> Result<Value, String> {
+        #[derive(Deserialize)]
+        #[serde(default, deny_unknown_fields)]
+        struct Params {
+            limit: usize,
+        }
+        impl Default for Params {
+            fn default() -> Self {
+                Self { limit: 25 }
+            }
+        }
+        let limit = decode::<Params>(params)?.limit.min(100);
+        Ok(json!({
+            "history": self.history.entries().iter().take(limit).collect::<Vec<_>>()
+        }))
+    }
+
+    pub(super) fn control_get_script_console(&self, params: Value) -> Result<Value, String> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Params {
+            operation_id: Option<u64>,
+        }
+        let operation_id = decode::<Params>(params)?.operation_id;
+        if let Some(operation_id) = operation_id
+            && Some(operation_id) != self.mcp_script_console_operation_id
+        {
+            return Err(format!(
+                "script-console operation {operation_id} is no longer current"
+            ));
+        }
+        let model = crate::app::script_console::script_console_model(
+            self.pre_script_report.as_ref(),
+            self.post_script_report.as_ref(),
+            self.script_diagnostic.as_ref(),
+            self.request_error.as_deref(),
+        );
+        Ok(json!({
+            "operation_id": self.mcp_script_console_operation_id,
+            "state": if self.script_console_running { "running" } else { "idle" },
+            "output": model.copy_all_text(),
+            "diagnostic": self.script_diagnostic.as_ref().map(script_diagnostic_value),
+            "pre_request_report": self.pre_script_report.as_ref().map(script_report_value),
+            "post_response_report": self.post_script_report.as_ref().map(script_report_value)
+        }))
+    }
+
+    fn control_connect_websocket(
+        &mut self,
+        params: Value,
+        cx: &mut Context<Self>,
+    ) -> Result<Value, String> {
+        let request_id = required_string(&params, "request_id")?;
+        let (_, saved) = self
+            .workspace
+            .saved_request(&request_id)
+            .ok_or_else(|| format!("request '{request_id}' was not found"))?;
+        let document = saved.definition.websocket.clone().ok_or_else(|| {
+            format!("request '{request_id}' is an HTTP request; use execute_http_request")
+        })?;
+        let connection_draft = RequestDraft {
+            url: document.url.trim().to_owned(),
+            headers: document.headers.clone(),
+            ..RequestDraft::default()
+        };
+        let resolved = resolve_request(&connection_draft, self.workspace.active_environment())
+            .map_err(|error| error.to_string())?;
+        if resolved.request.url.is_empty() {
+            return Err("The WebSocket URL cannot be empty.".to_owned());
+        }
+        let upstream_target = match self.workspace_providers.active_id() {
+            WorkspaceProviderId::Local(_) => None,
+            WorkspaceProviderId::Upstream { .. } => {
+                if !self.active_upstream_has_permission(WORKSPACES_READ) {
+                    return Err(format!(
+                        "The signed-in server user lacks the '{WORKSPACES_READ}' permission required by 'connect_websocket'."
+                    ));
+                }
+                Some(self.active_upstream_workspace()?)
+            }
+        };
+
+        if let Some(connection) = self.mcp_websocket.take() {
+            let _ = connection.sender.send(WebSocketCommand::Close);
+            connection.abort_handle.abort();
+        }
+        self.mcp_websocket_generation = self.mcp_websocket_generation.wrapping_add(1).max(1);
+        let connection_id = self.mcp_websocket_generation;
+        let (command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (wire_sender, mut wire_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (event_sender, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let url = resolved.request.url;
+        let headers = resolved.request.headers;
+        let vault = self.credential_vault.clone();
+        let upstream_client = self.upstream_execution_client.clone();
+        let connection_wire_sender = wire_sender.clone();
+        let task = self.runtime.spawn(async move {
+            let result = match upstream_target {
+                None => {
+                    run_websocket_connection(
+                        &url,
+                        &headers,
+                        command_receiver,
+                        connection_wire_sender.clone(),
+                    )
+                    .await
+                }
+                Some(target) => {
+                    let upstream_id = target.upstream_id.clone();
+                    let credential = match tokio::task::spawn_blocking(move || {
+                        vault.load_upstream(&upstream_id)
+                    })
+                    .await
+                    {
+                        Ok(Ok(Some(credential))) if credential.expires_at > Utc::now() => {
+                            credential
+                        }
+                        Ok(Ok(_)) => {
+                            let _ = connection_wire_sender.send(WebSocketSignal::Failed(
+                                "Log in to this server again.".to_owned(),
+                            ));
+                            return;
+                        }
+                        Ok(Err(error)) => {
+                            let _ = connection_wire_sender
+                                .send(WebSocketSignal::Failed(error.to_string()));
+                            return;
+                        }
+                        Err(error) => {
+                            let _ = connection_wire_sender
+                                .send(WebSocketSignal::Failed(error.to_string()));
+                            return;
+                        }
+                    };
+                    match get_upstream_execution_policy(
+                        &upstream_client,
+                        &target.base_url,
+                        credential.bearer_token(),
+                    )
+                    .await
+                    {
+                        Ok(RequestExecutionMode::Local) => {
+                            run_websocket_connection(
+                                &url,
+                                &headers,
+                                command_receiver,
+                                connection_wire_sender.clone(),
+                            )
+                            .await
+                        }
+                        Ok(RequestExecutionMode::Server) => {
+                            run_upstream_websocket_connection(
+                                &target.base_url,
+                                credential.bearer_token(),
+                                &target.workspace_id,
+                                &url,
+                                &headers,
+                                command_receiver,
+                                connection_wire_sender.clone(),
+                            )
+                            .await
+                        }
+                        Err(error) => {
+                            let _ = connection_wire_sender
+                                .send(WebSocketSignal::Failed(error.to_string()));
+                            return;
+                        }
+                    }
+                }
+            };
+            if let Err(error) = result {
+                let _ = connection_wire_sender.send(WebSocketSignal::Failed(error.to_string()));
+            }
+        });
+        let abort_handle = task.abort_handle();
+
+        let automation_enabled = document.automation_enabled;
+        let automation_source = document.automation_source;
+        let automation_environment = self.workspace.active_environment().cloned();
+        let automation_values = automation_environment
+            .as_ref()
+            .map(|environment| {
+                environment
+                    .variables
+                    .iter()
+                    .filter(|variable| variable.enabled)
+                    .map(|variable| (variable.key.clone(), variable.value.clone()))
+                    .collect::<std::collections::BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let automation_commands = command_sender.clone();
+        let automation_events = event_sender.clone();
+        self.runtime.spawn(async move {
+            while let Some(signal) = wire_receiver.recv().await {
+                let automation_event = match &signal {
+                    WebSocketSignal::Connected => Some(WebSocketAutomationEvent::opened()),
+                    WebSocketSignal::Text(payload) => {
+                        Some(WebSocketAutomationEvent::text(payload.clone()))
+                    }
+                    WebSocketSignal::Binary(bytes) => Some(WebSocketAutomationEvent {
+                        event_type: "message".to_owned(),
+                        data: None,
+                        binary_base64: Some(
+                            base64::engine::general_purpose::STANDARD.encode(bytes),
+                        ),
+                    }),
+                    _ => None,
+                };
+                if automation_events
+                    .send(ControlWebSocketIncoming::Wire(signal))
+                    .is_err()
+                {
+                    return;
+                }
+                if !automation_enabled {
+                    continue;
+                }
+                let Some(automation_event) = automation_event else {
+                    continue;
+                };
+                let source = automation_source.clone();
+                let values = automation_values.clone();
+                let output = tokio::task::spawn_blocking(move || {
+                    execute_websocket_automation(&source, &automation_event, &values)
+                })
+                .await;
+                match output {
+                    Ok(Ok(output)) => {
+                        for log in output.logs {
+                            let _ =
+                                automation_events.send(ControlWebSocketIncoming::ScriptLog(log));
+                        }
+                        for payload in output.sends {
+                            let resolved = resolve_request(
+                                &RequestDraft {
+                                    url: payload,
+                                    ..RequestDraft::default()
+                                },
+                                automation_environment.as_ref(),
+                            );
+                            match resolved {
+                                Ok(resolved) => {
+                                    let payload = resolved.request.url;
+                                    if automation_commands
+                                        .send(WebSocketCommand::SendText(payload.clone()))
+                                        .is_ok()
+                                    {
+                                        let _ = automation_events
+                                            .send(ControlWebSocketIncoming::SentText(payload));
+                                    }
+                                }
+                                Err(error) => {
+                                    let _ = automation_events.send(
+                                        ControlWebSocketIncoming::ScriptError(error.to_string()),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        let _ =
+                            automation_events.send(ControlWebSocketIncoming::ScriptError(error));
+                    }
+                    Err(error) => {
+                        let _ = automation_events
+                            .send(ControlWebSocketIncoming::ScriptError(error.to_string()));
+                    }
+                }
+            }
+        });
+
+        self.mcp_websocket = Some(ControlWebSocketConnection {
+            id: connection_id,
+            request_id,
+            status: ControlWebSocketStatus::Connecting,
+            notice: None,
+            sender: command_sender,
+            event_sender,
+            abort_handle,
+            events: Vec::new(),
+            next_event_id: 1,
+        });
+        cx.spawn(async move |weak_this, cx| {
+            while let Some(event) = event_receiver.recv().await {
+                let Some(this) = weak_this.upgrade() else {
+                    break;
+                };
+                let _ = this.update(cx, |this, cx| {
+                    this.handle_control_websocket_event(connection_id, event);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+        Ok(json!({
+            "connection_id": connection_id,
+            "request_id": self.mcp_websocket.as_ref().map(|connection| &connection.request_id),
+            "state": "connecting"
+        }))
+    }
+
+    fn control_send_websocket_message(
+        &mut self,
+        params: Value,
+        cx: &mut Context<Self>,
+    ) -> Result<Value, String> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Params {
+            connection_id: u64,
+            #[serde(default)]
+            text: Option<String>,
+            #[serde(default)]
+            binary_base64: Option<String>,
+            #[serde(default)]
+            saved_message_id: Option<String>,
+            #[serde(default)]
+            template_id: Option<String>,
+            #[serde(default)]
+            template_values: std::collections::BTreeMap<String, String>,
+        }
+        let params: Params = decode(params)?;
+        let connection = self
+            .mcp_websocket
+            .as_ref()
+            .ok_or_else(|| "No MCP WebSocket connection exists.".to_owned())?;
+        if connection.id != params.connection_id {
+            return Err(format!(
+                "WebSocket connection {} is no longer current",
+                params.connection_id
+            ));
+        }
+        if connection.status != ControlWebSocketStatus::Connected {
+            return Err(format!(
+                "WebSocket connection {} is {}",
+                connection.id,
+                connection.status.as_str()
+            ));
+        }
+        let request_id = connection.request_id.clone();
+        let sender = connection.sender.clone();
+        let selected_sources = [
+            params.text.is_some(),
+            params.binary_base64.is_some(),
+            params.saved_message_id.is_some(),
+            params.template_id.is_some(),
+        ]
+        .into_iter()
+        .filter(|selected| *selected)
+        .count();
+        if selected_sources != 1 {
+            return Err(
+                "provide exactly one of 'text', 'binary_base64', 'saved_message_id', or 'template_id'"
+                    .to_owned(),
+            );
+        }
+        let resolve_text = |text: String| -> Result<String, String> {
+            resolve_request(
+                &RequestDraft {
+                    url: text,
+                    ..RequestDraft::default()
+                },
+                self.workspace.active_environment(),
+            )
+            .map(|resolved| resolved.request.url)
+            .map_err(|error| error.to_string())
+        };
+        let mut commands = if let Some(text) = params.text {
+            vec![WebSocketCommand::SendText(resolve_text(text)?)]
+        } else if let Some(encoded) = params.binary_base64 {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| format!("invalid base64 WebSocket payload: {error}"))?;
+            if bytes.len() > crate::core::MAX_WEBSOCKET_MESSAGE_BYTES {
+                return Err(format!(
+                    "WebSocket payload exceeds the {}-byte limit",
+                    crate::core::MAX_WEBSOCKET_MESSAGE_BYTES
+                ));
+            }
+            vec![WebSocketCommand::SendBinary(bytes)]
+        } else {
+            let (_, saved) = self
+                .workspace
+                .saved_request(&request_id)
+                .ok_or_else(|| format!("request '{request_id}' was not found"))?;
+            let document =
+                saved.definition.websocket.as_ref().ok_or_else(|| {
+                    "The saved request is no longer a WebSocket document.".to_owned()
+                })?;
+            if let Some(message_id) = params.saved_message_id {
+                let message = document
+                    .messages
+                    .iter()
+                    .find(|message| message.id == message_id)
+                    .ok_or_else(|| format!("saved message '{message_id}' was not found"))?;
+                let payload = resolve_text(message.payload.clone())?;
+                if message.language == RawBodyLanguage::JsonLines {
+                    crate::core::parse_json_lines(&payload)?
+                        .into_iter()
+                        .map(|record| WebSocketCommand::SendText(payload[record.range].to_owned()))
+                        .collect()
+                } else {
+                    vec![WebSocketCommand::SendText(payload)]
+                }
+            } else {
+                let template_id = params.template_id.expect("one source was selected");
+                let template = document
+                    .templates
+                    .iter()
+                    .find(|template| template.id == template_id)
+                    .ok_or_else(|| format!("template '{template_id}' was not found"))?;
+                let rendered = render_message_template(&template.payload, &params.template_values)
+                    .map_err(|error| error.to_string())?;
+                vec![WebSocketCommand::SendText(resolve_text(rendered)?)]
+            }
+        };
+        let sent_count = commands.len();
+        let connection = self.control_websocket_mut(params.connection_id)?;
+        for command in commands.drain(..) {
+            sender
+                .send(command.clone())
+                .map_err(|_| "The WebSocket connection is no longer available.".to_owned())?;
+            match command {
+                WebSocketCommand::SendText(payload) => {
+                    connection.push_event("sent", "text", Some(payload))
+                }
+                WebSocketCommand::SendBinary(bytes) => {
+                    connection.push_binary_event("sent", "binary", bytes)
+                }
+                WebSocketCommand::Close => unreachable!(),
+            }
+        }
+        cx.notify();
+        Ok(json!({
+            "sent": true,
+            "sent_count": sent_count,
+            "connection_id": params.connection_id
+        }))
+    }
+
+    pub(super) fn control_get_websocket_events(&self, params: Value) -> Result<Value, String> {
+        #[derive(Deserialize)]
+        #[serde(default, deny_unknown_fields)]
+        struct Params {
+            connection_id: Option<u64>,
+            after_event_id: u64,
+            limit: usize,
+            max_payload_bytes: usize,
+        }
+        impl Default for Params {
+            fn default() -> Self {
+                Self {
+                    connection_id: None,
+                    after_event_id: 0,
+                    limit: 100,
+                    max_payload_bytes: 64 * 1024,
+                }
+            }
+        }
+        let params: Params = decode(params)?;
+        let connection = self
+            .mcp_websocket
+            .as_ref()
+            .ok_or_else(|| "No MCP WebSocket connection exists.".to_owned())?;
+        if params.connection_id.is_some_and(|id| id != connection.id) {
+            return Err(format!(
+                "WebSocket connection {} is no longer current",
+                params.connection_id.unwrap()
+            ));
+        }
+        let mut remaining_bytes = 512 * 1024;
+        let mut events = Vec::new();
+        for event in connection
+            .events
+            .iter()
+            .filter(|event| event.id > params.after_event_id)
+            .take(params.limit.min(500))
+        {
+            let event_limit = params
+                .max_payload_bytes
+                .min(256 * 1024)
+                .min(remaining_bytes);
+            events.push(control_websocket_event_value(event, event_limit));
+            let event_size = event
+                .payload
+                .as_ref()
+                .map(String::len)
+                .or_else(|| event.binary.as_ref().map(Vec::len))
+                .unwrap_or(0);
+            remaining_bytes = remaining_bytes.saturating_sub(event_size.min(event_limit));
+            if remaining_bytes == 0 {
+                break;
+            }
+        }
+        Ok(json!({
+            "connection_id": connection.id,
+            "request_id": connection.request_id,
+            "state": connection.status.as_str(),
+            "notice": connection.notice,
+            "events": events,
+            "last_event_id": connection.events.last().map(|event| event.id).unwrap_or(0)
+        }))
+    }
+
+    fn control_run_websocket_replay(&mut self, params: Value) -> Result<Value, String> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Params {
+            connection_id: u64,
+            replay_id: String,
+        }
+        let params: Params = decode(params)?;
+        let connection = self.control_websocket_mut(params.connection_id)?;
+        if connection.status != ControlWebSocketStatus::Connected {
+            return Err(format!(
+                "WebSocket connection {} is {}",
+                connection.id,
+                connection.status.as_str()
+            ));
+        }
+        let request_id = connection.request_id.clone();
+        let sender = connection.sender.clone();
+        let events = connection.event_sender.clone();
+        let (_, saved) = self
+            .workspace
+            .saved_request(&request_id)
+            .ok_or_else(|| format!("request '{request_id}' was not found"))?;
+        let document = saved
+            .definition
+            .websocket
+            .as_ref()
+            .ok_or_else(|| "The saved request is no longer a WebSocket document.".to_owned())?;
+        let replay = document
+            .replays
+            .iter()
+            .find(|replay| replay.id == params.replay_id)
+            .ok_or_else(|| format!("replay '{}' was not found", params.replay_id))?;
+        let environment = self.workspace.active_environment();
+        let mut frames = Vec::with_capacity(replay.frames.len());
+        for frame in &replay.frames {
+            let resolved = resolve_request(
+                &RequestDraft {
+                    url: frame.payload.clone(),
+                    ..RequestDraft::default()
+                },
+                environment,
+            )
+            .map_err(|error| error.to_string())?;
+            frames.push((frame.delay_ms, resolved.request.url));
+        }
+        self.runtime.spawn(async move {
+            for (delay_ms, payload) in frames {
+                if delay_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+                if sender
+                    .send(WebSocketCommand::SendText(payload.clone()))
+                    .is_err()
+                {
+                    break;
+                }
+                let _ = events.send(ControlWebSocketIncoming::SentText(payload));
+            }
+        });
+        Ok(json!({
+            "started": true,
+            "connection_id": params.connection_id,
+            "replay_id": params.replay_id,
+            "frame_count": replay.frames.len()
+        }))
+    }
+
+    fn control_disconnect_websocket(&mut self, params: Value) -> Result<Value, String> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Params {
+            connection_id: u64,
+        }
+        let params: Params = decode(params)?;
+        let connection = self.control_websocket_mut(params.connection_id)?;
+        if matches!(
+            connection.status,
+            ControlWebSocketStatus::Disconnected | ControlWebSocketStatus::Failed
+        ) {
+            return Ok(json!({ "closed": false, "state": connection.status.as_str() }));
+        }
+        if connection.status == ControlWebSocketStatus::Connecting {
+            connection.abort_handle.abort();
+            connection.status = ControlWebSocketStatus::Disconnected;
+            connection.push_event("system", "close", Some("Connection cancelled".to_owned()));
+        } else {
+            connection
+                .sender
+                .send(WebSocketCommand::Close)
+                .map_err(|_| "The WebSocket connection is no longer available.".to_owned())?;
+            connection.status = ControlWebSocketStatus::Closing;
+        }
+        Ok(json!({ "closed": true, "state": connection.status.as_str() }))
+    }
+
+    fn control_websocket_mut(
+        &mut self,
+        connection_id: u64,
+    ) -> Result<&mut ControlWebSocketConnection, String> {
+        let connection = self
+            .mcp_websocket
+            .as_mut()
+            .ok_or_else(|| "No MCP WebSocket connection exists.".to_owned())?;
+        if connection.id != connection_id {
+            return Err(format!(
+                "WebSocket connection {connection_id} is no longer current"
+            ));
+        }
+        Ok(connection)
+    }
+
+    fn handle_control_websocket_event(
+        &mut self,
+        connection_id: u64,
+        incoming: ControlWebSocketIncoming,
+    ) {
+        let Some(connection) = self.mcp_websocket.as_mut() else {
+            return;
+        };
+        if connection.id != connection_id {
+            return;
+        }
+        match incoming {
+            ControlWebSocketIncoming::Wire(WebSocketSignal::Connected) => {
+                connection.status = ControlWebSocketStatus::Connected;
+                connection.notice = None;
+                connection.push_event("system", "open", Some("Connected".to_owned()));
+            }
+            ControlWebSocketIncoming::Wire(WebSocketSignal::Text(payload)) => {
+                connection.push_event("received", "text", Some(payload));
+            }
+            ControlWebSocketIncoming::Wire(WebSocketSignal::Binary(bytes)) => {
+                connection.push_binary_event("received", "binary", bytes);
+            }
+            ControlWebSocketIncoming::Wire(WebSocketSignal::Ping(bytes)) => {
+                connection.push_binary_event("received", "ping", bytes);
+            }
+            ControlWebSocketIncoming::Wire(WebSocketSignal::Pong(bytes)) => {
+                connection.push_binary_event("received", "pong", bytes);
+            }
+            ControlWebSocketIncoming::Wire(WebSocketSignal::Closed(reason)) => {
+                connection.status = ControlWebSocketStatus::Disconnected;
+                connection.push_event(
+                    "system",
+                    "close",
+                    Some(reason.unwrap_or_else(|| "Connection closed".to_owned())),
+                );
+            }
+            ControlWebSocketIncoming::Wire(WebSocketSignal::Failed(error)) => {
+                connection.status = ControlWebSocketStatus::Failed;
+                connection.notice = Some(error.clone());
+                connection.push_event("system", "error", Some(error));
+            }
+            ControlWebSocketIncoming::SentText(payload) => {
+                connection.push_event("sent", "text", Some(payload));
+            }
+            ControlWebSocketIncoming::ScriptLog(log) => {
+                connection.push_event("system", "script", Some(log));
+            }
+            ControlWebSocketIncoming::ScriptError(error) => {
+                connection.push_event("system", "script_error", Some(error));
+            }
+        }
     }
 
     fn control_list_environments(&self) -> Result<Value, String> {
@@ -1252,7 +2217,7 @@ impl ApiTester {
         Ok(variable_value(variable))
     }
 
-    fn commit_control_workspace(
+    pub(super) fn commit_control_workspace(
         &mut self,
         candidate: Workspace,
         cx: &mut Context<Self>,
@@ -1266,6 +2231,48 @@ impl ApiTester {
 
 fn is_mutating_control_method(method: &str) -> bool {
     crate::control_tools::tool(method).is_some_and(|tool| !tool.read_only)
+}
+
+impl ControlWebSocketConnection {
+    fn push_event(&mut self, direction: &'static str, kind: &'static str, payload: Option<String>) {
+        let id = self.next_event_id;
+        self.next_event_id = id.wrapping_add(1).max(1);
+        self.events.push(ControlWebSocketEvent {
+            id,
+            at: Utc::now(),
+            direction,
+            kind,
+            payload,
+            binary: None,
+        });
+        let excess = self
+            .events
+            .len()
+            .saturating_sub(MAX_WEBSOCKET_TIMELINE_ENTRIES);
+        if excess > 0 {
+            self.events.drain(..excess);
+        }
+    }
+
+    fn push_binary_event(&mut self, direction: &'static str, kind: &'static str, binary: Vec<u8>) {
+        let id = self.next_event_id;
+        self.next_event_id = id.wrapping_add(1).max(1);
+        self.events.push(ControlWebSocketEvent {
+            id,
+            at: Utc::now(),
+            direction,
+            kind,
+            payload: None,
+            binary: Some(binary),
+        });
+        let excess = self
+            .events
+            .len()
+            .saturating_sub(MAX_WEBSOCKET_TIMELINE_ENTRIES);
+        if excess > 0 {
+            self.events.drain(..excess);
+        }
+    }
 }
 
 fn remote_profile_can_write(profile: &UpstreamProfile) -> bool {
@@ -1305,14 +2312,16 @@ fn ensure_request_revision(request: &SavedRequest, expected: &str) -> Result<(),
 }
 
 fn request_summary(collection: &Collection, request: &SavedRequest) -> Value {
+    let websocket = request.definition.websocket.as_ref();
     json!({
         "id": request.id,
         "name": request.name,
         "collection_id": collection.id,
         "collection_name": collection.name,
         "folder_id": request.folder_id,
-        "method": request.definition.request.method,
-        "url": request.definition.request.url,
+        "kind": if websocket.is_some() { "websocket" } else { "http" },
+        "method": if websocket.is_some() { "WEBSOCKET" } else { request.definition.request.method.as_str() },
+        "url": websocket.map(|document| document.url.as_str()).unwrap_or(request.definition.request.url.as_str()),
         "updated_at": request.updated_at.to_rfc3339()
     })
 }
@@ -1322,11 +2331,25 @@ fn request_value(collection: &Collection, request: &SavedRequest) -> Value {
     let object = value.as_object_mut().expect("request summary is an object");
     object.insert("request".to_owned(), json!(request.definition.request));
     object.insert("scripts".to_owned(), json!(request.definition.scripts));
+    object.insert("websocket".to_owned(), json!(request.definition.websocket));
     object.insert(
         "created_at".to_owned(),
         json!(request.created_at.to_rfc3339()),
     );
     value
+}
+
+fn request_definition(
+    request: Option<RequestDraft>,
+    websocket: Option<WebSocketWorkspace>,
+    scripts: RequestScripts,
+) -> Result<RequestTemplate, String> {
+    match (request, websocket) {
+        (Some(request), None) => Ok(RequestTemplate::new(request).with_scripts(scripts)),
+        (None, Some(websocket)) => Ok(RequestTemplate::websocket(websocket).with_scripts(scripts)),
+        (Some(_), Some(_)) => Err("provide either 'request' or 'websocket', not both".to_owned()),
+        (None, None) => Err("either 'request' or 'websocket' is required".to_owned()),
+    }
 }
 
 fn environment_value(environment: &Environment) -> Value {
@@ -1345,6 +2368,112 @@ fn variable_value(variable: &EnvironmentVariable) -> Value {
         "has_value": !variable.value.is_empty(),
         "enabled": variable.enabled,
         "secret": variable.secret
+    })
+}
+
+fn http_exchange_value(snapshot: &McpHttpExchangeSnapshot, max_body_bytes: usize) -> Value {
+    json!({
+        "operation_id": snapshot.operation_id,
+        "state": snapshot.state,
+        "stage": snapshot.stage,
+        "request": snapshot.request,
+        "response": snapshot.response.as_ref().map(|response| response_value(response, max_body_bytes)),
+        "error": snapshot.error,
+        "diagnostic": snapshot.diagnostic.as_ref().map(script_diagnostic_value),
+        "pre_request_report": snapshot.pre_request_report.as_ref().map(script_report_value),
+        "post_response_report": snapshot.post_response_report.as_ref().map(script_report_value)
+    })
+}
+
+fn response_value(response: &ResponseData, max_body_bytes: usize) -> Value {
+    let requested_bytes = response.body.len().min(max_body_bytes);
+    let (included_bytes, body_encoding, body_value) = match std::str::from_utf8(&response.body) {
+        Ok(text) => {
+            let mut boundary = requested_bytes;
+            while !text.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            (boundary, "utf8", text[..boundary].to_owned())
+        }
+        Err(_) => (
+            requested_bytes,
+            "base64",
+            base64::engine::general_purpose::STANDARD.encode(&response.body[..requested_bytes]),
+        ),
+    };
+    json!({
+        "status": response.status,
+        "status_text": response.status_text,
+        "http_version": response.http_version,
+        "final_url": response.final_url,
+        "headers": response.headers.iter().map(|header| json!({
+            "name": header.name,
+            "value": header.value
+        })).collect::<Vec<_>>(),
+        "content_type": response.content_type,
+        "duration_ms": response.duration.as_millis().min(u128::from(u64::MAX)) as u64,
+        "size_bytes": response.size_bytes(),
+        "body": body_value,
+        "body_encoding": body_encoding,
+        "body_included_bytes": included_bytes,
+        "body_truncated": included_bytes < response.body.len()
+    })
+}
+
+fn control_websocket_event_value(event: &ControlWebSocketEvent, max_payload_bytes: usize) -> Value {
+    let (payload, binary_base64, size_bytes, included_bytes) = if let Some(payload) = &event.payload
+    {
+        let mut included = payload.len().min(max_payload_bytes);
+        while !payload.is_char_boundary(included) {
+            included -= 1;
+        }
+        (
+            Some(payload[..included].to_owned()),
+            None,
+            payload.len(),
+            included,
+        )
+    } else if let Some(binary) = &event.binary {
+        let included = binary.len().min(max_payload_bytes);
+        (
+            None,
+            Some(base64::engine::general_purpose::STANDARD.encode(&binary[..included])),
+            binary.len(),
+            included,
+        )
+    } else {
+        (None, None, 0, 0)
+    };
+    json!({
+        "id": event.id,
+        "at": event.at.to_rfc3339(),
+        "direction": event.direction,
+        "kind": event.kind,
+        "payload": payload,
+        "binary_base64": binary_base64,
+        "size_bytes": size_bytes,
+        "included_bytes": included_bytes,
+        "truncated": included_bytes < size_bytes
+    })
+}
+
+fn script_report_value(report: &ScriptReport) -> Value {
+    json!({
+        "phase": report.phase.to_string(),
+        "duration_ms": report.duration.as_millis().min(u128::from(u64::MAX)) as u64,
+        "logs": report.logs,
+        "tests": report.tests,
+        "response_body_truncated": report.response_body_truncated
+    })
+}
+
+fn script_diagnostic_value(diagnostic: &ScriptDiagnostic) -> Value {
+    json!({
+        "phase": diagnostic.phase.to_string(),
+        "kind": format!("{:?}", diagnostic.kind).to_lowercase(),
+        "filename": diagnostic.filename,
+        "message": diagnostic.message,
+        "stack": diagnostic.stack
     })
 }
 

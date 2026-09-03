@@ -64,7 +64,9 @@ workspace, subject to the signed-in user's server RBAC permissions.
 
 New installations default to MCP off with all individual tool switches selected.
 This means turning on MCP exposes the full initial catalog unless the catalog is
-narrowed first.
+narrowed first. Existing installations keep their persisted allowlist when an
+upgrade adds tools, so newly introduced execution or WebSocket tools must be
+enabled deliberately in Settings.
 
 ### Read-only tools
 
@@ -75,6 +77,10 @@ narrowed first.
 | `list_collections` | List collections, folder trees, and saved-request summaries in the active workspace | None |
 | `search_requests` | Search saved requests by name or URL; an empty query returns all matches | Optional `query` |
 | `get_request` | Read a saved request, scripts, and timestamps | `request_id` |
+| `get_http_exchange` | Poll the current HTTP operation and read response data, errors, and script reports | Optional `operation_id`, `max_body_bytes` |
+| `list_request_history` | List secret-redacted request history and response summaries | Optional `limit` |
+| `get_script_console` | Read the latest structured script reports and console output | Optional `operation_id` |
+| `get_websocket_events` | Poll connection, frame, automation, and error events | Optional `connection_id`, `after_event_id`, `limit` |
 | `list_environments` | List environments and their redacted variables | None |
 | `get_environment` | Read one environment and its redacted variables | `environment_id` |
 
@@ -83,9 +89,16 @@ narrowed first.
 | Tool | Purpose | Required input |
 | --- | --- | --- |
 | `create_collection` | Create a collection in the active workspace | `name` |
-| `create_request` | Create a saved request in a collection or folder | `collection_id`, `name`, `request` |
+| `create_request` | Create a saved HTTP or WebSocket request in a collection or folder | `collection_id`, `name`, and either `request` or `websocket` |
 | `save_request` | Update a saved request after an optimistic revision check | `request_id`, `expected_updated_at` |
 | `set_request_scripts` | Replace both scripts after an optimistic revision check | `request_id`, `expected_updated_at`, `pre_request`, `post_response` |
+| `execute_http_request` | Start a saved HTTP request through the full application pipeline | `request_id` |
+| `cancel_http_request` | Cancel the active HTTP or script-console operation | None |
+| `run_script_console` | Evaluate JavaScript against the latest HTTP exchange | `source` |
+| `connect_websocket` | Open a saved WebSocket request | `request_id` |
+| `send_websocket_message` | Send text, binary, a saved message, or a rendered template | `connection_id` and one message source |
+| `run_websocket_replay` | Send a saved replay with its recorded delays | `connection_id`, `replay_id` |
+| `disconnect_websocket` | Close the MCP WebSocket session | `connection_id` |
 | `create_environment` | Create an environment | `name` |
 | `rename_environment` | Rename an environment | `environment_id`, `name` |
 | `set_active_environment` | Select an environment, or clear selection with `null` | `environment_id` |
@@ -105,6 +118,7 @@ permission is missing.
 | `create_collection` | `workspaces.read`, `collections.create` |
 | `create_request` | `workspaces.read`, `requests.create` |
 | `save_request`, `set_request_scripts` | `workspaces.read`, `requests.update` |
+| `execute_http_request`, `connect_websocket` | `workspaces.read`; the server also enforces its configured execution policy |
 | `create_environment` | `environments.read`, `environments.create` |
 | `rename_environment` | `environments.read`, `environments.update` |
 | `set_environment_variable` (create or metadata change) | `environments.read`, `environments.update` |
@@ -171,6 +185,55 @@ that race after that preflight remain a narrow last-writer-wins case.
 combination of them. Omitted top-level fields are preserved. When `scripts` is
 provided, it replaces the stored scripts object.
 
+### HTTP execution and script console
+
+`execute_http_request` opens the saved request in Resolved and starts the same
+pipeline as Send in the UI: active-environment expansion, every HTTP method,
+raw, URL-encoded, and multipart bodies (including file fields), pre-request and
+post-response scripts, nested `api.requests.execute(...)` chains, cancellation,
+local or server execution policy, environment mutations, and history. The tool
+returns an `operation_id` immediately. Poll `get_http_exchange` with that ID
+until `state` is `completed` or `failed`.
+
+Response bodies are returned as UTF-8 when valid and otherwise as base64. Set
+`max_body_bytes` up to 524288 to bound the MCP response; `size_bytes`,
+`body_included_bytes`, and `body_truncated` make truncation explicit. The
+application's normal 64 MiB response buffering limit still applies before this
+smaller MCP projection.
+
+After a completed response, `run_script_console` evaluates the supplied source
+with the same post-response runtime used by the UI. It can inspect the request
+and response, log and test, update the active environment, and execute saved
+request chains. Poll `get_script_console` for structured reports and the
+copyable console transcript. `cancel_http_request` cancels either an active HTTP
+pipeline or console evaluation.
+
+### WebSocket documents and sessions
+
+Pass `websocket` instead of `request` to `create_request` to store the complete
+WebSocket document: URL, headers, composer state and language, saved messages,
+templates, replays, reset behavior, and automation source. `get_request` returns
+the document with `kind: "websocket"`; `save_request` replaces it when a new
+`websocket` object is supplied. Supplying an HTTP `request` converts it back to
+HTTP, and `clear_websocket: true` explicitly removes a WebSocket document.
+
+`connect_websocket` returns a `connection_id` immediately and honors active
+environment variables plus the server's local-versus-proxied execution policy.
+Poll `get_websocket_events`; use `after_event_id` to read only newer bounded
+events and `max_payload_bytes` to cap each projected payload. One call includes
+at most 512 KiB of raw event payload before base64 expansion. Text, binary, ping,
+pong, close, failure, and automation log/error events are explicit. Binary
+payloads use base64, and every event reports its original and included sizes.
+
+`send_websocket_message` accepts exactly one of `text`, `binary_base64`,
+`saved_message_id`, or `template_id`. Templates also accept `template_values`;
+saved JSONL messages produce one frame per record. `run_websocket_replay`
+resolves environment placeholders and preserves recorded frame delays. Enabled
+automation runs on open and message events and its sends and logs appear in the
+same event stream. Switching workspaces, disabling MCP, disabling
+`connect_websocket`, or revoking server-workspace MCP access closes the MCP
+connection.
+
 ## Environment workflows
 
 Create an environment, optionally select it, then create variables with
@@ -226,12 +289,21 @@ those fields may contain credentials if they were stored literally instead of
 as secret environment-variable references. Enable request-reading tools only
 for clients allowed to read that workspace content.
 
+HTTP response bodies, script logs, and WebSocket frames are application data,
+not environment-secret projections, and may contain credentials returned or
+logged by the target system. Enable their read tools only for clients allowed to
+see those results. WebSocket connections can continue receiving frames and
+running enabled automation between MCP polls; close them when the workflow is
+finished.
+
 ## Current limits
 
-The MCP surface does not currently expose request execution, response or history
-inspection, arbitrary SQL, arbitrary local scripts, server administration, or
-UI automation. Request execution needs an explicit side-effect policy and a
-complete script/history result envelope before it can be safely added.
+The MCP surface does not expose arbitrary SQL, unrestricted filesystem or shell
+execution, server administration, shared-history administration, or generic UI
+automation. HTTP and WebSocket operations intentionally use saved requests and
+the application's bounded runtimes and network policies. MCP WebSocket sessions
+are separate from the visible WebSocket console, though both use the same core
+wire and automation implementations.
 
 The MCP transport belongs to the desktop client and is never exposed by the
 collaboration server. When a server workspace is active, the desktop forwards

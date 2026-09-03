@@ -110,11 +110,11 @@ pub use upstream_management::{
     update_management_user, update_request_execution_settings, upload_shared_history,
 };
 pub use websocket::{
-    MAX_WEBSOCKET_TIMELINE_ENTRIES, WebSocketAutomationEvent, WebSocketCommand,
-    WebSocketMessageTemplate, WebSocketReplay, WebSocketSavedMessage, WebSocketSignal,
-    WebSocketWorkspace, binary_preview, execute_websocket_automation, render_message_template,
-    replay_frames, replay_websocket_frames, run_upstream_websocket_connection,
-    run_websocket_connection, template_variable_names,
+    MAX_WEBSOCKET_MESSAGE_BYTES, MAX_WEBSOCKET_TIMELINE_ENTRIES, WebSocketAutomationEvent,
+    WebSocketCommand, WebSocketMessageTemplate, WebSocketReplay, WebSocketSavedMessage,
+    WebSocketSignal, WebSocketWorkspace, binary_preview, execute_websocket_automation,
+    render_message_template, replay_frames, replay_websocket_frames,
+    run_upstream_websocket_connection, run_websocket_connection, template_variable_names,
 };
 pub use workspace::{
     Collection, CollectionFolder, Environment, EnvironmentVariable, RequestScripts,

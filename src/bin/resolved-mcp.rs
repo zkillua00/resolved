@@ -217,7 +217,7 @@ fn tool(name: &str, _description: &str, input_schema: Value, _read_only: bool) -
         "inputSchema": input_schema,
         "annotations": {
             "readOnlyHint": catalog.read_only,
-            "destructiveHint": false,
+            "destructiveHint": !catalog.read_only,
             "idempotentHint": catalog.read_only
         }
     })
@@ -225,20 +225,125 @@ fn tool(name: &str, _description: &str, input_schema: Value, _read_only: bool) -
 
 fn tool_definitions() -> Vec<Value> {
     let empty = || object_schema(json!({}), &[]);
+    let raw_body_languages = json!([
+        "text",
+        "json",
+        "jsonl",
+        "xml",
+        "html",
+        "javascript",
+        "typescript",
+        "css",
+        "markdown",
+        "graphql",
+        "yaml",
+        "toml",
+        "sql",
+        "shell",
+        "rust",
+        "python"
+    ]);
+    let headers = json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "enabled": { "type": "boolean", "default": true },
+                "shared": { "type": "boolean", "default": true },
+                "name": { "type": "string" },
+                "value": { "type": "string" }
+            },
+            "required": ["name", "value"],
+            "additionalProperties": false
+        }
+    });
     let request_draft = json!({
         "type": "object",
         "description": "Resolved request draft. Fields omitted by Resolved defaults are optional.",
         "properties": {
             "method": { "type": "string" },
             "url": { "type": "string" },
-            "query_params": { "type": "array", "items": { "type": "object" } },
-            "headers": { "type": "array", "items": { "type": "object" } },
+            "query_params": { "type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean", "default": true },
+                    "key": { "type": "string" },
+                    "value": { "type": "string" },
+                    "description": { "type": "string" }
+                },
+                "required": ["key", "value"],
+                "additionalProperties": false
+            } },
+            "headers": headers.clone(),
             "body": { "type": "string" },
             "body_mode": { "type": "string", "enum": ["none", "raw", "form_url_encoded", "multipart_form_data"] },
-            "raw_body_language": { "type": "string" },
-            "body_fields": { "type": "array", "items": { "type": "object" } }
+            "raw_body_language": { "type": "string", "enum": raw_body_languages.clone() },
+            "body_fields": { "type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean", "default": true },
+                    "name": { "type": "string" },
+                    "value": { "type": "string", "description": "Text value or local file path when kind is file." },
+                    "kind": { "type": "string", "enum": ["text", "file"], "default": "text" }
+                },
+                "required": ["name", "value"],
+                "additionalProperties": false
+            } }
         },
         "required": ["method", "url"],
+        "additionalProperties": false
+    });
+    let websocket_document = json!({
+        "type": "object",
+        "properties": {
+            "url": { "type": "string" },
+            "headers": headers,
+            "composer": { "type": "string" },
+            "composer_language": { "type": "string", "enum": raw_body_languages },
+            "messages": { "type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "payload": { "type": "string" },
+                    "language": { "type": "string" }
+                },
+                "required": ["id", "name", "payload"],
+                "additionalProperties": false
+            } },
+            "templates": { "type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "payload": { "type": "string" }
+                },
+                "required": ["id", "name", "payload"],
+                "additionalProperties": false
+            } },
+            "replays": { "type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "frames": { "type": "array", "items": {
+                        "type": "object",
+                        "properties": {
+                            "delay_ms": { "type": "integer", "minimum": 0 },
+                            "payload": { "type": "string" }
+                        },
+                        "required": ["delay_ms", "payload"],
+                        "additionalProperties": false
+                    } }
+                },
+                "required": ["id", "name", "frames"],
+                "additionalProperties": false
+            } },
+            "reset_input_after_send": { "type": "boolean" },
+            "automation_enabled": { "type": "boolean" },
+            "automation_source": { "type": "string" }
+        },
+        "required": ["url"],
         "additionalProperties": false
     });
     vec![
@@ -290,9 +395,10 @@ fn tool_definitions() -> Vec<Value> {
                     "folder_id": { "type": "string" },
                     "name": { "type": "string" },
                     "request": request_draft.clone(),
+                    "websocket": websocket_document.clone(),
                     "scripts": { "type": "object", "properties": { "pre_request": { "type": "string" }, "post_response": { "type": "string" } }, "additionalProperties": false }
                 }),
-                &["collection_id", "name", "request"],
+                &["collection_id", "name"],
             ),
             false,
         ),
@@ -305,6 +411,8 @@ fn tool_definitions() -> Vec<Value> {
                     "expected_updated_at": { "type": "string" },
                     "name": { "type": "string" },
                     "request": request_draft,
+                    "websocket": websocket_document,
+                    "clear_websocket": { "type": "boolean", "default": false },
                     "scripts": { "type": "object", "properties": { "pre_request": { "type": "string" }, "post_response": { "type": "string" } }, "additionalProperties": false }
                 }),
                 &["request_id", "expected_updated_at"],
@@ -327,6 +435,126 @@ fn tool_definitions() -> Vec<Value> {
                     "pre_request",
                     "post_response",
                 ],
+            ),
+            false,
+        ),
+        tool(
+            "execute_http_request",
+            "Execute a saved HTTP request through Resolved.",
+            object_schema(
+                json!({ "request_id": { "type": "string" } }),
+                &["request_id"],
+            ),
+            false,
+        ),
+        tool(
+            "get_http_exchange",
+            "Poll an HTTP execution and read its response and script reports.",
+            object_schema(
+                json!({
+                    "operation_id": { "type": "integer", "minimum": 0 },
+                    "max_body_bytes": { "type": "integer", "minimum": 0, "maximum": 524288, "default": 262144 }
+                }),
+                &[],
+            ),
+            true,
+        ),
+        tool(
+            "cancel_http_request",
+            "Cancel the current HTTP request or script stage.",
+            empty(),
+            false,
+        ),
+        tool(
+            "list_request_history",
+            "List secret-redacted local request history.",
+            object_schema(
+                json!({
+                    "limit": { "type": "integer", "minimum": 0, "maximum": 100, "default": 25 }
+                }),
+                &[],
+            ),
+            true,
+        ),
+        tool(
+            "run_script_console",
+            "Evaluate JavaScript against the latest HTTP request and response.",
+            object_schema(json!({ "source": { "type": "string" } }), &["source"]),
+            false,
+        ),
+        tool(
+            "get_script_console",
+            "Read the latest script-console output and reports.",
+            object_schema(
+                json!({
+                    "operation_id": { "type": "integer", "minimum": 0 }
+                }),
+                &[],
+            ),
+            true,
+        ),
+        tool(
+            "connect_websocket",
+            "Open a saved WebSocket request through Resolved.",
+            object_schema(
+                json!({ "request_id": { "type": "string" } }),
+                &["request_id"],
+            ),
+            false,
+        ),
+        tool(
+            "send_websocket_message",
+            "Send text or binary data on the active MCP WebSocket connection.",
+            object_schema(
+                json!({
+                    "connection_id": { "type": "integer", "minimum": 1 },
+                    "text": { "type": "string" },
+                    "binary_base64": { "type": "string" },
+                    "saved_message_id": { "type": "string" },
+                    "template_id": { "type": "string" },
+                    "template_values": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string" }
+                    }
+                }),
+                &["connection_id"],
+            ),
+            false,
+        ),
+        tool(
+            "get_websocket_events",
+            "Read new events from the active MCP WebSocket connection.",
+            object_schema(
+                json!({
+                    "connection_id": { "type": "integer", "minimum": 1 },
+                    "after_event_id": { "type": "integer", "minimum": 0, "default": 0 },
+                    "limit": { "type": "integer", "minimum": 0, "maximum": 500, "default": 100 },
+                    "max_payload_bytes": { "type": "integer", "minimum": 0, "maximum": 262144, "default": 65536 }
+                }),
+                &[],
+            ),
+            true,
+        ),
+        tool(
+            "run_websocket_replay",
+            "Run a saved replay on the active MCP WebSocket connection.",
+            object_schema(
+                json!({
+                    "connection_id": { "type": "integer", "minimum": 1 },
+                    "replay_id": { "type": "string" }
+                }),
+                &["connection_id", "replay_id"],
+            ),
+            false,
+        ),
+        tool(
+            "disconnect_websocket",
+            "Close the active MCP WebSocket connection.",
+            object_schema(
+                json!({
+                    "connection_id": { "type": "integer", "minimum": 1 }
+                }),
+                &["connection_id"],
             ),
             false,
         ),

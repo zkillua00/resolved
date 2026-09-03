@@ -541,6 +541,359 @@ fn remote_workspace_mcp_access_is_hidden_and_rejected_until_enabled(cx: &mut gpu
     });
 }
 
+#[gpui::test]
+fn local_control_round_trips_websocket_documents(cx: &mut gpui::TestAppContext) {
+    let directory = tempfile::tempdir().expect("create temporary control database directory");
+    let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+    store.initialize().expect("initialize test database");
+    let mut app = None;
+    let store_for_app = store.clone();
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        gpui_component::init(cx);
+        let base_key_bindings = shortcuts::capture_base_key_bindings(cx);
+        crate::theme::configure(cx);
+        let view = cx.new(|cx| {
+            ApiTester::new_with_database_store(base_key_bindings, store_for_app, window, cx)
+        });
+        app = Some(view.clone());
+        gpui_component::Root::new(view, window, cx)
+    });
+    let app = app.expect("capture app entity");
+    cx.update(|_, cx| app.update(cx, |app, _| app.settings.mcp.enabled = true));
+
+    let collection = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call(
+                "create_collection",
+                serde_json::json!({ "name": "Sockets" }),
+                cx,
+            )
+        })
+    });
+    let collection_id = collection.result.unwrap()["collection_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let created = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call(
+                "create_request",
+                serde_json::json!({
+                    "collection_id": collection_id,
+                    "name": "Echo socket",
+                    "websocket": {
+                        "url": "wss://echo.example.test/{{token}}",
+                        "composer": "{\"hello\":true}",
+                        "composer_language": "json",
+                        "messages": [{
+                            "id": "message-1",
+                            "name": "Hello",
+                            "payload": "hello",
+                            "language": "text"
+                        }],
+                        "templates": [{
+                            "id": "template-1",
+                            "name": "Greeting",
+                            "payload": "Hello %{name}%"
+                        }],
+                        "replays": [{
+                            "id": "replay-1",
+                            "name": "Handshake",
+                            "frames": [{ "delay_ms": 25, "payload": "hello" }]
+                        }],
+                        "automation_enabled": true,
+                        "automation_source": "if (ws.event.type === 'open') ws.send('ready');"
+                    }
+                }),
+                cx,
+            )
+        })
+    });
+    assert!(created.ok, "{:?}", created.error);
+    let request_id = created.result.as_ref().unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(created.result.as_ref().unwrap()["kind"], "websocket");
+    assert_eq!(
+        created.result.as_ref().unwrap()["websocket"]["replays"][0]["frames"][0]["delay_ms"],
+        25
+    );
+
+    let fetched = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call(
+                "get_request",
+                serde_json::json!({ "request_id": request_id }),
+                cx,
+            )
+        })
+    });
+    assert!(fetched.ok, "{:?}", fetched.error);
+    assert_eq!(
+        fetched.result.unwrap()["url"],
+        "wss://echo.example.test/{{token}}"
+    );
+}
+
+#[gpui::test]
+fn mcp_http_execution_and_script_console_use_the_application_pipeline(
+    cx: &mut gpui::TestAppContext,
+) {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback test server");
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request).unwrap();
+        stream
+            .write_all(
+                b"HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
+            )
+            .unwrap();
+    });
+
+    let directory = tempfile::tempdir().expect("create temporary control database directory");
+    let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+    store.initialize().expect("initialize test database");
+    let mut app = None;
+    let store_for_app = store.clone();
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        gpui_component::init(cx);
+        let base_key_bindings = shortcuts::capture_base_key_bindings(cx);
+        crate::theme::configure(cx);
+        let view = cx.new(|cx| {
+            ApiTester::new_with_database_store(base_key_bindings, store_for_app, window, cx)
+        });
+        app = Some(view.clone());
+        gpui_component::Root::new(view, window, cx)
+    });
+    let app = app.expect("capture app entity");
+    let request_id = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.settings.mcp.enabled = true;
+            let mut workspace = app.workspace.clone();
+            let collection_id = workspace.create_collection("HTTP").unwrap();
+            let request_id = workspace
+                .create_saved_request(
+                    &collection_id,
+                    "Create",
+                    RequestTemplate::new(RequestDraft::new(
+                        "POST",
+                        format!("http://{address}/items"),
+                    ))
+                    .with_scripts(RequestScripts {
+                        pre_request: "console.log('pre');".to_owned(),
+                        post_response: "console.log('post', api.response.status);".to_owned(),
+                    }),
+                )
+                .unwrap();
+            app.commit_control_workspace(workspace, cx).unwrap();
+            request_id
+        })
+    });
+    let operation_id = cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.start_control_http_request(&request_id, window, cx)
+                .unwrap()
+        })
+    });
+    cx.run_until_parked();
+    server.join().unwrap();
+
+    let exchange = cx.update(|_, cx| {
+        let app = app.read(cx);
+        app.control_get_http_exchange(serde_json::json!({ "operation_id": operation_id }))
+            .unwrap()
+    });
+    assert_eq!(exchange["state"], "completed");
+    assert_eq!(exchange["response"]["status"], 201);
+    assert_eq!(exchange["response"]["body"], "{\"ok\":true}");
+    assert_eq!(exchange["pre_request_report"]["logs"][0]["message"], "pre");
+    assert_eq!(
+        exchange["post_response_report"]["logs"][0]["message"],
+        "post 201"
+    );
+
+    let console_operation_id = cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.start_control_script_console("api.response.status".to_owned(), window, cx)
+                .unwrap()
+        })
+    });
+    cx.run_until_parked();
+    let console = cx.update(|_, cx| {
+        app.read(cx)
+            .control_get_script_console(serde_json::json!({ "operation_id": console_operation_id }))
+            .unwrap()
+    });
+    assert_eq!(console["state"], "idle");
+    assert!(console["output"].as_str().unwrap().contains("201"));
+
+    cx.update(|_, cx| {
+        app.update(cx, |app, _| {
+            // A UI tab switch replaces these live response fields. Completed MCP
+            // operations must still poll their own exchange snapshot.
+            app.response = None;
+            app.request_error = Some("another tab".to_owned());
+        })
+    });
+    let completed_exchange = cx.update(|_, cx| {
+        app.read(cx)
+            .control_get_http_exchange(serde_json::json!({ "operation_id": operation_id }))
+            .unwrap()
+    });
+    assert_eq!(completed_exchange["state"], "completed");
+    assert_eq!(completed_exchange["response"]["status"], 201);
+}
+
+#[gpui::test]
+fn mcp_websocket_connection_exposes_frames_and_runs_automation(cx: &mut gpui::TestAppContext) {
+    use futures::{SinkExt as _, StreamExt as _};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind WebSocket server");
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                for _ in 0..2 {
+                    let message = tokio::time::timeout(Duration::from_secs(3), socket.next())
+                        .await
+                        .expect("receive WebSocket message before timeout")
+                        .expect("WebSocket remains open")
+                        .expect("read WebSocket message");
+                    socket.send(message).await.unwrap();
+                }
+            });
+    });
+
+    let directory = tempfile::tempdir().expect("create temporary control database directory");
+    let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+    store.initialize().expect("initialize test database");
+    let mut app = None;
+    let store_for_app = store.clone();
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        gpui_component::init(cx);
+        let base_key_bindings = shortcuts::capture_base_key_bindings(cx);
+        crate::theme::configure(cx);
+        let view = cx.new(|cx| {
+            ApiTester::new_with_database_store(base_key_bindings, store_for_app, window, cx)
+        });
+        app = Some(view.clone());
+        gpui_component::Root::new(view, window, cx)
+    });
+    let app = app.expect("capture app entity");
+    let request_id = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.settings.mcp.enabled = true;
+            let mut workspace = app.workspace.clone();
+            let collection_id = workspace.create_collection("Sockets").unwrap();
+            let request_id = workspace
+                .create_saved_request(
+                    &collection_id,
+                    "Echo",
+                    RequestTemplate::websocket(WebSocketWorkspace {
+                        url: format!("ws://{address}/echo"),
+                        templates: vec![WebSocketMessageTemplate {
+                            id: "template-1".to_owned(),
+                            name: "Manual".to_owned(),
+                            payload: "%{value}%".to_owned(),
+                        }],
+                        automation_enabled: true,
+                        automation_source:
+                            "if (ws.event.eventType === 'open') ws.send('automatic');".to_owned(),
+                        ..WebSocketWorkspace::default()
+                    }),
+                )
+                .unwrap();
+            app.commit_control_workspace(workspace, cx).unwrap();
+            request_id
+        })
+    });
+    let connected = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call(
+                "connect_websocket",
+                serde_json::json!({ "request_id": request_id }),
+                cx,
+            )
+        })
+    });
+    assert!(connected.ok, "{:?}", connected.error);
+    let connection_id = connected.result.unwrap()["connection_id"].as_u64().unwrap();
+
+    let mut automatic_received = false;
+    for _ in 0..100 {
+        std::thread::sleep(Duration::from_millis(10));
+        cx.run_until_parked();
+        automatic_received =
+            cx.update(|_, cx| {
+                let events = app
+                    .read(cx)
+                    .control_get_websocket_events(serde_json::json!({
+                        "connection_id": connection_id
+                    }))
+                    .unwrap();
+                events["events"].as_array().unwrap().iter().any(|event| {
+                    event["direction"] == "received" && event["payload"] == "automatic"
+                })
+            });
+        if automatic_received {
+            break;
+        }
+    }
+    assert!(
+        automatic_received,
+        "automation output should be sent and echoed"
+    );
+
+    let sent = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call(
+                "send_websocket_message",
+                serde_json::json!({
+                    "connection_id": connection_id,
+                    "template_id": "template-1",
+                    "template_values": { "value": "manual" }
+                }),
+                cx,
+            )
+        })
+    });
+    assert!(sent.ok, "{:?}", sent.error);
+    let mut manual_received = false;
+    for _ in 0..100 {
+        std::thread::sleep(Duration::from_millis(10));
+        cx.run_until_parked();
+        manual_received = cx.update(|_, cx| {
+            let events = app
+                .read(cx)
+                .control_get_websocket_events(serde_json::json!({
+                    "connection_id": connection_id
+                }))
+                .unwrap();
+            events["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| event["direction"] == "received" && event["payload"] == "manual")
+        });
+        if manual_received {
+            break;
+        }
+    }
+    assert!(manual_received, "manual output should be sent and echoed");
+    server.join().unwrap();
+}
+
 #[test]
 fn snippet_list_rows_filter_case_insensitively_and_order_by_category() {
     use super::snippets::{SnippetListRow, filter_snippet_list_rows};

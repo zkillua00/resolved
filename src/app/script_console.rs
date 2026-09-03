@@ -295,21 +295,46 @@ impl ApiTester {
     }
 
     pub(super) fn evaluate_script_console(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.script_console_running || self.sending {
-            return;
-        }
         let source = self.script_console_input.read(cx).value(cx).to_string();
         if source.trim().is_empty() {
             return;
         }
+        self.script_console_input
+            .update(cx, |editor, cx| editor.set_value("", window, cx));
+        if let Err(error) = self.start_script_console(source, false, window, cx) {
+            window.push_notification(Notification::warning(error), cx);
+        }
+    }
+
+    pub(super) fn start_control_script_console(
+        &mut self,
+        source: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<u64, String> {
+        self.start_script_console(source, true, window, cx)
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn start_script_console(
+        &mut self,
+        source: String,
+        mcp_owned: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<u64, String> {
+        if self.script_console_running || self.sending {
+            return Err(
+                "Another request or script-console evaluation is already running.".to_owned(),
+            );
+        }
+        if source.trim().is_empty() {
+            return Err("Script console source cannot be empty.".to_owned());
+        }
         let (Some(request), Some(response)) =
             (self.response_request.clone(), self.response.clone())
         else {
-            window.push_notification(
-                Notification::warning("Run a request before using the script console"),
-                cx,
-            );
-            return;
+            return Err("Run an HTTP request before using the script console.".to_owned());
         };
 
         if self.script_console_history.last() != Some(&source) {
@@ -320,8 +345,6 @@ impl ApiTester {
         }
         self.script_console_history_cursor = None;
         self.script_console_history_draft.clear();
-        self.script_console_input
-            .update(cx, |editor, cx| editor.set_value("", window, cx));
         self.append_script_console_report(ScriptReport {
             phase: ScriptPhase::PostResponse,
             duration: Duration::ZERO,
@@ -334,6 +357,11 @@ impl ApiTester {
             response_body_truncated: false,
         });
         self.script_console_running = true;
+        self.mcp_script_console_generation =
+            self.mcp_script_console_generation.wrapping_add(1).max(1);
+        let operation_id = self.mcp_script_console_generation;
+        self.mcp_script_console_operation_id = Some(operation_id);
+        self.mcp_script_console_owned = mcp_owned;
 
         let generation = self.request_generation;
         let tab_id = self.request_tabs.active_tab_id().clone();
@@ -364,6 +392,7 @@ impl ApiTester {
             let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.script_console_running = false;
+                this.mcp_script_console_owned = false;
                 if generation != this.request_generation
                     || &tab_id != this.request_tabs.active_tab_id()
                 {
@@ -427,6 +456,7 @@ impl ApiTester {
         })
         .detach();
         cx.notify();
+        Ok(operation_id)
     }
 
     pub(super) fn navigate_script_console_history(

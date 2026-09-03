@@ -56,7 +56,8 @@ covered by the [MCP guide](docs/mcp.md). Server operators should start with the
 - Named local workspaces with isolated collections, environments, snippets, and
   request-tab drafts
 - Opt-in local MCP control with an independently configurable tool catalog for
-  semantic request, collection, script, and environment automation
+  HTTP execution and history, script-console evaluation, live WebSockets,
+  collections, saved requests, and environments
 - Multiple switchable self-hosted server profiles with direct login; session
   tokens are authenticated-encrypted locally, with biometric Keychain
   protection available to provisioned macOS builds
@@ -739,10 +740,10 @@ Only enabled tools are advertised. Clients that cache discovery may need to be
 refreshed or reconnected after a switch changes. Resolved also rejects disabled
 tools server-side. Server workspace access is off by default; while it is off,
 workspace-scoped tools disappear from discovery whenever a server workspace is
-active. See the [local MCP control guide](docs/mcp.md) for the full
-tool catalog, request and environment workflows, revision checks, secret
-redaction, remote-workspace RBAC behavior, security boundary, current limits,
-and troubleshooting.
+active. See the [local MCP control guide](docs/mcp.md) for the full tool catalog,
+HTTP execution/results/history, script-console and WebSocket workflows, request
+and environment editing, revision checks, secret redaction, remote-workspace
+RBAC behavior, security boundary, current limits, and troubleshooting.
 
 The project uses Rust edition 2024 and has compile-time platform backends for
 Linux, macOS, and Windows. Shared feature code does not select operating

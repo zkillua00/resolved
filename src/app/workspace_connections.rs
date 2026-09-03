@@ -1366,6 +1366,9 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.workspace_providers.active_id() != &provider_id {
+            self.stop_mcp_websocket();
+        }
         if let Err(error) = self.workspace_providers.switch(provider_id) {
             self.settings_notice = Some(error.to_string());
             cx.notify();
