@@ -625,7 +625,7 @@ impl ApiTester {
         Ok(draft)
     }
 
-    fn persist_upstream_active_environment(
+    pub(super) fn persist_upstream_active_environment(
         &mut self,
         environment_id: Option<&str>,
         cx: &mut Context<Self>,

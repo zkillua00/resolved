@@ -16,7 +16,7 @@ pub const CONTROL_TOOLS: &[ControlToolDescriptor] = &[
     ControlToolDescriptor {
         name: "list_workspaces",
         label: "List workspaces",
-        description: "List local Resolved workspaces.",
+        description: "List local and connected server workspaces.",
         read_only: true,
     },
     ControlToolDescriptor {

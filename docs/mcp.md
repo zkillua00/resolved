@@ -64,8 +64,8 @@ narrowed first.
 
 | Tool | Purpose | Required input |
 | --- | --- | --- |
-| `status` | Report the app version, active workspace, writability, and enabled tools | None |
-| `list_workspaces` | List local workspaces and identify the active local workspace | None |
+| `status` | Report the app version, active workspace provider, effective writability, and enabled tools | None |
+| `list_workspaces` | List local and connected server workspaces and identify the active workspace | None |
 | `list_collections` | List collections, folder trees, and saved-request summaries in the active workspace | None |
 | `search_requests` | Search saved requests by name or URL; an empty query returns all matches | Optional `query` |
 | `get_request` | Read a saved request, scripts, and timestamps | `request_id` |
@@ -85,8 +85,30 @@ narrowed first.
 | `set_active_environment` | Select an environment, or clear selection with `null` | `environment_id` |
 | `set_environment_variable` | Create or update an environment variable | `environment_id`; see below |
 
-Mutations target the active workspace and fail when it is read-only. Use
-`status` to check `workspace_writable` before planning changes.
+Mutations target the active workspace. Local changes use the desktop database.
+Remote changes use the signed-in server session, enforce that user's RBAC
+permissions, and reload the authoritative server state before returning. Use
+`status` to check `workspace_provider` and effective `workspace_writable` before
+planning changes; an individual remote mutation can still fail when its specific
+permission is missing.
+
+### Remote workspace permissions
+
+| Tool | Required server permissions |
+| --- | --- |
+| `create_collection` | `workspaces.read`, `collections.create` |
+| `create_request` | `workspaces.read`, `requests.create` |
+| `save_request`, `set_request_scripts` | `workspaces.read`, `requests.update` |
+| `create_environment` | `environments.read`, `environments.create` |
+| `rename_environment` | `environments.read`, `environments.update` |
+| `set_environment_variable` (create or metadata change) | `environments.read`, `environments.update` |
+| `set_environment_variable` (value change) | `environments.read`, `environment_values.update` |
+
+`set_active_environment` changes the desktop user's locally remembered selection
+for that server workspace and requires writable app settings, not a server
+mutation permission. The collaboration server still performs its own RBAC and
+workspace-membership checks on every remote request; the desktop checks are an
+early, descriptive failure rather than a replacement for server authorization.
 
 ## Request workflows
 
@@ -133,6 +155,11 @@ Updates are optimistic. Read the request with `get_request`, retain its
 `set_request_scripts`. If the request changed after it was read, Resolved rejects
 the update and returns the current revision instead of overwriting the newer
 edit. Read it again, reconcile the changes, and retry.
+
+For a server workspace, Resolved refreshes and checks the server revision
+immediately before sending the update. The current collaboration-server PATCH
+contract does not yet provide an atomic conditional-update field, so two writes
+that race after that preflight remain a narrow last-writer-wins case.
 
 `save_request` can update the name, request definition, scripts, or any
 combination of them. Omitted top-level fields are preserved. When `scripts` is
@@ -197,9 +224,10 @@ inspection, arbitrary SQL, arbitrary local scripts, server administration, or
 UI automation. Request execution needs an explicit side-effect policy and a
 complete script/history result envelope before it can be safely added.
 
-The local MCP transport belongs to the desktop client. It is independent of the
-self-hosted collaboration server and is not a remote collaboration or
-administration API.
+The MCP transport belongs to the desktop client and is never exposed by the
+collaboration server. When a server workspace is active, the desktop forwards
+supported mutations through its authenticated server APIs with the signed-in
+user's RBAC permissions. MCP does not provide server administration tools.
 
 ## Troubleshooting
 
@@ -211,6 +239,11 @@ administration API.
   is still running and MCP remains enabled.
 - **A mutation says the workspace is read-only:** switch to a writable workspace
   or use read-only tools.
+- **A remote mutation reports a missing permission:** ask the server owner for
+  the named RBAC permission or use tools allowed by the current role.
+- **A remote mutation times out or loses connection after dispatch:** re-read
+  the affected resource before retrying because the server may have accepted the
+  change even though the refreshed result did not return.
 - **A request update reports a revision conflict:** call `get_request` again and
   retry with its latest `updated_at` after reconciling changes.
 - **The adapter cannot be found after installing Resolved:** build or distribute

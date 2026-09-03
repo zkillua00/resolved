@@ -737,7 +737,8 @@ Only enabled tools are advertised. Clients that cache discovery may need to be
 refreshed or reconnected after a switch changes. Resolved also rejects disabled
 tools server-side. See the [local MCP control guide](docs/mcp.md) for the full
 tool catalog, request and environment workflows, revision checks, secret
-redaction, security boundary, current limits, and troubleshooting.
+redaction, remote-workspace RBAC behavior, security boundary, current limits,
+and troubleshooting.
 
 The project uses Rust edition 2024 and has compile-time platform backends for
 Linux, macOS, and Windows. Shared feature code does not select operating

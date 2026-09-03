@@ -46,9 +46,11 @@ MCP client -> resolved-mcp stdio adapter -> authenticated local IPC
 ```
 
 The adapter discovers only tools enabled in the desktop's MCP settings. It does
-not access SQLite directly, and the self-hosted collaboration server is not part
-of this local transport. See the [local MCP guide](mcp.md) for its contract and
-security boundary.
+not access SQLite directly. With a local workspace active, mutations use the
+desktop persistence path; with a server workspace active, they use the existing
+authenticated, RBAC-protected collaboration-server APIs and refresh the
+authoritative remote snapshot. See the [local MCP guide](mcp.md) for its contract
+and security boundary.
 
 ## Desktop builds
 
