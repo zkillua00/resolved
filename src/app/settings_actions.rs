@@ -65,6 +65,29 @@ impl ApiTester {
         cx.notify();
     }
 
+    pub(super) fn set_mcp_remote_workspaces_enabled(
+        &mut self,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.mcp.allow_remote_workspaces == enabled {
+            return;
+        }
+        let mut candidate = self.settings.clone();
+        candidate.mcp.allow_remote_workspaces = enabled;
+        match self.commit_settings(candidate, false, cx) {
+            Ok(()) => {
+                self.settings_notice = Some(if enabled {
+                    "MCP access to server workspaces enabled.".to_owned()
+                } else {
+                    "MCP access to server workspaces disabled.".to_owned()
+                });
+            }
+            Err(error) => self.settings_notice = Some(error),
+        }
+        cx.notify();
+    }
+
     pub(super) fn begin_recording_shortcut(
         &mut self,
         shortcut_id: ShortcutId,

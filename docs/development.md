@@ -46,11 +46,13 @@ MCP client -> resolved-mcp stdio adapter -> authenticated local IPC
 ```
 
 The adapter discovers only tools enabled in the desktop's MCP settings. It does
-not access SQLite directly. With a local workspace active, mutations use the
-desktop persistence path; with a server workspace active, they use the existing
-authenticated, RBAC-protected collaboration-server APIs and refresh the
-authoritative remote snapshot. See the [local MCP guide](mcp.md) for its contract
-and security boundary.
+not access SQLite directly. Connected server workspace access is independently
+disabled by default; when it is off, workspace-scoped tools are neither
+advertised nor accepted while a server workspace is active. When enabled, remote
+mutations use the existing authenticated, RBAC-protected collaboration-server
+APIs and refresh the authoritative remote snapshot. Local mutations continue to
+use the desktop persistence path. See the [local MCP guide](mcp.md) for its
+contract and security boundary.
 
 ## Desktop builds
 

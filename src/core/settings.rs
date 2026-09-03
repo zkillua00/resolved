@@ -41,6 +41,9 @@ pub struct AppSettings {
 #[serde(default)]
 pub struct McpSettings {
     pub enabled: bool,
+    /// Allow workspace-scoped MCP tools to inspect or change connected server
+    /// workspaces. Server RBAC remains authoritative when this is enabled.
+    pub allow_remote_workspaces: bool,
     #[serde(default = "default_mcp_tools")]
     pub enabled_tools: std::collections::BTreeSet<String>,
     /// Preserve fields written by a newer application version.
@@ -58,6 +61,7 @@ impl Default for McpSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            allow_remote_workspaces: false,
             enabled_tools: default_mcp_tools(),
             extra: BTreeMap::new(),
         }
@@ -803,6 +807,7 @@ mod tests {
         assert_eq!(settings.formatter, FormatterSettings::default());
         assert_eq!(settings.mcp, McpSettings::default());
         assert!(!settings.mcp.enabled);
+        assert!(!settings.mcp.allow_remote_workspaces);
         assert_eq!(
             settings.mcp.enabled_tools.len(),
             crate::control_tools::CONTROL_TOOLS.len()
@@ -817,6 +822,7 @@ mod tests {
         let settings: AppSettings = serde_json::from_value(serde_json::json!({
             "mcp": {
                 "enabled": true,
+                "allow_remote_workspaces": true,
                 "enabled_tools": ["status", "future_tool"],
                 "future_policy": "prompt"
             }
@@ -824,6 +830,7 @@ mod tests {
         .unwrap();
 
         assert!(settings.mcp.enabled);
+        assert!(settings.mcp.allow_remote_workspaces);
         assert!(settings.mcp.tool_enabled("status"));
         assert!(!settings.mcp.tool_enabled("get_request"));
         assert!(settings.mcp.enabled_tools.contains("future_tool"));

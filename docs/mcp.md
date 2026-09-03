@@ -56,6 +56,12 @@ desktop also rejects direct calls to disabled tools, protecting against clients
 that cached an older list. Turning MCP off stops the local transport and removes
 its discovery files.
 
+**Allow server workspaces** is a separate, off-by-default switch. While a server
+workspace is active and this switch is off, only `status` and `list_workspaces`
+are advertised; all workspace-scoped tools are also rejected inside the desktop.
+Turning it on permits the individually enabled tools to use the active server
+workspace, subject to the signed-in user's server RBAC permissions.
+
 New installations default to MCP off with all individual tool switches selected.
 This means turning on MCP exposes the full initial catalog unless the catalog is
 narrowed first.
@@ -205,6 +211,9 @@ client allowed to use the environment read tools.
   allows up to 30 seconds for the desktop response.
 - Every call is checked against the current tool allowlist inside the desktop
   process, not only in MCP discovery.
+- Connected server workspace access has its own off-by-default gate. Disabling
+  it removes workspace-scoped tools from discovery while a server workspace is
+  active and rejects stale cached calls.
 
 This is a same-user trust boundary. Any process that can read the Resolved data
 directory and descriptor can invoke every currently enabled tool. Protect the
@@ -233,6 +242,8 @@ user's RBAC permissions. MCP does not provide server administration tools.
 
 - **No tools are listed:** start Resolved, enable MCP, and select at least one
   tool. Then refresh or reconnect the MCP client.
+- **Only status and workspace listing appear:** the active workspace is on a
+  connected server and **Allow server workspaces** is off.
 - **A recently enabled or disabled tool is stale:** reconnect the client; list
   change notifications are not implemented yet.
 - **A tool call says local control is unavailable:** verify that the desktop app

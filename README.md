@@ -331,7 +331,8 @@ selector. `⌘⇧M` remains available as a customizable quick toggle.
 The MCP page controls the experimental local agent connection and its individual
 tools. MCP is disabled by default. Turning off a tool removes it from subsequent
 MCP discovery responses and also rejects calls from clients with a stale cached
-tool list.
+tool list. Access to connected server workspaces has a separate off-by-default
+switch; server RBAC still applies when it is enabled.
 
 Bindings are divided into five sections so related commands remain easy to
 scan:
@@ -712,7 +713,8 @@ the local user account accordingly.
 Resolved provides an optional MCP stdio adapter for semantic control of the
 running desktop app. MCP is disabled by default. Start Resolved, open
 **Settings -> MCP**, enable the connection, and select only the tools the agent
-needs.
+needs. Enable **Allow server workspaces** separately if the agent should use the
+active connected-server workspace.
 
 Build the adapter separately; it is not currently included in application
 packages:
@@ -735,7 +737,9 @@ Configure the MCP client with the adapter's absolute path:
 
 Only enabled tools are advertised. Clients that cache discovery may need to be
 refreshed or reconnected after a switch changes. Resolved also rejects disabled
-tools server-side. See the [local MCP control guide](docs/mcp.md) for the full
+tools server-side. Server workspace access is off by default; while it is off,
+workspace-scoped tools disappear from discovery whenever a server workspace is
+active. See the [local MCP control guide](docs/mcp.md) for the full
 tool catalog, request and environment workflows, revision checks, secret
 redaction, remote-workspace RBAC behavior, security boundary, current limits,
 and troubleshooting.

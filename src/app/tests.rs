@@ -462,10 +462,83 @@ fn mcp_setting_starts_and_stops_the_local_control_transport(cx: &mut gpui::TestA
     assert!(store.load_app_settings().unwrap().mcp.enabled);
 
     cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.set_mcp_remote_workspaces_enabled(true, cx)
+        });
+    });
+    assert!(
+        store
+            .load_app_settings()
+            .unwrap()
+            .mcp
+            .allow_remote_workspaces
+    );
+
+    cx.update(|_, cx| {
         app.update(cx, |app, cx| app.set_mcp_enabled(false, cx));
     });
     assert!(!descriptor.exists());
     assert!(!store.load_app_settings().unwrap().mcp.enabled);
+}
+
+#[gpui::test]
+fn remote_workspace_mcp_access_is_hidden_and_rejected_until_enabled(cx: &mut gpui::TestAppContext) {
+    let directory = tempfile::tempdir().expect("create temporary MCP settings directory");
+    let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+    store.initialize().expect("initialize test database");
+
+    let mut app = None;
+    let store_for_app = store.clone();
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        gpui_component::init(cx);
+        let base_key_bindings = shortcuts::capture_base_key_bindings(cx);
+        crate::theme::configure(cx);
+        let view = cx.new(|cx| {
+            ApiTester::new_with_database_store(base_key_bindings, store_for_app, window, cx)
+        });
+        app = Some(view.clone());
+        gpui_component::Root::new(view, window, cx)
+    });
+    let app = app.expect("capture app entity");
+
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.settings.mcp.enabled = true;
+            let provider = RemoteWorkspaceProvider::new(
+                app.database_store.clone(),
+                "server-1".to_owned(),
+                "workspace-1".to_owned(),
+                Workspace::default(),
+            );
+            let provider_id = provider.id();
+            app.workspace_providers.register(Arc::new(provider));
+            app.workspace_providers
+                .switch(provider_id)
+                .expect("switch to remote workspace provider");
+
+            let tools = app.handle_control_call("__list_enabled_tools", serde_json::json!({}), cx);
+            assert_eq!(
+                tools.result.unwrap()["tools"],
+                serde_json::json!(["status", "list_workspaces"])
+            );
+
+            let denied = app.handle_control_call("list_collections", serde_json::json!({}), cx);
+            assert!(!denied.ok);
+            assert!(
+                denied
+                    .error
+                    .unwrap()
+                    .contains("server workspaces is disabled")
+            );
+
+            app.settings.mcp.allow_remote_workspaces = true;
+            let tools = app.handle_control_call("__list_enabled_tools", serde_json::json!({}), cx);
+            assert_eq!(
+                tools.result.unwrap()["tools"].as_array().unwrap().len(),
+                crate::control_tools::CONTROL_TOOLS.len()
+            );
+        });
+    });
 }
 
 #[test]

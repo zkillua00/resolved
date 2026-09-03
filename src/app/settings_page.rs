@@ -165,7 +165,10 @@ impl ApiTester {
                     .description(
                         "No local control socket or session token exists while MCP is disabled.",
                     )
-                    .item(self.mcp_enabled_setting_item(cx)),
+                    .items([
+                        self.mcp_enabled_setting_item(cx),
+                        self.mcp_remote_workspaces_setting_item(cx),
+                    ]),
             )
             .group(
                 SettingGroup::new()
@@ -294,6 +297,40 @@ impl ApiTester {
             }),
         )
         .description(tool.description)
+    }
+
+    fn mcp_remote_workspaces_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Allow server workspaces",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let checked = state.settings.mcp.allow_remote_workspaces;
+                let writable = state.settings_writable;
+                let change_this = this.clone();
+                Switch::new("mcp-remote-workspaces")
+                    .checked(checked)
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        "Allow MCP tools to access connected server workspaces",
+                    ))
+                    .on_click(move |checked, _, cx| {
+                        if let Some(this) = change_this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.set_mcp_remote_workspaces_enabled(*checked, cx);
+                            });
+                        }
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description(
+            "Permits workspace tools on the active server workspace; server RBAC still applies.",
+        )
     }
 
     fn snippet_library_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {

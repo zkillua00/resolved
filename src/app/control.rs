@@ -429,7 +429,25 @@ impl ApiTester {
                 "the MCP tool '{method}' is disabled in Resolved settings"
             )));
         }
+        if !self.control_tool_available_in_active_workspace(method) {
+            return Some(ControlResponse::error(
+                "MCP access to server workspaces is disabled in Resolved settings",
+            ));
+        }
         None
+    }
+
+    fn control_tool_available_in_active_workspace(&self, method: &str) -> bool {
+        !matches!(
+            self.workspace_providers.active_id(),
+            WorkspaceProviderId::Upstream { .. }
+        ) || self.settings.mcp.allow_remote_workspaces
+            || matches!(method, "status" | "list_workspaces")
+    }
+
+    fn control_tool_advertised(&self, method: &str) -> bool {
+        self.settings.mcp.tool_enabled(method)
+            && self.control_tool_available_in_active_workspace(method)
     }
 
     fn prepare_remote_control_call(
@@ -814,7 +832,7 @@ impl ApiTester {
             return ControlResponse::success(json!({
                 "tools": crate::control_tools::CONTROL_TOOLS
                     .iter()
-                    .filter(|tool| self.settings.mcp.tool_enabled(tool.name))
+                    .filter(|tool| self.control_tool_advertised(tool.name))
                     .map(|tool| tool.name)
                     .collect::<Vec<_>>()
             }));
@@ -857,8 +875,17 @@ impl ApiTester {
             "protocol_version": crate::control_server::CONTROL_PROTOCOL_VERSION,
             "active_workspace": self.workspace_providers.active_id().to_string(),
             "workspace_provider": if remote { "remote" } else { "local" },
-            "workspace_writable": self.workspace_writable || self.remote_control_can_write(),
-            "enabled_tools": self.settings.mcp.enabled_tools
+            "workspace_writable": if remote {
+                self.settings.mcp.allow_remote_workspaces && self.remote_control_can_write()
+            } else {
+                self.workspace_writable
+            },
+            "remote_workspace_access": self.settings.mcp.allow_remote_workspaces,
+            "enabled_tools": crate::control_tools::CONTROL_TOOLS
+                .iter()
+                .filter(|tool| self.control_tool_advertised(tool.name))
+                .map(|tool| tool.name)
+                .collect::<Vec<_>>()
         }))
     }
 
@@ -879,7 +906,8 @@ impl ApiTester {
             })
             .collect::<Vec<_>>();
         for profile in &self.settings.upstreams.servers {
-            let writable = remote_profile_can_write(profile);
+            let writable =
+                self.settings.mcp.allow_remote_workspaces && remote_profile_can_write(profile);
             for workspace in &profile.workspaces {
                 let id = format!("upstream:{}:{}", profile.id, workspace.id);
                 workspaces.push(json!({
