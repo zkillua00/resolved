@@ -94,7 +94,7 @@ pub const CONTROL_TOOLS: &[ControlToolDescriptor] = &[
     ControlToolDescriptor {
         name: "set_environment_variable",
         label: "Set environment variable",
-        description: "Create or update an environment variable without returning secret values.",
+        description: "Create or update an environment variable without returning secret values; stored secrets cannot be marked non-secret through MCP.",
         read_only: false,
     },
 ];

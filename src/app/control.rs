@@ -429,6 +429,12 @@ impl ApiTester {
                 })
                 .cloned()
                 .ok_or_else(|| format!("variable '{variable_id}' was not found"))?;
+            if existing.secret && params.secret == Some(false) {
+                return Err(
+                    "secret variables cannot be made non-secret through MCP; use the Resolved UI"
+                        .to_owned(),
+                );
+            }
             candidate
                 .update_environment_variable(
                     &params.environment_id,

@@ -355,8 +355,29 @@ fn local_control_mutations_persist_and_redact_secret_values(cx: &mut gpui::TestA
         })
     });
     let variable = variable.result.unwrap();
+    let variable_id = variable["id"].as_str().unwrap().to_owned();
     assert!(variable["value"].is_null());
     assert_eq!(variable["has_value"], true);
+    let refused_declassification = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call(
+                "set_environment_variable",
+                serde_json::json!({
+                    "environment_id": environment_id,
+                    "variable_id": variable_id,
+                    "secret": false
+                }),
+                cx,
+            )
+        })
+    });
+    assert!(!refused_declassification.ok);
+    assert!(
+        refused_declassification
+            .error
+            .unwrap()
+            .contains("cannot be made non-secret through MCP")
+    );
     let read_environment = cx.update(|_, cx| {
         app.update(cx, |app, cx| {
             app.handle_control_call(
