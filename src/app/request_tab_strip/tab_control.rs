@@ -67,7 +67,15 @@ impl WorkspaceTabControl {
     }
 
     pub(super) fn render(self, app: &ApiTester, cx: &mut Context<ApiTester>) -> AnyElement {
-        let active = app.workspace_tabs.active_tab(&app.request_tabs) == self.tab;
+        let active = self.pane_id.map_or_else(
+            || app.workspace_tabs.active_tab(&app.request_tabs) == self.tab,
+            |pane_id| {
+                app.panes
+                    .pane(pane_id)
+                    .and_then(|pane| pane.active_tab())
+                    .is_some_and(|tab| tab == self.tab)
+            },
+        );
         let can_reorder = !app.sending;
         let row_group: SharedString = format!("{}-group", self.row_id).into();
         let title_id: SharedString = format!("{}-title", self.row_id).into();
@@ -80,6 +88,7 @@ impl WorkspaceTabControl {
             WorkspaceTab::Welcome => None,
         };
         let activate_tab = self.tab.clone();
+        let activate_pane_id = self.pane_id;
         let close_tab = self.tab.clone();
         let drop_target = self.tab.clone();
         let drag = workspace_tab_drag(self.tab, self.title.clone());
@@ -149,7 +158,12 @@ impl WorkspaceTabControl {
                 )
             })
             .on_click(cx.listener(move |this, _, window, cx| {
-                this.activate_workspace_tab(activate_tab.clone(), window, cx);
+                this.activate_workspace_tab_in_pane(
+                    activate_tab.clone(),
+                    activate_pane_id,
+                    window,
+                    cx,
+                );
             }))
             .child(
                 h_flex()

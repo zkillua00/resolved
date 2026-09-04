@@ -97,7 +97,7 @@ impl ApiTester {
         // be created by dragging a tab to the pane's edge.
         let pane_id = self.panes.panes().first().map(|pane| pane.id());
         let split_overlay = pane_id
-            .map(|pane_id| render_pane_split_drop_zones(pane_id, cx))
+            .map(|pane_id| render_pane_dock_overlays(pane_id, cx))
             .unwrap_or_default();
 
         v_flex()
@@ -109,6 +109,9 @@ impl ApiTester {
             .children(show_workspace_tab_strip.then(|| self.render_request_tab_strip(cx)))
             .child(
                 div()
+                    .when_some(pane_id, |this, pane_id| {
+                        this.group(pane_dock_group(pane_id))
+                    })
                     .relative()
                     .flex_1()
                     .min_h_0()
@@ -211,7 +214,42 @@ impl ApiTester {
         let pane_id = pane.id();
         let strip = self.render_request_tab_strip_with(&tabs, Some(pane_id), cx);
         let content = self.render_pane_content(pane, is_primary, cx);
-        let split_overlay = render_pane_split_drop_zones(pane_id, cx);
+        let split_overlay = render_pane_dock_overlays(pane_id, cx);
+        let is_request = matches!(pane.active_tab(), Some(WorkspaceTab::Request(_)));
+        let scroll_handle = if is_primary {
+            Some(&self.primary_pane_scroll)
+        } else {
+            self.pane_editors
+                .get(&pane_id)
+                .map(|session| &session.pane_scroll)
+        };
+        let content = if is_request {
+            if let Some(scroll_handle) = scroll_handle {
+                div()
+                    .id(SharedString::from(format!(
+                        "workspace-pane-scroll-{}",
+                        pane_id.0
+                    )))
+                    .size_full()
+                    .min_h_0()
+                    .relative()
+                    .track_scroll(scroll_handle)
+                    .overflow_y_scroll()
+                    .vertical_scrollbar(scroll_handle)
+                    .child(
+                        div()
+                            .w_full()
+                            .h_full()
+                            .min_h(MIN_DOCKED_REQUEST_SURFACE_HEIGHT)
+                            .child(content),
+                    )
+                    .into_any_element()
+            } else {
+                content
+            }
+        } else {
+            content
+        };
         v_flex()
             .size_full()
             .min_h_0()
@@ -219,6 +257,8 @@ impl ApiTester {
             .child(strip)
             .child(
                 div()
+                    .group(pane_dock_group(pane_id))
+                    .debug_selector(move || format!("workspace-pane-content-{}", pane_id.0))
                     .relative()
                     .flex_1()
                     .min_h_0()
@@ -296,9 +336,23 @@ impl ApiTester {
     }
 }
 
-/// Render left/right/top/bottom edge drop zones around a pane's content area
-/// that create a new split containing the dragged tab when dropped on.
-fn render_pane_split_drop_zones(pane_id: PaneId, cx: &mut Context<ApiTester>) -> Vec<AnyElement> {
+#[derive(Clone, Copy)]
+enum PaneDockTarget {
+    Center,
+    Split {
+        direction: SplitDirection,
+        after: bool,
+    },
+}
+
+fn pane_dock_group(pane_id: PaneId) -> SharedString {
+    format!("workspace-pane-dock-group-{}", pane_id.0).into()
+}
+
+/// Keep the broad edge targets for forgiving drops, and add a five-way dock
+/// compass like a traditional IDE. The compass is only revealed while a
+/// workspace tab is over this pane's group.
+fn render_pane_dock_overlays(pane_id: PaneId, cx: &mut Context<ApiTester>) -> Vec<AnyElement> {
     vec![
         render_workspace_pane_split_edge(
             pane_id,
@@ -328,7 +382,154 @@ fn render_pane_split_drop_zones(pane_id: PaneId, cx: &mut Context<ApiTester>) ->
             "bottom",
             cx,
         ),
+        render_pane_dock_compass(pane_id, cx),
     ]
+}
+
+fn render_pane_dock_compass(pane_id: PaneId, cx: &mut Context<ApiTester>) -> AnyElement {
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .relative()
+                .size(px(156.))
+                .child(render_pane_dock_target(
+                    pane_id,
+                    PaneDockTarget::Split {
+                        direction: SplitDirection::Vertical,
+                        after: false,
+                    },
+                    "top",
+                    px(54.),
+                    px(0.),
+                    cx,
+                ))
+                .child(render_pane_dock_target(
+                    pane_id,
+                    PaneDockTarget::Split {
+                        direction: SplitDirection::Horizontal,
+                        after: false,
+                    },
+                    "left",
+                    px(0.),
+                    px(54.),
+                    cx,
+                ))
+                .child(render_pane_dock_target(
+                    pane_id,
+                    PaneDockTarget::Center,
+                    "center",
+                    px(54.),
+                    px(54.),
+                    cx,
+                ))
+                .child(render_pane_dock_target(
+                    pane_id,
+                    PaneDockTarget::Split {
+                        direction: SplitDirection::Horizontal,
+                        after: true,
+                    },
+                    "right",
+                    px(108.),
+                    px(54.),
+                    cx,
+                ))
+                .child(render_pane_dock_target(
+                    pane_id,
+                    PaneDockTarget::Split {
+                        direction: SplitDirection::Vertical,
+                        after: true,
+                    },
+                    "bottom",
+                    px(54.),
+                    px(108.),
+                    cx,
+                )),
+        )
+        .into_any_element()
+}
+
+fn render_pane_dock_target(
+    pane_id: PaneId,
+    target: PaneDockTarget,
+    tag: &'static str,
+    left: Pixels,
+    top: Pixels,
+    cx: &mut Context<ApiTester>,
+) -> AnyElement {
+    let id: SharedString = format!("workspace-pane-dock-{tag}-{}", pane_id.0).into();
+    div()
+        .id(id)
+        .absolute()
+        .left(left)
+        .top(top)
+        .size(px(48.))
+        .rounded_md()
+        .border_1()
+        .border_color(cx.api_outline_variant())
+        .bg(cx.api_surface().opacity(0.96))
+        .shadow_md()
+        .invisible()
+        .group_drag_over::<WorkspaceTabDrag>(pane_dock_group(pane_id), |style| style.visible())
+        .debug_selector(move || format!("workspace-pane-dock-{tag}-{}", pane_id.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .can_drop(|value, _, _| value.downcast_ref::<WorkspaceTabDrag>().is_some())
+        .drag_over::<WorkspaceTabDrag>(|style, _, _, cx| {
+            style
+                .border_2()
+                .border_color(cx.theme().drag_border)
+                .bg(cx.theme().drop_target)
+        })
+        .on_drop(cx.listener(
+            move |this, drag: &WorkspaceTabDrag, window, cx| match target {
+                PaneDockTarget::Center => {
+                    this.on_workspace_tab_move(drag, pane_id, usize::MAX, window, cx);
+                }
+                PaneDockTarget::Split { direction, after } => {
+                    this.on_workspace_tab_split(drag, pane_id, direction, after, window, cx);
+                }
+            },
+        ))
+        .child(render_pane_dock_glyph(tag, cx))
+        .into_any_element()
+}
+
+fn render_pane_dock_glyph(tag: &'static str, cx: &mut Context<ApiTester>) -> AnyElement {
+    let accent = cx.theme().drag_border.opacity(0.55);
+    div()
+        .relative()
+        .w(px(26.))
+        .h(px(22.))
+        .rounded_sm()
+        .border_1()
+        .border_color(cx.api_outline_variant())
+        .bg(cx.theme().background)
+        .child(
+            div()
+                .absolute()
+                .when(tag == "center", |this| this.inset_1())
+                .when(tag == "left", |this| {
+                    this.left_0().top_0().bottom_0().w(gpui::relative(0.45))
+                })
+                .when(tag == "right", |this| {
+                    this.right_0().top_0().bottom_0().w(gpui::relative(0.45))
+                })
+                .when(tag == "top", |this| {
+                    this.top_0().left_0().right_0().h(gpui::relative(0.45))
+                })
+                .when(tag == "bottom", |this| {
+                    this.bottom_0().left_0().right_0().h(gpui::relative(0.45))
+                })
+                .rounded_sm()
+                .bg(accent),
+        )
+        .into_any_element()
 }
 
 fn render_workspace_pane_split_edge(
@@ -375,27 +576,10 @@ fn render_workspace_pane_split_edge(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px, size};
-
-    fn drag_between(
-        cx: &mut VisualTestContext,
-        source: gpui::Bounds<Pixels>,
-        target: Point<Pixels>,
-    ) {
-        let source = source.center();
-        cx.simulate_mouse_down(source, MouseButton::Left, Modifiers::none());
-        cx.simulate_mouse_move(
-            point(source.x + px(8.), source.y),
-            MouseButton::Left,
-            Modifiers::none(),
-        );
-        cx.simulate_mouse_move(target, MouseButton::Left, Modifiers::none());
-        cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::none());
-        cx.run_until_parked();
-    }
+    use gpui::{Modifiers, MouseButton, TestAppContext, point, px, size};
 
     #[gpui::test]
-    fn first_split_is_created_by_dragging_a_tab_to_the_single_pane_edge(cx: &mut TestAppContext) {
+    fn dock_compass_splits_and_merges_workspace_panes(cx: &mut TestAppContext) {
         let directory = tempfile::tempdir().expect("create temporary database directory");
         let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
         store.initialize().expect("initialize test database");
@@ -418,12 +602,13 @@ mod tests {
         cx.simulate_resize(size(px(1_200.), px(800.)));
         cx.run_until_parked();
 
-        cx.update(|_, cx| {
+        let original_pane_id = cx.update(|_, cx| {
             let app = app.read(cx);
             assert!(
                 app.panes.is_single_leaf(),
                 "a fresh app must start as a single pane"
             );
+            app.panes.panes()[0].id()
         });
 
         let drag_handle = cx
@@ -431,19 +616,31 @@ mod tests {
             .expect("the current request must expose the shared tab drag handle");
         let right_edge = cx
             .debug_bounds("workspace-pane-split-right")
-            .expect("a single pane must expose right-edge split drop zones");
-        assert!(
-            right_edge.size.width >= px(64.),
-            "the right-edge split target must be comfortably draggable",
+            .expect("a single pane must retain its broad right-edge drop zone");
+        let source = drag_handle.center();
+        cx.simulate_mouse_down(source, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            point(source.x + px(8.), source.y),
+            MouseButton::Left,
+            Modifiers::none(),
         );
-
-        drag_between(cx, drag_handle, right_edge.center());
+        cx.simulate_mouse_move(right_edge.center(), MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let right_selector: &'static str =
+            Box::leak(format!("workspace-pane-dock-right-{}", original_pane_id.0).into_boxed_str());
+        let right_target = cx
+            .debug_bounds(right_selector)
+            .expect("a single pane must expose the right dock-compass target");
+        assert_eq!(right_target.size, size(px(48.), px(48.)));
+        cx.simulate_mouse_move(right_target.center(), MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(right_target.center(), MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
 
         cx.update(|_, cx| {
             let app = app.read(cx);
             assert!(
                 !app.panes.is_single_leaf(),
-                "dropping on the pane edge must split the single pane"
+                "dropping on the dock compass must split the single pane"
             );
             assert_eq!(app.panes.len(), 2);
         });
@@ -458,19 +655,56 @@ mod tests {
             "the Collections sidebar must sit outside request pane contents",
         );
 
+        // Reflow the panes after the first successful dock. The compass must
+        // derive its hitboxes from the pane's current bounds, not the bounds
+        // captured when that pane was first laid out.
+        cx.simulate_resize(size(px(1_480.), px(920.)));
+        cx.run_until_parked();
+
         let split_drag_handle = cx
             .debug_bounds("current-workspace-request-tab-drag-handle")
             .expect("the split request must remain draggable");
-        let original_strip = cx
-            .debug_bounds("workspace-empty-pane-tab-drop")
-            .expect("the empty original pane must expose a tab-strip merge target");
-        drag_between(cx, split_drag_handle, original_strip.center());
+        let original_right_edge = cx
+            .debug_bounds("workspace-pane-split-right")
+            .expect("the original pane must retain its broad right-edge drop zone");
+        let source = split_drag_handle.center();
+        cx.simulate_mouse_down(source, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            point(source.x + px(8.), source.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(
+            original_right_edge.center(),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+        let center_selector: &'static str = Box::leak(
+            format!("workspace-pane-dock-center-{}", original_pane_id.0).into_boxed_str(),
+        );
+        let center_target = cx
+            .debug_bounds(center_selector)
+            .expect("the empty original pane must expose a center dock-compass target");
+        let pane_selector: &'static str =
+            Box::leak(format!("workspace-pane-content-{}", original_pane_id.0).into_boxed_str());
+        let resized_pane = cx
+            .debug_bounds(pane_selector)
+            .expect("the resized pane must expose its current content bounds");
+        assert!(
+            (center_target.center().x - resized_pane.center().x).abs() < px(1.)
+                && (center_target.center().y - resized_pane.center().y).abs() < px(1.),
+            "dock target hitboxes must stay centered after the pane is resized",
+        );
+        cx.simulate_mouse_move(center_target.center(), MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(center_target.center(), MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
 
         cx.update(|_, cx| {
             let app = app.read(cx);
             assert!(
                 app.panes.is_single_leaf(),
-                "dropping the tab back into the empty original strip must unsplit the workspace",
+                "dropping the tab on the center target must merge and unsplit the workspace",
             );
         });
 

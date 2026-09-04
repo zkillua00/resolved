@@ -45,6 +45,7 @@ pub(in crate::app) struct PaneEditorState {
     preview_error: Option<String>,
     copied: bool,
     request_notice: Option<String>,
+    pub(in crate::app) pane_scroll: ScrollHandle,
     _url_subscription: Subscription,
 }
 
@@ -157,6 +158,7 @@ impl PaneEditorState {
             preview_error: None,
             copied: false,
             request_notice: None,
+            pane_scroll: ScrollHandle::default(),
             _url_subscription: url_subscription,
         };
         this.set_raw_body_language(cx);
@@ -405,16 +407,14 @@ impl PaneEditorState {
         self.preview_error = runtime.preview_error.clone();
         self.copied = runtime.copied;
         self.request_notice = runtime.request_notice.clone();
-        let content = match &self.response {
-            Some(response) if is_probably_text(&response.body) => None,
-            Some(response) => Some(format!(
-                "Binary response ({}).",
-                format_bytes(response.size_bytes())
-            )),
-            None => None,
-        };
-        if let Some(content) = content {
+        if let Some(response) = &self.response {
+            let language = response_language(response);
+            let content = self.formatted_body.clone().map_or_else(
+                || format!("Binary response ({}).", format_bytes(response.size_bytes())),
+                |body| body.to_string(),
+            );
             self.response_editor.update(cx, |editor, cx| {
+                editor.set_language(language, cx);
                 editor.set_value(content, window, cx);
             });
         } else {
@@ -609,6 +609,12 @@ impl ApiTester {
     pub(super) fn reconcile_pane_editors(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active_workspace_tab = self.workspace_tabs.active_tab(&self.request_tabs);
         let primary_pane_id = self.panes.pane_for_tab(&active_workspace_tab);
+        // A pane session is only a secondary-surface cache. Keeping it after
+        // that pane becomes primary lets its stale runtime win if the pane is
+        // demoted again, which used to make responses disappear on tab changes.
+        if let Some(primary_pane_id) = primary_pane_id {
+            self.pane_editors.remove(&primary_pane_id);
+        }
         let mut live = std::collections::HashSet::new();
         let pane_ids = self
             .panes
@@ -631,7 +637,7 @@ impl ApiTester {
             .retain(|pane_id, _| live.contains(pane_id));
     }
 
-    fn ensure_pane_editor_for(
+    pub(super) fn ensure_pane_editor_for(
         &mut self,
         pane_id: PaneId,
         tab_id: RequestTabId,
@@ -860,6 +866,11 @@ impl ApiTester {
         let method = session.method.read(cx).value().trim().to_ascii_uppercase();
         let color = method_color(&method, cx);
         let key = session.dom_key(pane_id);
+        let send_button_id: SharedString = format!("{key}-send-request").into();
+        let sending = session
+            .active_tab_id
+            .as_ref()
+            .is_some_and(|tab_id| self.pane_requests_in_flight.contains_key(tab_id.as_str()));
 
         h_flex()
             .w_full()
@@ -899,6 +910,19 @@ impl ApiTester {
                             .min_w_0()
                             .child(Input::new(&session.url).appearance(false).large()),
                     ),
+            )
+            .child(
+                Button::new(send_button_id)
+                    .label(if sending { "Sending…" } else { "Send" })
+                    .large()
+                    .h(px(44.))
+                    .rounded(px(12.))
+                    .primary()
+                    .disabled(sending)
+                    .debug_selector(|| "secondary-pane-send-request".to_owned())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.start_pane_request(pane_id, window, cx);
+                    })),
             )
             .into_any_element()
     }
@@ -1600,8 +1624,8 @@ impl ApiTester {
                                     .ghost()
                                     .rounded(px(18.))
                                     .selected(session.pretty_body)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.pane_toggle_pretty(pane_id, cx);
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.pane_toggle_pretty(pane_id, window, cx);
                                     })),
                             )
                             .child(
@@ -1693,25 +1717,16 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let key = session.dom_key(pane_id);
-        let Some(response) = &session.response else {
+        let Some(_) = &session.response else {
             return div().size_full().into_any_element();
         };
-        // The formatted text is precomputed when the response arrives or the
-        // pretty toggle changes; only binary bodies fall through to the cheap
-        // size label here.
-        let content = session.formatted_body.clone().unwrap_or_else(|| {
-            format!("Binary response ({}).", format_bytes(response.size_bytes())).into()
-        });
         div()
             .id(SharedString::from(format!("{key}-response-body")))
+            .debug_selector(|| "secondary-pane-response-code-editor".to_owned())
             .size_full()
             .min_h_0()
-            .overflow_y_scroll()
-            .whitespace_nowrap()
-            .font_family(cx.theme().mono_font_family.clone())
-            .text_xs()
-            .text_color(cx.theme().foreground)
-            .child(content)
+            .bg(cx.api_surface_lowest())
+            .child(session.response_editor.clone())
             .into_any_element()
     }
 
@@ -1796,6 +1811,234 @@ fn status_color(status: u16, cx: &App) -> Hsla {
 }
 
 impl ApiTester {
+    fn start_pane_request(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.pane_editors.get(&pane_id) else {
+            return;
+        };
+        let Some(tab_id) = session.active_tab_id.clone() else {
+            return;
+        };
+        if self.pane_requests_in_flight.contains_key(tab_id.as_str()) {
+            return;
+        }
+        let template = session.snapshot_template(cx);
+        if let Some(record) = self.request_tabs.get_mut(&tab_id) {
+            record.set_template(template.clone());
+        } else {
+            return;
+        }
+
+        let validation_error = if template.request.method.trim().is_empty() {
+            Some("HTTP method cannot be empty.".to_owned())
+        } else if self.active_environment_editor_is_dirty(cx) {
+            Some(
+                "The active environment has unsaved changes. Save or Revert them before sending."
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
+        if let Some(message) = validation_error {
+            self.finish_pane_request_error(&tab_id, message, window, cx);
+            return;
+        }
+
+        let environment = self.workspace.active_environment();
+        let mut resolved = match resolve_request(&template.request, environment) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                self.finish_pane_request_error(&tab_id, error.to_string(), window, cx);
+                return;
+            }
+        };
+        if let Some(environment) = environment {
+            resolved.sensitive_values.extend(
+                environment
+                    .variables
+                    .iter()
+                    .filter(|variable| variable.enabled && variable.secret)
+                    .map(|variable| variable.value.clone()),
+            );
+        }
+
+        self.pane_request_generation = self.pane_request_generation.wrapping_add(1);
+        let generation = self.pane_request_generation;
+        self.pane_requests_in_flight
+            .insert(tab_id.as_str().to_owned(), generation);
+        if let Some(session) = self.pane_editors.get_mut(&pane_id) {
+            session.response = None;
+            session.response_request = None;
+            session.response_sensitive_values.clear();
+            session.formatted_body = None;
+            session.request_error = None;
+            session.script_diagnostic = None;
+            session.pre_script_report = None;
+            session.post_script_report = None;
+            session.preview_error = None;
+            session.copied = false;
+        }
+
+        let request = resolved.request.clone();
+        let task = match self.workspace_providers.active_id() {
+            WorkspaceProviderId::Local(_) => {
+                spawn_request(self.runtime.handle(), self.client.clone(), request)
+            }
+            WorkspaceProviderId::Upstream { .. } => {
+                let target = match self.active_upstream_workspace() {
+                    Ok(target) => target,
+                    Err(error) => {
+                        self.pane_requests_in_flight.remove(tab_id.as_str());
+                        self.finish_pane_request_error(&tab_id, error.to_string(), window, cx);
+                        return;
+                    }
+                };
+                let vault = self.credential_vault.clone();
+                let client = self.upstream_execution_client.clone();
+                let local_client = self.client.clone();
+                let runtime = Arc::clone(&self.runtime);
+                let credential_upstream_id = target.upstream_id.clone();
+                RequestTask::spawn(self.runtime.handle(), async move {
+                    let credential = runtime
+                        .spawn_blocking(move || vault.load_upstream(&credential_upstream_id))
+                        .await
+                        .map_err(|error| RequestError::TaskFailed(error.to_string()))?
+                        .map_err(|error| RequestError::Upstream(error.to_string()))?
+                        .ok_or_else(|| {
+                            RequestError::Upstream("Log in to this server again.".to_owned())
+                        })?;
+                    if credential.expires_at <= Utc::now() {
+                        return Err(RequestError::Upstream(
+                            "Log in to this server again.".to_owned(),
+                        ));
+                    }
+                    send_request_for_upstream_workspace(
+                        &client,
+                        &local_client,
+                        &target.base_url,
+                        credential.bearer_token(),
+                        &target.workspace_id,
+                        request,
+                    )
+                    .await
+                })
+            }
+        };
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.wait().await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.finish_pane_request(tab_id, generation, resolved, result, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_pane_request_error(
+        &mut self,
+        tab_id: &RequestTabId,
+        message: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let message = message;
+        let runtime = self
+            .request_tab_runtime
+            .entry(tab_id.as_str().to_owned())
+            .or_default();
+        runtime.response = None;
+        runtime.response_request = None;
+        runtime.response_sensitive_values.clear();
+        runtime.request_error = Some(message.clone());
+        self.refresh_visible_pane_runtime(tab_id, window, cx);
+    }
+
+    fn finish_pane_request(
+        &mut self,
+        tab_id: RequestTabId,
+        generation: u64,
+        resolved: crate::core::ResolvedRequest,
+        result: Result<ResponseData, RequestError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pane_requests_in_flight.get(tab_id.as_str()) != Some(&generation) {
+            return;
+        }
+        self.pane_requests_in_flight.remove(tab_id.as_str());
+        if self.request_tabs.get(&tab_id).is_none() {
+            cx.notify();
+            return;
+        }
+
+        let runtime = self
+            .request_tab_runtime
+            .entry(tab_id.as_str().to_owned())
+            .or_default();
+        runtime.response_request = Some(resolved.request.clone());
+        runtime.response_sensitive_values = resolved.sensitive_values.clone();
+        runtime.script_diagnostic = None;
+        runtime.pre_script_report = None;
+        runtime.post_script_report = None;
+        runtime.preview_error = None;
+        runtime.copied = false;
+        match result {
+            Ok(mut response) => {
+                response.final_url = resolved.redact_secrets(&response.final_url);
+                runtime.response = Some(response.clone());
+                runtime.request_error = None;
+                let history_entry = HistoryEntry::completed_with_secrets(
+                    &resolved.request,
+                    &response,
+                    &resolved.sensitive_values,
+                );
+                self.history.push(history_entry);
+                self.persist_history();
+            }
+            Err(error) => {
+                runtime.response = None;
+                runtime.request_error = Some(resolved.redact_secrets(&error.to_string()));
+            }
+        }
+        self.refresh_visible_pane_runtime(&tab_id, window, cx);
+        cx.notify();
+    }
+
+    fn refresh_visible_pane_runtime(
+        &mut self,
+        tab_id: &RequestTabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(record) = self.request_tabs.get(tab_id).cloned() else {
+            return;
+        };
+        let runtime = self
+            .request_tab_runtime
+            .get(tab_id.as_str())
+            .cloned()
+            .unwrap_or_default();
+        let pane_ids = self
+            .pane_editors
+            .iter()
+            .filter_map(|(pane_id, session)| {
+                (session.active_tab_id.as_ref() == Some(tab_id)).then_some(*pane_id)
+            })
+            .collect::<Vec<_>>();
+        for pane_id in pane_ids {
+            if let Some(session) = self.pane_editors.get_mut(&pane_id) {
+                session.load_template(
+                    pane_id,
+                    record.template(),
+                    &runtime,
+                    &self.settings.formatter,
+                    window,
+                    cx,
+                );
+            }
+        }
+    }
+
     fn pane_set_request_pane(
         &mut self,
         pane_id: PaneId,
@@ -2066,7 +2309,7 @@ impl ApiTester {
         cx.notify();
     }
 
-    fn pane_toggle_pretty(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
+    fn pane_toggle_pretty(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
         let formatter = self.settings.formatter.clone();
         if let Some(session) = self.pane_editor_mut(pane_id) {
             session.pretty_body = !session.pretty_body;
@@ -2076,6 +2319,17 @@ impl ApiTester {
                     SharedString::from(format_body(&response.body, session.pretty_body, &formatter))
                 })
             });
+            if let Some(response) = &session.response {
+                let language = response_language(response);
+                let content = session.formatted_body.clone().map_or_else(
+                    || format!("Binary response ({}).", format_bytes(response.size_bytes())),
+                    |body| body.to_string(),
+                );
+                session.response_editor.update(cx, |editor, cx| {
+                    editor.set_language(language, cx);
+                    editor.set_value(content, window, cx);
+                });
+            }
         }
         cx.notify();
     }
@@ -2113,6 +2367,7 @@ impl ApiTester {
 mod tests {
     use super::*;
     use gpui::{TestAppContext, px, size};
+    use std::time::Duration;
 
     fn template_with_content() -> RequestTemplate {
         RequestTemplate {
@@ -2147,6 +2402,19 @@ mod tests {
         }
     }
 
+    fn completed_response() -> ResponseData {
+        ResponseData {
+            status: 200,
+            status_text: "OK".to_owned(),
+            http_version: "HTTP/2".to_owned(),
+            final_url: "https://example.com/submit".to_owned(),
+            headers: Vec::new(),
+            content_type: Some("application/json".to_owned()),
+            body: br#"{"ok":true}"#.to_vec().into(),
+            duration: Duration::from_millis(42),
+        }
+    }
+
     #[gpui::test]
     fn secondary_pane_gets_a_real_request_editor_session(cx: &mut TestAppContext) {
         let directory = tempfile::tempdir().expect("create temporary database directory");
@@ -2177,7 +2445,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let (first, second) = cx.update(|_, cx| {
+        let (first, second, third) = cx.update(|_, cx| {
             let app = app.read(cx);
             let ids = app
                 .request_tabs
@@ -2185,7 +2453,7 @@ mod tests {
                 .iter()
                 .map(|tab| tab.id().clone())
                 .collect::<Vec<_>>();
-            (ids[0].clone(), ids[1].clone())
+            (ids[0].clone(), ids[1].clone(), ids[2].clone())
         });
 
         // Give the second tab a known template so the round-trip is meaningful,
@@ -2199,10 +2467,22 @@ mod tests {
                     .get_mut(&second)
                     .expect("second tab")
                     .set_template(tmpl.clone());
+                app.request_tabs
+                    .get_mut(&third)
+                    .expect("third tab")
+                    .set_template(tmpl.clone());
+                app.request_tab_runtime.insert(
+                    second.as_str().to_owned(),
+                    RequestTabRuntime {
+                        response: Some(completed_response()),
+                        ..RequestTabRuntime::default()
+                    },
+                );
                 app.panes = PaneRoot::from_tabs(
                     vec![
                         WorkspaceTab::Request(first.clone()),
                         WorkspaceTab::Request(second.clone()),
+                        WorkspaceTab::Request(third.clone()),
                     ],
                     0,
                 );
@@ -2217,20 +2497,102 @@ mod tests {
                     secondary_id,
                     0,
                 );
+                app.panes.move_tab_between_panes(
+                    &WorkspaceTab::Request(third.clone()),
+                    primary_id,
+                    secondary_id,
+                    1,
+                );
                 app.reconcile_pane_editors(window, cx);
                 (primary_id, secondary_id)
             })
         });
         cx.run_until_parked();
 
+        assert!(
+            cx.debug_bounds("secondary-pane-send-request").is_some(),
+            "a secondary request pane must retain its Send button",
+        );
+        assert!(
+            cx.debug_bounds("secondary-pane-response-code-editor")
+                .is_some(),
+            "secondary responses must render through the same code-editor surface",
+        );
+
+        cx.update(|_, cx| {
+            let app = app.read(cx);
+            assert!(
+                app.primary_pane_scroll.max_offset().height > px(0.),
+                "a short primary pane must expose vertical overflow",
+            );
+            assert!(
+                app.pane_editors
+                    .get(&secondary_id)
+                    .expect("secondary pane session")
+                    .pane_scroll
+                    .max_offset()
+                    .height
+                    > px(0.),
+                "a short secondary pane must expose vertical overflow",
+            );
+            assert_eq!(
+                app.pane_editors
+                    .get(&secondary_id)
+                    .and_then(|session| session.response.as_ref())
+                    .map(|response| response.status),
+                Some(200),
+                "the secondary pane must render its stored response",
+            );
+        });
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.activate_workspace_tab_in_pane(
+                    WorkspaceTab::Request(third.clone()),
+                    Some(secondary_id),
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.activate_workspace_tab_in_pane(
+                    WorkspaceTab::Request(second.clone()),
+                    Some(secondary_id),
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
         cx.update(|_, cx| {
             app.update(cx, |app, cx| {
+                assert_eq!(
+                    app.request_tabs.active_tab_id(),
+                    &first,
+                    "secondary-pane selection must not replace the global request surface",
+                );
+                assert_eq!(
+                    app.panes
+                        .pane(secondary_id)
+                        .and_then(|pane| pane.active_tab()),
+                    Some(WorkspaceTab::Request(second.clone())),
+                );
                 assert!(app.panes.pane(secondary_id).is_some());
                 let session = app
                     .pane_editors
                     .get(&secondary_id)
                     .expect("secondary pane must own a request editor session");
                 assert_eq!(session.active_tab_id.as_ref(), Some(&second));
+                assert_eq!(
+                    session.response.as_ref().map(|response| response.status),
+                    Some(200),
+                    "switching away and back must restore the pane-local response",
+                );
                 assert_eq!(
                     session.method.read(cx).value().as_ref(),
                     "POST",
@@ -2240,6 +2602,60 @@ mod tests {
                 let round_trip = session.snapshot_template(cx);
                 assert_eq!(round_trip.request, tmpl.request);
                 assert_eq!(round_trip.scripts, tmpl.scripts);
+            });
+        });
+
+        // Completions are keyed to request tabs, not to the globally active
+        // request or the pane's current selection. Finishing one request must
+        // leave another request running and its response must survive a
+        // switch away and back.
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.pane_requests_in_flight
+                    .insert(second.as_str().to_owned(), 41);
+                app.pane_requests_in_flight
+                    .insert(third.as_str().to_owned(), 42);
+                let resolved = resolve_request(&tmpl.request, None).expect("resolve request");
+                app.finish_pane_request(
+                    second.clone(),
+                    41,
+                    resolved,
+                    Ok(completed_response()),
+                    window,
+                    cx,
+                );
+                assert!(!app.pane_requests_in_flight.contains_key(second.as_str()));
+                assert_eq!(
+                    app.pane_requests_in_flight.get(third.as_str()),
+                    Some(&42),
+                    "a different pane request must remain in flight",
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.activate_workspace_tab_in_pane(
+                    WorkspaceTab::Request(third.clone()),
+                    Some(secondary_id),
+                    window,
+                    cx,
+                );
+                app.activate_workspace_tab_in_pane(
+                    WorkspaceTab::Request(second.clone()),
+                    Some(secondary_id),
+                    window,
+                    cx,
+                );
+                assert_eq!(
+                    app.pane_editors
+                        .get(&secondary_id)
+                        .and_then(|session| session.response.as_ref())
+                        .map(|response| response.status),
+                    Some(200),
+                    "completed response must remain attached to its request tab",
+                );
             });
         });
     }

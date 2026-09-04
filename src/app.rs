@@ -203,6 +203,10 @@ const THEME_EDITOR_VALIDATION_DEBOUNCE: Duration = Duration::from_millis(100);
 const THEME_EDITOR_PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
 /// Height of every in-app title bar, in rems so interface zoom scales it.
 const APP_TITLE_BAR_HEIGHT: Rems = Rems(3.25);
+/// Docked HTTP editors need enough vertical room for both halves of their
+/// request/response split. Shorter panes scroll as a whole instead of clipping
+/// the response editor below the pane boundary.
+const MIN_DOCKED_REQUEST_SURFACE_HEIGHT: Pixels = px(720.);
 
 struct ThemeEditorSession {
     theme_id: Option<String>,
@@ -354,6 +358,11 @@ pub struct ApiTester {
     workspace_tabs: WorkspaceTabs,
     panes: PaneRoot,
     pane_editors: HashMap<PaneId, PaneEditorState>,
+    primary_pane_scroll: ScrollHandle,
+    /// Independent network jobs started from secondary panes, keyed by request
+    /// tab so switching a pane cannot redirect a completion into another tab.
+    pane_request_generation: u64,
+    pane_requests_in_flight: HashMap<String, u64>,
     settings: AppSettings,
     settings_warning: Option<String>,
     settings_writable: bool,
