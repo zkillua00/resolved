@@ -208,9 +208,22 @@ fn object_schema(properties: Value, required: &[&str]) -> Value {
     })
 }
 
-fn tool(name: &str, _description: &str, input_schema: Value, _read_only: bool) -> Value {
+fn tool(name: &str, _description: &str, mut input_schema: Value, _read_only: bool) -> Value {
     let catalog = control_tools::tool(name).expect("every MCP definition must be in the catalog");
     let _label = catalog.label;
+    if control_tools::workspace_scoped_tool(name)
+        && let Some(properties) = input_schema
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+    {
+        properties.insert(
+            "workspace_id".to_owned(),
+            json!({
+                "type": "string",
+                "description": "Optional workspace ID from list_workspaces. Explicit targeting does not switch the user's active workspace."
+            }),
+        );
+    }
     json!({
         "name": name,
         "description": catalog.description,
@@ -1000,6 +1013,44 @@ mod tests {
     }
 
     #[test]
+    fn workspace_scoped_tools_advertise_an_optional_workspace_id() {
+        let definitions = tool_definitions();
+        for definition in &definitions {
+            let name = definition["name"].as_str().expect("tool name");
+            let properties = definition["inputSchema"]["properties"]
+                .as_object()
+                .expect("tool properties");
+            if control_tools::workspace_scoped_tool(name) {
+                assert_eq!(
+                    properties["workspace_id"]["type"], "string",
+                    "{name} must advertise workspace_id"
+                );
+                assert!(
+                    !definition["inputSchema"]["required"]
+                        .as_array()
+                        .expect("required fields")
+                        .iter()
+                        .any(|field| field == "workspace_id"),
+                    "{name} must keep workspace_id optional"
+                );
+            }
+        }
+
+        for name in ["status", "get_active_context", "list_snippets"] {
+            let definition = definitions
+                .iter()
+                .find(|definition| definition["name"] == name)
+                .unwrap_or_else(|| panic!("missing MCP definition for {name}"));
+            assert!(
+                definition["inputSchema"]["properties"]
+                    .get("workspace_id")
+                    .is_none(),
+                "{name} must not advertise workspace_id"
+            );
+        }
+    }
+
+    #[test]
     fn expanded_tools_publish_the_expected_async_and_revision_schemas() {
         let definitions = tool_definitions();
         let definition = |name: &str| {
@@ -1030,8 +1081,7 @@ mod tests {
             json!(["snippet_id", "expected_updated_at"])
         );
         assert_eq!(
-            definition("execute_http_request")["inputSchema"]["properties"]["overrides"]
-                ["additionalProperties"],
+            definition("execute_http_request")["inputSchema"]["properties"]["overrides"]["additionalProperties"],
             false
         );
         assert_eq!(

@@ -466,6 +466,37 @@ pub fn tool_group(id: &str) -> Option<&'static ControlToolGroupDescriptor> {
     CONTROL_TOOL_GROUPS.iter().find(|group| group.id == id)
 }
 
+pub fn workspace_scoped_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "list_collections"
+            | "create_collection"
+            | "rename_collection"
+            | "delete_collection"
+            | "create_folder"
+            | "rename_folder"
+            | "move_folder"
+            | "delete_folder"
+            | "search_requests"
+            | "get_request"
+            | "create_request"
+            | "save_request"
+            | "duplicate_request"
+            | "move_request"
+            | "delete_request"
+            | "set_request_scripts"
+            | "list_environments"
+            | "get_environment"
+            | "create_environment"
+            | "rename_environment"
+            | "set_environment_variable"
+            | "delete_environment"
+            | "delete_environment_variable"
+            | "import_requests"
+            | "export_request"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;

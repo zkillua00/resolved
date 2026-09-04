@@ -742,7 +742,15 @@ Configure the MCP client with the adapter's absolute path:
 
 Only enabled tools are advertised. Clients that cache discovery may need to be
 refreshed or reconnected after a switch changes. Resolved also rejects disabled
-tools server-side. The default **Follow agent activity** setting keeps workspace
+tools server-side. Workspace resource tools also accept an optional
+`workspace_id` from `list_workspaces`, allowing an agent to read from or edit
+another local or connected-server workspace without changing the user's active
+workspace, selected tab, or editor buffers. Omitting it retains the existing
+active-workspace behavior; `switch_workspace` remains the explicit way to move
+the UI.
+Explicit server targets require **Allow server workspaces** and remain subject
+to the signed-in user's membership and RBAC permissions. The default **Follow
+agent activity** setting keeps workspace
 changes, ordered HTTP work, script-console activity, history replays, snippets,
 and WebSocket sessions visible in the corresponding native workspace with an
 MCP ownership indicator. Server workspace access is off by default; while it is
@@ -750,8 +758,8 @@ off, workspace-scoped tools disappear from discovery whenever a server
 workspace is active. See the [local MCP control guide](docs/mcp.md) for the full
 tool catalog, lifecycle/import/export operations, HTTP sequences and history,
 snippet, script-console and WebSocket workflows, revision checks, secret
-redaction, remote-workspace RBAC behavior, security boundary, current limits,
-and troubleshooting.
+redaction, background workspace targeting, remote-workspace RBAC behavior,
+security boundary, current limits, and troubleshooting.
 
 The project uses Rust edition 2024 and has compile-time platform backends for
 Linux, macOS, and Windows. Shared feature code does not select operating

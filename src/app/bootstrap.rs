@@ -913,6 +913,7 @@ impl ApiTester {
             mcp_http_operation_id: None,
             mcp_http_request_id: None,
             mcp_http_exchange: None,
+            mcp_scoped_local_workspace_id: None,
             mcp_request_sequence_generation: 0,
             mcp_request_sequence: None,
             abort_handle: None,

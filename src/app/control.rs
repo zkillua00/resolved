@@ -140,9 +140,16 @@ enum ControlDispatch {
     Remote(RemoteControlPending),
 }
 
+enum ControlWorkspaceTarget {
+    Active,
+    Local(String),
+    Remote(ActiveUpstreamWorkspace),
+}
+
 struct RemoteControlPending {
     target: ActiveUpstreamWorkspace,
     generation: u64,
+    background: bool,
     task: tokio::task::JoinHandle<Result<RemoteControlOutcome, String>>,
 }
 
@@ -779,27 +786,41 @@ impl ApiTester {
                     call.respond(ControlResponse::error("Resolved is shutting down"));
                     break;
                 };
-                let dispatch = if matches!(
-                    call.method.as_str(),
-                    "execute_http_request"
-                        | "get_request"
-                        | "get_http_exchange"
-                        | "query_http_response"
-                        | "cancel_http_request"
-                        | "run_script_console"
-                        | "get_script_console"
-                        | "connect_websocket"
-                        | "send_websocket_message"
-                        | "get_websocket_events"
-                        | "run_websocket_replay"
-                        | "disconnect_websocket"
-                        | "switch_workspace"
-                        | "run_request_sequence"
-                        | "get_request_sequence"
-                        | "run_snippet"
-                        | "open_history_entry"
-                        | "replay_history_request"
-                ) {
+                let active_workspace_id = this
+                    .update(cx, |this, _| {
+                        this.workspace_providers.active_id().to_string()
+                    })
+                    .ok();
+                let explicitly_scoped_get = call.method == "get_request"
+                    && call
+                        .params
+                        .get("workspace_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|workspace_id| {
+                            active_workspace_id.as_deref() != Some(workspace_id)
+                        });
+                let dispatch = if !explicitly_scoped_get
+                    && matches!(
+                        call.method.as_str(),
+                        "execute_http_request"
+                            | "get_request"
+                            | "get_http_exchange"
+                            | "query_http_response"
+                            | "cancel_http_request"
+                            | "run_script_console"
+                            | "get_script_console"
+                            | "connect_websocket"
+                            | "send_websocket_message"
+                            | "get_websocket_events"
+                            | "run_websocket_replay"
+                            | "disconnect_websocket"
+                            | "switch_workspace"
+                            | "run_request_sequence"
+                            | "get_request_sequence"
+                            | "run_snippet"
+                            | "open_history_entry"
+                            | "replay_history_request"
+                    ) {
                     let result = cx.update(|cx| {
                         let window_handle = cx
                             .active_window()
@@ -837,13 +858,16 @@ impl ApiTester {
                     ControlDispatch::Remote(pending) => {
                         let target = pending.target.clone();
                         let generation = pending.generation;
+                        let background = pending.background;
                         let result = pending.task.await;
                         let Some(this) = weak_this.upgrade() else {
                             call.respond(ControlResponse::error("Resolved is shutting down"));
                             break;
                         };
                         this.update(cx, |this, cx| {
-                            this.finish_remote_control_call(target, generation, result, cx)
+                            this.finish_remote_control_call(
+                                target, generation, background, result, cx,
+                            )
                         })
                         .unwrap_or_else(|error| ControlResponse::error(error.to_string()))
                     }
@@ -857,9 +881,30 @@ impl ApiTester {
     fn dispatch_control_call(
         &mut self,
         method: &str,
-        params: Value,
+        mut params: Value,
         cx: &mut Context<Self>,
     ) -> ControlDispatch {
+        let target = match self.control_workspace_target(method, &mut params) {
+            Ok(target) => target,
+            Err(error) => return ControlDispatch::Immediate(ControlResponse::error(error)),
+        };
+        match target {
+            ControlWorkspaceTarget::Local(workspace_id) => {
+                return ControlDispatch::Immediate(self.handle_scoped_local_control_call(
+                    &workspace_id,
+                    method,
+                    params,
+                    cx,
+                ));
+            }
+            ControlWorkspaceTarget::Remote(target) => {
+                return match self.prepare_targeted_remote_control_call(target, method, params, cx) {
+                    Ok(pending) => ControlDispatch::Remote(pending),
+                    Err(error) => ControlDispatch::Immediate(ControlResponse::error(error)),
+                };
+            }
+            ControlWorkspaceTarget::Active => {}
+        }
         if method == "__list_enabled_tools"
             || !matches!(
                 self.workspace_providers.active_id(),
@@ -898,10 +943,31 @@ impl ApiTester {
     pub(super) fn handle_window_control_call(
         &mut self,
         method: &str,
-        params: Value,
+        mut params: Value,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ControlResponse {
+        let target = match self.control_workspace_target(method, &mut params) {
+            Ok(target) => target,
+            Err(error) => return ControlResponse::error(error),
+        };
+        match target {
+            ControlWorkspaceTarget::Local(workspace_id) => {
+                return self.handle_scoped_local_window_control_call(
+                    &workspace_id,
+                    method,
+                    params,
+                    window,
+                    cx,
+                );
+            }
+            ControlWorkspaceTarget::Remote(_) => {
+                return ControlResponse::error(format!(
+                    "background server workspace targeting is not supported by '{method}' yet"
+                ));
+            }
+            ControlWorkspaceTarget::Active => {}
+        }
         if let Some(response) = self.validate_control_method(method) {
             return response;
         }
@@ -1065,6 +1131,124 @@ impl ApiTester {
         }
     }
 
+    fn control_workspace_target(
+        &self,
+        method: &str,
+        params: &mut Value,
+    ) -> Result<ControlWorkspaceTarget, String> {
+        if !crate::control_tools::workspace_scoped_tool(method) {
+            return Ok(ControlWorkspaceTarget::Active);
+        }
+        let workspace_id = params
+            .as_object_mut()
+            .and_then(|params| params.remove("workspace_id"));
+        let Some(workspace_id) = workspace_id else {
+            return Ok(ControlWorkspaceTarget::Active);
+        };
+        let workspace_id = workspace_id
+            .as_str()
+            .filter(|workspace_id| !workspace_id.is_empty())
+            .ok_or_else(|| "workspace_id must be a non-empty string".to_owned())?;
+        if workspace_id == self.workspace_providers.active_id().to_string() {
+            return Ok(ControlWorkspaceTarget::Active);
+        }
+        if !self.settings.mcp.enabled {
+            return Err("MCP is disabled in Resolved settings".to_owned());
+        }
+        if !self.settings.mcp.tool_enabled(method) {
+            return Err(format!(
+                "the MCP tool '{method}' is disabled in Resolved settings"
+            ));
+        }
+        if let Some(local_id) = workspace_id.strip_prefix("local:") {
+            if self
+                .local_workspaces
+                .iter()
+                .any(|workspace| workspace.id == local_id)
+            {
+                return Ok(ControlWorkspaceTarget::Local(local_id.to_owned()));
+            }
+            return Err(format!("workspace '{workspace_id}' was not found"));
+        }
+        let Some(remote) = workspace_id.strip_prefix("upstream:") else {
+            return Err("workspace_id must be an id returned by list_workspaces".to_owned());
+        };
+        if !self.settings.mcp.allow_remote_workspaces {
+            return Err(
+                "MCP access to server workspaces is disabled in Resolved settings".to_owned(),
+            );
+        }
+        let mut parts = remote.splitn(2, ':');
+        let upstream_id = parts.next().unwrap_or_default();
+        let remote_workspace_id = parts.next().unwrap_or_default();
+        let profile = self
+            .settings
+            .upstreams
+            .server(upstream_id)
+            .ok_or_else(|| format!("workspace '{workspace_id}' was not found"))?;
+        if !profile
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.id == remote_workspace_id)
+        {
+            return Err(format!("workspace '{workspace_id}' was not found"));
+        }
+        if profile.session_expired(Utc::now()) {
+            return Err(format!("Log in to {} again.", profile.display_label()));
+        }
+        let base_url = profile
+            .parsed_base_url()
+            .ok_or_else(|| "That server URL is invalid.".to_owned())?;
+        Ok(ControlWorkspaceTarget::Remote(ActiveUpstreamWorkspace {
+            upstream_id: upstream_id.to_owned(),
+            workspace_id: remote_workspace_id.to_owned(),
+            base_url,
+        }))
+    }
+
+    fn handle_scoped_local_control_call(
+        &mut self,
+        workspace_id: &str,
+        method: &str,
+        params: Value,
+        cx: &mut Context<Self>,
+    ) -> ControlResponse {
+        let workspace = match self.database_store.load_workspace_for(workspace_id) {
+            Ok(workspace) => workspace,
+            Err(error) => return ControlResponse::error(error.to_string()),
+        };
+        let provider_id = WorkspaceProviderId::Local(workspace_id.to_owned());
+        if !self.workspace_providers.contains(&provider_id) {
+            self.workspace_providers
+                .register(Arc::new(LocalWorkspaceProvider::new(
+                    self.database_store.clone(),
+                    workspace_id,
+                )));
+        }
+        let visible_provider = self.workspace_providers.active_id().clone();
+        let visible_workspace = std::mem::replace(&mut self.workspace, workspace);
+        self.mcp_scoped_local_workspace_id = Some(workspace_id.to_owned());
+        let response = match self.workspace_providers.switch(provider_id) {
+            Ok(()) => self.handle_control_call(method, params, cx),
+            Err(error) => ControlResponse::error(error.to_string()),
+        };
+        let _ = self.workspace_providers.switch(visible_provider);
+        self.workspace = visible_workspace;
+        self.mcp_scoped_local_workspace_id = None;
+        response
+    }
+
+    fn handle_scoped_local_window_control_call(
+        &mut self,
+        workspace_id: &str,
+        method: &str,
+        params: Value,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ControlResponse {
+        self.handle_scoped_local_control_call(workspace_id, method, params, cx)
+    }
+
     fn validate_control_method(&self, method: &str) -> Option<ControlResponse> {
         if !self.settings.mcp.enabled {
             return Some(ControlResponse::error(
@@ -1112,7 +1296,8 @@ impl ApiTester {
             return Err("The active workspace is busy; retry the MCP call shortly.".to_owned());
         }
         let target = self.active_upstream_workspace()?;
-        let (mutation, permissions) = self.remote_control_mutation(method, params)?;
+        let (mutation, permissions) =
+            Self::remote_control_mutation(&self.workspace, method, params)?;
         for permission in permissions {
             if !self.active_upstream_has_permission(permission) {
                 return Err(format!(
@@ -1150,12 +1335,105 @@ impl ApiTester {
         Ok(RemoteControlPending {
             target,
             generation,
+            background: false,
+            task,
+        })
+    }
+
+    fn prepare_targeted_remote_control_call(
+        &mut self,
+        target: ActiveUpstreamWorkspace,
+        method: &str,
+        params: Value,
+        _cx: &mut Context<Self>,
+    ) -> Result<RemoteControlPending, String> {
+        let profile = self
+            .settings
+            .upstreams
+            .server(&target.upstream_id)
+            .ok_or_else(|| "The selected server is no longer configured.".to_owned())?;
+        let permission_keys = profile.permission_keys.clone();
+        let active_environment_id = profile
+            .active_environment_id(&target.workspace_id)
+            .map(str::to_owned);
+        let vault = self.credential_vault.clone();
+        let client = self.upstream_client.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let credential_upstream_id = target.upstream_id.clone();
+        let task_target = target.clone();
+        let method = method.to_owned();
+        let task = self.runtime.spawn(async move {
+            let credential = runtime
+                .spawn_blocking(move || vault.load_upstream(&credential_upstream_id))
+                .await
+                .map_err(|error| format!("Could not open the saved session: {error}"))?
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Log in to this server again.".to_owned())?;
+            if credential.expires_at <= Utc::now() {
+                return Err("Log in to this server again.".to_owned());
+            }
+            let environment_only = workspace_method_needs_environments(&method);
+            let preflight_permissions = if environment_only {
+                vec![ENVIRONMENTS_READ]
+            } else {
+                vec![WORKSPACES_READ]
+            };
+            require_remote_permissions(&permission_keys, &preflight_permissions, &method)?;
+            let token = credential.bearer_token();
+            let (workspace, read_snapshot) = if environment_only {
+                let environments = reload_remote_environments(&client, &task_target, token).await?;
+                if environments
+                    .iter()
+                    .any(|environment| environment.workspace_id != task_target.workspace_id)
+                {
+                    return Err(
+                        "The server returned an environment from another workspace.".to_owned()
+                    );
+                }
+                let mut workspace = Workspace::default();
+                workspace.active_environment_id = active_environment_id;
+                workspace.environments = environments
+                    .iter()
+                    .cloned()
+                    .map(UpstreamEnvironmentView::into_local)
+                    .collect();
+                (workspace, RemoteControlSnapshot::Environments(environments))
+            } else {
+                let remote = reload_remote_workspace(&client, &task_target, token).await?;
+                if remote.id != task_target.workspace_id {
+                    return Err("The server returned a different workspace.".to_owned());
+                }
+                (
+                    remote.clone().into_local_workspace(),
+                    RemoteControlSnapshot::Workspace(remote),
+                )
+            };
+
+            if let Some((result, permissions)) =
+                workspace_control_read(&workspace, &method, params.clone())?
+            {
+                require_remote_permissions(&permission_keys, &permissions, &method)?;
+                return Ok(RemoteControlOutcome {
+                    snapshot: read_snapshot,
+                    result: RemoteControlResult::Json(result),
+                });
+            }
+
+            let (mutation, permissions) =
+                Self::remote_control_mutation(&workspace, &method, params)?;
+            require_remote_permissions(&permission_keys, &permissions, &method)?;
+            mutation.execute(&client, &task_target, token).await
+        });
+        Ok(RemoteControlPending {
+            target,
+            generation: 0,
+            background: true,
             task,
         })
     }
 
     fn remote_control_mutation(
-        &self,
+        workspace: &Workspace,
         method: &str,
         params: Value,
     ) -> Result<(RemoteControlMutation, Vec<&'static str>), String> {
@@ -1174,7 +1452,7 @@ impl ApiTester {
             }
             "rename_collection" => {
                 let collection_id = required_string(&params, "collection_id")?;
-                if self.workspace.collection(&collection_id).is_none() {
+                if workspace.collection(&collection_id).is_none() {
                     return Err(format!("collection '{collection_id}' was not found"));
                 }
                 Ok((
@@ -1188,7 +1466,7 @@ impl ApiTester {
             }
             "delete_collection" => {
                 let collection_id = required_string(&params, "collection_id")?;
-                if self.workspace.collection(&collection_id).is_none() {
+                if workspace.collection(&collection_id).is_none() {
                     return Err(format!("collection '{collection_id}' was not found"));
                 }
                 Ok((
@@ -1209,12 +1487,9 @@ impl ApiTester {
                     name: String,
                 }
                 let params: Params = decode(params)?;
-                let collection = self
-                    .workspace
-                    .collection(&params.collection_id)
-                    .ok_or_else(|| {
-                        format!("collection '{}' was not found", params.collection_id)
-                    })?;
+                let collection = workspace.collection(&params.collection_id).ok_or_else(|| {
+                    format!("collection '{}' was not found", params.collection_id)
+                })?;
                 if let Some(folder_id) = params.parent_folder_id.as_deref()
                     && collection.folder(folder_id).is_none()
                 {
@@ -1232,8 +1507,7 @@ impl ApiTester {
             "rename_folder" => {
                 let folder_id = required_string(&params, "folder_id")?;
                 let collection_id = required_string(&params, "collection_id")?;
-                let collection = self
-                    .workspace
+                let collection = workspace
                     .collection(&collection_id)
                     .ok_or_else(|| format!("collection '{collection_id}' was not found"))?;
                 if collection.folder(&folder_id).is_none() {
@@ -1258,12 +1532,9 @@ impl ApiTester {
                     parent_folder_id: Option<String>,
                 }
                 let params: Params = decode(params)?;
-                let collection = self
-                    .workspace
-                    .collection(&params.collection_id)
-                    .ok_or_else(|| {
-                        format!("collection '{}' was not found", params.collection_id)
-                    })?;
+                let collection = workspace.collection(&params.collection_id).ok_or_else(|| {
+                    format!("collection '{}' was not found", params.collection_id)
+                })?;
                 if collection.folder(&params.folder_id).is_none() {
                     return Err(format!("folder '{}' was not found", params.folder_id));
                 }
@@ -1284,8 +1555,7 @@ impl ApiTester {
             "delete_folder" => {
                 let folder_id = required_string(&params, "folder_id")?;
                 let collection_id = required_string(&params, "collection_id")?;
-                let collection = self
-                    .workspace
+                let collection = workspace
                     .collection(&collection_id)
                     .ok_or_else(|| format!("collection '{collection_id}' was not found"))?;
                 if collection.folder(&folder_id).is_none() {
@@ -1301,12 +1571,9 @@ impl ApiTester {
             }
             "create_request" => {
                 let params: CreateRequestParams = decode(params)?;
-                let collection = self
-                    .workspace
-                    .collection(&params.collection_id)
-                    .ok_or_else(|| {
-                        format!("collection '{}' was not found", params.collection_id)
-                    })?;
+                let collection = workspace.collection(&params.collection_id).ok_or_else(|| {
+                    format!("collection '{}' was not found", params.collection_id)
+                })?;
                 if let Some(folder_id) = params.folder_id.as_deref()
                     && collection.folder(folder_id).is_none()
                 {
@@ -1328,22 +1595,25 @@ impl ApiTester {
             }
             "save_request" => {
                 let params: SaveRequestParams = decode(params)?;
-                self.remote_save_request_mutation(params)
+                Self::remote_save_request_mutation(workspace, params)
             }
             "set_request_scripts" => {
                 let params: SetScriptsParams = decode(params)?;
-                self.remote_save_request_mutation(SaveRequestParams {
-                    request_id: params.request_id,
-                    expected_updated_at: params.expected_updated_at,
-                    name: None,
-                    request: None,
-                    websocket: None,
-                    clear_websocket: false,
-                    scripts: Some(RequestScripts {
-                        pre_request: params.pre_request,
-                        post_response: params.post_response,
-                    }),
-                })
+                Self::remote_save_request_mutation(
+                    workspace,
+                    SaveRequestParams {
+                        request_id: params.request_id,
+                        expected_updated_at: params.expected_updated_at,
+                        name: None,
+                        request: None,
+                        websocket: None,
+                        clear_websocket: false,
+                        scripts: Some(RequestScripts {
+                            pre_request: params.pre_request,
+                            post_response: params.post_response,
+                        }),
+                    },
+                )
             }
             "duplicate_request" => {
                 #[derive(Deserialize)]
@@ -1354,8 +1624,7 @@ impl ApiTester {
                     name: Option<String>,
                 }
                 let params: Params = decode(params)?;
-                let (collection, request) = self
-                    .workspace
+                let (collection, request) = workspace
                     .saved_request(&params.request_id)
                     .ok_or_else(|| format!("request '{}' was not found", params.request_id))?;
                 Ok((
@@ -1382,12 +1651,10 @@ impl ApiTester {
                     target_folder_id: Option<String>,
                 }
                 let params: Params = decode(params)?;
-                let (source_collection, request) = self
-                    .workspace
+                let (source_collection, request) = workspace
                     .saved_request(&params.request_id)
                     .ok_or_else(|| format!("request '{}' was not found", params.request_id))?;
-                let target_collection = self
-                    .workspace
+                let target_collection = workspace
                     .collection(&params.target_collection_id)
                     .ok_or_else(|| {
                         format!("collection '{}' was not found", params.target_collection_id)
@@ -1413,8 +1680,7 @@ impl ApiTester {
             }
             "delete_request" => {
                 let request_id = required_string(&params, "request_id")?;
-                let (collection, request) = self
-                    .workspace
+                let (collection, request) = workspace
                     .saved_request(&request_id)
                     .ok_or_else(|| format!("request '{request_id}' was not found"))?;
                 Ok((
@@ -1438,12 +1704,9 @@ impl ApiTester {
                     source: String,
                 }
                 let params: Params = decode(params)?;
-                let collection = self
-                    .workspace
-                    .collection(&params.collection_id)
-                    .ok_or_else(|| {
-                        format!("collection '{}' was not found", params.collection_id)
-                    })?;
+                let collection = workspace.collection(&params.collection_id).ok_or_else(|| {
+                    format!("collection '{}' was not found", params.collection_id)
+                })?;
                 if let Some(folder_id) = params.folder_id.as_deref()
                     && collection.folder(folder_id).is_none()
                 {
@@ -1470,7 +1733,7 @@ impl ApiTester {
             )),
             "rename_environment" => {
                 let environment_id = required_string(&params, "environment_id")?;
-                if self.workspace.environment(&environment_id).is_none() {
+                if workspace.environment(&environment_id).is_none() {
                     return Err(format!("environment '{environment_id}' was not found"));
                 }
                 Ok((
@@ -1483,7 +1746,7 @@ impl ApiTester {
             }
             "delete_environment" => {
                 let environment_id = required_string(&params, "environment_id")?;
-                if self.workspace.environment(&environment_id).is_none() {
+                if workspace.environment(&environment_id).is_none() {
                     return Err(format!("environment '{environment_id}' was not found"));
                 }
                 Ok((
@@ -1491,12 +1754,13 @@ impl ApiTester {
                     vec![ENVIRONMENTS_READ, ENVIRONMENTS_DELETE],
                 ))
             }
-            "set_environment_variable" => self.remote_environment_variable_mutation(params),
+            "set_environment_variable" => {
+                Self::remote_environment_variable_mutation(workspace, params)
+            }
             "delete_environment_variable" => {
                 let environment_id = required_string(&params, "environment_id")?;
                 let variable_id = required_string(&params, "variable_id")?;
-                let environment = self
-                    .workspace
+                let environment = workspace
                     .environment(&environment_id)
                     .ok_or_else(|| format!("environment '{environment_id}' was not found"))?;
                 if !environment
@@ -1521,11 +1785,10 @@ impl ApiTester {
     }
 
     fn remote_save_request_mutation(
-        &self,
+        workspace: &Workspace,
         params: SaveRequestParams,
     ) -> Result<(RemoteControlMutation, Vec<&'static str>), String> {
-        let (collection, existing) = self
-            .workspace
+        let (collection, existing) = workspace
             .saved_request(&params.request_id)
             .ok_or_else(|| format!("request '{}' was not found", params.request_id))?;
         ensure_request_revision(existing, &params.expected_updated_at)?;
@@ -1559,12 +1822,11 @@ impl ApiTester {
     }
 
     fn remote_environment_variable_mutation(
-        &self,
+        workspace: &Workspace,
         params: Value,
     ) -> Result<(RemoteControlMutation, Vec<&'static str>), String> {
         let params: SetVariableParams = decode(params)?;
-        let environment = self
-            .workspace
+        let environment = workspace
             .environment(&params.environment_id)
             .ok_or_else(|| format!("environment '{}' was not found", params.environment_id))?;
         if let Some(variable_id) = params.variable_id {
@@ -1634,9 +1896,25 @@ impl ApiTester {
         &mut self,
         target: ActiveUpstreamWorkspace,
         generation: u64,
+        background: bool,
         result: Result<Result<RemoteControlOutcome, String>, tokio::task::JoinError>,
         cx: &mut Context<Self>,
     ) -> ControlResponse {
+        if background {
+            return match result {
+                Ok(Ok(outcome)) => match background_remote_result(&target, outcome) {
+                    Ok(value) => ControlResponse::success(value),
+                    Err(error) => ControlResponse::error(error),
+                },
+                Ok(Err(error)) => ControlResponse::error(error),
+                Err(error) if error.is_cancelled() => {
+                    ControlResponse::error("The remote MCP operation was cancelled.")
+                }
+                Err(error) => ControlResponse::error(format!(
+                    "The remote MCP operation could not be completed: {error}"
+                )),
+            };
+        }
         if self.workspace_switch_generation != generation {
             return ControlResponse::error(
                 "The active workspace changed while the MCP operation was running; re-read state before retrying.",
@@ -3942,6 +4220,13 @@ impl ApiTester {
         candidate: Workspace,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        if let Some(workspace_id) = self.mcp_scoped_local_workspace_id.as_deref() {
+            self.database_store
+                .save_workspace_for(workspace_id, &candidate)
+                .map_err(|error| error.to_string())?;
+            self.workspace = candidate;
+            return Ok(());
+        }
         self.snapshot_active_request_tab(cx);
         let mut request_tabs = self.request_tabs.clone();
         super::request_tab_reconciliation::reconcile_restored_request_tabs(
@@ -4091,6 +4376,201 @@ fn request_summary(collection: &Collection, request: &SavedRequest) -> Value {
         "url": websocket.map(|document| document.url.as_str()).unwrap_or(request.definition.request.url.as_str()),
         "updated_at": request.updated_at.to_rfc3339()
     })
+}
+
+fn workspace_control_read(
+    workspace: &Workspace,
+    method: &str,
+    params: Value,
+) -> Result<Option<(Value, Vec<&'static str>)>, String> {
+    let result = match method {
+        "list_collections" => {
+            let collections = workspace
+                .collections
+                .iter()
+                .map(|collection| {
+                    json!({
+                        "id": collection.id,
+                        "name": collection.name,
+                        "folders": collection.folders,
+                        "requests": collection.requests.iter()
+                            .map(|request| request_summary(collection, request))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect::<Vec<_>>();
+            (json!({ "collections": collections }), vec![WORKSPACES_READ])
+        }
+        "search_requests" => {
+            #[derive(Deserialize, Default)]
+            #[serde(default, deny_unknown_fields)]
+            struct Params {
+                query: String,
+            }
+            let query = decode::<Params>(params)?.query.to_lowercase();
+            let requests = workspace
+                .collections
+                .iter()
+                .flat_map(|collection| {
+                    let query = query.clone();
+                    collection.requests.iter().filter_map(move |request| {
+                        let matches = query.is_empty()
+                            || request.name.to_lowercase().contains(&query)
+                            || request
+                                .definition
+                                .request
+                                .url
+                                .to_lowercase()
+                                .contains(&query);
+                        matches.then(|| request_summary(collection, request))
+                    })
+                })
+                .collect::<Vec<_>>();
+            (json!({ "requests": requests }), vec![WORKSPACES_READ])
+        }
+        "get_request" => {
+            let request_id = required_string(&params, "request_id")?;
+            let (collection, request) = workspace
+                .saved_request(&request_id)
+                .ok_or_else(|| format!("request '{request_id}' was not found"))?;
+            (request_value(collection, request), vec![WORKSPACES_READ])
+        }
+        "export_request" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Params {
+                request_id: String,
+                format: String,
+            }
+            let params: Params = decode(params)?;
+            let (_, request) = workspace
+                .saved_request(&params.request_id)
+                .ok_or_else(|| format!("request '{}' was not found", params.request_id))?;
+            if request.definition.is_websocket() {
+                return Err("WebSocket documents cannot be exported as HTTP requests".to_owned());
+            }
+            let format = control_interchange_format(&params.format)?;
+            let source = export_request(format, &request.name, &request.definition)
+                .map_err(|error| error.to_string())?;
+            (
+                json!({ "request_id": params.request_id, "format": params.format, "source": source }),
+                vec![WORKSPACES_READ],
+            )
+        }
+        "list_environments" => {
+            let environments = workspace
+                .environments
+                .iter()
+                .map(environment_value)
+                .collect::<Vec<_>>();
+            (
+                json!({
+                    "environments": environments,
+                    "active_environment_id": workspace.active_environment_id
+                }),
+                vec![ENVIRONMENTS_READ],
+            )
+        }
+        "get_environment" => {
+            let id = required_string(&params, "environment_id")?;
+            let environment = workspace
+                .environment(&id)
+                .ok_or_else(|| format!("environment '{id}' was not found"))?;
+            (environment_value(environment), vec![ENVIRONMENTS_READ])
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(result))
+}
+
+fn workspace_method_needs_environments(method: &str) -> bool {
+    matches!(
+        method,
+        "list_environments"
+            | "get_environment"
+            | "create_environment"
+            | "rename_environment"
+            | "delete_environment"
+            | "set_environment_variable"
+            | "delete_environment_variable"
+    )
+}
+
+fn require_remote_permissions(
+    permission_keys: &std::collections::BTreeSet<String>,
+    permissions: &[&str],
+    method: &str,
+) -> Result<(), String> {
+    for permission in permissions {
+        if !permission_keys.contains(*permission) {
+            return Err(format!(
+                "The signed-in server user lacks the '{permission}' permission required by '{method}'."
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn background_remote_result(
+    target: &ActiveUpstreamWorkspace,
+    outcome: RemoteControlOutcome,
+) -> Result<Value, String> {
+    match &outcome.snapshot {
+        RemoteControlSnapshot::Workspace(remote) if remote.id != target.workspace_id => {
+            return Err("The server returned a different workspace.".to_owned());
+        }
+        RemoteControlSnapshot::Environments(environments)
+            if environments
+                .iter()
+                .any(|environment| environment.workspace_id != target.workspace_id) =>
+        {
+            return Err("The server returned an environment from another workspace.".to_owned());
+        }
+        _ => {}
+    }
+
+    let result = match outcome.result {
+        RemoteControlResult::Collection(id) => json!({ "collection_id": id }),
+        RemoteControlResult::Request(id) => match outcome.snapshot {
+            RemoteControlSnapshot::Workspace(remote) => remote
+                .into_local_workspace()
+                .saved_request(&id)
+                .map(|(collection, request)| request_value(collection, request))
+                .unwrap_or_else(|| json!({ "request_id": id })),
+            RemoteControlSnapshot::Environments(_) => json!({ "request_id": id }),
+        },
+        RemoteControlResult::Environment(id) => match outcome.snapshot {
+            RemoteControlSnapshot::Environments(environments) => environments
+                .into_iter()
+                .find(|environment| environment.id == id)
+                .map(UpstreamEnvironmentView::into_local)
+                .as_ref()
+                .map(environment_value)
+                .unwrap_or_else(|| json!({ "environment_id": id })),
+            RemoteControlSnapshot::Workspace(_) => json!({ "environment_id": id }),
+        },
+        RemoteControlResult::Variable {
+            environment_id,
+            variable_id,
+        } => match outcome.snapshot {
+            RemoteControlSnapshot::Environments(environments) => environments
+                .into_iter()
+                .find(|environment| environment.id == environment_id)
+                .map(UpstreamEnvironmentView::into_local)
+                .and_then(|environment| {
+                    environment
+                        .variables
+                        .into_iter()
+                        .find(|variable| variable.id == variable_id)
+                })
+                .as_ref()
+                .map(variable_value)
+                .unwrap_or_else(|| json!({ "variable_id": variable_id })),
+            RemoteControlSnapshot::Workspace(_) => json!({ "variable_id": variable_id }),
+        },
+        RemoteControlResult::Json(value) => value,
+    };
+    Ok(result)
 }
 
 fn request_value(collection: &Collection, request: &SavedRequest) -> Value {

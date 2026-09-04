@@ -279,6 +279,7 @@ pub struct ApiTester {
     mcp_http_operation_id: Option<u64>,
     mcp_http_request_id: Option<String>,
     mcp_http_exchange: Option<control::McpHttpExchangeSnapshot>,
+    mcp_scoped_local_workspace_id: Option<String>,
     mcp_request_sequence_generation: u64,
     mcp_request_sequence: Option<control::McpRequestSequence>,
     abort_handle: Option<AbortHandle>,

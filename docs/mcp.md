@@ -78,6 +78,49 @@ execution still opens its saved request because it runs through the app's active
 request pipeline. The execution surfaces label agent-owned activity as MCP
 controlled.
 
+### Target workspace resources without switching the UI
+
+The resource tools listed below accept an optional `workspace_id`. Use the exact
+`local:...` or `upstream:...` identifier returned by `list_workspaces`. When the
+field is omitted, the tool uses the active workspace, preserving the original
+contract. When it names another workspace, Resolved performs the operation in
+that workspace without changing the user's active workspace, selected tab, or
+editor buffers. `switch_workspace` is different: its required `workspace_id`
+deliberately changes the visible workspace.
+
+For example, this searches a connected workspace while the user keeps working
+elsewhere:
+
+```json
+{
+  "workspace_id": "upstream:server-id:workspace-id",
+  "query": "health"
+}
+```
+
+The optional field is available on these tool families:
+
+- collections and folders: `list_collections`, `create_collection`,
+  `rename_collection`, `delete_collection`, `create_folder`, `rename_folder`,
+  `move_folder`, and `delete_folder`;
+- saved requests: `search_requests`, `get_request`, `create_request`,
+  `save_request`, `duplicate_request`, `move_request`, `delete_request`, and
+  `set_request_scripts`;
+- environments: `list_environments`, `get_environment`, `create_environment`,
+  `rename_environment`, `set_environment_variable`, `delete_environment`, and
+  `delete_environment_variable`;
+- interchange: `import_requests` and `export_request`.
+
+Execution, WebSocket, environment selection, history, and snippet tools continue
+to use the active application context and do not accept a background workspace
+target.
+
+An explicit local target uses that local workspace's normal SQLite persistence.
+An explicit server target requires **Allow server workspaces**, a valid saved
+session, membership in the target workspace, and the same per-operation RBAC
+permissions as an active server workspace. Targeting another server workspace
+does not make it temporarily active or replace the state shown in the UI.
+
 ### Read-only tools
 
 | Tool | Purpose | Required input |
@@ -134,12 +177,13 @@ controlled.
 | `open_history_entry` | Open a redacted history request as a buffered request tab | `history_id` |
 | `replay_history_request` | Replay the stored redacted request through the normal HTTP pipeline | `history_id` |
 
-Mutations target the active workspace. Local changes use the desktop database.
-Remote changes use the signed-in server session, enforce that user's RBAC
-permissions, and reload the authoritative server state before returning. Use
-`status` to check `workspace_provider` and effective `workspace_writable` before
-planning changes; an individual remote mutation can still fail when its specific
-permission is missing.
+Mutations target the active workspace unless their optional `workspace_id`
+selects another one. Local changes use the desktop database. Remote changes use
+the signed-in server session, enforce that user's RBAC permissions, and reload
+the authoritative server state before returning. Use `status` to check the
+active `workspace_provider` and effective `workspace_writable`; an explicitly
+targeted remote mutation is still authorized against its target and can fail
+when its specific permission is missing.
 
 ### Remote workspace permissions
 

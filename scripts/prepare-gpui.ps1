@@ -46,6 +46,24 @@ function Get-FileSha256([string]$path) {
     (Get-FileHash -Path $path -Algorithm SHA256).Hash.ToLower()
 }
 
+function Get-PatchedTreeSha256([string]$root) {
+    $lines = Get-ChildItem -Path $root -File -Recurse |
+        Where-Object { $_.Name -ne '.api-tester-patch-sha256' } |
+        ForEach-Object {
+            $relative = [IO.Path]::GetRelativePath($root, $_.FullName).Replace('\', '/')
+            "$(Get-FileSha256 $_.FullName)  ./$relative"
+        } |
+        Sort-Object
+    $canonical = ($lines -join "`n") + "`n"
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($canonical)
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        -join ($hasher.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })
+    } finally {
+        $hasher.Dispose()
+    }
+}
+
 function Invoke-PrepareCrate($crate) {
     $crateArchive = "$($crate.name)-$($crate.version).crate"
     $vendorDir = Join-Path $vendorRoot "$($crate.name)-$($crate.version)"
@@ -59,7 +77,9 @@ function Invoke-PrepareCrate($crate) {
     $sourceIsCurrent =
         (Test-Path $markerFile) -and
         ((Get-Content $markerFile -TotalCount 1) -eq $patchSha) -and
-        ((Get-Content $markerFile | Select-Object -Skip 1 -First 1) -eq $crate.sha256)
+        ((Get-Content $markerFile | Select-Object -Skip 1 -First 1) -eq $crate.sha256) -and
+        ((Get-Content $markerFile | Select-Object -Skip 2 -First 1) -eq
+            (Get-PatchedTreeSha256 $vendorDir))
     if ($sourceIsCurrent) {
         return
     }
@@ -120,8 +140,9 @@ function Invoke-PrepareCrate($crate) {
             }
         }
 
+        $treeSha = Get-PatchedTreeSha256 $sourceDir
         Set-Content -Path (Join-Path $sourceDir '.api-tester-patch-sha256') `
-            -Value @($patchSha, $crate.sha256) -Encoding ascii
+            -Value @($patchSha, $crate.sha256, $treeSha) -Encoding ascii
 
         New-Item -ItemType Directory -Path $vendorRoot -Force | Out-Null
         if (Test-Path $vendorDir) { Remove-Item -Recurse -Force $vendorDir }

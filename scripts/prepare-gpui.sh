@@ -5,6 +5,17 @@ project_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 vendor_root="$project_dir/vendor"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 
+patched_tree_sha256() (
+    cd "$1"
+    find . -type f ! -name '.api-tester-patch-sha256' -print |
+        LC_ALL=C sort |
+        while IFS= read -r file; do
+            printf '%s  %s\n' "$(shasum -a 256 "$file" | awk '{print $1}')" "$file"
+        done |
+        shasum -a 256 |
+        awk '{print $1}'
+)
+
 # Prepare one vendored crate by applying its patch(es) on top of the pristine
 # crates.io archive. The last arguments are the ordered patch files.
 prepare_crate() (
@@ -12,7 +23,6 @@ prepare_crate() (
     crate_version="$2"
     crate_sha256="$3"
     shift 3
-    patch_files="$@"
     crate_archive="$crate_name-$crate_version.crate"
     vendor_dir="$vendor_root/$crate_name-$crate_version"
     marker_file="$vendor_dir/.api-tester-patch-sha256"
@@ -22,10 +32,7 @@ prepare_crate() (
     if [ -f "$marker_file" ] &&
         [ "$(sed -n '1p' "$marker_file")" = "$patch_sha256" ] &&
         [ "$(sed -n '2p' "$marker_file")" = "$crate_sha256" ] &&
-        (cd "$vendor_dir" &&
-            for f in "$@"; do
-                patch --dry-run -R -p1 <"$f" >/dev/null 2>&1 || exit 1
-            done); then
+        [ "$(sed -n '3p' "$marker_file")" = "$(patched_tree_sha256 "$vendor_dir")" ]; then
         exit 0
     fi
 
@@ -68,7 +75,8 @@ prepare_crate() (
         fi
     done
 
-    printf '%s\n%s\n' "$patch_sha256" "$crate_sha256" \
+    tree_sha256="$(patched_tree_sha256 "$source_dir")"
+    printf '%s\n%s\n%s\n' "$patch_sha256" "$crate_sha256" "$tree_sha256" \
         >"$source_dir/.api-tester-patch-sha256"
     mkdir -p "$vendor_root"
     rm -rf "$vendor_dir"

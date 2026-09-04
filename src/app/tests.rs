@@ -625,6 +625,106 @@ fn mcp_setting_starts_and_stops_the_local_control_transport(cx: &mut gpui::TestA
 }
 
 #[gpui::test]
+fn mcp_can_read_and_edit_a_local_workspace_without_switching_the_active_workspace(
+    cx: &mut gpui::TestAppContext,
+) {
+    let directory = tempfile::tempdir().expect("create temporary MCP workspace directory");
+    let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+    store.initialize().expect("initialize test database");
+    let active_workspace_id = store
+        .active_local_workspace_id()
+        .expect("read active workspace");
+    let background_workspace = store
+        .create_local_workspace("Background")
+        .expect("create background workspace");
+    let mut background = store
+        .load_workspace_for(&background_workspace.id)
+        .expect("load background workspace");
+    let collection_id = background
+        .create_collection("Agent collection")
+        .expect("create background collection");
+    let request_id = background
+        .create_saved_request(
+            &collection_id,
+            "Agent request",
+            RequestTemplate::new(RequestDraft::new("GET", "https://agent.example.test")),
+        )
+        .expect("create background request");
+    store
+        .save_workspace_for(&background_workspace.id, &background)
+        .expect("save background workspace");
+
+    let mut app = None;
+    let store_for_app = store.clone();
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        gpui_component::init(cx);
+        let base_key_bindings = shortcuts::capture_base_key_bindings(cx);
+        crate::theme::configure(cx);
+        let view = cx.new(|cx| {
+            ApiTester::new_with_database_store(base_key_bindings, store_for_app, window, cx)
+        });
+        app = Some(view.clone());
+        gpui_component::Root::new(view, window, cx)
+    });
+    let app = app.expect("capture app entity");
+    let response = cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.settings.mcp.enabled = true;
+            app.handle_window_control_call(
+                "get_request",
+                serde_json::json!({
+                    "workspace_id": format!("local:{}", background_workspace.id),
+                    "request_id": request_id
+                }),
+                window,
+                cx,
+            )
+        })
+    });
+
+    assert!(response.ok, "{:?}", response.error);
+    let request = response.result.expect("request result");
+    assert_eq!(request["name"], "Agent request");
+    assert_eq!(request["request"]["url"], "https://agent.example.test");
+    let created = cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_window_control_call(
+                "create_collection",
+                serde_json::json!({
+                    "workspace_id": format!("local:{}", background_workspace.id),
+                    "name": "Created in background"
+                }),
+                window,
+                cx,
+            )
+        })
+    });
+    assert!(created.ok, "{:?}", created.error);
+    assert!(
+        store
+            .load_workspace_for(&background_workspace.id)
+            .expect("reload background workspace")
+            .collections
+            .iter()
+            .any(|collection| collection.name == "Created in background")
+    );
+    assert_eq!(
+        store
+            .active_local_workspace_id()
+            .expect("reload active workspace"),
+        active_workspace_id
+    );
+    cx.update(|_, cx| {
+        let app = app.read(cx);
+        assert_eq!(
+            app.workspace_providers.active_id(),
+            &WorkspaceProviderId::Local(active_workspace_id.clone())
+        );
+        assert!(app.workspace.saved_request(&request_id).is_none());
+    });
+}
+
+#[gpui::test]
 fn remote_workspace_mcp_access_is_hidden_and_rejected_until_enabled(cx: &mut gpui::TestAppContext) {
     let directory = tempfile::tempdir().expect("create temporary MCP settings directory");
     let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
@@ -888,7 +988,10 @@ fn mcp_http_execution_and_script_console_use_the_application_pipeline(
             }))
             .unwrap()
     });
-    assert_eq!(selected["value"], serde_json::json!([{ "id": 1, "title": "First" }]));
+    assert_eq!(
+        selected["value"],
+        serde_json::json!([{ "id": 1, "title": "First" }])
+    );
     assert_eq!(selected["total_items"], 2);
     assert_eq!(selected["returned_items"], 1);
     assert_eq!(selected["items_truncated"], true);

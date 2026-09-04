@@ -51,7 +51,10 @@ disabled by default; when it is off, workspace-scoped tools are neither
 advertised nor accepted while a server workspace is active. When enabled, remote
 mutations use the existing authenticated, RBAC-protected collaboration-server
 APIs and refresh the authoritative remote snapshot. Local mutations continue to
-use the desktop persistence path. HTTP execution enters the same request,
+use the desktop persistence path. Workspace-scoped calls may include an optional
+provider ID returned by `list_workspaces`; the desktop resolves that local or
+remote provider for the call without changing the registry's visible active
+provider or the user's editor context. HTTP execution enters the same request,
 script, chain, and history pipeline as the UI. MCP WebSocket sessions use the
 shared local or server-proxied wire implementation and the same bounded
 automation runtime and mirror their event stream into the visible WebSocket
