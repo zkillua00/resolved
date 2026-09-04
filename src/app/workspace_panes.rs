@@ -258,6 +258,7 @@ impl ApiTester {
             .child(
                 div()
                     .group(pane_dock_group(pane_id))
+                    .debug_selector(move || format!("workspace-pane-content-{}", pane_id.0))
                     .relative()
                     .flex_1()
                     .min_h_0()
@@ -388,63 +389,67 @@ fn render_pane_dock_overlays(pane_id: PaneId, cx: &mut Context<ApiTester>) -> Ve
 fn render_pane_dock_compass(pane_id: PaneId, cx: &mut Context<ApiTester>) -> AnyElement {
     div()
         .absolute()
-        .left(gpui::relative(0.5))
-        .top(gpui::relative(0.5))
-        .ml(-px(78.))
-        .mt(-px(78.))
-        .size(px(156.))
-        .child(render_pane_dock_target(
-            pane_id,
-            PaneDockTarget::Split {
-                direction: SplitDirection::Vertical,
-                after: false,
-            },
-            "top",
-            px(54.),
-            px(0.),
-            cx,
-        ))
-        .child(render_pane_dock_target(
-            pane_id,
-            PaneDockTarget::Split {
-                direction: SplitDirection::Horizontal,
-                after: false,
-            },
-            "left",
-            px(0.),
-            px(54.),
-            cx,
-        ))
-        .child(render_pane_dock_target(
-            pane_id,
-            PaneDockTarget::Center,
-            "center",
-            px(54.),
-            px(54.),
-            cx,
-        ))
-        .child(render_pane_dock_target(
-            pane_id,
-            PaneDockTarget::Split {
-                direction: SplitDirection::Horizontal,
-                after: true,
-            },
-            "right",
-            px(108.),
-            px(54.),
-            cx,
-        ))
-        .child(render_pane_dock_target(
-            pane_id,
-            PaneDockTarget::Split {
-                direction: SplitDirection::Vertical,
-                after: true,
-            },
-            "bottom",
-            px(54.),
-            px(108.),
-            cx,
-        ))
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .relative()
+                .size(px(156.))
+                .child(render_pane_dock_target(
+                    pane_id,
+                    PaneDockTarget::Split {
+                        direction: SplitDirection::Vertical,
+                        after: false,
+                    },
+                    "top",
+                    px(54.),
+                    px(0.),
+                    cx,
+                ))
+                .child(render_pane_dock_target(
+                    pane_id,
+                    PaneDockTarget::Split {
+                        direction: SplitDirection::Horizontal,
+                        after: false,
+                    },
+                    "left",
+                    px(0.),
+                    px(54.),
+                    cx,
+                ))
+                .child(render_pane_dock_target(
+                    pane_id,
+                    PaneDockTarget::Center,
+                    "center",
+                    px(54.),
+                    px(54.),
+                    cx,
+                ))
+                .child(render_pane_dock_target(
+                    pane_id,
+                    PaneDockTarget::Split {
+                        direction: SplitDirection::Horizontal,
+                        after: true,
+                    },
+                    "right",
+                    px(108.),
+                    px(54.),
+                    cx,
+                ))
+                .child(render_pane_dock_target(
+                    pane_id,
+                    PaneDockTarget::Split {
+                        direction: SplitDirection::Vertical,
+                        after: true,
+                    },
+                    "bottom",
+                    px(54.),
+                    px(108.),
+                    cx,
+                )),
+        )
         .into_any_element()
 }
 
@@ -650,6 +655,12 @@ mod tests {
             "the Collections sidebar must sit outside request pane contents",
         );
 
+        // Reflow the panes after the first successful dock. The compass must
+        // derive its hitboxes from the pane's current bounds, not the bounds
+        // captured when that pane was first laid out.
+        cx.simulate_resize(size(px(1_480.), px(920.)));
+        cx.run_until_parked();
+
         let split_drag_handle = cx
             .debug_bounds("current-workspace-request-tab-drag-handle")
             .expect("the split request must remain draggable");
@@ -675,6 +686,16 @@ mod tests {
         let center_target = cx
             .debug_bounds(center_selector)
             .expect("the empty original pane must expose a center dock-compass target");
+        let pane_selector: &'static str =
+            Box::leak(format!("workspace-pane-content-{}", original_pane_id.0).into_boxed_str());
+        let resized_pane = cx
+            .debug_bounds(pane_selector)
+            .expect("the resized pane must expose its current content bounds");
+        assert!(
+            (center_target.center().x - resized_pane.center().x).abs() < px(1.)
+                && (center_target.center().y - resized_pane.center().y).abs() < px(1.),
+            "dock target hitboxes must stay centered after the pane is resized",
+        );
         cx.simulate_mouse_move(center_target.center(), MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_up(center_target.center(), MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
