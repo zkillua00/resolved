@@ -1341,8 +1341,10 @@ impl ApiTester {
             return false;
         }
         if !self.flush_local_state(cx) {
-            self.settings_notice =
-                Some("Save or discard the current changes before switching workspaces.".to_owned());
+            self.settings_notice = Some(
+                "The current editor buffers could not be persisted before switching workspaces."
+                    .to_owned(),
+            );
             cx.notify();
             return false;
         }

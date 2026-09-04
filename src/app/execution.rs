@@ -1,5 +1,50 @@
 use super::*;
+use serde::Deserialize;
 use std::sync::atomic::Ordering;
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct McpHttpRequestOverrides {
+    pub method: Option<String>,
+    pub url: Option<String>,
+    pub query_parameters: Option<Vec<QueryParamEntry>>,
+    pub headers: Option<Vec<HeaderEntry>>,
+    pub body: Option<String>,
+    pub body_mode: Option<BodyMode>,
+    pub raw_body_language: Option<RawBodyLanguage>,
+    pub body_fields: Option<Vec<BodyField>>,
+}
+
+impl McpHttpRequestOverrides {
+    fn apply(self, request: &mut RequestDraft) {
+        if let Some(method) = self.method {
+            request.method = method;
+        }
+        if let Some(url) = self.url {
+            request.url = url;
+            request.query_params = query_params_from_url(&request.url);
+        }
+        if let Some(query_parameters) = self.query_parameters {
+            request.url = url_with_query_params(&request.url, &query_parameters);
+            request.query_params = query_parameters;
+        }
+        if let Some(headers) = self.headers {
+            request.headers = headers;
+        }
+        if let Some(body) = self.body {
+            request.body = body;
+        }
+        if let Some(body_mode) = self.body_mode {
+            request.body_mode = body_mode;
+        }
+        if let Some(raw_body_language) = self.raw_body_language {
+            request.raw_body_language = raw_body_language;
+        }
+        if let Some(body_fields) = self.body_fields {
+            request.body_fields = body_fields;
+        }
+    }
+}
 
 // Script errors intentionally carry a full structured report and diagnostic.
 // Keeping the unboxed error preserves that context across the background task.
@@ -64,6 +109,7 @@ impl ApiTester {
     pub(super) fn start_control_http_request(
         &mut self,
         request_id: &str,
+        overrides: Option<McpHttpRequestOverrides>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<u64, String> {
@@ -88,7 +134,10 @@ impl ApiTester {
                 "request '{request_id}' is a WebSocket document; use connect_websocket"
             ));
         }
-        let template = request.definition.clone();
+        let mut template = request.definition.clone();
+        if let Some(overrides) = overrides {
+            overrides.apply(&mut template.request);
+        }
         if template.request.method.trim().is_empty() {
             return Err("HTTP method cannot be empty.".to_owned());
         }
@@ -102,7 +151,7 @@ impl ApiTester {
         Ok(operation_id)
     }
 
-    fn begin_request_template(
+    pub(super) fn begin_request_template(
         &mut self,
         template: RequestTemplate,
         window: &mut Window,
@@ -839,6 +888,7 @@ impl ApiTester {
             self.hide_preview(cx);
         }
         self.capture_mcp_http_exchange(generation);
+        self.advance_mcp_request_sequence(window, cx);
         cx.notify();
     }
 

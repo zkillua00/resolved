@@ -913,6 +913,8 @@ impl ApiTester {
             mcp_http_operation_id: None,
             mcp_http_request_id: None,
             mcp_http_exchange: None,
+            mcp_request_sequence_generation: 0,
+            mcp_request_sequence: None,
             abort_handle: None,
             script_cancellation: None,
             request_namespace: crate::core::RequestNamespaceCatalog::default(),
@@ -991,6 +993,10 @@ impl ApiTester {
             base_key_bindings,
             recording_shortcut_id: None,
             settings_notice: None,
+            mcp_open_tool_groups: crate::control_tools::CONTROL_TOOL_GROUPS
+                .iter()
+                .map(|group| group.id.to_owned())
+                .collect(),
             server_management: server_management::ServerManagementState::default(),
             server_management_generation: 0,
             server_management_abort_handle: None,

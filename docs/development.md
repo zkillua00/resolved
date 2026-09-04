@@ -54,9 +54,11 @@ APIs and refresh the authoritative remote snapshot. Local mutations continue to
 use the desktop persistence path. HTTP execution enters the same request,
 script, chain, and history pipeline as the UI. MCP WebSocket sessions use the
 shared local or server-proxied wire implementation and the same bounded
-automation runtime, but keep their event stream separate from the visible
-WebSocket console. See the [local MCP guide](mcp.md) for its contract and
-security boundary.
+automation runtime and mirror their event stream into the visible WebSocket
+console when follow-agent activity is enabled. Workspace/resource lifecycle,
+interchange, snippet, history, and ordered-execution tools similarly delegate to
+the existing application and provider rules. See the [local MCP guide](mcp.md)
+for its contract and security boundary.
 
 ## Desktop builds
 

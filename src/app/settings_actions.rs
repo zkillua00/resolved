@@ -93,6 +93,72 @@ impl ApiTester {
         cx.notify();
     }
 
+    pub(super) fn set_mcp_tool_group_enabled(
+        &mut self,
+        group_id: &str,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(group) = crate::control_tools::tool_group(group_id).copied() else {
+            return;
+        };
+        let mut candidate = self.settings.clone();
+        for tool_name in group.tools {
+            if enabled {
+                candidate.mcp.enabled_tools.insert((*tool_name).to_owned());
+            } else {
+                candidate.mcp.enabled_tools.remove(*tool_name);
+            }
+        }
+        if candidate.mcp == self.settings.mcp {
+            return;
+        }
+        match self.commit_settings(candidate, false, cx) {
+            Ok(()) => {
+                if !enabled {
+                    match group.id {
+                        "http" => self.stop_mcp_http_request(cx),
+                        "script_console" => self.stop_mcp_script_console(),
+                        "websocket" => self.stop_mcp_websocket(),
+                        _ => {}
+                    }
+                }
+                self.settings_notice = Some(format!(
+                    "All {} MCP tools {}.",
+                    group.label,
+                    if enabled { "enabled" } else { "disabled" }
+                ));
+            }
+            Err(error) => self.settings_notice = Some(error),
+        }
+        cx.notify();
+    }
+
+    pub(super) fn set_mcp_open_tool_groups(
+        &mut self,
+        open_group_indices: &[usize],
+        cx: &mut Context<Self>,
+    ) {
+        self.mcp_open_tool_groups = open_group_indices
+            .iter()
+            .filter_map(|index| crate::control_tools::CONTROL_TOOL_GROUPS.get(*index))
+            .map(|group| group.id.to_owned())
+            .collect();
+        cx.notify();
+    }
+
+    pub(super) fn set_all_mcp_tool_groups_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if open {
+            self.mcp_open_tool_groups = crate::control_tools::CONTROL_TOOL_GROUPS
+                .iter()
+                .map(|group| group.id.to_owned())
+                .collect();
+        } else {
+            self.mcp_open_tool_groups.clear();
+        }
+        cx.notify();
+    }
+
     pub(super) fn set_mcp_remote_workspaces_enabled(
         &mut self,
         enabled: bool,

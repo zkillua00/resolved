@@ -137,6 +137,10 @@ impl SnippetDraftSnapshot {
 }
 
 impl ApiTester {
+    pub(super) fn invalidate_snippet_list_cache(&mut self) {
+        SNIPPET_LIST_CACHE.with(|cache| cache.borrow_mut().invalidate());
+    }
+
     pub(in crate::app) fn create_snippet_editor_session(
         snippets: &[Snippet],
         writable: bool,

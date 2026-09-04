@@ -257,38 +257,40 @@ fn tool_definitions() -> Vec<Value> {
             "additionalProperties": false
         }
     });
+    let query_parameters = json!({ "type": "array", "items": {
+        "type": "object",
+        "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "key": { "type": "string" },
+            "value": { "type": "string" },
+            "description": { "type": "string" }
+        },
+        "required": ["key", "value"],
+        "additionalProperties": false
+    } });
+    let body_fields = json!({ "type": "array", "items": {
+        "type": "object",
+        "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "name": { "type": "string" },
+            "value": { "type": "string", "description": "Text value or local file path when kind is file." },
+            "kind": { "type": "string", "enum": ["text", "file"], "default": "text" }
+        },
+        "required": ["name", "value"],
+        "additionalProperties": false
+    } });
     let request_draft = json!({
         "type": "object",
         "description": "Resolved request draft. Fields omitted by Resolved defaults are optional.",
         "properties": {
             "method": { "type": "string" },
             "url": { "type": "string" },
-            "query_params": { "type": "array", "items": {
-                "type": "object",
-                "properties": {
-                    "enabled": { "type": "boolean", "default": true },
-                    "key": { "type": "string" },
-                    "value": { "type": "string" },
-                    "description": { "type": "string" }
-                },
-                "required": ["key", "value"],
-                "additionalProperties": false
-            } },
+            "query_params": query_parameters.clone(),
             "headers": headers.clone(),
             "body": { "type": "string" },
             "body_mode": { "type": "string", "enum": ["none", "raw", "form_url_encoded", "multipart_form_data"] },
             "raw_body_language": { "type": "string", "enum": raw_body_languages.clone() },
-            "body_fields": { "type": "array", "items": {
-                "type": "object",
-                "properties": {
-                    "enabled": { "type": "boolean", "default": true },
-                    "name": { "type": "string" },
-                    "value": { "type": "string", "description": "Text value or local file path when kind is file." },
-                    "kind": { "type": "string", "enum": ["text", "file"], "default": "text" }
-                },
-                "required": ["name", "value"],
-                "additionalProperties": false
-            } }
+            "body_fields": body_fields.clone()
         },
         "required": ["method", "url"],
         "additionalProperties": false
@@ -440,9 +442,26 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "execute_http_request",
-            "Execute a saved HTTP request through Resolved.",
+            "Execute a saved HTTP request through Resolved with optional non-persistent overrides.",
             object_schema(
-                json!({ "request_id": { "type": "string" } }),
+                json!({
+                    "request_id": { "type": "string" },
+                    "overrides": {
+                        "type": "object",
+                        "description": "Ephemeral values used only for this execution. The saved request and revision are not changed.",
+                        "properties": {
+                            "method": { "type": "string" },
+                            "url": { "type": "string" },
+                            "query_parameters": query_parameters,
+                            "headers": headers.clone(),
+                            "body": { "type": "string" },
+                            "body_mode": { "type": "string", "enum": ["none", "raw", "form_url_encoded", "multipart_form_data"] },
+                            "raw_body_language": { "type": "string", "enum": raw_body_languages.clone() },
+                            "body_fields": body_fields
+                        },
+                        "additionalProperties": false
+                    }
+                }),
                 &["request_id"],
             ),
             false,
@@ -456,6 +475,26 @@ fn tool_definitions() -> Vec<Value> {
                     "max_body_bytes": { "type": "integer", "minimum": 0, "maximum": 524288, "default": 262144 }
                 }),
                 &[],
+            ),
+            true,
+        ),
+        tool(
+            "query_http_response",
+            "Select and optionally project bounded JSON from an HTTP response without returning the full body.",
+            object_schema(
+                json!({
+                    "operation_id": { "type": "integer", "minimum": 0 },
+                    "json_pointer": { "type": "string", "description": "RFC 6901 JSON Pointer. Use an empty string for the response root." },
+                    "projection": {
+                        "type": "object",
+                        "description": "Optional output field names mapped to relative JSON Pointers. When the selection is an array, the projection is applied to every returned item.",
+                        "additionalProperties": { "type": "string" },
+                        "maxProperties": 100
+                    },
+                    "limit": { "type": "integer", "minimum": 0, "maximum": 1000, "default": 100 },
+                    "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 524288, "default": 262144 }
+                }),
+                &["json_pointer"],
             ),
             true,
         ),
@@ -478,7 +517,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "run_script_console",
-            "Evaluate JavaScript against the latest HTTP request and response.",
+            "Evaluate JavaScript against the latest HTTP exchange; response data is available through api.response.text() and api.response.json().",
             object_schema(json!({ "source": { "type": "string" } }), &["source"]),
             false,
         ),
@@ -613,7 +652,313 @@ fn tool_definitions() -> Vec<Value> {
             ),
             false,
         ),
+        tool("get_active_context", "", empty(), true),
+        tool(
+            "switch_workspace",
+            "",
+            object_schema(
+                json!({ "workspace_id": { "type": "string" } }),
+                &["workspace_id"],
+            ),
+            false,
+        ),
+        tool(
+            "rename_collection",
+            "",
+            object_schema(
+                json!({
+                    "collection_id": { "type": "string" },
+                    "name": { "type": "string" }
+                }),
+                &["collection_id", "name"],
+            ),
+            false,
+        ),
+        tool(
+            "delete_collection",
+            "",
+            object_schema(
+                json!({ "collection_id": { "type": "string" } }),
+                &["collection_id"],
+            ),
+            false,
+        ),
+        tool(
+            "create_folder",
+            "",
+            object_schema(
+                json!({
+                    "collection_id": { "type": "string" },
+                    "parent_folder_id": { "type": ["string", "null"] },
+                    "name": { "type": "string" }
+                }),
+                &["collection_id", "name"],
+            ),
+            false,
+        ),
+        tool(
+            "rename_folder",
+            "",
+            object_schema(
+                json!({
+                    "collection_id": { "type": "string" },
+                    "folder_id": { "type": "string" },
+                    "name": { "type": "string" }
+                }),
+                &["collection_id", "folder_id", "name"],
+            ),
+            false,
+        ),
+        tool(
+            "move_folder",
+            "",
+            object_schema(
+                json!({
+                    "collection_id": { "type": "string" },
+                    "folder_id": { "type": "string" },
+                    "parent_folder_id": { "type": ["string", "null"] }
+                }),
+                &["collection_id", "folder_id", "parent_folder_id"],
+            ),
+            false,
+        ),
+        tool(
+            "delete_folder",
+            "",
+            object_schema(
+                json!({
+                    "collection_id": { "type": "string" },
+                    "folder_id": { "type": "string" }
+                }),
+                &["collection_id", "folder_id"],
+            ),
+            false,
+        ),
+        tool(
+            "duplicate_request",
+            "",
+            object_schema(
+                json!({
+                    "request_id": { "type": "string" },
+                    "name": { "type": "string" }
+                }),
+                &["request_id"],
+            ),
+            false,
+        ),
+        tool(
+            "move_request",
+            "",
+            object_schema(
+                json!({
+                    "request_id": { "type": "string" },
+                    "target_collection_id": { "type": "string" },
+                    "target_folder_id": { "type": ["string", "null"] }
+                }),
+                &["request_id", "target_collection_id", "target_folder_id"],
+            ),
+            false,
+        ),
+        tool(
+            "delete_request",
+            "",
+            object_schema(
+                json!({ "request_id": { "type": "string" } }),
+                &["request_id"],
+            ),
+            false,
+        ),
+        tool(
+            "delete_environment",
+            "",
+            object_schema(
+                json!({ "environment_id": { "type": "string" } }),
+                &["environment_id"],
+            ),
+            false,
+        ),
+        tool(
+            "delete_environment_variable",
+            "",
+            object_schema(
+                json!({
+                    "environment_id": { "type": "string" },
+                    "variable_id": { "type": "string" }
+                }),
+                &["environment_id", "variable_id"],
+            ),
+            false,
+        ),
+        tool(
+            "import_requests",
+            "",
+            object_schema(
+                json!({
+                    "collection_id": { "type": "string" },
+                    "folder_id": { "type": ["string", "null"] },
+                    "source": { "type": "string" }
+                }),
+                &["collection_id", "source"],
+            ),
+            false,
+        ),
+        tool(
+            "export_request",
+            "",
+            object_schema(
+                json!({
+                    "request_id": { "type": "string" },
+                    "format": {
+                        "type": "string",
+                        "enum": [
+                            "curl", "wget", "powershell", "openapi", "asyncapi",
+                            "intellij_http", "javascript_fetch", "javascript_axios",
+                            "javascript_jquery", "java_http_client", "java_okhttp",
+                            "go_net_http", "go_resty", "csharp_http_client",
+                            "csharp_restsharp", "rust_reqwest", "rust_ureq",
+                            "cpp_boost_beast", "cpp_libcurl", "php_curl", "php_guzzle",
+                            "kotlin_ktor", "kotlin_okhttp", "kotlin_java_http_client"
+                        ]
+                    }
+                }),
+                &["request_id", "format"],
+            ),
+            true,
+        ),
+        tool(
+            "run_request_sequence",
+            "",
+            object_schema(
+                json!({
+                    "request_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "maxItems": 25
+                    }
+                }),
+                &["request_ids"],
+            ),
+            false,
+        ),
+        tool(
+            "get_request_sequence",
+            "",
+            object_schema(
+                json!({
+                    "operation_id": { "type": "integer", "minimum": 0 },
+                    "max_body_bytes": { "type": "integer", "minimum": 0, "maximum": 524288, "default": 262144 }
+                }),
+                &[],
+            ),
+            true,
+        ),
+        tool("list_snippets", "", empty(), true),
+        tool(
+            "get_snippet",
+            "",
+            object_schema(
+                json!({ "snippet_id": { "type": "string" } }),
+                &["snippet_id"],
+            ),
+            true,
+        ),
+        tool("create_snippet", "", snippet_write_schema(false), false),
+        tool("save_snippet", "", snippet_write_schema(true), false),
+        tool(
+            "delete_snippet",
+            "",
+            object_schema(
+                json!({
+                    "snippet_id": { "type": "string" },
+                    "expected_updated_at": { "type": "string" }
+                }),
+                &["snippet_id", "expected_updated_at"],
+            ),
+            false,
+        ),
+        tool(
+            "run_snippet",
+            "",
+            object_schema(
+                json!({
+                    "snippet_id": { "type": "string" },
+                    "request_id": { "type": "string" },
+                    "operation_id": { "type": "integer", "minimum": 0 }
+                }),
+                &["snippet_id", "request_id"],
+            ),
+            false,
+        ),
+        tool(
+            "get_history_entry",
+            "",
+            object_schema(
+                json!({ "history_id": { "type": "string" } }),
+                &["history_id"],
+            ),
+            true,
+        ),
+        tool(
+            "open_history_entry",
+            "",
+            object_schema(
+                json!({ "history_id": { "type": "string" } }),
+                &["history_id"],
+            ),
+            false,
+        ),
+        tool(
+            "replay_history_request",
+            "",
+            object_schema(
+                json!({ "history_id": { "type": "string" } }),
+                &["history_id"],
+            ),
+            false,
+        ),
     ]
+}
+
+fn snippet_write_schema(update: bool) -> Value {
+    let mut properties = serde_json::Map::from_iter([
+        ("name".to_owned(), json!({ "type": "string" })),
+        ("description".to_owned(), json!({ "type": "string" })),
+        (
+            "category".to_owned(),
+            json!({ "type": "string", "enum": ["pre_request", "post_response"] }),
+        ),
+        (
+            "kind".to_owned(),
+            json!({ "type": "string", "enum": ["plain", "executable"] }),
+        ),
+        ("source".to_owned(), json!({ "type": "string" })),
+        (
+            "requirements".to_owned(),
+            json!({
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": [
+                        "always", "has_request", "has_response", "has_selection",
+                        "has_request_selection", "has_response_selection", "has_json_selection"
+                    ]
+                },
+                "uniqueItems": true
+            }),
+        ),
+    ]);
+    let required = if update {
+        properties.insert("snippet_id".to_owned(), json!({ "type": "string" }));
+        properties.insert(
+            "expected_updated_at".to_owned(),
+            json!({ "type": "string" }),
+        );
+        vec!["snippet_id", "expected_updated_at"]
+    } else {
+        vec!["name", "category"]
+    };
+    object_schema(Value::Object(properties), &required)
 }
 
 fn enabled_tool_definitions() -> Vec<Value> {
@@ -651,6 +996,81 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing MCP definition for {}", tool.name));
             assert_eq!(definition["description"], tool.description);
             assert_eq!(definition["annotations"]["readOnlyHint"], tool.read_only);
+        }
+    }
+
+    #[test]
+    fn expanded_tools_publish_the_expected_async_and_revision_schemas() {
+        let definitions = tool_definitions();
+        let definition = |name: &str| {
+            definitions
+                .iter()
+                .find(|definition| definition["name"] == name)
+                .unwrap_or_else(|| panic!("missing MCP definition for {name}"))
+        };
+
+        assert_eq!(
+            definition("run_request_sequence")["inputSchema"]["properties"]["request_ids"]["maxItems"],
+            25
+        );
+        assert_eq!(
+            definition("get_request_sequence")["inputSchema"]["required"],
+            json!([])
+        );
+        assert_eq!(
+            definition("run_snippet")["inputSchema"]["required"],
+            json!(["snippet_id", "request_id"])
+        );
+        assert_eq!(
+            definition("save_snippet")["inputSchema"]["required"],
+            json!(["snippet_id", "expected_updated_at"])
+        );
+        assert_eq!(
+            definition("delete_snippet")["inputSchema"]["required"],
+            json!(["snippet_id", "expected_updated_at"])
+        );
+        assert_eq!(
+            definition("execute_http_request")["inputSchema"]["properties"]["overrides"]
+                ["additionalProperties"],
+            false
+        );
+        assert_eq!(
+            definition("query_http_response")["inputSchema"]["required"],
+            json!(["json_pointer"])
+        );
+        assert_eq!(
+            definition("query_http_response")["inputSchema"]["properties"]["limit"]["maximum"],
+            1000
+        );
+        for name in [
+            "get_active_context",
+            "switch_workspace",
+            "rename_collection",
+            "delete_collection",
+            "create_folder",
+            "rename_folder",
+            "move_folder",
+            "delete_folder",
+            "duplicate_request",
+            "move_request",
+            "delete_request",
+            "delete_environment",
+            "delete_environment_variable",
+            "import_requests",
+            "export_request",
+            "run_request_sequence",
+            "get_request_sequence",
+            "list_snippets",
+            "get_snippet",
+            "create_snippet",
+            "save_snippet",
+            "delete_snippet",
+            "run_snippet",
+            "get_history_entry",
+            "open_history_entry",
+            "replay_history_request",
+        ] {
+            let _ = definition(name);
         }
     }
 }

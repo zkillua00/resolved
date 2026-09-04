@@ -389,6 +389,99 @@ fn local_control_mutations_persist_and_redact_secret_values(cx: &mut gpui::TestA
     });
     assert!(read_environment.result.unwrap()["variables"][0]["value"].is_null());
 
+    let folder = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call(
+                "create_folder",
+                serde_json::json!({ "collection_id": collection_id, "name": "Nested" }),
+                cx,
+            )
+        })
+    });
+    assert!(folder.ok, "{:?}", folder.error);
+    let folder_id = folder.result.unwrap()["folder_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let moved = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call(
+                "move_request",
+                serde_json::json!({
+                    "request_id": request_id,
+                    "target_collection_id": collection_id,
+                    "target_folder_id": folder_id
+                }),
+                cx,
+            )
+        })
+    });
+    assert!(moved.ok, "{:?}", moved.error);
+    assert_eq!(moved.result.unwrap()["folder_id"], folder_id);
+    let exported = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call(
+                "export_request",
+                serde_json::json!({ "request_id": request_id, "format": "curl" }),
+                cx,
+            )
+        })
+    });
+    assert!(exported.ok, "{:?}", exported.error);
+    assert!(
+        exported.result.unwrap()["source"]
+            .as_str()
+            .unwrap()
+            .contains("curl")
+    );
+
+    let snippet = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call(
+                "create_snippet",
+                serde_json::json!({
+                    "name": "Authorization header",
+                    "category": "pre_request",
+                    "source": "Bearer {{token}}"
+                }),
+                cx,
+            )
+        })
+    });
+    assert!(snippet.ok, "{:?}", snippet.error);
+    let snippet = snippet.result.unwrap();
+    let snippet_id = snippet["id"].as_str().unwrap().to_owned();
+    let snippet_revision = snippet["updated_at"].as_str().unwrap().to_owned();
+    let saved_snippet = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call(
+                "save_snippet",
+                serde_json::json!({
+                    "snippet_id": snippet_id,
+                    "expected_updated_at": snippet_revision,
+                    "description": "MCP managed"
+                }),
+                cx,
+            )
+        })
+    });
+    assert!(saved_snippet.ok, "{:?}", saved_snippet.error);
+    assert_eq!(saved_snippet.result.unwrap()["description"], "MCP managed");
+
+    let deleted_variable = cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_control_call(
+                "delete_environment_variable",
+                serde_json::json!({
+                    "environment_id": environment_id,
+                    "variable_id": variable_id
+                }),
+                cx,
+            )
+        })
+    });
+    assert!(deleted_variable.ok, "{:?}", deleted_variable.error);
+
     cx.update(|_, cx| {
         app.update(cx, |app, cx| {
             app.set_mcp_tool_enabled("create_collection", false, cx)
@@ -427,9 +520,13 @@ fn local_control_mutations_persist_and_redact_secret_values(cx: &mut gpui::TestA
             .any(|collection| collection.id == collection_id)
     );
     let persisted_environment = persisted.environment(&environment_id).unwrap();
-    assert_eq!(
-        persisted_environment.variables[0].value,
-        "never-return-this"
+    assert!(persisted_environment.variables.is_empty());
+    assert!(
+        store
+            .load_snippets()
+            .unwrap()
+            .iter()
+            .any(|snippet| snippet.id == snippet_id && snippet.description == "MCP managed")
     );
 }
 
@@ -480,6 +577,47 @@ fn mcp_setting_starts_and_stops_the_local_control_transport(cx: &mut gpui::TestA
     assert!(!store.load_app_settings().unwrap().mcp.follow_agent_activity);
 
     cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            assert_eq!(
+                app.mcp_open_tool_groups.len(),
+                crate::control_tools::CONTROL_TOOL_GROUPS.len()
+            );
+            app.set_all_mcp_tool_groups_open(false, cx);
+            assert!(app.mcp_open_tool_groups.is_empty());
+            app.set_all_mcp_tool_groups_open(true, cx);
+            assert_eq!(
+                app.mcp_open_tool_groups.len(),
+                crate::control_tools::CONTROL_TOOL_GROUPS.len()
+            );
+        });
+    });
+
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.set_mcp_tool_group_enabled("requests", false, cx)
+        });
+    });
+    let persisted_settings = store.load_app_settings().unwrap();
+    let request_tools = crate::control_tools::tool_group("requests").unwrap().tools;
+    assert!(
+        request_tools
+            .iter()
+            .all(|tool| !persisted_settings.mcp.enabled_tools.contains(*tool))
+    );
+
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.set_mcp_tool_group_enabled("requests", true, cx)
+        });
+    });
+    let persisted_settings = store.load_app_settings().unwrap();
+    assert!(
+        request_tools
+            .iter()
+            .all(|tool| persisted_settings.mcp.enabled_tools.contains(*tool))
+    );
+
+    cx.update(|_, cx| {
         app.update(cx, |app, cx| app.set_mcp_enabled(false, cx));
     });
     assert!(!descriptor.exists());
@@ -524,7 +662,7 @@ fn remote_workspace_mcp_access_is_hidden_and_rejected_until_enabled(cx: &mut gpu
             let tools = app.handle_control_call("__list_enabled_tools", serde_json::json!({}), cx);
             assert_eq!(
                 tools.result.unwrap()["tools"],
-                serde_json::json!(["status", "list_workspaces"])
+                serde_json::json!(["status", "list_workspaces", "switch_workspace"])
             );
 
             let denied = app.handle_control_call("list_collections", serde_json::json!({}), cx);
@@ -647,18 +785,31 @@ fn mcp_http_execution_and_script_console_use_the_application_pipeline(
 ) {
     use std::io::{Read as _, Write as _};
     use std::net::TcpListener;
+    use std::sync::mpsc;
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback test server");
     let address = listener.local_addr().unwrap();
+    let (requests_tx, requests_rx) = mpsc::channel();
     let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0_u8; 4096];
-        let _ = stream.read(&mut request).unwrap();
-        stream
-            .write_all(
-                b"HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
+        for index in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let request_len = stream.read(&mut request).unwrap();
+            requests_tx
+                .send(String::from_utf8_lossy(&request[..request_len]).into_owned())
+                .unwrap();
+            let body = if index == 0 {
+                r#"{"data":{"documents":[{"id":1,"title":"First","secret":"hidden"},{"id":2,"title":"Second","secret":"hidden"}]}}"#
+            } else {
+                r#"{"ok":true}"#
+            };
+            write!(
+                stream,
+                "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
             )
             .unwrap();
+        }
     });
 
     let directory = tempfile::tempdir().expect("create temporary control database directory");
@@ -700,14 +851,87 @@ fn mcp_http_execution_and_script_console_use_the_application_pipeline(
             request_id
         })
     });
-    let operation_id = cx.update(|window, cx| {
+    let override_operation_id = cx.update(|window, cx| {
         app.update(cx, |app, cx| {
-            app.start_control_http_request(&request_id, window, cx)
-                .unwrap()
+            let response = app.handle_window_control_call(
+                "execute_http_request",
+                serde_json::json!({
+                    "request_id": request_id,
+                    "overrides": {
+                        "method": "PUT",
+                        "query_parameters": [{ "key": "scope", "value": "recent" }],
+                        "headers": [{ "name": "X-Agent", "value": "mcp" }],
+                        "body": "{\"probe\":true}",
+                        "body_mode": "raw",
+                        "raw_body_language": "json"
+                    }
+                }),
+                window,
+                cx,
+            );
+            assert!(response.ok, "{:?}", response.error);
+            response.result.unwrap()["operation_id"].as_u64().unwrap()
+        })
+    });
+    cx.run_until_parked();
+    let overridden_request = requests_rx.recv().unwrap();
+    assert!(overridden_request.starts_with("PUT /items?scope=recent HTTP/1.1"));
+    assert!(overridden_request.contains("x-agent: mcp"));
+    assert!(overridden_request.contains("{\"probe\":true}"));
+    let selected = cx.update(|_, cx| {
+        app.read(cx)
+            .control_query_http_response(serde_json::json!({
+                "operation_id": override_operation_id,
+                "json_pointer": "/data/documents",
+                "projection": { "id": "/id", "title": "/title" },
+                "limit": 1
+            }))
+            .unwrap()
+    });
+    assert_eq!(selected["value"], serde_json::json!([{ "id": 1, "title": "First" }]));
+    assert_eq!(selected["total_items"], 2);
+    assert_eq!(selected["returned_items"], 1);
+    assert_eq!(selected["items_truncated"], true);
+    assert!(!selected.to_string().contains("hidden"));
+    cx.update(|_, cx| {
+        let app = app.read(cx);
+        let (_, saved) = app.workspace.saved_request(&request_id).unwrap();
+        assert_eq!(saved.definition.request.method, "POST");
+        assert!(saved.definition.request.body.is_empty());
+        assert!(saved.definition.request.headers.is_empty());
+    });
+
+    let sequence_id = cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            let response = app.handle_window_control_call(
+                "run_request_sequence",
+                serde_json::json!({ "request_ids": [&request_id, &request_id] }),
+                window,
+                cx,
+            );
+            assert!(response.ok, "{:?}", response.error);
+            response.result.unwrap()["operation_id"].as_u64().unwrap()
         })
     });
     cx.run_until_parked();
     server.join().unwrap();
+    assert_eq!(requests_rx.into_iter().count(), 2);
+
+    let sequence = cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            let response = app.handle_window_control_call(
+                "get_request_sequence",
+                serde_json::json!({ "operation_id": sequence_id }),
+                window,
+                cx,
+            );
+            assert!(response.ok, "{:?}", response.error);
+            response.result.unwrap()
+        })
+    });
+    assert_eq!(sequence["state"], "completed");
+    assert_eq!(sequence["results"].as_array().unwrap().len(), 2);
+    let operation_id = sequence["results"][1]["operation_id"].as_u64().unwrap();
 
     let exchange = cx.update(|_, cx| {
         let app = app.read(cx);

@@ -56,8 +56,9 @@ covered by the [MCP guide](docs/mcp.md). Server operators should start with the
 - Named local workspaces with isolated collections, environments, snippets, and
   request-tab drafts
 - Opt-in local MCP control with an independently configurable tool catalog for
-  HTTP execution and history, script-console evaluation, live WebSockets,
-  collections, saved requests, and environments
+  workspace/context navigation, full collection/folder/request/environment
+  lifecycle, import/export, ordered HTTP execution and history, snippets,
+  script-console evaluation, and live WebSockets
 - Multiple switchable self-hosted server profiles with direct login; session
   tokens are authenticated-encrypted locally, with biometric Keychain
   protection available to provisioned macOS builds
@@ -329,11 +330,13 @@ immediately, including while an input or code editor is focused.
 The Developer Settings page contains the Metrics switch and HUD location
 selector. `⌘⇧M` remains available as a customizable quick toggle.
 
-The MCP page controls the experimental local agent connection and its individual
-tools. MCP is disabled by default. Turning off a tool removes it from subsequent
-MCP discovery responses and also rejects calls from clients with a stale cached
-tool list. Access to connected server workspaces has a separate off-by-default
-switch; server RBAC still applies when it is enabled.
+The MCP page controls the experimental local agent connection and its tools.
+Tool switches are grouped into expandable categories with Expand all, Collapse
+all, Enable all, and Disable all controls. MCP is disabled by default. Turning
+off a tool removes it from subsequent MCP discovery responses and also rejects
+calls from clients with a stale cached tool list. Access to connected server
+workspaces has a separate off-by-default switch; server RBAC still applies when
+it is enabled.
 
 Bindings are divided into five sections so related commands remain easy to
 scan:
@@ -714,8 +717,9 @@ the local user account accordingly.
 Resolved provides an optional MCP stdio adapter for semantic control of the
 running desktop app. MCP is disabled by default. Start Resolved, open
 **Settings -> MCP**, enable the connection, and select only the tools the agent
-needs. Enable **Allow server workspaces** separately if the agent should use the
-active connected-server workspace.
+needs. Tools are organized into expandable categories with per-category bulk
+controls. Enable **Allow server workspaces** separately if the agent should use
+the active connected-server workspace.
 
 Build the adapter separately; it is not currently included in application
 packages:
@@ -738,14 +742,16 @@ Configure the MCP client with the adapter's absolute path:
 
 Only enabled tools are advertised. Clients that cache discovery may need to be
 refreshed or reconnected after a switch changes. Resolved also rejects disabled
-tools server-side. The default **Follow agent activity** setting keeps HTTP,
-script-console, and WebSocket execution visible in the corresponding native
-workspace with an MCP ownership indicator. Server workspace access is off by default; while it is off,
-workspace-scoped tools disappear from discovery whenever a server workspace is
-active. See the [local MCP control guide](docs/mcp.md) for the full tool catalog,
-HTTP execution/results/history, script-console and WebSocket workflows, request
-and environment editing, revision checks, secret redaction, remote-workspace
-RBAC behavior, security boundary, current limits, and troubleshooting.
+tools server-side. The default **Follow agent activity** setting keeps workspace
+changes, ordered HTTP work, script-console activity, history replays, snippets,
+and WebSocket sessions visible in the corresponding native workspace with an
+MCP ownership indicator. Server workspace access is off by default; while it is
+off, workspace-scoped tools disappear from discovery whenever a server
+workspace is active. See the [local MCP control guide](docs/mcp.md) for the full
+tool catalog, lifecycle/import/export operations, HTTP sequences and history,
+snippet, script-console and WebSocket workflows, revision checks, secret
+redaction, remote-workspace RBAC behavior, security boundary, current limits,
+and troubleshooting.
 
 The project uses Rust edition 2024 and has compile-time platform backends for
 Linux, macOS, and Windows. Shared feature code does not select operating

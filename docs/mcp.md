@@ -57,8 +57,9 @@ that cached an older list. Turning MCP off stops the local transport and removes
 its discovery files.
 
 **Allow server workspaces** is a separate, off-by-default switch. While a server
-workspace is active and this switch is off, only `status` and `list_workspaces`
-are advertised; all workspace-scoped tools are also rejected inside the desktop.
+workspace is active and this switch is off, only `status`, `list_workspaces`,
+and `switch_workspace` are advertised, so an agent can still return to a local
+workspace; all other workspace-scoped tools are also rejected inside the desktop.
 Turning it on permits the individually enabled tools to use the active server
 workspace, subject to the signed-in user's server RBAC permissions.
 
@@ -82,26 +83,39 @@ controlled.
 | Tool | Purpose | Required input |
 | --- | --- | --- |
 | `status` | Report the app version, active workspace provider, effective writability, and enabled tools | None |
+| `get_active_context` | Read the active workspace, tab, saved-request association, environment, and execution state | None |
 | `list_workspaces` | List local and connected server workspaces and identify the active workspace | None |
 | `list_collections` | List collections, folder trees, and saved-request summaries in the active workspace | None |
 | `search_requests` | Search saved requests by name or URL; an empty query returns all matches | Optional `query` |
 | `get_request` | Read a saved request, scripts, and timestamps | `request_id` |
 | `get_http_exchange` | Poll the current HTTP operation and read response data, errors, and script reports | Optional `operation_id`, `max_body_bytes` |
+| `query_http_response` | Select and optionally project bounded JSON without returning the full response body | `json_pointer`; optional `operation_id`, `projection`, `limit`, `max_output_bytes` |
+| `get_request_sequence` | Poll a bounded ordered request run and read retained per-request exchanges | Optional `operation_id`, `max_body_bytes` |
 | `list_request_history` | List secret-redacted request history and response summaries | Optional `limit` |
+| `get_history_entry` | Read one secret-redacted history entry | `history_id` |
 | `get_script_console` | Read the latest structured script reports and console output | Optional `operation_id` |
 | `get_websocket_events` | Poll connection, frame, automation, and error events | Optional `connection_id`, `after_event_id`, `limit` |
 | `list_environments` | List environments and their redacted variables | None |
 | `get_environment` | Read one environment and its redacted variables | `environment_id` |
+| `export_request` | Export an HTTP request to any supported command, specification, or client-code format | `request_id`, `format` |
+| `list_snippets` | List snippet metadata without source | None |
+| `get_snippet` | Read one snippet, including source and revision | `snippet_id` |
 
 ### Mutating tools
 
 | Tool | Purpose | Required input |
 | --- | --- | --- |
+| `switch_workspace` | Switch to an ID returned by `list_workspaces`; editor buffers are persisted first | `workspace_id` |
 | `create_collection` | Create a collection in the active workspace | `name` |
+| `rename_collection`, `delete_collection` | Rename or recursively delete a collection | `collection_id`; rename also needs `name` |
+| `create_folder`, `rename_folder`, `move_folder`, `delete_folder` | Manage root or nested collection folders | `collection_id` plus the operation's folder/name fields |
 | `create_request` | Create a saved HTTP or WebSocket request in a collection or folder | `collection_id`, `name`, and either `request` or `websocket` |
 | `save_request` | Update a saved request after an optimistic revision check | `request_id`, `expected_updated_at` |
+| `duplicate_request`, `move_request`, `delete_request` | Copy, relocate, or delete a saved request | `request_id` plus destination fields for move |
 | `set_request_scripts` | Replace both scripts after an optimistic revision check | `request_id`, `expected_updated_at`, `pre_request`, `post_response` |
-| `execute_http_request` | Start a saved HTTP request through the full application pipeline | `request_id` |
+| `import_requests` | Parse request text without executing it and persist every discovered request | `collection_id`, `source`; optional `folder_id` |
+| `execute_http_request` | Start a saved HTTP request through the full application pipeline, optionally with ephemeral overrides | `request_id`; optional `overrides` |
+| `run_request_sequence` | Run 1–25 saved HTTP requests in order, stopping on the first failure | `request_ids` |
 | `cancel_http_request` | Cancel the active HTTP or script-console operation | None |
 | `run_script_console` | Evaluate JavaScript against the latest HTTP exchange | `source` |
 | `connect_websocket` | Open a saved WebSocket request | `request_id` |
@@ -110,8 +124,15 @@ controlled.
 | `disconnect_websocket` | Close the MCP WebSocket session | `connection_id` |
 | `create_environment` | Create an environment | `name` |
 | `rename_environment` | Rename an environment | `environment_id`, `name` |
+| `delete_environment` | Delete an environment | `environment_id` |
 | `set_active_environment` | Select an environment, or clear selection with `null` | `environment_id` |
 | `set_environment_variable` | Create or update an environment variable | `environment_id`; see below |
+| `delete_environment_variable` | Delete one environment variable | `environment_id`, `variable_id` |
+| `create_snippet` | Create a plain or bounded executable snippet | `name`, `category` |
+| `save_snippet`, `delete_snippet` | Update or delete a snippet with optimistic revision protection | `snippet_id`, `expected_updated_at` |
+| `run_snippet` | Run a snippet through the bounded snippet generator against a saved HTTP request | `snippet_id`, `request_id` |
+| `open_history_entry` | Open a redacted history request as a buffered request tab | `history_id` |
+| `replay_history_request` | Replay the stored redacted request through the normal HTTP pipeline | `history_id` |
 
 Mutations target the active workspace. Local changes use the desktop database.
 Remote changes use the signed-in server session, enforce that user's RBAC
@@ -125,13 +146,21 @@ permission is missing.
 | Tool | Required server permissions |
 | --- | --- |
 | `create_collection` | `workspaces.read`, `collections.create` |
+| `rename_collection`, `rename_folder`, `move_folder` | `workspaces.read`, `collections.update` |
+| `delete_collection`, `delete_folder` | `workspaces.read`, `collections.delete` |
+| `create_folder` | `workspaces.read`, `collections.create` |
 | `create_request` | `workspaces.read`, `requests.create` |
+| `duplicate_request`, `import_requests` | `workspaces.read`, `requests.create` |
 | `save_request`, `set_request_scripts` | `workspaces.read`, `requests.update` |
+| `move_request` | `workspaces.read`, `requests.update` |
+| `delete_request` | `workspaces.read`, `requests.delete` |
 | `execute_http_request`, `connect_websocket` | `workspaces.read`; the server also enforces its configured execution policy |
 | `create_environment` | `environments.read`, `environments.create` |
 | `rename_environment` | `environments.read`, `environments.update` |
+| `delete_environment` | `environments.read`, `environments.delete` |
 | `set_environment_variable` (create or metadata change) | `environments.read`, `environments.update` |
 | `set_environment_variable` (value change) | `environments.read`, `environment_values.update` |
+| `delete_environment_variable` | `environments.read`, `environments.update` |
 
 `set_active_environment` changes the desktop user's locally remembered selection
 for that server workspace and requires writable app settings, not a server
@@ -194,6 +223,21 @@ that race after that preflight remain a narrow last-writer-wins case.
 combination of them. Omitted top-level fields are preserved. When `scripts` is
 provided, it replaces the stored scripts object.
 
+`switch_workspace` accepts the exact `local:...` or `upstream:...` identifier
+returned by `list_workspaces`. Resolved snapshots and persists its request-tab,
+snippet, and theme-editor buffers before changing providers, so unsaved request
+drafts remain attached to their original workspace. An active HTTP or script
+console execution blocks switching. Local switches complete before the tool
+returns; a server switch returns `state: "switching"` while the authenticated
+workspace load finishes, so poll `get_active_context` until its `workspace_id`
+matches the target.
+
+`import_requests` auto-detects every format supported by the Import dialog and
+never evaluates pasted source. Local imports validate the full bundle and save
+it atomically. Server imports use the normal authenticated create-request API
+for each parsed item. `export_request` supports all formats exposed by the
+Export dialog, using stable snake-case names from its MCP schema.
+
 ### HTTP execution and script console
 
 `execute_http_request` opens the saved request in Resolved and starts the same
@@ -204,18 +248,58 @@ local or server execution policy, environment mutations, and history. The tool
 returns an `operation_id` immediately. Poll `get_http_exchange` with that ID
 until `state` is `completed` or `failed`.
 
+The optional `overrides` object can replace the method, URL, structured query
+parameters, headers, body, body mode, raw-body language, or structured body
+fields for that execution only. Resolved runs the saved scripts and active
+environment normally, but does not change the saved request or its revision.
+
 Response bodies are returned as UTF-8 when valid and otherwise as base64. Set
 `max_body_bytes` up to 524288 to bound the MCP response; `size_bytes`,
 `body_included_bytes`, and `body_truncated` make truncation explicit. The
 application's normal 64 MiB response buffering limit still applies before this
 smaller MCP projection.
 
+For large JSON responses, `query_http_response` applies an RFC 6901 JSON Pointer
+inside Resolved and returns only the selected value. An optional `projection`
+maps output field names to relative JSON Pointers. If the selected value is an
+array, the projection is applied to each item and `limit` bounds the returned
+items. For example, `{ "json_pointer": "/data/documents", "projection": {
+"id": "/id", "title": "/title" }, "limit": 25 }` returns only those two
+fields from the first 25 documents. `max_output_bytes` rejects an unexpectedly
+large selection instead of silently truncating structured JSON.
+
 After a completed response, `run_script_console` evaluates the supplied source
 with the same post-response runtime used by the UI. It can inspect the request
-and response, log and test, update the active environment, and execute saved
-request chains. Poll `get_script_console` for structured reports and the
-copyable console transcript. `cancel_http_request` cancels either an active HTTP
-pipeline or console evaluation.
+and response through `api.response.text()` and `api.response.json()`, log and
+test, update the active environment, and execute saved request chains. A final
+expression is included in the console output, so
+`api.response.json().data.documents` can be queried directly. Poll
+`get_script_console` for structured reports and the copyable console transcript.
+`cancel_http_request` cancels either an active HTTP pipeline or console
+evaluation.
+
+`run_request_sequence` is a bounded convenience for ordered agent workflows.
+It runs at most 25 saved HTTP requests, one at a time, through that same full
+pipeline and stops on the first failure. Poll `get_request_sequence` with the
+returned operation ID. Its `results` retain a bounded exchange for every
+finished item, while `current_request_id` identifies the visible request.
+
+### Snippets and history
+
+Snippet CRUD uses the same validated, persistent library as the Snippets UI.
+Use the returned RFC 3339 `updated_at` as `expected_updated_at` for save or
+delete. Executable snippets run only through Resolved's snippet generator,
+which enforces its time, memory, source, context, output, and log limits. A
+post-response snippet requires a matching completed MCP HTTP exchange; pass its
+`operation_id` when ambiguity is possible.
+
+History entries contain the stored secret-redacted request and response
+summary; response bodies are not stored in history. `open_history_entry` opens
+the redacted request as an unsaved buffered tab. `replay_history_request` sends
+that redacted request through the normal pipeline, so credentials represented
+as `[REDACTED]` must be restored through environment placeholders or deliberate
+editing before the replay can reproduce an authenticated exchange. MCP does not
+expose history clearing.
 
 ### WebSocket documents and sessions
 

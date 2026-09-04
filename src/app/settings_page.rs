@@ -175,12 +175,7 @@ impl ApiTester {
                 SettingGroup::new()
                     .title("Tools")
                     .description("Disabled tools are neither advertised nor accepted by Resolved.")
-                    .items(
-                        crate::control_tools::CONTROL_TOOLS
-                            .iter()
-                            .map(|tool| self.mcp_tool_setting_item(*tool, cx))
-                            .collect::<Vec<_>>(),
-                    ),
+                    .item(self.mcp_tools_setting_item(cx)),
             );
         let developer_page = SettingPage::new("Developer Settings")
             .description("Enable diagnostics for inspecting Resolved while it is running.")
@@ -260,44 +255,213 @@ impl ApiTester {
         .description("Starts a per-user authenticated control channel for the MCP adapter.")
     }
 
-    fn mcp_tool_setting_item(
-        &self,
-        tool: crate::control_tools::ControlToolDescriptor,
-        cx: &mut Context<Self>,
-    ) -> SettingItem {
+    fn mcp_tools_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
         let this = cx.entity().downgrade();
-        SettingItem::new(
-            tool.label,
-            SettingField::<SharedString>::render(move |_, _, cx| {
-                let Some(entity) = this.upgrade() else {
-                    return div().into_any_element();
-                };
-                let state = entity.read(cx);
-                let checked = state.settings.mcp.enabled_tools.contains(tool.name);
-                let writable = state.settings_writable;
-                let change_this = this.clone();
-                Switch::new(SharedString::from(format!("mcp-tool-{}", tool.name)))
-                    .checked(checked)
-                    .disabled(!writable)
-                    .tooltip(settings_control_tooltip(
-                        writable,
-                        if tool.read_only {
-                            "Allow this read-only MCP tool"
-                        } else {
-                            "Allow this MCP tool to change workspace data"
-                        },
-                    ))
-                    .on_click(move |checked, _, cx| {
-                        if let Some(this) = change_this.upgrade() {
-                            this.update(cx, |this, cx| {
-                                this.set_mcp_tool_enabled(tool.name, *checked, cx);
-                            });
-                        }
-                    })
-                    .into_any_element()
-            }),
-        )
-        .description(tool.description)
+        let search_text =
+            crate::control_tools::CONTROL_TOOL_GROUPS
+                .iter()
+                .flat_map(|group| {
+                    std::iter::once(group.label)
+                        .chain(std::iter::once(group.description))
+                        .chain(group.tools.iter().filter_map(|name| {
+                            crate::control_tools::tool(name).map(|tool| tool.label)
+                        }))
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+
+        SettingItem::render_searchable(search_text, move |_, _, cx| {
+            let Some(entity) = this.upgrade() else {
+                return div().into_any_element();
+            };
+            let state = entity.read(cx);
+            let writable = state.settings_writable;
+            let enabled_tools = state.settings.mcp.enabled_tools.clone();
+            let open_groups = state.mcp_open_tool_groups.clone();
+
+            let expand_this = this.clone();
+            let collapse_this = this.clone();
+            let toggle_this = this.clone();
+            let mut accordion = Accordion::new("mcp-tool-groups")
+                .multiple(true)
+                .on_toggle_click(move |indices, _, cx| {
+                    if let Some(this) = toggle_this.upgrade() {
+                        this.update(cx, |this, cx| {
+                            this.set_mcp_open_tool_groups(indices, cx);
+                        });
+                    }
+                });
+
+            for group in crate::control_tools::CONTROL_TOOL_GROUPS {
+                let enabled_count = group
+                    .tools
+                    .iter()
+                    .filter(|name| enabled_tools.contains(**name))
+                    .count();
+                let open = open_groups.contains(group.id);
+                let title = h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_3()
+                    .child(div().font_semibold().child(group.label))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{enabled_count} of {} enabled", group.tools.len())),
+                    );
+
+                let enable_this = this.clone();
+                let disable_this = this.clone();
+                let group_id = group.id;
+                let mut contents = v_flex().w_full().gap_3().child(
+                    h_flex()
+                        .w_full()
+                        .items_start()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(group.description),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "mcp-enable-group-{group_id}"
+                                    )))
+                                    .label("Enable all")
+                                    .small()
+                                    .ghost()
+                                    .disabled(!writable)
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            if let Some(this) = enable_this.upgrade() {
+                                                this.update(cx, |this, cx| {
+                                                    this.set_mcp_tool_group_enabled(
+                                                        group_id, true, cx,
+                                                    );
+                                                });
+                                            }
+                                        },
+                                    ),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "mcp-disable-group-{group_id}"
+                                    )))
+                                    .label("Disable all")
+                                    .small()
+                                    .ghost()
+                                    .disabled(!writable)
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            if let Some(this) = disable_this.upgrade() {
+                                                this.update(cx, |this, cx| {
+                                                    this.set_mcp_tool_group_enabled(
+                                                        group_id, false, cx,
+                                                    );
+                                                });
+                                            }
+                                        },
+                                    ),
+                                ),
+                        ),
+                );
+
+                for tool_name in group.tools {
+                    let tool = crate::control_tools::tool(tool_name)
+                        .expect("MCP tool groups must reference registered tools");
+                    let checked = enabled_tools.contains(tool.name);
+                    let change_this = this.clone();
+                    contents = contents.child(
+                        h_flex()
+                            .w_full()
+                            .items_start()
+                            .justify_between()
+                            .gap_3()
+                            .py_1()
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .gap_1()
+                                    .child(div().text_sm().child(tool.label))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(tool.description),
+                                    ),
+                            )
+                            .child(
+                                Switch::new(SharedString::from(format!("mcp-tool-{}", tool.name)))
+                                    .checked(checked)
+                                    .disabled(!writable)
+                                    .tooltip(settings_control_tooltip(
+                                        writable,
+                                        if tool.read_only {
+                                            "Allow this read-only MCP tool"
+                                        } else {
+                                            "Allow this MCP tool to change workspace data"
+                                        },
+                                    ))
+                                    .on_click(move |checked, _, cx| {
+                                        if let Some(this) = change_this.upgrade() {
+                                            this.update(cx, |this, cx| {
+                                                this.set_mcp_tool_enabled(tool.name, *checked, cx);
+                                            });
+                                        }
+                                    }),
+                            ),
+                    );
+                }
+
+                accordion = accordion
+                    .item(|item: AccordionItem| item.title(title).open(open).child(contents));
+            }
+
+            v_flex()
+                .w_full()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_end()
+                        .gap_1()
+                        .child(
+                            Button::new("mcp-expand-all-tool-groups")
+                                .label("Expand all")
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    if let Some(this) = expand_this.upgrade() {
+                                        this.update(cx, |this, cx| {
+                                            this.set_all_mcp_tool_groups_open(true, cx);
+                                        });
+                                    }
+                                }),
+                        )
+                        .child(
+                            Button::new("mcp-collapse-all-tool-groups")
+                                .label("Collapse all")
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    if let Some(this) = collapse_this.upgrade() {
+                                        this.update(cx, |this, cx| {
+                                            this.set_all_mcp_tool_groups_open(false, cx);
+                                        });
+                                    }
+                                }),
+                        ),
+                )
+                .child(accordion)
+                .into_any_element()
+        })
     }
 
     fn mcp_follow_agent_activity_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
