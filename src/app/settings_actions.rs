@@ -10,6 +10,26 @@ enum ShortcutRecorderCommand {
 }
 
 impl ApiTester {
+    pub(super) fn set_mcp_follow_agent_activity(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.settings.mcp.follow_agent_activity == enabled {
+            return;
+        }
+        let mut candidate = self.settings.clone();
+        candidate.mcp.follow_agent_activity = enabled;
+        match self.commit_settings(candidate, false, cx) {
+            Ok(()) => {
+                self.settings_notice = Some(if enabled {
+                    "Resolved will follow MCP agent activity.".to_owned()
+                } else {
+                    "Resolved will no longer refocus views as MCP agent activity changes."
+                        .to_owned()
+                });
+            }
+            Err(error) => self.settings_notice = Some(error),
+        }
+        cx.notify();
+    }
+
     pub(super) fn set_mcp_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.settings.mcp.enabled == enabled {
             return;

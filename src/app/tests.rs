@@ -475,6 +475,11 @@ fn mcp_setting_starts_and_stops_the_local_control_transport(cx: &mut gpui::TestA
     );
 
     cx.update(|_, cx| {
+        app.update(cx, |app, cx| app.set_mcp_follow_agent_activity(false, cx));
+    });
+    assert!(!store.load_app_settings().unwrap().mcp.follow_agent_activity);
+
+    cx.update(|_, cx| {
         app.update(cx, |app, cx| app.set_mcp_enabled(false, cx));
     });
     assert!(!descriptor.exists());
@@ -733,21 +738,29 @@ fn mcp_http_execution_and_script_console_use_the_application_pipeline(
     assert_eq!(console["state"], "idle");
     assert!(console["output"].as_str().unwrap().contains("201"));
 
-    cx.update(|_, cx| {
-        app.update(cx, |app, _| {
-            // A UI tab switch replaces these live response fields. Completed MCP
-            // operations must still poll their own exchange snapshot.
-            app.response = None;
-            app.request_error = Some("another tab".to_owned());
+    cx.update(|window, cx| app.update(cx, |app, cx| app.open_blank_request_tab(window, cx)));
+    assert_eq!(
+        cx.update(|_, cx| app.read(cx).active_saved_request_id.clone()),
+        None
+    );
+    let completed_exchange = cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            let response = app.handle_window_control_call(
+                "get_http_exchange",
+                serde_json::json!({ "operation_id": operation_id }),
+                window,
+                cx,
+            );
+            assert!(response.ok, "{:?}", response.error);
+            response.result.unwrap()
         })
-    });
-    let completed_exchange = cx.update(|_, cx| {
-        app.read(cx)
-            .control_get_http_exchange(serde_json::json!({ "operation_id": operation_id }))
-            .unwrap()
     });
     assert_eq!(completed_exchange["state"], "completed");
     assert_eq!(completed_exchange["response"]["status"], 201);
+    assert_eq!(
+        cx.update(|_, cx| app.read(cx).active_saved_request_id.clone()),
+        Some(request_id)
+    );
 }
 
 #[gpui::test]
@@ -818,11 +831,12 @@ fn mcp_websocket_connection_exposes_frames_and_runs_automation(cx: &mut gpui::Te
             request_id
         })
     });
-    let connected = cx.update(|_, cx| {
+    let connected = cx.update(|window, cx| {
         app.update(cx, |app, cx| {
-            app.handle_control_call(
+            app.handle_window_control_call(
                 "connect_websocket",
                 serde_json::json!({ "request_id": request_id }),
+                window,
                 cx,
             )
         })
@@ -854,16 +868,31 @@ fn mcp_websocket_connection_exposes_frames_and_runs_automation(cx: &mut gpui::Te
         automatic_received,
         "automation output should be sent and echoed"
     );
+    cx.update(|_, cx| {
+        let app = app.read(cx);
+        assert_eq!(
+            app.active_saved_request_id.as_deref(),
+            Some(request_id.as_str())
+        );
+        assert_eq!(
+            app.websocket_workspace.mcp_connection_id,
+            Some(connection_id)
+        );
+        assert!(app.websocket_workspace.timeline.iter().any(|event| {
+            event.direction == WebSocketTimelineDirection::Received && event.payload == "automatic"
+        }));
+    });
 
-    let sent = cx.update(|_, cx| {
+    let sent = cx.update(|window, cx| {
         app.update(cx, |app, cx| {
-            app.handle_control_call(
+            app.handle_window_control_call(
                 "send_websocket_message",
                 serde_json::json!({
                     "connection_id": connection_id,
                     "template_id": "template-1",
                     "template_values": { "value": "manual" }
                 }),
+                window,
                 cx,
             )
         })
@@ -891,6 +920,18 @@ fn mcp_websocket_connection_exposes_frames_and_runs_automation(cx: &mut gpui::Te
         }
     }
     assert!(manual_received, "manual output should be sent and echoed");
+    cx.update(|_, cx| {
+        assert!(
+            app.read(cx)
+                .websocket_workspace
+                .timeline
+                .iter()
+                .any(|event| {
+                    event.direction == WebSocketTimelineDirection::Received
+                        && event.payload == "manual"
+                })
+        );
+    });
     server.join().unwrap();
 }
 

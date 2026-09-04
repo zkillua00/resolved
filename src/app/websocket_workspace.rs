@@ -22,7 +22,7 @@ enum WebSocketConnectionStatus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WebSocketTimelineDirection {
+pub(in crate::app) enum WebSocketTimelineDirection {
     Sent,
     Received,
     System,
@@ -50,12 +50,12 @@ pub(in crate::app) enum WebSocketQuickSendStage {
     Fill,
 }
 
-struct WebSocketTimelineEntry {
-    id: u64,
-    direction: WebSocketTimelineDirection,
-    at: chrono::DateTime<Utc>,
-    kind: &'static str,
-    payload: String,
+pub(in crate::app) struct WebSocketTimelineEntry {
+    pub(in crate::app) id: u64,
+    pub(in crate::app) direction: WebSocketTimelineDirection,
+    pub(in crate::app) at: chrono::DateTime<Utc>,
+    pub(in crate::app) kind: &'static str,
+    pub(in crate::app) payload: String,
 }
 
 pub(in crate::app) struct WebSocketWorkspaceState {
@@ -79,7 +79,7 @@ pub(in crate::app) struct WebSocketWorkspaceState {
     section: WebSocketSection,
     status: WebSocketConnectionStatus,
     notice: Option<String>,
-    timeline: Vec<WebSocketTimelineEntry>,
+    pub(in crate::app) timeline: Vec<WebSocketTimelineEntry>,
     pub(in crate::app) timeline_filter: Entity<InputState>,
     timeline_direction_filter: WebSocketTimelineFilter,
     pub(in crate::app) timeline_scroll: ScrollHandle,
@@ -94,6 +94,8 @@ pub(in crate::app) struct WebSocketWorkspaceState {
     command_sender: Option<tokio::sync::mpsc::UnboundedSender<WebSocketCommand>>,
     abort_handle: Option<AbortHandle>,
     generation: u64,
+    pub(in crate::app) mcp_connection_id: Option<u64>,
+    mcp_last_event_id: u64,
     hydrating: bool,
 }
 
@@ -235,6 +237,8 @@ impl WebSocketWorkspaceState {
             command_sender: None,
             abort_handle: None,
             generation: 0,
+            mcp_connection_id: None,
+            mcp_last_event_id: 0,
             hydrating: false,
         }
     }
@@ -296,7 +300,7 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.stop_websocket();
+        self.leave_websocket_view();
         self.websocket_workspace.hydrating = true;
         self.websocket_workspace.url.update(cx, |input, cx| {
             input.set_value(document.url.clone(), window, cx)
@@ -334,6 +338,8 @@ impl ApiTester {
             .clear();
         self.websocket_workspace.quick_send_open = false;
         self.websocket_workspace.quick_send_stage = WebSocketQuickSendStage::Picker;
+        self.websocket_workspace.mcp_connection_id = None;
+        self.websocket_workspace.mcp_last_event_id = 0;
         self.websocket_workspace.library_selection = None;
         self.websocket_workspace
             .library_search
@@ -452,8 +458,25 @@ impl ApiTester {
         self.websocket_workspace.status = WebSocketConnectionStatus::Disconnected;
     }
 
+    pub(super) fn leave_websocket_view(&mut self) {
+        if self.websocket_workspace.mcp_connection_id.is_some() {
+            self.websocket_workspace.command_sender = None;
+            self.websocket_workspace.mcp_connection_id = None;
+            self.websocket_workspace.mcp_last_event_id = 0;
+            self.websocket_workspace.status = WebSocketConnectionStatus::Disconnected;
+            self.websocket_workspace.generation =
+                self.websocket_workspace.generation.wrapping_add(1);
+        } else {
+            self.stop_websocket();
+        }
+    }
+
     fn connect_websocket(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.stop_websocket();
+        if self.websocket_workspace.mcp_connection_id.is_some() {
+            self.stop_mcp_websocket();
+        } else {
+            self.stop_websocket();
+        }
         let document = match self.websocket_document(cx) {
             Ok(document) => document,
             Err(error) => {
@@ -755,6 +778,90 @@ impl ApiTester {
         }
     }
 
+    pub(super) fn attach_mcp_websocket_ui(
+        &mut self,
+        connection_id: u64,
+        status: &str,
+        sender: tokio::sync::mpsc::UnboundedSender<WebSocketCommand>,
+        events: &[super::control::ControlWebSocketEvent],
+    ) {
+        if self.websocket_workspace.mcp_connection_id == Some(connection_id) {
+            self.websocket_workspace.command_sender = Some(sender);
+            self.websocket_workspace.status = match status {
+                "connecting" => WebSocketConnectionStatus::Connecting,
+                "connected" | "closing" => WebSocketConnectionStatus::Connected,
+                _ => WebSocketConnectionStatus::Disconnected,
+            };
+            self.websocket_workspace.section = WebSocketSection::Console;
+            return;
+        }
+        self.websocket_workspace.mcp_connection_id = Some(connection_id);
+        self.websocket_workspace.command_sender = Some(sender);
+        self.websocket_workspace.status = match status {
+            "connecting" => WebSocketConnectionStatus::Connecting,
+            "connected" | "closing" => WebSocketConnectionStatus::Connected,
+            _ => WebSocketConnectionStatus::Disconnected,
+        };
+        self.websocket_workspace.timeline.clear();
+        self.websocket_workspace.mcp_last_event_id = 0;
+        for event in events {
+            self.mirror_mcp_websocket_event(connection_id, event);
+        }
+        self.websocket_workspace.section = WebSocketSection::Console;
+        self.websocket_workspace.timeline_scroll.scroll_to_bottom();
+    }
+
+    pub(super) fn mirror_mcp_websocket_event(
+        &mut self,
+        connection_id: u64,
+        event: &super::control::ControlWebSocketEvent,
+    ) {
+        if self.websocket_workspace.mcp_connection_id != Some(connection_id)
+            || event.id <= self.websocket_workspace.mcp_last_event_id
+        {
+            return;
+        }
+        self.websocket_workspace.mcp_last_event_id = event.id;
+        let direction = match event.direction {
+            "sent" => WebSocketTimelineDirection::Sent,
+            "received" => WebSocketTimelineDirection::Received,
+            _ => WebSocketTimelineDirection::System,
+        };
+        let payload = event
+            .payload
+            .clone()
+            .or_else(|| event.binary.as_deref().map(binary_preview))
+            .unwrap_or_default();
+        let kind = if event.kind == "script_error" {
+            "script error"
+        } else {
+            event.kind
+        };
+        self.push_websocket_timeline(direction, kind, payload);
+        match event.kind {
+            "open" => self.websocket_workspace.status = WebSocketConnectionStatus::Connected,
+            "close" | "error" => {
+                self.websocket_workspace.status = WebSocketConnectionStatus::Disconnected;
+                self.websocket_workspace.command_sender = None;
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn detach_mcp_websocket_ui(&mut self, connection_id: u64, reason: &str) {
+        if self.websocket_workspace.mcp_connection_id != Some(connection_id) {
+            return;
+        }
+        self.websocket_workspace.status = WebSocketConnectionStatus::Disconnected;
+        self.websocket_workspace.command_sender = None;
+        self.push_websocket_timeline(
+            WebSocketTimelineDirection::System,
+            "close",
+            reason.to_owned(),
+        );
+        self.websocket_workspace.mcp_connection_id = None;
+    }
+
     fn clear_websocket_timeline(&mut self) {
         self.websocket_workspace.timeline.clear();
         self.websocket_workspace.selected_timeline_entry = None;
@@ -807,7 +914,8 @@ impl ApiTester {
         self.websocket_workspace
             .sent_session
             .push((Instant::now(), payload.clone()));
-        self.push_websocket_timeline(WebSocketTimelineDirection::Sent, "text", payload);
+        self.push_websocket_timeline(WebSocketTimelineDirection::Sent, "text", payload.clone());
+        self.record_mcp_websocket_ui_text(payload);
         self.websocket_workspace.notice = None;
         cx.notify();
     }
@@ -1559,6 +1667,26 @@ impl ApiTester {
                                     })
                                     .child(status),
                             ),
+                    )
+                    .when(
+                        self.websocket_workspace.mcp_connection_id.is_some(),
+                        |this| {
+                            this.child(
+                                div()
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_full()
+                                    .bg(cx.theme().info.opacity(0.12))
+                                    .text_xs()
+                                    .font_semibold()
+                                    .text_color(cx.theme().info)
+                                    .child(if connected {
+                                        "MCP controlled"
+                                    } else {
+                                        "MCP session"
+                                    }),
+                            )
+                        },
                     )
                     .child(
                         Button::new("websocket-connect")

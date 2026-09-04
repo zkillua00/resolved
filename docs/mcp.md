@@ -68,6 +68,15 @@ narrowed first. Existing installations keep their persisted allowlist when an
 upgrade adds tools, so newly introduced execution or WebSocket tools must be
 enabled deliberately in Settings.
 
+**Follow agent activity** is enabled by default. Execution-oriented calls keep
+the relevant saved request visible as the agent changes context: HTTP calls show
+the native request and response stages, script-console calls select the Scripts
+console, and WebSocket calls select the WebSocket console. Turn it off to stop
+polling and session activity from refocusing the visible tab. Starting an HTTP
+execution still opens its saved request because it runs through the app's active
+request pipeline. The execution surfaces label agent-owned activity as MCP
+controlled.
+
 ### Read-only tools
 
 | Tool | Purpose | Required input |
@@ -230,7 +239,9 @@ payloads use base64, and every event reports its original and included sizes.
 saved JSONL messages produce one frame per record. `run_websocket_replay`
 resolves environment placeholders and preserves recorded frame delays. Enabled
 automation runs on open and message events and its sends and logs appear in the
-same event stream. Switching workspaces, disabling MCP, disabling
+same MCP event stream and in the native WebSocket timeline in real time. The
+visible session is labeled **MCP controlled**; user-sent frames on that shared
+connection are also retained in the MCP event stream. Switching workspaces, disabling MCP, disabling
 `connect_websocket`, or revoking server-workspace MCP access closes the MCP
 connection.
 
@@ -301,9 +312,9 @@ finished.
 The MCP surface does not expose arbitrary SQL, unrestricted filesystem or shell
 execution, server administration, shared-history administration, or generic UI
 automation. HTTP and WebSocket operations intentionally use saved requests and
-the application's bounded runtimes and network policies. MCP WebSocket sessions
-are separate from the visible WebSocket console, though both use the same core
-wire and automation implementations.
+the application's bounded runtimes and network policies. Agent-owned HTTP,
+script-console, and WebSocket execution is projected into the same native
+surfaces used for interactive work rather than a hidden duplicate UI.
 
 The MCP transport belongs to the desktop client and is never exposed by the
 collaboration server. When a server workspace is active, the desktop forwards

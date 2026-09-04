@@ -41,6 +41,9 @@ pub struct AppSettings {
 #[serde(default)]
 pub struct McpSettings {
     pub enabled: bool,
+    /// Keep the native workspace focused on the HTTP, script-console, or
+    /// WebSocket execution currently being driven through MCP.
+    pub follow_agent_activity: bool,
     /// Allow workspace-scoped MCP tools to inspect or change connected server
     /// workspaces. Server RBAC remains authoritative when this is enabled.
     pub allow_remote_workspaces: bool,
@@ -61,6 +64,7 @@ impl Default for McpSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            follow_agent_activity: true,
             allow_remote_workspaces: false,
             enabled_tools: default_mcp_tools(),
             extra: BTreeMap::new(),
@@ -807,6 +811,7 @@ mod tests {
         assert_eq!(settings.formatter, FormatterSettings::default());
         assert_eq!(settings.mcp, McpSettings::default());
         assert!(!settings.mcp.enabled);
+        assert!(settings.mcp.follow_agent_activity);
         assert!(!settings.mcp.allow_remote_workspaces);
         assert_eq!(
             settings.mcp.enabled_tools.len(),
@@ -822,6 +827,7 @@ mod tests {
         let settings: AppSettings = serde_json::from_value(serde_json::json!({
             "mcp": {
                 "enabled": true,
+                "follow_agent_activity": false,
                 "allow_remote_workspaces": true,
                 "enabled_tools": ["status", "future_tool"],
                 "future_policy": "prompt"
@@ -830,6 +836,7 @@ mod tests {
         .unwrap();
 
         assert!(settings.mcp.enabled);
+        assert!(!settings.mcp.follow_agent_activity);
         assert!(settings.mcp.allow_remote_workspaces);
         assert!(settings.mcp.tool_enabled("status"));
         assert!(!settings.mcp.tool_enabled("get_request"));

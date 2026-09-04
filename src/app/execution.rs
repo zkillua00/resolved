@@ -55,6 +55,8 @@ impl ApiTester {
 
         self.dismiss_template_variable_popover();
         self.request_notice = None;
+        self.mcp_script_console_operation_id = None;
+        self.mcp_script_console_request_id = None;
         let template = self.request_template(cx);
         self.begin_request_template(template, window, cx);
     }
@@ -95,6 +97,7 @@ impl ApiTester {
         self.open_saved_request_tab(collection_id, request_id.to_owned(), window, cx);
         let operation_id = self.begin_request_template(template, window, cx);
         self.mcp_http_operation_id = Some(operation_id);
+        self.mcp_http_request_id = Some(request_id.to_owned());
         self.mcp_http_exchange = None;
         Ok(operation_id)
     }

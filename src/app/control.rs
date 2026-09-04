@@ -27,13 +27,13 @@ impl ControlWebSocketStatus {
 }
 
 #[derive(Clone, Debug)]
-struct ControlWebSocketEvent {
-    id: u64,
+pub(super) struct ControlWebSocketEvent {
+    pub(super) id: u64,
     at: chrono::DateTime<Utc>,
-    direction: &'static str,
-    kind: &'static str,
-    payload: Option<String>,
-    binary: Option<Vec<u8>>,
+    pub(super) direction: &'static str,
+    pub(super) kind: &'static str,
+    pub(super) payload: Option<String>,
+    pub(super) binary: Option<Vec<u8>>,
 }
 
 pub(super) struct ControlWebSocketConnection {
@@ -396,6 +396,15 @@ async fn reload_remote_environments(
 }
 
 impl ApiTester {
+    pub(super) fn record_mcp_websocket_ui_text(&mut self, payload: String) {
+        let Some(connection_id) = self.websocket_workspace.mcp_connection_id else {
+            return;
+        };
+        if let Ok(connection) = self.control_websocket_mut(connection_id) {
+            connection.push_event("sent", "text", Some(payload));
+        }
+    }
+
     pub(super) fn capture_mcp_http_exchange(&mut self, operation_id: u64) {
         if self.mcp_http_operation_id != Some(operation_id) {
             return;
@@ -450,6 +459,7 @@ impl ApiTester {
         if let Some(connection) = self.mcp_websocket.take() {
             let _ = connection.sender.send(WebSocketCommand::Close);
             connection.abort_handle.abort();
+            self.detach_mcp_websocket_ui(connection.id, "MCP session stopped");
         }
     }
 
@@ -487,7 +497,17 @@ impl ApiTester {
                 };
                 let dispatch = if matches!(
                     call.method.as_str(),
-                    "execute_http_request" | "run_script_console"
+                    "execute_http_request"
+                        | "get_request"
+                        | "get_http_exchange"
+                        | "cancel_http_request"
+                        | "run_script_console"
+                        | "get_script_console"
+                        | "connect_websocket"
+                        | "send_websocket_message"
+                        | "get_websocket_events"
+                        | "run_websocket_replay"
+                        | "disconnect_websocket"
                 ) {
                     let result = cx.update(|cx| {
                         let window_handle = cx
@@ -576,7 +596,7 @@ impl ApiTester {
         }
     }
 
-    fn handle_window_control_call(
+    pub(super) fn handle_window_control_call(
         &mut self,
         method: &str,
         params: Value,
@@ -587,6 +607,11 @@ impl ApiTester {
             return response;
         }
         let result = match method {
+            "get_request" => required_string(&params, "request_id").and_then(|request_id| {
+                let result = self.control_get_request(params)?;
+                self.follow_mcp_request_context(&request_id, window, cx);
+                Ok(result)
+            }),
             "execute_http_request" => {
                 required_string(&params, "request_id").and_then(|request_id| {
                     self.start_control_http_request(&request_id, window, cx)
@@ -594,14 +619,126 @@ impl ApiTester {
                 })
             }
             "run_script_console" => required_string(&params, "source").and_then(|source| {
+                if let Some(request_id) = self.mcp_http_request_id.clone() {
+                    self.follow_mcp_request_context(&request_id, window, cx);
+                }
                 self.start_control_script_console(source, window, cx)
                     .map(|operation_id| json!({ "operation_id": operation_id, "state": "running" }))
             }),
+            "get_http_exchange" => {
+                if let Some(request_id) = self.mcp_http_request_id.clone() {
+                    self.follow_mcp_request_context(&request_id, window, cx);
+                }
+                self.control_get_http_exchange(params)
+            }
+            "cancel_http_request" => {
+                if let Some(request_id) = self.mcp_http_request_id.clone() {
+                    self.follow_mcp_request_context(&request_id, window, cx);
+                }
+                self.control_cancel_http_request(cx)
+            }
+            "get_script_console" => {
+                if let Some(request_id) = self.mcp_script_console_request_id.clone() {
+                    self.follow_mcp_request_context(&request_id, window, cx);
+                    self.response_tab = ResponseTab::Scripts;
+                }
+                self.control_get_script_console(params)
+            }
+            "connect_websocket" => required_string(&params, "request_id").and_then(|request_id| {
+                self.follow_mcp_request_context(&request_id, window, cx);
+                let result = self.control_connect_websocket(params, cx)?;
+                if let Some(connection_id) = result.get("connection_id").and_then(Value::as_u64) {
+                    self.attach_mcp_websocket_context(connection_id);
+                }
+                Ok(result)
+            }),
+            "send_websocket_message" => {
+                self.follow_mcp_websocket_context(&params, window, cx);
+                self.control_send_websocket_message(params, cx)
+            }
+            "get_websocket_events" => {
+                self.follow_mcp_websocket_context(&params, window, cx);
+                self.control_get_websocket_events(params)
+            }
+            "run_websocket_replay" => {
+                self.follow_mcp_websocket_context(&params, window, cx);
+                self.control_run_websocket_replay(params)
+            }
+            "disconnect_websocket" => {
+                self.follow_mcp_websocket_context(&params, window, cx);
+                self.control_disconnect_websocket(params)
+            }
             _ => Err(format!("unknown window control method '{method}'")),
         };
         match result {
             Ok(result) => ControlResponse::success(result),
             Err(error) => ControlResponse::error(error),
+        }
+    }
+
+    fn follow_mcp_request_context(
+        &mut self,
+        request_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.settings.mcp.follow_agent_activity {
+            return;
+        }
+        if self.active_saved_request_id.as_deref() == Some(request_id) {
+            if self.workspace_tabs.active() != ActiveWorkspaceTab::Request {
+                self.activate_request_tab(self.request_tabs.active_tab_id().clone(), window, cx);
+            }
+            return;
+        }
+        let collection_id = self
+            .workspace
+            .saved_request(request_id)
+            .map(|(collection, _)| collection.id.clone());
+        if let Some(collection_id) = collection_id {
+            self.open_saved_request_tab(collection_id, request_id.to_owned(), window, cx);
+        }
+    }
+
+    fn follow_mcp_websocket_context(
+        &mut self,
+        params: &Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.settings.mcp.follow_agent_activity {
+            return;
+        }
+        let requested_id = params.get("connection_id").and_then(Value::as_u64);
+        let context = self.mcp_websocket.as_ref().and_then(|connection| {
+            requested_id
+                .is_none_or(|id| id == connection.id)
+                .then(|| (connection.id, connection.request_id.clone()))
+        });
+        if let Some((connection_id, request_id)) = context {
+            self.follow_mcp_request_context(&request_id, window, cx);
+            self.attach_mcp_websocket_context(connection_id);
+        }
+    }
+
+    fn attach_mcp_websocket_context(&mut self, connection_id: u64) {
+        let context = self.mcp_websocket.as_ref().and_then(|connection| {
+            (connection.id == connection_id).then(|| {
+                (
+                    connection.request_id.clone(),
+                    connection.status.as_str(),
+                    connection.sender.clone(),
+                    connection.events.clone(),
+                )
+            })
+        });
+        let Some((request_id, status, sender, events)) = context else {
+            return;
+        };
+        if self.active_saved_request_id.as_deref() == Some(request_id.as_str())
+            && self.request_tabs.active().template().is_websocket()
+        {
+            self.attach_mcp_websocket_ui(connection_id, status, sender, &events);
         }
     }
 
@@ -1095,6 +1232,7 @@ impl ApiTester {
                 self.workspace_writable
             },
             "remote_workspace_access": self.settings.mcp.allow_remote_workspaces,
+            "follow_agent_activity": self.settings.mcp.follow_agent_activity,
             "mcp_websocket": self.mcp_websocket.as_ref().map(|connection| json!({
                 "connection_id": connection.id,
                 "request_id": connection.request_id,
@@ -1468,10 +1606,7 @@ impl ApiTester {
             }
         };
 
-        if let Some(connection) = self.mcp_websocket.take() {
-            let _ = connection.sender.send(WebSocketCommand::Close);
-            connection.abort_handle.abort();
-        }
+        self.stop_mcp_websocket();
         self.mcp_websocket_generation = self.mcp_websocket_generation.wrapping_add(1).max(1);
         let connection_id = self.mcp_websocket_generation;
         let (command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -1804,19 +1939,25 @@ impl ApiTester {
             }
         };
         let sent_count = commands.len();
-        let connection = self.control_websocket_mut(params.connection_id)?;
         for command in commands.drain(..) {
             sender
                 .send(command.clone())
                 .map_err(|_| "The WebSocket connection is no longer available.".to_owned())?;
-            match command {
-                WebSocketCommand::SendText(payload) => {
-                    connection.push_event("sent", "text", Some(payload))
+            let mirrored = {
+                let connection = self.control_websocket_mut(params.connection_id)?;
+                match command {
+                    WebSocketCommand::SendText(payload) => {
+                        connection.push_event("sent", "text", Some(payload))
+                    }
+                    WebSocketCommand::SendBinary(bytes) => {
+                        connection.push_binary_event("sent", "binary", bytes)
+                    }
+                    WebSocketCommand::Close => unreachable!(),
                 }
-                WebSocketCommand::SendBinary(bytes) => {
-                    connection.push_binary_event("sent", "binary", bytes)
-                }
-                WebSocketCommand::Close => unreachable!(),
+                connection.events.last().cloned()
+            };
+            if let Some(event) = mirrored {
+                self.mirror_mcp_websocket_event(params.connection_id, &event);
             }
         }
         cx.notify();
@@ -1966,25 +2107,34 @@ impl ApiTester {
             connection_id: u64,
         }
         let params: Params = decode(params)?;
-        let connection = self.control_websocket_mut(params.connection_id)?;
-        if matches!(
-            connection.status,
-            ControlWebSocketStatus::Disconnected | ControlWebSocketStatus::Failed
-        ) {
-            return Ok(json!({ "closed": false, "state": connection.status.as_str() }));
+        let (state, mirrored) = {
+            let connection = self.control_websocket_mut(params.connection_id)?;
+            if matches!(
+                connection.status,
+                ControlWebSocketStatus::Disconnected | ControlWebSocketStatus::Failed
+            ) {
+                return Ok(json!({ "closed": false, "state": connection.status.as_str() }));
+            }
+            if connection.status == ControlWebSocketStatus::Connecting {
+                connection.abort_handle.abort();
+                connection.status = ControlWebSocketStatus::Disconnected;
+                connection.push_event("system", "close", Some("Connection cancelled".to_owned()));
+            } else {
+                connection
+                    .sender
+                    .send(WebSocketCommand::Close)
+                    .map_err(|_| "The WebSocket connection is no longer available.".to_owned())?;
+                connection.status = ControlWebSocketStatus::Closing;
+            }
+            (
+                connection.status.as_str(),
+                connection.events.last().cloned(),
+            )
+        };
+        if let Some(event) = mirrored {
+            self.mirror_mcp_websocket_event(params.connection_id, &event);
         }
-        if connection.status == ControlWebSocketStatus::Connecting {
-            connection.abort_handle.abort();
-            connection.status = ControlWebSocketStatus::Disconnected;
-            connection.push_event("system", "close", Some("Connection cancelled".to_owned()));
-        } else {
-            connection
-                .sender
-                .send(WebSocketCommand::Close)
-                .map_err(|_| "The WebSocket connection is no longer available.".to_owned())?;
-            connection.status = ControlWebSocketStatus::Closing;
-        }
-        Ok(json!({ "closed": true, "state": connection.status.as_str() }))
+        Ok(json!({ "closed": true, "state": state }))
     }
 
     fn control_websocket_mut(
@@ -2008,52 +2158,58 @@ impl ApiTester {
         connection_id: u64,
         incoming: ControlWebSocketIncoming,
     ) {
-        let Some(connection) = self.mcp_websocket.as_mut() else {
-            return;
+        let mirrored = {
+            let Some(connection) = self.mcp_websocket.as_mut() else {
+                return;
+            };
+            if connection.id != connection_id {
+                return;
+            }
+            match incoming {
+                ControlWebSocketIncoming::Wire(WebSocketSignal::Connected) => {
+                    connection.status = ControlWebSocketStatus::Connected;
+                    connection.notice = None;
+                    connection.push_event("system", "open", Some("Connected".to_owned()));
+                }
+                ControlWebSocketIncoming::Wire(WebSocketSignal::Text(payload)) => {
+                    connection.push_event("received", "text", Some(payload));
+                }
+                ControlWebSocketIncoming::Wire(WebSocketSignal::Binary(bytes)) => {
+                    connection.push_binary_event("received", "binary", bytes);
+                }
+                ControlWebSocketIncoming::Wire(WebSocketSignal::Ping(bytes)) => {
+                    connection.push_binary_event("received", "ping", bytes);
+                }
+                ControlWebSocketIncoming::Wire(WebSocketSignal::Pong(bytes)) => {
+                    connection.push_binary_event("received", "pong", bytes);
+                }
+                ControlWebSocketIncoming::Wire(WebSocketSignal::Closed(reason)) => {
+                    connection.status = ControlWebSocketStatus::Disconnected;
+                    connection.push_event(
+                        "system",
+                        "close",
+                        Some(reason.unwrap_or_else(|| "Connection closed".to_owned())),
+                    );
+                }
+                ControlWebSocketIncoming::Wire(WebSocketSignal::Failed(error)) => {
+                    connection.status = ControlWebSocketStatus::Failed;
+                    connection.notice = Some(error.clone());
+                    connection.push_event("system", "error", Some(error));
+                }
+                ControlWebSocketIncoming::SentText(payload) => {
+                    connection.push_event("sent", "text", Some(payload));
+                }
+                ControlWebSocketIncoming::ScriptLog(log) => {
+                    connection.push_event("system", "script", Some(log));
+                }
+                ControlWebSocketIncoming::ScriptError(error) => {
+                    connection.push_event("system", "script_error", Some(error));
+                }
+            }
+            connection.events.last().cloned()
         };
-        if connection.id != connection_id {
-            return;
-        }
-        match incoming {
-            ControlWebSocketIncoming::Wire(WebSocketSignal::Connected) => {
-                connection.status = ControlWebSocketStatus::Connected;
-                connection.notice = None;
-                connection.push_event("system", "open", Some("Connected".to_owned()));
-            }
-            ControlWebSocketIncoming::Wire(WebSocketSignal::Text(payload)) => {
-                connection.push_event("received", "text", Some(payload));
-            }
-            ControlWebSocketIncoming::Wire(WebSocketSignal::Binary(bytes)) => {
-                connection.push_binary_event("received", "binary", bytes);
-            }
-            ControlWebSocketIncoming::Wire(WebSocketSignal::Ping(bytes)) => {
-                connection.push_binary_event("received", "ping", bytes);
-            }
-            ControlWebSocketIncoming::Wire(WebSocketSignal::Pong(bytes)) => {
-                connection.push_binary_event("received", "pong", bytes);
-            }
-            ControlWebSocketIncoming::Wire(WebSocketSignal::Closed(reason)) => {
-                connection.status = ControlWebSocketStatus::Disconnected;
-                connection.push_event(
-                    "system",
-                    "close",
-                    Some(reason.unwrap_or_else(|| "Connection closed".to_owned())),
-                );
-            }
-            ControlWebSocketIncoming::Wire(WebSocketSignal::Failed(error)) => {
-                connection.status = ControlWebSocketStatus::Failed;
-                connection.notice = Some(error.clone());
-                connection.push_event("system", "error", Some(error));
-            }
-            ControlWebSocketIncoming::SentText(payload) => {
-                connection.push_event("sent", "text", Some(payload));
-            }
-            ControlWebSocketIncoming::ScriptLog(log) => {
-                connection.push_event("system", "script", Some(log));
-            }
-            ControlWebSocketIncoming::ScriptError(error) => {
-                connection.push_event("system", "script_error", Some(error));
-            }
+        if let Some(event) = mirrored {
+            self.mirror_mcp_websocket_event(connection_id, &event);
         }
     }
 

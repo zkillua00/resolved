@@ -360,8 +360,14 @@ impl ApiTester {
         self.mcp_script_console_generation =
             self.mcp_script_console_generation.wrapping_add(1).max(1);
         let operation_id = self.mcp_script_console_generation;
-        self.mcp_script_console_operation_id = Some(operation_id);
+        self.mcp_script_console_operation_id = mcp_owned.then_some(operation_id);
+        self.mcp_script_console_request_id = mcp_owned
+            .then(|| self.active_saved_request_id.clone())
+            .flatten();
         self.mcp_script_console_owned = mcp_owned;
+        if mcp_owned {
+            self.response_tab = ResponseTab::Scripts;
+        }
 
         let generation = self.request_generation;
         let tab_id = self.request_tabs.active_tab_id().clone();
@@ -748,6 +754,28 @@ impl ApiTester {
                             .text_color(cx.theme().muted_foreground),
                     )
                     .child(div().text_sm().font_semibold().child("Script console"))
+                    .when(
+                        self.active_saved_request_id.as_deref()
+                            == self.mcp_script_console_request_id.as_deref()
+                            && self.mcp_script_console_operation_id.is_some(),
+                        |this| {
+                            this.child(
+                                div()
+                                    .px_2()
+                                    .py(px(2.))
+                                    .rounded_full()
+                                    .bg(cx.theme().info.opacity(0.12))
+                                    .text_xs()
+                                    .font_semibold()
+                                    .text_color(cx.theme().info)
+                                    .child(if self.script_console_running {
+                                        "MCP running"
+                                    } else {
+                                        "MCP"
+                                    }),
+                            )
+                        },
+                    )
                     .child(
                         div()
                             .text_xs()

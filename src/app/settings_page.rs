@@ -167,6 +167,7 @@ impl ApiTester {
                     )
                     .items([
                         self.mcp_enabled_setting_item(cx),
+                        self.mcp_follow_agent_activity_setting_item(cx),
                         self.mcp_remote_workspaces_setting_item(cx),
                     ]),
             )
@@ -297,6 +298,40 @@ impl ApiTester {
             }),
         )
         .description(tool.description)
+    }
+
+    fn mcp_follow_agent_activity_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Follow agent activity",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let checked = state.settings.mcp.follow_agent_activity;
+                let writable = state.settings_writable;
+                let change_this = this.clone();
+                Switch::new("mcp-follow-agent-activity")
+                    .checked(checked)
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        "Keep the visible workspace on the request the MCP agent is using",
+                    ))
+                    .on_click(move |checked, _, cx| {
+                        if let Some(this) = change_this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.set_mcp_follow_agent_activity(*checked, cx);
+                            });
+                        }
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description(
+            "Shows the HTTP response, script console, or WebSocket console as the agent changes execution context.",
+        )
     }
 
     fn mcp_remote_workspaces_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {

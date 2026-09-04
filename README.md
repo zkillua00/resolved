@@ -738,7 +738,9 @@ Configure the MCP client with the adapter's absolute path:
 
 Only enabled tools are advertised. Clients that cache discovery may need to be
 refreshed or reconnected after a switch changes. Resolved also rejects disabled
-tools server-side. Server workspace access is off by default; while it is off,
+tools server-side. The default **Follow agent activity** setting keeps HTTP,
+script-console, and WebSocket execution visible in the corresponding native
+workspace with an MCP ownership indicator. Server workspace access is off by default; while it is off,
 workspace-scoped tools disappear from discovery whenever a server workspace is
 active. See the [local MCP control guide](docs/mcp.md) for the full tool catalog,
 HTTP execution/results/history, script-console and WebSocket workflows, request

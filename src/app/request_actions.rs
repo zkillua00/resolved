@@ -810,7 +810,7 @@ impl ApiTester {
         if let Some(document) = websocket {
             self.load_websocket_document(document, window, cx);
         } else {
-            self.stop_websocket();
+            self.leave_websocket_view();
         }
         let query_params = if request.query_params.is_empty() {
             query_params_from_url(&request.url)
