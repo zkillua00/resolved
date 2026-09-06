@@ -31,14 +31,14 @@ index 6be242e..ab603aa 100644
      /// Add a page to the settings.
      pub fn page(mut self, page: SettingPage) -> Self {
          self.pages.push(page);
-@@ -127,6 +135,7 @@ impl Settings {
- 
-         Sidebar::left()
+@@ -147,6 +155,7 @@ impl Settings {
              .w(relative(1.))
              .border_0()
              .refine_style(&self.sidebar_style)
 +            .content_top_inset(self.content_top_inset)
              .collapsed(false)
+             .header(
+                 div()
 @@ -249,6 +258,14 @@ impl RenderOnce for Settings {
                  deferred_scroll_group_ix: None,
              }
