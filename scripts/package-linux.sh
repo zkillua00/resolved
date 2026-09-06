@@ -7,11 +7,11 @@ format="${2:-all}"
 
 case "$profile" in
     debug)
-        cargo_arguments="build"
+        cargo_arguments="build --locked"
         binary_dir="debug"
         ;;
     release)
-        cargo_arguments="build --release"
+        cargo_arguments="build --release --locked"
         binary_dir="release"
         ;;
     *)
@@ -65,6 +65,7 @@ fi
 "$project_dir/scripts/cargo.sh" $cargo_arguments
 
 version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$project_dir/Cargo.toml" | sed -n '1p')"
+version="${RESOLVED_BUILD_VERSION:-$version}"
 case "$(uname -m)" in
     x86_64)
         deb_architecture="amd64"

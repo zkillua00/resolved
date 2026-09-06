@@ -2157,7 +2157,7 @@ impl ApiTester {
         );
         Ok(json!({
             "product": PRODUCT_NAME,
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": env!("RESOLVED_BUILD_VERSION"),
             "protocol_version": crate::control_server::CONTROL_PROTOCOL_VERSION,
             "active_workspace": self.workspace_providers.active_id().to_string(),
             "workspace_provider": if remote { "remote" } else { "local" },

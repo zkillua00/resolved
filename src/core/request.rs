@@ -15,7 +15,7 @@ use url::Url;
 use super::DbStringEnum;
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-const DEFAULT_USER_AGENT: &str = concat!("resolved/", env!("CARGO_PKG_VERSION"));
+const DEFAULT_USER_AGENT: &str = concat!("resolved/", env!("RESOLVED_BUILD_VERSION"));
 const MAX_BUFFERED_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// Common HTTP methods offered by editable method controls and script
@@ -1482,7 +1482,7 @@ mod tests {
         assert!(received.starts_with("post /echo http/1.1\r\n"));
         assert!(received.contains(concat!(
             "user-agent: resolved/",
-            env!("CARGO_PKG_VERSION"),
+            env!("RESOLVED_BUILD_VERSION"),
             "\r\n"
         )));
         assert!(received.contains("x-test-request: yes\r\n"));

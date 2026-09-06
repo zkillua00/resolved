@@ -56,7 +56,7 @@ fn main() {
                     "capabilities": { "tools": { "listChanged": false } },
                     "serverInfo": {
                         "name": "resolved-mcp",
-                        "version": env!("CARGO_PKG_VERSION")
+                        "version": env!("RESOLVED_BUILD_VERSION")
                     }
                 }),
             ),
