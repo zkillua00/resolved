@@ -947,6 +947,9 @@ impl ApiTester {
             script_console_history_cursor: None,
             script_console_history_draft: String::new(),
             script_console_scroll: ScrollHandle::new(),
+            script_console_highlights: RefCell::new(
+                script_console::ConsoleHighlightCache::default(),
+            ),
             script_console_expanded_rows: HashSet::new(),
             script_console_hidden_rows: 0,
             preview_error: None,

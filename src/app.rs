@@ -312,6 +312,7 @@ pub struct ApiTester {
     script_console_history_cursor: Option<usize>,
     script_console_history_draft: String,
     script_console_scroll: ScrollHandle,
+    script_console_highlights: RefCell<script_console::ConsoleHighlightCache>,
     script_console_expanded_rows: HashSet<String>,
     script_console_hidden_rows: usize,
     preview_error: Option<String>,

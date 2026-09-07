@@ -551,6 +551,9 @@ impl ApiTester {
     pub(super) fn render_script_results(&self, cx: &mut Context<Self>) -> AnyElement {
         let model = self.visible_script_console_model();
         let row_count = model.row_count();
+        // Keep only the visible transcript, so clearing/switching tabs releases cached text.
+        self.script_console_highlights.borrow_mut().retain(&model);
+
         let prompt_lines = self
             .script_console_input
             .read(cx)
@@ -667,7 +670,9 @@ impl ApiTester {
                                         .min_w_0()
                                         .whitespace_normal()
                                         .child(if is_command {
-                                            console_command_text(&row.message, cx)
+                                            self.script_console_highlights
+                                                .borrow_mut()
+                                                .text(&row.message, &cx.theme().highlight_theme)
                                         } else {
                                             gpui::StyledText::new(row.message.clone())
                                         })
@@ -976,10 +981,158 @@ mod interactive_tests {
     }
 }
 
-fn console_command_text(source: &str, cx: &App) -> gpui::StyledText {
+type ConsoleHighlights = Vec<(std::ops::Range<usize>, gpui::HighlightStyle)>;
+
+/// Highlight submitted inputs once, not once per row on every hover/caret repaint.
+#[derive(Default)]
+pub(super) struct ConsoleHighlightCache {
+    theme: Option<Arc<gpui_component::highlighter::HighlightTheme>>,
+    entries: HashMap<String, ConsoleHighlights>,
+    highlighter: Option<gpui_component::highlighter::SyntaxHighlighter>,
+    previous_end: Option<(usize, tree_sitter::Point)>,
+}
+
+impl ConsoleHighlightCache {
+    fn retain(&mut self, model: &ScriptConsoleModel) {
+        let commands = model
+            .sections
+            .iter()
+            .flat_map(|section| &section.rows)
+            .filter(|row| row.tone == ScriptConsoleTone::Command)
+            .map(|row| row.message.as_str())
+            .collect::<HashSet<_>>();
+        self.entries
+            .retain(|source, _| commands.contains(source.as_str()));
+    }
+
+    fn text(
+        &mut self,
+        source: &str,
+        theme: &Arc<gpui_component::highlighter::HighlightTheme>,
+    ) -> gpui::StyledText {
+        if !self
+            .theme
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, theme))
+        {
+            self.entries.clear();
+            self.theme = Some(theme.clone());
+        }
+        if !self.entries.contains_key(source) {
+            let highlighter = self.highlighter.get_or_insert_with(|| {
+                gpui_component::highlighter::SyntaxHighlighter::new("javascript")
+            });
+            let end = tree_sitter::Point::new(
+                source.bytes().filter(|byte| *byte == b'\n').count(),
+                source.rsplit('\n').next().unwrap_or_default().len(),
+            );
+            let (old_len, old_end) = self
+                .previous_end
+                .unwrap_or((0, tree_sitter::Point::new(0, 0)));
+            highlighter.update(
+                Some(tree_sitter::InputEdit {
+                    start_byte: 0,
+                    old_end_byte: old_len,
+                    new_end_byte: source.len(),
+                    start_position: tree_sitter::Point::new(0, 0),
+                    old_end_position: old_end,
+                    new_end_position: end,
+                }),
+                &gpui_component::Rope::from_str(source),
+            );
+            self.previous_end = Some((source.len(), end));
+            self.entries.insert(
+                source.to_owned(),
+                highlighter.styles(&(0..source.len()), theme),
+            );
+        }
+        gpui::StyledText::new(source.to_owned()).with_highlights(self.entries[source].clone())
+    }
+}
+
+#[cfg(test)]
+fn console_command_highlights(
+    source: &str,
+    theme: &gpui_component::highlighter::HighlightTheme,
+) -> ConsoleHighlights {
     let rope = gpui_component::Rope::from_str(source);
     let mut highlighter = gpui_component::highlighter::SyntaxHighlighter::new("javascript");
     highlighter.update(None, &rope);
-    let styles = highlighter.styles(&(0..source.len()), &cx.theme().highlight_theme);
-    gpui::StyledText::new(source.to_owned()).with_highlights(styles)
+    highlighter.styles(&(0..source.len()), theme)
+}
+
+#[cfg(test)]
+mod highlight_tests {
+    use super::*;
+
+    #[test]
+    fn script_console_highlights_survive_repaint_and_refresh_for_themes() {
+        let dark = Arc::new(gpui_component::highlighter::HighlightTheme::default_dark());
+        let light = Arc::new(gpui_component::highlighter::HighlightTheme::default_light());
+        let source = "const greeting = 'hello →';\nconsole.log(greeting);";
+        let mut cache = ConsoleHighlightCache::default();
+        cache.text(source, &dark);
+        let spans = cache.entries[source].clone();
+        assert!(!spans.is_empty());
+        assert!(
+            spans
+                .iter()
+                .all(|(range, _)| source.is_char_boundary(range.start)
+                    && source.is_char_boundary(range.end))
+        );
+        for _ in 0..100 {
+            cache.text(source, &dark);
+        }
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.entries[source], spans);
+        for next in [
+            "log(vLLM.Proxy)",
+            "// → unicode\nconst answer = 42;",
+            source,
+        ] {
+            cache.text(next, &dark);
+            assert_eq!(cache.entries[next], console_command_highlights(next, &dark));
+        }
+        cache.text(source, &light);
+        assert_eq!(
+            cache.entries[source],
+            console_command_highlights(source, &light)
+        );
+        cache.retain(&ScriptConsoleModel::default());
+        assert!(cache.entries.is_empty());
+    }
+
+    #[test]
+    #[ignore = "manual comparison of old and cached transcript highlighting"]
+    fn script_console_highlighting_repaint_benchmark() {
+        let theme = Arc::new(gpui_component::highlighter::HighlightTheme::default_dark());
+        let sources = [
+            "const log = console.log",
+            "log(vLLM.Proxy.Models)",
+            "log(vLLM.Proxy)",
+            "log(vLLM)",
+        ];
+        let frames = 30;
+        let start = std::time::Instant::now();
+        for _ in 0..frames {
+            for source in sources {
+                std::hint::black_box(console_command_highlights(source, &theme));
+            }
+        }
+        let old = start.elapsed();
+        let mut cache = ConsoleHighlightCache::default();
+        for source in sources {
+            cache.text(source, &theme);
+        }
+        let start = std::time::Instant::now();
+        for _ in 0..frames {
+            for source in sources {
+                std::hint::black_box(cache.text(source, &theme));
+            }
+        }
+        eprintln!(
+            "Four transcript commands, {frames} repaints: uncached {old:?}; cached {:?}",
+            start.elapsed()
+        );
+    }
 }
