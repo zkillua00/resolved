@@ -1403,7 +1403,8 @@ mod tests {
                 );
                 assert!(!app.cookie_jar.enabled());
                 assert!(app.cookie_jar.warning().is_some());
-                app.open_cookie_manager(window, cx);
+                app.request_pane = RequestPane::Cookies;
+                cx.notify();
             });
         });
         cx.run_until_parked();
@@ -1421,6 +1422,65 @@ mod tests {
         cx.run_until_parked();
         cx.update(|_, cx| {
             assert!(app.read(cx).cookie_jar.enabled());
+        });
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.cookie_jar
+                    .edit(None, "https://example.test/", "session=test; Path=/")
+                    .unwrap();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let eye = cx.debug_bounds("toggle-cookie-values").unwrap().center();
+        cx.update(|_, cx| assert!(!app.read(cx).cookie_values_visible));
+        cx.simulate_click(eye, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert!(app.read(cx).cookie_values_visible);
+            assert_eq!(app.read(cx).cookie_jar.entries()[0].value, "test");
+        });
+        cx.simulate_click(eye, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, cx| assert!(!app.read(cx).cookie_values_visible));
+        let row = cx.debug_bounds("cookie-row-0").unwrap();
+        cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let row_eye = cx.debug_bounds("toggle-cookie-value-0").unwrap().center();
+        assert!((row_eye.x - eye.x).abs() < px(1.));
+        cx.simulate_click(row_eye, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert!(!app.read(cx).cookie_values_visible);
+            assert!(
+                app.read(cx)
+                    .cookie_value_visibility
+                    .values()
+                    .any(|visible| *visible)
+            );
+            assert!(app.read(cx).selected_cookie.is_none());
+        });
+        cx.simulate_click(row_eye, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert!(
+                app.read(cx)
+                    .cookie_value_visibility
+                    .values()
+                    .all(|visible| !*visible)
+            )
+        });
+        let add = cx.debug_bounds("add-cookie").unwrap();
+        assert!(add.origin.y > row.origin.y + row.size.height);
+        cx.simulate_click(row.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, cx| assert!(app.read(cx).selected_cookie.is_some()));
+        let delete = cx.debug_bounds("delete-cookie").unwrap().center();
+        cx.simulate_click(delete, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert!(app.read(cx).cookie_jar.entries().is_empty());
+            assert!(app.read(cx).selected_cookie.is_none());
         });
     }
 

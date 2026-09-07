@@ -223,22 +223,6 @@ impl ApiTester {
                         .child(label),
                 )
             })
-            .child(
-                Button::new("cookie-manager")
-                    .label(if self.cookie_jar.syncing() {
-                        "Cookies…"
-                    } else if self.cookie_jar.warning().is_some() {
-                        "Cookies ⚠"
-                    } else if self.cookie_jar.enabled() {
-                        "Cookies"
-                    } else {
-                        "Cookies off"
-                    })
-                    .disabled(self.sending)
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.open_cookie_manager(window, cx)),
-                    ),
-            )
             .child(action)
             .into_any_element()
     }

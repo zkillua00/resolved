@@ -29,6 +29,7 @@ pub struct CookieEntry {
     pub domain: String,
     pub path: String,
     pub name: String,
+    pub value: String,
     pub origin: String,
     pub header: String,
 }
@@ -181,6 +182,7 @@ impl CookieJar {
                     domain: domain.into(),
                     path: path.into(),
                     name: cookie.name().into(),
+                    value: cookie.value().into(),
                     origin: format!(
                         "{}://{}{}",
                         if cookie.secure().unwrap_or(false) {

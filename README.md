@@ -72,7 +72,7 @@ not encrypt the local database. Run only scripts you trust.
 
 HTTP requests use an encrypted cookie jar isolated to the active workspace.
 Server-workspace jars are private to each user and use their password-derived key;
-local-workspace jars use the device vault. Open **Cookies** beside **Send** to inspect, edit, delete, clear, or
+local-workspace jars use the device vault. Open the **Cookies** request tab to inspect, edit, delete, clear, or
 disable automatic cookies. See [cookie behavior](docs/user-guide.md#cookies).
 
 ## Documentation

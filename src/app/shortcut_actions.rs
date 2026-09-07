@@ -196,7 +196,7 @@ impl ApiTester {
                 let editor = self.post_response_script.clone();
                 self.format_script_editor(editor, "post-response", window, cx);
             }
-            RequestPane::Params | RequestPane::Headers => {
+            RequestPane::Params | RequestPane::Headers | RequestPane::Cookies => {
                 self.request_notice =
                     Some("Open a raw body or script editor to format its buffer.".to_owned());
                 cx.notify();

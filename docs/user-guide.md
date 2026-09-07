@@ -670,8 +670,9 @@ The desktop keeps these cookies only in memory, with no device-key fallback.
 Both local and server execution use this private server-workspace jar. This requires
 a server version supporting encrypted cookie jars; unavailable storage fails closed.
 
-Open **Cookies** beside **Send** to view the active workspace's cookies. Values
-stay hidden in the list; **View / edit** reveals the value and attributes. Add or
+Open the **Cookies** request tab to view the active workspace's cookies. Values
+are hidden by default; the eye beside **Value** toggles their visibility.
+**View / edit** opens the value and attributes. Add or
 edit using an origin URL and a `Set-Cookie` value, including optional `Path`,
 `Domain`, `Secure`, `HttpOnly`, `Expires`, and `Max-Age` attributes. Editing preserves
 the effective path and absolute expiry unless you change them. Delete individual

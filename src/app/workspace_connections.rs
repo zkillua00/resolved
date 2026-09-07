@@ -1516,6 +1516,9 @@ impl ApiTester {
         self.hide_preview(cx);
         self.client = client;
         self.cookie_jar = cookie_jar;
+        self.selected_cookie = None;
+        self.cookie_values_visible = false;
+        self.cookie_value_visibility.clear();
         self.replace_workspace(workspace);
         self.workspace_warning = None;
         self.workspace_writable = workspace_writable;

@@ -828,6 +828,7 @@ impl ApiTester {
                         "Body".to_owned(),
                         "Pre-request".to_owned(),
                         "Post-response".to_owned(),
+                        self.cookie_tab_label(),
                     ])
                     .selected_index(session.request_pane.index())
                     .on_click(cx.listener(move |this, index: &usize, _, cx| {
@@ -849,6 +850,9 @@ impl ApiTester {
                     })
                     .when(session.request_pane == RequestPane::PreRequest, |this| {
                         this.child(session.pre_request_script.clone())
+                    })
+                    .when(session.request_pane == RequestPane::Cookies, |this| {
+                        this.child(self.render_cookie_manager(format!("{key}-cookies").into(), cx))
                     })
                     .when(session.request_pane == RequestPane::PostResponse, |this| {
                         this.child(session.post_response_script.clone())
