@@ -135,6 +135,23 @@ Nightlies of the same base version sort after the stable base in package
 managers; switching back to that stable version may require explicit downgrade
 or uninstall/reinstall.
 
+Builds cache Cargo downloads and compiled dependencies with
+[`Swatinem/rust-cache`](https://github.com/Swatinem/rust-cache). Each runner OS and
+architecture has its own cache, shared by nightly and version workflows where
+GitHub's cache scope permits. Compiler versions, Cargo metadata, build flags,
+and vendored patch/preparation changes distinguish caches. Prepared GPUI source
+trees are cached too, preserving their timestamps so their compiled dependencies
+can be reused. Dependency preparation runs before cache restore because the
+cache action needs the local manifests for `cargo metadata`.
+
+The first build populates the cache; later builds can reuse unchanged
+dependencies. The application is rebuilt and packages are regenerated for the
+current version. Compiler incremental mode remains disabled. GitHub lets tag
+runs restore default-branch caches, but caches saved under one tag are not
+available to other tags. Scheduled nightly builds on the default branch provide
+the shared baseline for future version releases. Cache eviction or compiler and
+patch changes can still cause a cold build.
+
 Every successful matrix uploads Actions artifacts for 14 days. Only after all
 five builds succeed does CI publish a GitHub Release with all packages and
 `SHA256SUMS.txt`. Nightlies use a prerelease tag such as
