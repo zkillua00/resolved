@@ -2,6 +2,7 @@ use std::fmt;
 use std::future::Future;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -12,7 +13,7 @@ use tokio::runtime::Handle;
 use tokio::task::{AbortHandle, JoinHandle};
 use url::Url;
 
-use super::DbStringEnum;
+use super::{CookieJar, DbStringEnum};
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_USER_AGENT: &str = concat!("resolved/", env!("CARGO_PKG_VERSION"));
@@ -558,6 +559,7 @@ impl From<reqwest::Error> for RequestError {
 }
 
 /// Construct the shared client used by the application.
+#[cfg(test)]
 pub fn build_client() -> Result<Client, RequestError> {
     crate::tls::install_crypto_provider()
         .map_err(|error| RequestError::TaskFailed(error.to_owned()))?;
@@ -565,6 +567,23 @@ pub fn build_client() -> Result<Client, RequestError> {
         .user_agent(DEFAULT_USER_AGENT)
         .redirect(reqwest::redirect::Policy::limited(10))
         .timeout(DEFAULT_REQUEST_TIMEOUT)
+        .build()
+        .map_err(RequestError::Transport)
+}
+
+/// Construct the application request client with one isolated cookie jar.
+///
+/// The jar's identity is chosen by the workspace layer. Keeping that choice
+/// outside the request draft prevents cookies from becoming visible request
+/// data while still allowing an explicit `Cookie` header to take precedence.
+pub fn build_client_with_cookie_jar(cookie_jar: Arc<CookieJar>) -> Result<Client, RequestError> {
+    crate::tls::install_crypto_provider()
+        .map_err(|error| RequestError::TaskFailed(error.to_owned()))?;
+    Client::builder()
+        .user_agent(DEFAULT_USER_AGENT)
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(DEFAULT_REQUEST_TIMEOUT)
+        .cookie_provider(cookie_jar)
         .build()
         .map_err(RequestError::Transport)
 }

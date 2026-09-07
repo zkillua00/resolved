@@ -45,7 +45,7 @@ use crate::{
     },
     core::{
         AppSettings, BodyField, BodyFieldKind, BodyMode, COLLECTIONS_CREATE, COLLECTIONS_DELETE,
-        COLLECTIONS_UPDATE, Collection, CollectionFolder, CredentialVault,
+        COLLECTIONS_UPDATE, Collection, CollectionFolder, CookieJar, CredentialVault,
         DEFAULT_REQUEST_TAB_TITLE, DatabaseStore, ENVIRONMENT_VALUES_UPDATE, ENVIRONMENTS_CREATE,
         ENVIRONMENTS_DELETE, ENVIRONMENTS_READ, ENVIRONMENTS_UPDATE, Environment,
         EnvironmentMutation, FormatterSettings, HeaderEntry, HistoryEntry, HostnameOverride,
@@ -66,7 +66,7 @@ use crate::{
         UpstreamWorkspaceError, UpstreamWorkspaceSummary, UpstreamWorkspaceView, WORKSPACES_CREATE,
         WORKSPACES_DELETE, WORKSPACES_UPDATE, Workspace, WorkspaceMutationError, WorkspaceProvider,
         WorkspaceProviderId, WorkspaceProviderRegistry, add_upstream_proxy_allowlist_entry,
-        build_client, build_upstream_client, build_upstream_execution_client,
+        build_client_with_cookie_jar, build_upstream_client, build_upstream_execution_client,
         create_upstream_collection, create_upstream_environment, create_upstream_saved_request,
         create_upstream_workspace, delete_shared_history, delete_upstream_collection,
         delete_upstream_environment, delete_upstream_saved_request, delete_upstream_workspace,

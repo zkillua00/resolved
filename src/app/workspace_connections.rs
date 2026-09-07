@@ -1366,6 +1366,27 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let cookie_jar =
+            match CookieJar::load(self.credential_vault.clone(), provider_id.to_string()) {
+                Ok(cookie_jar) => cookie_jar,
+                Err(error) => {
+                    self.settings_notice = Some(format!(
+                        "Could not open this workspace's cookie jar: {error}"
+                    ));
+                    cx.notify();
+                    return;
+                }
+            };
+        let client = match build_client_with_cookie_jar(Arc::new(cookie_jar)) {
+            Ok(client) => client,
+            Err(error) => {
+                self.settings_notice = Some(format!(
+                    "Could not create this workspace's request client: {error}"
+                ));
+                cx.notify();
+                return;
+            }
+        };
         if let Err(error) = self.workspace_providers.switch(provider_id) {
             self.settings_notice = Some(error.to_string());
             cx.notify();
@@ -1438,6 +1459,7 @@ impl ApiTester {
             .unwrap_or_default();
 
         self.hide_preview(cx);
+        self.client = client;
         self.replace_workspace(workspace);
         self.workspace_warning = None;
         self.workspace_writable = workspace_writable;

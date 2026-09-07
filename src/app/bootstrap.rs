@@ -519,7 +519,17 @@ impl ApiTester {
                 .masked(true)
         });
 
-        let client = startup_or_exit("failed to create the HTTP client", build_client());
+        let cookie_jar = startup_or_exit(
+            "failed to open the active workspace cookie jar",
+            CookieJar::load(
+                credential_vault.clone(),
+                workspace_providers.active_id().to_string(),
+            ),
+        );
+        let client = startup_or_exit(
+            "failed to create the HTTP client",
+            build_client_with_cookie_jar(Arc::new(cookie_jar)),
+        );
         let upstream_client = startup_or_exit(
             "failed to create the upstream login client",
             build_upstream_client(),

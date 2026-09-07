@@ -152,6 +152,14 @@ server. Without an exact administrator-configured override, server execution
 rejects loopback, link-local, private, carrier-grade NAT, unspecified, and
 multicast destinations.
 
+Locally executed requests automatically accept `Set-Cookie` response headers
+and send matching cookies on later requests using RFC 6265 domain, path,
+security, and expiration rules. Each local or server workspace has an isolated
+jar, and its contents are encrypted through the same local secure-vault
+boundary as saved server sessions. An enabled, explicitly authored `Cookie`
+header takes precedence for that request. Server-executed requests do not yet
+transfer or synchronize the desktop jar.
+
 ## Code editors
 
 Raw request bodies, pre-request scripts, post-response scripts, and text
@@ -916,7 +924,8 @@ need permission to bind a local socket in a restricted environment.
 
 ## Deliberate limits
 
-Cookie jars, response streaming/downloads, certificate controls, proxy
-controls, and native collection-structure import/export are not included yet.
+Cookie-jar management UI and server-execution jar handoff, response
+streaming/downloads, certificate controls, proxy controls, and native
+collection-structure import/export are not included yet.
 Specification imports open operations as request tabs rather than manufacturing
 a saved collection.

@@ -1,3 +1,4 @@
+mod cookie_jar;
 mod database;
 mod format;
 mod history;
@@ -20,6 +21,7 @@ mod workspace_provider;
 #[cfg(test)]
 mod mvp_smoke_test;
 
+pub use cookie_jar::CookieJar;
 pub use database::{DatabaseStore, LocalWorkspace};
 pub use format::{format_body, format_raw_source, format_script_source, is_probably_text};
 pub use history::{HistoryEntry, REDACTED_VALUE, RequestHistory};
@@ -29,8 +31,11 @@ pub use interchange::{
 pub use realtime::{RealtimeResourceChange, RealtimeSignal, watch_upstream_changes};
 pub use request::{
     BodyField, BodyFieldKind, BodyMode, HeaderEntry, RawBodyLanguage, RequestDraft, RequestError,
-    RequestTask, ResponseData, STANDARD_HTTP_METHODS, build_client, send_request, spawn_request,
+    RequestTask, ResponseData, STANDARD_HTTP_METHODS, build_client_with_cookie_jar,
+    send_request, spawn_request,
 };
+#[cfg(test)]
+pub use request::build_client;
 pub use request_tabs::{
     DEFAULT_REQUEST_TAB_TITLE, RequestTabAssociation, RequestTabCloseScope, RequestTabGroup,
     RequestTabGroupColor, RequestTabGroupId, RequestTabId, RequestTabRecord, RequestTabs,

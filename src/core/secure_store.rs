@@ -23,6 +23,7 @@ const KEY_VERSION: u32 = 1;
 const KEY_LENGTH: usize = 32;
 const NONCE_LENGTH: usize = 12;
 const UPSTREAM_SESSION_NAMESPACE: &str = "upstream-session";
+pub(crate) const COOKIE_JAR_NAMESPACE: &str = "cookie-jar";
 const LOCAL_MASTER_KEY_EXTENSION: &str = "secure-vault.key";
 
 /// A decrypted upstream session. Its token is zeroed when dropped and is
@@ -200,6 +201,33 @@ impl CredentialVault {
             token: Zeroizing::new(stored.token),
             expires_at: stored.expires_at,
         }))
+    }
+
+    /// Persist an opaque serialized cookie jar using the same authenticated
+    /// encryption boundary as saved upstream sessions.
+    pub(crate) fn store_cookie_jar(
+        &self,
+        jar_id: &str,
+        plaintext: &[u8],
+    ) -> Result<(), CredentialVaultError> {
+        let encrypted = self.seal(COOKIE_JAR_NAMESPACE, jar_id, plaintext)?;
+        self.database
+            .save_secure_value(COOKIE_JAR_NAMESPACE, jar_id, &encrypted)?;
+        Ok(())
+    }
+
+    /// Load and decrypt a serialized cookie jar, if one has been stored.
+    pub(crate) fn load_cookie_jar(
+        &self,
+        jar_id: &str,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, CredentialVaultError> {
+        let Some(encrypted) = self
+            .database
+            .load_secure_value(COOKIE_JAR_NAMESPACE, jar_id)?
+        else {
+            return Ok(None);
+        };
+        self.open(COOKIE_JAR_NAMESPACE, jar_id, encrypted).map(Some)
     }
 
     fn seal(
