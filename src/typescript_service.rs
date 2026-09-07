@@ -130,18 +130,20 @@ pub enum TypeScriptScriptPhase {
 pub enum TypeScriptDocumentKind {
     Script(TypeScriptScriptPhase),
     InteractiveConsole,
+    WebSocketAutomation,
     PlainSnippet(TypeScriptScriptPhase),
     ExecutableSnippet(TypeScriptScriptPhase),
 }
 
 impl TypeScriptDocumentKind {
-    const COUNT: usize = 7;
+    const COUNT: usize = 8;
 
     const fn bridge_name(self) -> &'static str {
         match self {
             Self::Script(TypeScriptScriptPhase::PreRequest) => "script-pre",
             Self::Script(TypeScriptScriptPhase::PostResponse) => "script-post",
             Self::InteractiveConsole => "interactive-console",
+            Self::WebSocketAutomation => "websocket-automation",
             Self::PlainSnippet(TypeScriptScriptPhase::PreRequest) => "plain-snippet-pre",
             Self::PlainSnippet(TypeScriptScriptPhase::PostResponse) => "plain-snippet-post",
             Self::ExecutableSnippet(TypeScriptScriptPhase::PreRequest) => "executable-snippet-pre",
@@ -156,6 +158,7 @@ impl TypeScriptDocumentKind {
             Self::Script(TypeScriptScriptPhase::PreRequest) => 0,
             Self::Script(TypeScriptScriptPhase::PostResponse) => 1,
             Self::InteractiveConsole => 2,
+            Self::WebSocketAutomation => 7,
             Self::PlainSnippet(TypeScriptScriptPhase::PreRequest) => 3,
             Self::PlainSnippet(TypeScriptScriptPhase::PostResponse) => 4,
             Self::ExecutableSnippet(TypeScriptScriptPhase::PreRequest) => 5,
@@ -221,6 +224,13 @@ pub enum TypeScriptServiceError {
 #[derive(Clone)]
 pub struct TypeScriptServiceHandle {
     inner: Arc<ServiceInner>,
+    websocket_project: Option<WebSocketScriptProject>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct WebSocketScriptProject {
+    pub active_file: String,
+    pub files: std::collections::BTreeMap<String, String>,
 }
 
 struct ServiceInner {
@@ -260,6 +270,7 @@ impl TypeScriptServiceHandle {
             .map_err(|error| TypeScriptServiceError::Unavailable(error.to_string()))?;
 
         Ok(Self {
+            websocket_project: None,
             inner: Arc::new(ServiceInner {
                 sender,
                 worker: Mutex::new(Some(worker)),
@@ -336,6 +347,11 @@ impl TypeScriptServiceHandle {
         .await
     }
 
+    pub fn with_websocket_project(mut self, project: WebSocketScriptProject) -> Self {
+        self.websocket_project = Some(project);
+        self
+    }
+
     async fn request<T>(
         &self,
         command: impl FnOnce(oneshot::Sender<Result<T, TypeScriptServiceError>>) -> Command,
@@ -344,9 +360,18 @@ impl TypeScriptServiceHandle {
         T: Send + 'static,
     {
         let (reply, receiver) = oneshot::channel();
+        let command = command(reply);
+        let command = if let Some(project) = &self.websocket_project {
+            Command::WebSocketProject {
+                project: project.clone(),
+                command: Box::new(command),
+            }
+        } else {
+            command
+        };
         self.inner
             .sender
-            .send(command(reply))
+            .send(command)
             .map_err(|_| TypeScriptServiceError::WorkerStopped)?;
         receiver
             .await
@@ -367,6 +392,10 @@ impl TypeScriptServiceHandle {
 }
 
 enum Command {
+    WebSocketProject {
+        project: WebSocketScriptProject,
+        command: Box<Command>,
+    },
     #[cfg(test)]
     Sync {
         document: TypeScriptDocumentKind,
@@ -404,7 +433,16 @@ enum Command {
 
 fn worker_loop(mut engine: TypeScriptEngine, receiver: Receiver<Command>) {
     while let Ok(command) = receiver.recv() {
+        let command = if let Command::WebSocketProject { project, command } = command {
+            if let Err(error) = engine.set_websocket_project(&project) {
+                tracing::debug!(%error, "WebSocket project unavailable");
+            }
+            *command
+        } else {
+            command
+        };
         match command {
+            Command::WebSocketProject { .. } => unreachable!("nested project command"),
             #[cfg(test)]
             Command::Sync {
                 document,
@@ -450,8 +488,14 @@ fn worker_loop(mut engine: TypeScriptEngine, receiver: Receiver<Command>) {
 
 fn unavailable_worker_loop(message: String, receiver: Receiver<Command>) {
     while let Ok(command) = receiver.recv() {
+        let command = if let Command::WebSocketProject { command, .. } = command {
+            *command
+        } else {
+            command
+        };
         let unavailable = || TypeScriptServiceError::Unavailable(message.clone());
         match command {
+            Command::WebSocketProject { .. } => unreachable!("nested project command"),
             #[cfg(test)]
             Command::Sync { reply, .. } => {
                 let _ = reply.send(Err(unavailable()));
@@ -498,6 +542,13 @@ impl TypeScriptEngine {
             let globals = ctx.globals();
             globals
                 .set("__RESOLVED_TS_LIBRARIES_JSON", libraries)
+                .catch(&ctx)
+                .map_err(|error| TypeScriptServiceError::Unavailable(error.to_string()))?;
+            globals
+                .set(
+                    "__RESOLVED_TS_WEBSOCKET_DTS",
+                    include_str!("typescript_service/websocket.d.ts"),
+                )
                 .catch(&ctx)
                 .map_err(|error| TypeScriptServiceError::Unavailable(error.to_string()))?;
             globals
@@ -699,6 +750,36 @@ impl TypeScriptEngine {
                 .catch(&ctx)
                 .map_err(|error| TypeScriptServiceError::Engine(error.to_string()))
         })
+    }
+
+    fn set_websocket_project(
+        &mut self,
+        project: &WebSocketScriptProject,
+    ) -> Result<(), TypeScriptServiceError> {
+        let json = serde_json::to_string(project)
+            .map_err(|error| TypeScriptServiceError::Engine(error.to_string()))?;
+        let changed = self
+            .context
+            .with(|ctx| {
+                let service: Object<'_> = ctx.globals().get(SERVICE_GLOBAL)?;
+                let setter: Function<'_> = service.get("setWebSocketProject")?;
+                setter
+                    .call::<_, bool>((json,))
+                    .catch(&ctx)
+                    .map_err(|error| {
+                        rquickjs::Error::new_from_js_message(
+                            "project",
+                            "workspace",
+                            error.to_string(),
+                        )
+                    })
+            })
+            .map_err(|error| TypeScriptServiceError::Engine(error.to_string()))?;
+        if changed {
+            self.documents[TypeScriptDocumentKind::WebSocketAutomation.index()] =
+                DocumentState::default();
+        }
+        Ok(())
     }
 
     /// Pushes fresh request-reference namespace declarations (from the active
@@ -1085,6 +1166,133 @@ mod tests {
             utf16_offset_to_position(source, 5).expect("position after first line"),
             Position::new(1, 0)
         );
+    }
+
+    #[test]
+    fn websocket_automation_intelligence_resolves_modules_and_runtime_api() {
+        run_async(async {
+            let service = TypeScriptServiceHandle::start().unwrap();
+            let mut project = WebSocketScriptProject {
+                active_file: "automation.js".into(),
+                files: std::collections::BTreeMap::from([
+                    ("automation.js".into(), "".into()),
+                    ("lib/helpers.js".into(), "/** @param {number} id */ export function ack(id) { return { id, accepted: true }; }".into()),
+                ]),
+            };
+            let configured = service.clone().with_websocket_project(project.clone());
+            let source = "import { ack } from './lib/helpers.js'; const result = ack(1); result.";
+            let items = configured
+                .completion_items(
+                    TypeScriptDocumentKind::WebSocketAutomation,
+                    1,
+                    source.into(),
+                    source.len(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                items.iter().any(|item| item.label == "accepted"),
+                "{items:?}"
+            );
+            let import_source = "import { ack } from './lib/hel";
+            let imports = configured
+                .completion_items(
+                    TypeScriptDocumentKind::WebSocketAutomation,
+                    2,
+                    import_source.into(),
+                    import_source.len(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                imports.iter().any(|item| item.label.contains("helpers")),
+                "{imports:?}"
+            );
+            let source = "ws.";
+            let items = configured
+                .completion_items(
+                    TypeScriptDocumentKind::WebSocketAutomation,
+                    3,
+                    source.into(),
+                    source.len(),
+                )
+                .await
+                .unwrap();
+            assert!(items.iter().any(|item| item.label == "sendJson"));
+            let source = "import { ack } from './lib/helpers.js'; ws.sendJson(await Promise.resolve(ack(7))); console.log('sent');";
+            let diagnostics = configured
+                .diagnostics(
+                    TypeScriptDocumentKind::WebSocketAutomation,
+                    4,
+                    source.into(),
+                )
+                .await
+                .unwrap();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let source = "import { ack } from './lib/helpers.js'; ack('wrong'); ws.nonexistent(); api.request;";
+            let diagnostics = configured
+                .diagnostics(
+                    TypeScriptDocumentKind::WebSocketAutomation,
+                    5,
+                    source.into(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|item| item.message.contains("number")),
+                "{diagnostics:?}"
+            );
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|item| item.message.contains("nonexistent"))
+            );
+            assert!(diagnostics.iter().any(|item| item.message.contains("api")));
+            let source = "import { ack } from './lib/helpers.js'; ack(2);";
+            let hover = configured
+                .hover(
+                    TypeScriptDocumentKind::WebSocketAutomation,
+                    6,
+                    source.into(),
+                    source.rfind("ack").unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(hover.is_some());
+            project.active_file = "lib/other.js".into();
+            project.files.insert("lib/other.js".into(), "".into());
+            let configured = service.clone().with_websocket_project(project.clone());
+            let source = "import { ack } from './helpers.js'; ws.send(ack(1));";
+            assert!(
+                configured
+                    .diagnostics(
+                        TypeScriptDocumentKind::WebSocketAutomation,
+                        7,
+                        source.into()
+                    )
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            project.files.remove("lib/helpers.js");
+            let configured = service.with_websocket_project(project);
+            let diagnostics = configured
+                .diagnostics(
+                    TypeScriptDocumentKind::WebSocketAutomation,
+                    8,
+                    source.into(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|item| item.message.contains("Cannot find module")),
+                "{diagnostics:?}"
+            );
+        });
     }
 
     #[test]

@@ -53,11 +53,12 @@
     scriptFile,
     declarationEntries,
     strictNullChecks = false,
+    websocket = false,
   ) {
     const files = new Map(libraryEntries);
     const versions = new Map();
 
-    files.set("/resolved-runtime.d.ts", runtimeDeclarations);
+    if (!websocket) files.set("/resolved-runtime.d.ts", runtimeDeclarations);
     for (const [fileName, declarations] of declarationEntries) {
       files.set(fileName, declarations);
     }
@@ -65,7 +66,7 @@
     // Dynamic request-reference namespace (from the active workspace's
     // collection tree). Empty until Resolved pushes declarations; it is only
     // populated for the script/plain-snippet projects, never the generators.
-    files.set("/request-namespace.d.ts", requestNamespaceDeclarations);
+    files.set("/request-namespace.d.ts", websocket ? "" : requestNamespaceDeclarations);
     for (const fileName of files.keys()) {
       versions.set(fileName, "0");
     }
@@ -77,6 +78,7 @@
         checkJs: true,
         libReplacement: false,
         module: typescript.ModuleKind.ESNext,
+        moduleResolution: websocket ? typescript.ModuleResolutionKind.Bundler : typescript.ModuleResolutionKind.Classic,
         // The runtime evaluates scripts as global async code (top-level await
         // is supported); treat every document as a module so the checker does
         // not flag top-level `await` as an error.
@@ -90,6 +92,20 @@
         target: typescript.ScriptTarget.ES2022,
         types: [],
       }),
+      ...(websocket ? {
+        resolveModuleNames: (names, containingFile) => names.map(name => {
+          const parts = (name.startsWith(".") ? containingFile.slice(0, containingFile.lastIndexOf("/") + 1) + name : "/" + name).split("/");
+          const normalized = [];
+          for (const part of parts) {
+            if (!part || part === ".") continue;
+            if (part === "..") normalized.pop(); else normalized.push(part);
+          }
+          const resolvedFileName = "/" + normalized.join("/");
+          return files.has(resolvedFileName) && resolvedFileName.endsWith(".js")
+            ? { resolvedFileName, extension: typescript.Extension.Js }
+            : undefined;
+        }),
+      } : {}),
       // Rust supplies only declarations implemented by the script runtime.
       // Make those files roots because the hostless service cannot resolve
       // triple-slash `lib` references through TypeScript's filesystem helper.
@@ -102,23 +118,29 @@
           : typescript.ScriptSnapshot.fromString(source);
       },
       getScriptKind: (fileName) =>
-        fileName === scriptFile ? typescript.ScriptKind.JS : typescript.ScriptKind.TS,
+        fileName.endsWith(".js") ? typescript.ScriptKind.JS : typescript.ScriptKind.TS,
       getCurrentDirectory: () => "/",
       getDefaultLibFileName: () => "/lib.es2022.d.ts",
       getDefaultLibLocation: () => "/",
       getNewLine: () => "\n",
-      getProjectVersion: () => versions.get(scriptFile) || "0",
+      getProjectVersion: () => scriptFile + Array.from(versions.values()).join(":"),
       useCaseSensitiveFileNames: () => true,
       fileExists: (fileName) => files.has(fileName),
       readFile: (fileName) => files.get(fileName),
-      readDirectory: () => [],
-      directoryExists: (directoryName) => directoryName === "/",
-      getDirectories: () => [],
+      readDirectory: (directoryName) => websocket ? Array.from(files.keys()).filter(name => name.endsWith(".js") && name.startsWith(directoryName.replace(/\/$/, "") + "/")) : [],
+      directoryExists: (directoryName) => directoryName === "/" || Array.from(files.keys()).some(name => name.startsWith(directoryName.replace(/\/$/, "") + "/")),
+      getDirectories: (directoryName) => {
+        if (!websocket) return [];
+        const prefix = directoryName.replace(/\/$/, "") + "/";
+        return Array.from(new Set(Array.from(files.keys()).filter(name => name.startsWith(prefix)).map(name => name.slice(prefix.length)).filter(name => name.includes("/")).map(name => name.split("/")[0])));
+      },
       realpath: (fileName) => fileName,
     };
 
     return {
-      scriptFile,
+      websocket,
+      get scriptFile() { return scriptFile; },
+      set scriptFile(value) { scriptFile = value; },
       files,
       versions,
       service: typescript.createLanguageService(
@@ -129,6 +151,9 @@
   }
 
   const projects = {
+    "websocket-automation": createProject("/automation.js", [
+      ["/websocket.d.ts", globalThis.__RESOLVED_TS_WEBSOCKET_DTS],
+    ], true, true),
     "script-pre": createProject("/script-pre.js", [
       ["/pre-request.d.ts", phaseDeclarations.pre],
     ]),
@@ -164,6 +189,25 @@
       true,
     ),
   };
+
+  let websocketProjectJson = "";
+  let websocketRevision = 0;
+  function setWebSocketProject(json) {
+    if (json === websocketProjectJson) return false;
+    const input = JSON.parse(json);
+    const project = projects["websocket-automation"];
+    for (const name of Array.from(project.files.keys())) {
+      if (name.endsWith(".js")) { project.files.delete(name); project.versions.delete(name); }
+    }
+    websocketRevision++;
+    for (const [name, source] of Object.entries(input.files)) {
+      project.files.set("/" + name, source);
+      project.versions.set("/" + name, "project-" + websocketRevision);
+    }
+    project.scriptFile = "/" + input.active_file;
+    websocketProjectJson = json;
+    return true;
+  }
 
   function projectFor(documentKind) {
     const project = projects[documentKind];
@@ -228,7 +272,8 @@
       offset,
       {
         allowIncompleteCompletions: true,
-        includeCompletionsForImportStatements: false,
+        includeCompletionsForImportStatements: project.websocket,
+        ...(project.websocket ? { importModuleSpecifierEnding: "js" } : {}),
         includeCompletionsForModuleExports: false,
         includeCompletionsWithClassMemberSnippets: true,
         includeCompletionsWithInsertText: true,
@@ -352,7 +397,7 @@
           "Intl is unavailable in the Resolved QuickJS runtime.",
         );
       }
-      if (isRuntimeGlobalReference(node, "Promise")) {
+      if (!project.websocket && isRuntimeGlobalReference(node, "Promise")) {
         push(
           node,
           typescript.DiagnosticCategory.Warning,
@@ -363,7 +408,7 @@
       const asyncModifier = node.modifiers?.find(
         (modifier) => modifier.kind === typescript.SyntaxKind.AsyncKeyword,
       );
-      if (asyncModifier) {
+      if (!project.websocket && asyncModifier) {
         push(
           asyncModifier,
           typescript.DiagnosticCategory.Warning,
@@ -401,5 +446,6 @@
     hover,
     updateDocument,
     setRequestNamespaceDeclarations,
+    setWebSocketProject,
   });
 })();

@@ -83,6 +83,10 @@ pub(in crate::app) struct WebSocketWorkspaceState {
     pub(in crate::app) template_payload: Entity<CodeEditor>,
     replay_name: Entity<InputState>,
     pub(in crate::app) automation: Entity<CodeEditor>,
+    automation_module_name: Entity<InputState>,
+    automation_selected_module: Option<String>,
+    automation_headers_open: bool,
+    automation_project: Rc<std::cell::RefCell<crate::typescript_service::WebSocketScriptProject>>,
     section: WebSocketSection,
     status: WebSocketConnectionStatus,
     notice: Option<String>,
@@ -114,6 +118,7 @@ pub(in crate::app) struct WebSocketWorkspaceState {
 impl WebSocketWorkspaceState {
     pub fn new(
         document: &WebSocketWorkspace,
+        typescript: Option<TypeScriptServiceHandle>,
         window: &mut Window,
         cx: &mut Context<ApiTester>,
     ) -> Self {
@@ -180,14 +185,38 @@ impl WebSocketWorkspaceState {
                 cx,
             )
         });
+        let mut files = document.automation_modules.clone();
+        files.insert("automation.js".into(), document.automation_source.clone());
+        let automation_project = Rc::new(std::cell::RefCell::new(
+            crate::typescript_service::WebSocketScriptProject {
+                active_file: "automation.js".into(),
+                files,
+            },
+        ));
         let automation = cx.new(|cx| {
+            let mut intelligence =
+                ScriptCompletionProvider::for_websocket_automation(automation_project.clone());
+            if let Some(service) = typescript {
+                intelligence = intelligence.with_typescript_service(service);
+            }
+            let intelligence = Rc::new(intelligence);
+            let diagnostics = intelligence.clone();
             CodeEditor::new(
                 CodeEditorConfig::default()
                     .language(CodeLanguage::JavaScript)
                     .placeholder("if (ws.event.eventType === 'message') ws.send({ ack: true });")
                     .rows(16)
                     .soft_wrap(false)
-                    .format_action(true),
+                    .line_numbers(true)
+                    .format_action(true)
+                    .completion_provider(intelligence.clone())
+                    .hover_provider(intelligence)
+                    .async_diagnostic_provider(move |source, cx| {
+                        let task = diagnostics.diagnostics_task(source, cx);
+                        cx.background_spawn(async move {
+                            task.await.into_iter().map(Into::into).collect()
+                        })
+                    }),
                 window,
                 cx,
             )
@@ -231,6 +260,11 @@ impl WebSocketWorkspaceState {
             template_payload,
             replay_name: cx.new(|cx| InputState::new(window, cx).placeholder("Replay name")),
             automation,
+            automation_module_name: cx
+                .new(|cx| InputState::new(window, cx).placeholder("helpers.js")),
+            automation_selected_module: None,
+            automation_headers_open: false,
+            automation_project,
             section: WebSocketSection::Console,
             status: WebSocketConnectionStatus::Disconnected,
             notice: None,
@@ -262,6 +296,119 @@ impl WebSocketWorkspaceState {
 }
 
 impl ApiTester {
+    fn sync_websocket_automation_buffer(&mut self, cx: &App) {
+        let source = self
+            .websocket_workspace
+            .automation
+            .read(cx)
+            .value(cx)
+            .to_string();
+        if let Some(name) = &self.websocket_workspace.automation_selected_module {
+            self.websocket_workspace
+                .document
+                .automation_modules
+                .insert(name.clone(), source);
+        } else {
+            self.websocket_workspace.document.automation_source = source;
+        }
+        self.refresh_websocket_automation_project();
+        self.sync_mcp_websocket_automation();
+    }
+
+    fn refresh_websocket_automation_project(&mut self) {
+        let mut project = self.websocket_workspace.automation_project.borrow_mut();
+        project.active_file = self
+            .websocket_workspace
+            .automation_selected_module
+            .clone()
+            .unwrap_or_else(|| "automation.js".into());
+        project.files = self.websocket_workspace.document.automation_modules.clone();
+        project.files.insert(
+            "automation.js".into(),
+            self.websocket_workspace.document.automation_source.clone(),
+        );
+    }
+
+    fn select_websocket_automation_module(
+        &mut self,
+        name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_websocket_automation_buffer(cx);
+        let source = match &name {
+            Some(name) => self
+                .websocket_workspace
+                .document
+                .automation_modules
+                .get(name)
+                .cloned()
+                .unwrap_or_default(),
+            None => self.websocket_workspace.document.automation_source.clone(),
+        };
+        self.websocket_workspace.automation_selected_module = name;
+        self.websocket_workspace.automation_headers_open = false;
+        self.refresh_websocket_automation_project();
+        self.websocket_workspace
+            .automation
+            .update(cx, |editor, cx| editor.set_value(source, window, cx));
+        cx.notify();
+    }
+
+    fn add_websocket_automation_module(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self
+            .websocket_workspace
+            .automation_module_name
+            .read(cx)
+            .value()
+            .trim()
+            .to_owned();
+        if let Err(error) = validate_automation_module_name(&name) {
+            self.websocket_workspace.notice = Some(error);
+            cx.notify();
+            return;
+        }
+        if self
+            .websocket_workspace
+            .document
+            .automation_modules
+            .contains_key(&name)
+        {
+            self.websocket_workspace.notice =
+                Some("A module with that name already exists.".into());
+            cx.notify();
+            return;
+        }
+        if self.websocket_workspace.document.automation_modules.len() >= 64 {
+            self.websocket_workspace.notice = Some("Automation supports up to 64 modules.".into());
+            cx.notify();
+            return;
+        }
+        self.websocket_workspace.document.automation_modules.insert(
+            name.clone(),
+            "export function transform(message) {\n  return message;\n}\n".into(),
+        );
+        self.select_websocket_automation_module(Some(name), window, cx);
+        self.websocket_workspace
+            .automation_module_name
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.persist_websocket_document(cx);
+    }
+
+    pub(super) fn format_websocket_automation(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.format_websocket_editor(
+            self.websocket_workspace.automation.clone(),
+            RawBodyLanguage::JavaScript,
+            "automation",
+            window,
+            cx,
+        );
+    }
+
     pub(super) fn sync_active_websocket_document(&mut self, cx: &mut Context<Self>) {
         if self.websocket_workspace.hydrating
             || !self.request_tabs.active().template().is_websocket()
@@ -276,12 +423,7 @@ impl ApiTester {
             .read(cx)
             .value(cx)
             .to_string();
-        self.websocket_workspace.document.automation_source = self
-            .websocket_workspace
-            .automation
-            .read(cx)
-            .value(cx)
-            .to_string();
+        self.sync_websocket_automation_buffer(cx);
         if let Ok(headers) =
             parse_websocket_headers(self.websocket_workspace.headers.read(cx).value(cx).as_ref())
         {
@@ -302,12 +444,7 @@ impl ApiTester {
             .read(cx)
             .value(cx)
             .to_string();
-        self.websocket_workspace.document.automation_source = self
-            .websocket_workspace
-            .automation
-            .read(cx)
-            .value(cx)
-            .to_string();
+        self.sync_websocket_automation_buffer(cx);
         Ok(self.websocket_workspace.document.clone())
     }
 
@@ -331,6 +468,8 @@ impl ApiTester {
             editor.set_language(code_language_for_raw_body(document.composer_language), cx);
             editor.set_value(document.composer.clone(), window, cx)
         });
+        self.websocket_workspace.automation_selected_module = None;
+        self.websocket_workspace.automation_headers_open = false;
         self.websocket_workspace
             .automation
             .update(cx, |editor, cx| {
@@ -340,6 +479,7 @@ impl ApiTester {
         self.websocket_workspace.replay_run = None;
         self.websocket_workspace.replay_task = None;
         self.websocket_workspace.document = document;
+        self.refresh_websocket_automation_project();
         self.refresh_websocket_composer_inline_actions(cx);
         self.websocket_workspace.notice = None;
         self.websocket_workspace.timeline.clear();
@@ -730,15 +870,17 @@ impl ApiTester {
             })
             .unwrap_or_default();
         let source = self.websocket_workspace.document.automation_source.clone();
+        let modules = self.websocket_workspace.document.automation_modules.clone();
         let generation = self.websocket_workspace.generation;
-        let task = self
-            .runtime
-            .spawn_blocking(move || execute_websocket_automation(&source, &event, &environment));
+        let task = self.runtime.spawn_blocking(move || {
+            execute_websocket_automation_with_modules(&source, &modules, &event, &environment)
+        });
         cx.spawn_in(window, async move |this, cx| {
             let output = task.await;
             let _ = this.update_in(cx, |this, _, cx| {
                 if this.websocket_workspace.generation != generation
                     || this.websocket_replay_running()
+                    || !this.websocket_workspace.document.automation_enabled
                 {
                     return;
                 }
@@ -3565,82 +3707,146 @@ impl ApiTester {
     }
 
     fn render_websocket_automation(&self, cx: &mut Context<Self>) -> AnyElement {
+        let state = &self.websocket_workspace;
+        let selected = state
+            .automation_selected_module
+            .as_deref()
+            .unwrap_or("automation.js");
+        let sidebar = v_flex()
+            .debug_selector(|| "websocket-automation-files".into())
+            .w(px(230.))
+            .h_full()
+            .flex_shrink_0()
+            .border_r_1()
+            .border_color(cx.api_outline_variant())
+            .child(
+                h_flex()
+                    .h(px(52.))
+                    .px_4()
+                    .border_b_1()
+                    .border_color(cx.api_outline_variant())
+                    .child(div().font_semibold().child("Automation")),
+            )
+            .child(
+                v_flex()
+                    .p_3()
+                    .gap_2()
+                    .child(Input::new(&state.automation_module_name).small())
+                    .child(
+                        Button::new("add-automation-module")
+                            .label("New module")
+                            .small()
+                            .outline()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.add_websocket_automation_module(window, cx)
+                            })),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .id("automation-file-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .p_2()
+                    .gap_1()
+                    .children(
+                        std::iter::once("automation.js".to_owned())
+                            .chain(state.document.automation_modules.keys().cloned())
+                            .map(|name| {
+                                let target = if name == "automation.js" {
+                                    None
+                                } else {
+                                    Some(name.clone())
+                                };
+                                v_flex()
+                                    .id(SharedString::from(format!("automation-file-{name}")))
+                                    .px_3()
+                                    .py_2()
+                                    .gap_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .when(
+                                        selected == name && !state.automation_headers_open,
+                                        |row| row.bg(cx.theme().sidebar_accent),
+                                    )
+                                    .hover(|row| row.bg(cx.theme().sidebar_accent.opacity(0.6)))
+                                    .child(div().text_sm().child(name.clone()))
+                                    .when(name == "automation.js", |row| {
+                                        row.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child("Entry · open / message"),
+                                        )
+                                    })
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.select_websocket_automation_module(
+                                            target.clone(),
+                                            window,
+                                            cx,
+                                        )
+                                    }))
+                            }),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .p_3()
+                    .gap_2()
+                    .border_t_1()
+                    .border_color(cx.api_outline_variant())
+                    .child(
+                        Button::new("automation-connection-headers")
+                            .label("Connection headers")
+                            .small()
+                            .outline()
+                            .selected(state.automation_headers_open)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.websocket_workspace.automation_headers_open = true;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Files are saved with this request."),
+                    ),
+            );
+        let detail = v_flex().debug_selector(|| "websocket-automation-editor".into()).flex_1().min_w_0().h_full()
+            .child(h_flex().h(px(52.)).px_4().gap_2().border_b_1().border_color(cx.api_outline_variant())
+                .child(div().flex_1().min_w_0().font_semibold().child(if state.automation_headers_open { "Connection headers".to_owned() } else { selected.to_owned() }))
+                .when(!state.automation_headers_open, |bar| bar
+                    .child(Button::new("format-automation").label("Format").small().ghost()
+                        .on_click(cx.listener(|this, _, window, cx| this.format_websocket_automation(window, cx))))
+                    .when(state.automation_selected_module.is_some(), |bar| bar.child(Button::new("delete-automation-module").icon(IconName::Delete).tooltip("Delete module").small().ghost()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let name = this.websocket_workspace.automation_selected_module.clone();
+                            this.select_websocket_automation_module(None, window, cx);
+                            if let Some(name) = name { this.websocket_workspace.document.automation_modules.remove(&name); }
+                            this.refresh_websocket_automation_project();
+                            this.websocket_workspace.automation.update(cx, |editor, cx| editor.refresh_diagnostics(cx));
+                            this.persist_websocket_document(cx);
+                        })))))
+                .child(Button::new("automation-open-console").label("Console").small().outline()
+                    .on_click(cx.listener(|this, _, _, cx| { this.websocket_workspace.section = WebSocketSection::Console; cx.notify(); })))
+                .child(Checkbox::new("websocket-automation-enabled").label("Enabled").checked(state.document.automation_enabled)
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| { this.websocket_workspace.document.automation_enabled = *checked; this.persist_websocket_document(cx); }))))
+            .child(div().px_4().py_2().text_xs().text_color(cx.theme().muted_foreground)
+                .child(if state.automation_headers_open { "Headers are sent when connecting. Reconnect to use changes." } else { "Runs on open and incoming messages. Import saved modules with import { helper } from './helpers.js'." }))
+            .child(div().flex_1().min_h_0().overflow_hidden().child(if state.automation_headers_open { state.headers.clone() } else { state.automation.clone() }))
+            .child(h_flex().px_4().py_2().gap_3().border_t_1().border_color(cx.api_outline_variant()).text_xs().text_color(cx.theme().muted_foreground)
+                .child(if state.automation_headers_open { "JSON" } else { "JavaScript · completions · hover · diagnostics" })
+                .child(div().flex_1())
+                .child(if self.websocket_replay_running() { "Paused for replay" } else if state.document.automation_enabled && state.status == WebSocketConnectionStatus::Connected { "Listening for events" } else if state.document.automation_enabled { "Enabled · connect to run" } else { "Automation disabled" }));
         h_flex()
+            .debug_selector(|| "websocket-automation-workspace".into())
             .size_full()
             .min_h_0()
             .items_start()
-            .p_4()
-            .gap_4()
-            .child(
-                v_flex()
-                    .h_full()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_3()
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Automation"))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Runs when the connection opens or a message arrives."),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(cx.api_outline_variant())
-                            .overflow_hidden()
-                            .child(self.websocket_workspace.automation.clone()),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Checkbox::new("websocket-automation-enabled")
-                                    .label("Enable automation")
-                                    .checked(self.websocket_workspace.document.automation_enabled)
-                                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                        this.websocket_workspace.document.automation_enabled =
-                                            *checked;
-                                        this.persist_websocket_document(cx);
-                                    })),
-                            )
-                            .child(div().flex_1())
-                            .child(
-                                Button::new("save-websocket-automation")
-                                    .label("Apply")
-                                    .primary()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.persist_websocket_document(cx);
-                                    })),
-                            ),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .h_full()
-                    .w(px(380.))
-                    .flex_shrink_0()
-                    .min_h_0()
-                    .gap_3()
-                    .child(div().font_semibold().child("Connection headers"))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(cx.api_outline_variant())
-                            .overflow_hidden()
-                            .child(self.websocket_workspace.headers.clone()),
-                    ),
-            )
+            .child(sidebar)
+            .child(detail)
             .into_any_element()
     }
 }
@@ -3853,6 +4059,61 @@ mod tests {
             websocket_timeline_kind_label("script error"),
             "Script error"
         );
+    }
+
+    #[gpui::test]
+    fn automation_workspace_switches_modules_without_overwriting_the_entry(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, cx, _directory) = mount_app(cx);
+        cx.simulate_resize(size(px(900.), px(560.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.open_blank_websocket_tab(window, cx);
+                app.websocket_workspace.section = WebSocketSection::Automation;
+                app.websocket_workspace.automation.update(cx, |editor, cx| {
+                    editor.set_value(
+                        "import { value } from './helpers.js'; ws.send(value);",
+                        window,
+                        cx,
+                    )
+                });
+                app.websocket_workspace
+                    .automation_module_name
+                    .update(cx, |input, cx| input.set_value("helpers.js", window, cx));
+                app.add_websocket_automation_module(window, cx);
+                app.websocket_workspace.automation.update(cx, |editor, cx| {
+                    editor.set_value("export const value = 'from module';", window, cx)
+                });
+                app.select_websocket_automation_module(None, window, cx);
+                let document = app.websocket_document(cx).unwrap();
+                assert!(document.automation_source.starts_with("import { value }"));
+                assert_eq!(
+                    document.automation_modules["helpers.js"],
+                    "export const value = 'from module';"
+                );
+                let output = execute_websocket_automation_with_modules(
+                    &document.automation_source,
+                    &document.automation_modules,
+                    &WebSocketAutomationEvent::opened(),
+                    &BTreeMap::new(),
+                )
+                .unwrap();
+                assert_eq!(output.sends, vec!["from module"]);
+                let saved = serde_json::to_string(&document).unwrap();
+                app.load_websocket_document(serde_json::from_str(&saved).unwrap(), window, cx);
+                app.websocket_workspace.section = WebSocketSection::Automation;
+                assert_eq!(app.websocket_document(cx).unwrap(), document);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let workspace = cx.debug_bounds("websocket-automation-workspace").unwrap();
+        let files = cx.debug_bounds("websocket-automation-files").unwrap();
+        let editor = cx.debug_bounds("websocket-automation-editor").unwrap();
+        assert!(files.is_contained_within(&workspace));
+        assert!(editor.is_contained_within(&workspace));
+        assert!(files.right() <= editor.left());
     }
 
     #[gpui::test]

@@ -119,8 +119,9 @@ pub use websocket::{
     MAX_WEBSOCKET_MESSAGE_BYTES, MAX_WEBSOCKET_TIMELINE_ENTRIES, WebSocketAutomationEvent,
     WebSocketCommand, WebSocketMessageTemplate, WebSocketReplay, WebSocketReplayDirection,
     WebSocketReplayFrame, WebSocketSavedMessage, WebSocketSignal, WebSocketWorkspace,
-    binary_preview, compare_replay_frames, execute_websocket_automation, render_message_template,
-    run_upstream_websocket_connection, run_websocket_connection, template_variable_names,
+    binary_preview, compare_replay_frames, execute_websocket_automation_with_modules,
+    render_message_template, run_upstream_websocket_connection, run_websocket_connection,
+    template_variable_names, validate_automation_module_name,
 };
 pub use workspace::{
     Collection, CollectionFolder, Environment, EnvironmentVariable, RequestScripts,

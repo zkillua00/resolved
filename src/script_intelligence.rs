@@ -229,6 +229,7 @@ pub struct ScriptCompletionProvider {
     typescript: Option<TypeScriptServiceHandle>,
     typescript_document: TypeScriptDocumentKind,
     request_namespace: Option<ScriptRequestNamespaceHandle>,
+    websocket_project: Option<Rc<RefCell<crate::typescript_service::WebSocketScriptProject>>>,
     document: Rc<RefCell<ScriptDocumentVersion>>,
 }
 
@@ -255,6 +256,7 @@ impl ScriptCompletionProvider {
             typescript: None,
             typescript_document: TypeScriptDocumentKind::Script(typescript_phase(phase)),
             request_namespace: None,
+            websocket_project: None,
             document: Rc::new(RefCell::new(ScriptDocumentVersion::default())),
         }
     }
@@ -272,11 +274,33 @@ impl ScriptCompletionProvider {
         }
     }
 
+    pub fn for_websocket_automation(
+        project: Rc<RefCell<crate::typescript_service::WebSocketScriptProject>>,
+    ) -> Self {
+        Self {
+            typescript_document: TypeScriptDocumentKind::WebSocketAutomation,
+            websocket_project: Some(project),
+            ..Self::new(
+                ScriptEditorPhase::PostResponse,
+                Rc::new(RefCell::new(ScriptVariableCatalog::default())),
+            )
+        }
+    }
+
     pub fn for_interactive_console(variables: ScriptVariableCatalogHandle) -> Self {
         Self {
             typescript_document: TypeScriptDocumentKind::InteractiveConsole,
             ..Self::new(ScriptEditorPhase::PostResponse, variables)
         }
+    }
+
+    fn typescript_service(&self) -> Option<TypeScriptServiceHandle> {
+        self.typescript
+            .clone()
+            .map(|service| match &self.websocket_project {
+                Some(project) => service.with_websocket_project(project.borrow().clone()),
+                None => service,
+            })
     }
 
     /// Adds Microsoft's embedded TypeScript Language Service for ordinary
@@ -297,6 +321,9 @@ impl ScriptCompletionProvider {
     /// Synchronous completion entrypoint used by the GPUI provider and focused
     /// unit tests.
     pub fn completion_items_for_source(&self, source: &str, offset: usize) -> Vec<CompletionItem> {
+        if self.typescript_document == TypeScriptDocumentKind::WebSocketAutomation {
+            return Vec::new();
+        }
         let namespace = self
             .request_namespace
             .as_ref()
@@ -314,6 +341,9 @@ impl ScriptCompletionProvider {
     /// Returns documentation for the runtime symbol or variable name under
     /// the pointer.
     pub fn hover_for_source(&self, source: &str, offset: usize) -> Option<Hover> {
+        if self.typescript_document == TypeScriptDocumentKind::WebSocketAutomation {
+            return None;
+        }
         let namespace = self
             .request_namespace
             .as_ref()
@@ -336,7 +366,7 @@ impl ScriptCompletionProvider {
             .request_namespace
             .as_ref()
             .map(|handle| handle.borrow().clone());
-        let typescript_request = self.typescript.clone().map(|typescript| {
+        let typescript_request = self.typescript_service().map(|typescript| {
             (
                 typescript,
                 self.typescript_document,
@@ -344,8 +374,13 @@ impl ScriptCompletionProvider {
             )
         });
 
+        let websocket = self.typescript_document == TypeScriptDocumentKind::WebSocketAutomation;
         cx.background_spawn(async move {
-            let local = diagnostics_for_source(&source, &variables, namespace.as_ref());
+            let local = if websocket {
+                Vec::new()
+            } else {
+                diagnostics_for_source(&source, &variables, namespace.as_ref())
+            };
             let Some((typescript, document, version)) = typescript_request else {
                 return local;
             };
@@ -383,7 +418,7 @@ impl CompletionProvider for ScriptCompletionProvider {
         cx: &mut Context<InputState>,
     ) -> Task<Result<CompletionResponse>> {
         let source = text.to_string();
-        let Some(typescript) = self.typescript.clone() else {
+        let Some(typescript) = self.typescript_service() else {
             let local = self.completion_items_for_source(&source, offset);
             return Task::ready(Ok(CompletionResponse::Array(local)));
         };
@@ -398,14 +433,18 @@ impl CompletionProvider for ScriptCompletionProvider {
         let version = self.version_for_source(&source);
 
         cx.background_spawn(async move {
-            let local = completion_items(
-                &source,
-                offset,
-                local_phase,
-                &variables,
-                expose_environment_values,
-                namespace.as_ref(),
-            );
+            let local = if document == TypeScriptDocumentKind::WebSocketAutomation {
+                Vec::new()
+            } else {
+                completion_items(
+                    &source,
+                    offset,
+                    local_phase,
+                    &variables,
+                    expose_environment_values,
+                    namespace.as_ref(),
+                )
+            };
             let items = match typescript
                 .completion_items(document, version, source, offset)
                 .await
@@ -470,7 +509,7 @@ impl HoverProvider for ScriptCompletionProvider {
         cx: &mut App,
     ) -> Task<Result<Option<Hover>>> {
         let source = text.to_string();
-        let Some(typescript) = self.typescript.clone() else {
+        let Some(typescript) = self.typescript_service() else {
             return Task::ready(Ok(self.hover_for_source(&source, offset)));
         };
         let variables = self.variables.borrow().clone();
@@ -484,14 +523,16 @@ impl HoverProvider for ScriptCompletionProvider {
         let version = self.version_for_source(&source);
 
         cx.background_spawn(async move {
-            if let Some(hover) = hover_for_source(
-                &source,
-                offset,
-                local_phase,
-                &variables,
-                expose_environment_values,
-                namespace.as_ref(),
-            ) {
+            if document != TypeScriptDocumentKind::WebSocketAutomation
+                && let Some(hover) = hover_for_source(
+                    &source,
+                    offset,
+                    local_phase,
+                    &variables,
+                    expose_environment_values,
+                    namespace.as_ref(),
+                )
+            {
                 return Ok(Some(hover));
             }
             match typescript.hover(document, version, source, offset).await {

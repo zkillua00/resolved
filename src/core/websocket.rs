@@ -10,7 +10,10 @@ use std::{
 };
 
 use futures::{SinkExt as _, StreamExt as _};
-use rquickjs::{Context as JsContext, Runtime as JsRuntime};
+use rquickjs::{
+    CatchResultExt as _, Context as JsContext, Module, Runtime as JsRuntime,
+    loader::{BuiltinLoader, BuiltinResolver},
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -45,6 +48,7 @@ pub struct WebSocketWorkspace {
     pub reset_input_after_send: bool,
     pub automation_enabled: bool,
     pub automation_source: String,
+    pub automation_modules: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -276,15 +280,58 @@ pub fn render_message_template(
     Ok(rendered)
 }
 
-pub fn execute_websocket_automation(
+#[cfg(test)]
+fn execute_websocket_automation(
     source: &str,
     event: &WebSocketAutomationEvent,
     environment: &BTreeMap<String, String>,
 ) -> Result<WebSocketAutomationOutput, String> {
+    execute_websocket_automation_with_modules(source, &BTreeMap::new(), event, environment)
+}
+
+pub fn validate_automation_module_name(name: &str) -> Result<(), String> {
+    if name == "automation.js"
+        || !name.ends_with(".js")
+        || name.len() > 128
+        || name
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/'))
+    {
+        return Err("Use a relative .js filename, such as helpers.js or lib/messages.js. automation.js is the entry file.".into());
+    }
+    Ok(())
+}
+
+pub fn execute_websocket_automation_with_modules(
+    source: &str,
+    modules: &BTreeMap<String, String>,
+    event: &WebSocketAutomationEvent,
+    environment: &BTreeMap<String, String>,
+) -> Result<WebSocketAutomationOutput, String> {
+    if modules.len() > 64
+        || source
+            .len()
+            .saturating_add(modules.values().map(String::len).sum::<usize>())
+            > 1024 * 1024
+    {
+        return Err("Automation supports up to 64 modules and 1 MiB of source.".into());
+    }
+    let mut resolver = BuiltinResolver::default();
+    let mut loader = BuiltinLoader::default();
+    for (name, source) in modules {
+        validate_automation_module_name(name)?;
+        let path = name.clone();
+        resolver.add_module(path.clone());
+        loader.add_module(path, source.as_bytes().to_vec());
+    }
     if source.trim().is_empty() {
         return Ok(WebSocketAutomationOutput::default());
     }
     let runtime = JsRuntime::new().map_err(|error| error.to_string())?;
+    runtime.set_loader(resolver, loader);
     runtime.set_memory_limit(AUTOMATION_MEMORY_BYTES);
     runtime.set_max_stack_size(AUTOMATION_STACK_BYTES);
     let deadline = Instant::now() + AUTOMATION_TIMEOUT;
@@ -303,7 +350,11 @@ pub fn execute_websocket_automation(
             .map_err(|error| error.to_string())?;
         ctx.eval::<(), _>(AUTOMATION_PRELUDE)
             .map_err(|error| error.to_string())?;
-        ctx.eval::<(), _>(source)
+        Module::evaluate(ctx.clone(), "automation.js", source)
+            .catch(&ctx)
+            .map_err(|error| error.to_string())?
+            .finish::<()>()
+            .catch(&ctx)
             .map_err(|error| error.to_string())?;
         let output = ctx
             .eval::<rquickjs::Value<'_>, _>("__WS_FINISH()")
@@ -326,6 +377,9 @@ const AUTOMATION_PRELUDE: &str = r#"
     send(value) { sends.push(stringify(value)); },
     sendJson(value) { sends.push(JSON.stringify(value)); },
     log(...values) { logs.push(values.map(stringify).join(" ")); },
+  });
+  globalThis.console = Object.freeze({
+    log: ws.log, info: ws.log, warn: ws.log, error: ws.log, debug: ws.log,
   });
   globalThis.__WS_FINISH = () => ({ sends, logs });
 })();
@@ -580,6 +634,50 @@ mod tests {
             render_message_template("%{room}%", &BTreeMap::new()).unwrap_err(),
             WebSocketDocumentError::MissingTemplateValue("room".to_owned())
         );
+    }
+
+    #[test]
+    fn automation_imports_nested_modules_and_awaits_results() {
+        let modules = BTreeMap::from([
+            ("lib/ack.js".into(), "import { decorate } from './format.js'; export async function ack(id) { return decorate(await Promise.resolve(id)); }".into()),
+            ("lib/format.js".into(), "export function decorate(id) { return { ack: id }; }".into()),
+        ]);
+        let output = execute_websocket_automation_with_modules(
+            "import { ack } from './lib/ack.js'; ws.sendJson(await ack(JSON.parse(ws.event.data).id)); console.log('sent', ws.environment.label);",
+            &modules, &WebSocketAutomationEvent::text(r#"{"id":7}"#), &BTreeMap::from([("label".into(), "ack".into())]),
+        ).unwrap();
+        assert_eq!(output.sends, vec![r#"{"ack":7}"#]);
+        assert_eq!(output.logs, vec!["sent ack"]);
+    }
+
+    #[test]
+    fn automation_import_errors_and_resource_limits_are_reported() {
+        let event = WebSocketAutomationEvent::opened();
+        let error = execute_websocket_automation_with_modules(
+            "import './missing.js';",
+            &BTreeMap::new(),
+            &event,
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert!(error.contains("missing.js"), "{error}");
+        assert!(
+            execute_websocket_automation_with_modules(
+                "ws.send('no');",
+                &BTreeMap::from([("../escape.js".into(), "".into())]),
+                &event,
+                &BTreeMap::new()
+            )
+            .is_err()
+        );
+        let error = execute_websocket_automation(
+            "throw new Error('specific failure');",
+            &event,
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert!(error.contains("specific failure"), "{error}");
+        assert!(execute_websocket_automation("while (true) {}", &event, &BTreeMap::new()).is_err());
     }
 
     #[test]

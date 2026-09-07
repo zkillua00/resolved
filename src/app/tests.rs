@@ -1103,7 +1103,7 @@ fn mcp_websocket_connection_exposes_frames_and_runs_automation(cx: &mut gpui::Te
                 let listener = tokio::net::TcpListener::from_std(listener).unwrap();
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
-                for _ in 0..2 {
+                for _ in 0..3 {
                     let message = tokio::time::timeout(Duration::from_secs(3), socket.next())
                         .await
                         .expect("receive WebSocket message before timeout")
@@ -1148,7 +1148,8 @@ fn mcp_websocket_connection_exposes_frames_and_runs_automation(cx: &mut gpui::Te
                         }],
                         automation_enabled: true,
                         automation_source:
-                            "if (ws.event.eventType === 'open') ws.send('automatic');".to_owned(),
+                            "import { run } from './events.js'; run();".to_owned(),
+                        automation_modules: std::collections::BTreeMap::from([("events.js".into(), "export function run() { if (ws.event.eventType === 'open') ws.send('automatic'); }".into())]),
                         ..WebSocketWorkspace::default()
                     }),
                 )
@@ -1209,6 +1210,13 @@ fn mcp_websocket_connection_exposes_frames_and_runs_automation(cx: &mut gpui::Te
         }));
     });
 
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.websocket_workspace.document.automation_modules.insert("events.js".into(), "export function run() { if (ws.event.data === 'manual') ws.send('updated automation'); }".into());
+            app.websocket_workspace.automation.update(cx, |editor, cx| editor.set_value("import { run } from './events.js'; run();", window, cx));
+            app.sync_active_websocket_document(cx);
+        });
+    });
     let sent = cx.update(|window, cx| {
         app.update(cx, |app, cx| {
             app.handle_window_control_call(
@@ -1258,6 +1266,28 @@ fn mcp_websocket_connection_exposes_frames_and_runs_automation(cx: &mut gpui::Te
                 })
         );
     });
+    let mut updated_received = false;
+    for _ in 0..100 {
+        std::thread::sleep(Duration::from_millis(10));
+        cx.run_until_parked();
+        updated_received = cx.update(|_, cx| {
+            app.read(cx)
+                .websocket_workspace
+                .timeline
+                .iter()
+                .any(|event| {
+                    event.direction == WebSocketTimelineDirection::Received
+                        && event.payload == "updated automation"
+                })
+        });
+        if updated_received {
+            break;
+        }
+    }
+    assert!(
+        updated_received,
+        "module edits must apply without reconnecting"
+    );
     server.join().unwrap();
 }
 

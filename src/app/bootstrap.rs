@@ -561,8 +561,12 @@ impl ApiTester {
                 .placeholder("Password")
                 .masked(true)
         });
-        let websocket_workspace =
-            WebSocketWorkspaceState::new(&WebSocketWorkspace::default(), window, cx);
+        let websocket_workspace = WebSocketWorkspaceState::new(
+            &WebSocketWorkspace::default(),
+            typescript_service.clone(),
+            window,
+            cx,
+        );
         let websocket_url_subscription = cx.subscribe(
             &websocket_workspace.url,
             |this, _, event: &InputEvent, cx| {
@@ -624,6 +628,15 @@ impl ApiTester {
             |this, _, event: &CodeEditorEvent, window, cx| {
                 if matches!(event, CodeEditorEvent::FormatRequested) {
                     this.format_websocket_template(window, cx);
+                }
+            },
+        );
+        let websocket_automation_format_subscription = cx.subscribe_in(
+            &websocket_workspace.automation,
+            window,
+            |this, _, event: &CodeEditorEvent, window, cx| {
+                if matches!(event, CodeEditorEvent::FormatRequested) {
+                    this.format_websocket_automation(window, cx);
                 }
             },
         );
@@ -1094,6 +1107,7 @@ impl ApiTester {
                 websocket_library_preview_format_subscription,
                 websocket_template_format_subscription,
                 websocket_automation_subscription,
+                websocket_automation_format_subscription,
                 websocket_timeline_filter_subscription,
                 websocket_library_search_subscription,
                 websocket_quick_send_query_subscription,

@@ -37,6 +37,13 @@ pub(super) struct ControlWebSocketEvent {
     pub(super) binary: Option<Vec<u8>>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct ControlWebSocketAutomation {
+    enabled: bool,
+    source: String,
+    modules: BTreeMap<String, String>,
+}
+
 pub(super) struct ControlWebSocketConnection {
     id: u64,
     request_id: String,
@@ -48,6 +55,7 @@ pub(super) struct ControlWebSocketConnection {
     events: Vec<ControlWebSocketEvent>,
     next_event_id: u64,
     automation_paused: Arc<std::sync::atomic::AtomicBool>,
+    automation: Arc<std::sync::Mutex<ControlWebSocketAutomation>>,
 }
 
 enum ControlWebSocketIncoming {
@@ -674,6 +682,24 @@ async fn reload_remote_environments(
 }
 
 impl ApiTester {
+    pub(super) fn sync_mcp_websocket_automation(&mut self) {
+        let Some(id) = self.websocket_workspace.mcp_connection_id else {
+            return;
+        };
+        let document = &self.websocket_workspace.document;
+        let config = ControlWebSocketAutomation {
+            enabled: document.automation_enabled,
+            source: document.automation_source.clone(),
+            modules: document.automation_modules.clone(),
+        };
+        if let Ok(connection) = self.control_websocket_mut(id) {
+            *connection
+                .automation
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = config;
+        }
+    }
+
     pub(super) fn pause_mcp_websocket_automation(&mut self, paused: bool) {
         if let Some(id) = self.websocket_workspace.mcp_connection_id {
             if let Ok(connection) = self.control_websocket_mut(id) {
@@ -3363,8 +3389,12 @@ impl ApiTester {
         });
         let abort_handle = task.abort_handle();
 
-        let automation_enabled = document.automation_enabled;
-        let automation_source = document.automation_source;
+        let automation = Arc::new(std::sync::Mutex::new(ControlWebSocketAutomation {
+            enabled: document.automation_enabled,
+            source: document.automation_source,
+            modules: document.automation_modules,
+        }));
+        let task_automation = automation.clone();
         let automation_environment = self.workspace.active_environment().cloned();
         let automation_values = automation_environment
             .as_ref()
@@ -3403,7 +3433,11 @@ impl ApiTester {
                 {
                     return;
                 }
-                if !automation_enabled
+                let config = task_automation
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
+                if !config.enabled
                     || task_automation_paused.load(std::sync::atomic::Ordering::SeqCst)
                 {
                     continue;
@@ -3411,13 +3445,24 @@ impl ApiTester {
                 let Some(automation_event) = automation_event else {
                     continue;
                 };
-                let source = automation_source.clone();
+                let source = config.source.clone();
+                let modules = config.modules.clone();
                 let values = automation_values.clone();
                 let output = tokio::task::spawn_blocking(move || {
-                    execute_websocket_automation(&source, &automation_event, &values)
+                    execute_websocket_automation_with_modules(
+                        &source,
+                        &modules,
+                        &automation_event,
+                        &values,
+                    )
                 })
                 .await;
-                if task_automation_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                if task_automation_paused.load(std::sync::atomic::Ordering::SeqCst)
+                    || *task_automation
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        != config
+                {
                     continue;
                 }
                 match output {
@@ -3476,6 +3521,7 @@ impl ApiTester {
             events: Vec::new(),
             next_event_id: 1,
             automation_paused,
+            automation,
         });
         cx.spawn(async move |weak_this, cx| {
             while let Some(event) = event_receiver.recv().await {
