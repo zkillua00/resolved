@@ -658,11 +658,17 @@ destroys it when Preview is left, the response is cleared, or loading fails.
 
 ## Cookies
 
-Locally executed HTTP requests accept `Set-Cookie` response headers and send
-matching cookies on later requests, including redirects. Each workspace has its
-own encrypted jar. Local execution inside a server workspace uses that workspace's
-local jar; cookies are not shared with other workspaces or uploaded to the server.
-An enabled explicit `Cookie` header takes precedence over automatic cookies.
+HTTP requests accept `Set-Cookie` response headers and send matching cookies on
+later requests, including redirects. An explicit `Cookie` header takes precedence.
+Local-workspace jars are isolated by workspace and encrypted with the device vault.
+
+Server-workspace jars are private to your signed-in user, even in shared workspaces.
+They are stored on that server with the same password-derived key as your environment
+values, using separate authenticated encryption bound to the user and workspace.
+Keys remain in server memory and jars are re-encrypted when your password changes.
+The desktop keeps these cookies only in memory, with no device-key fallback.
+Both local and server execution use this private server-workspace jar. This requires
+a server version supporting encrypted cookie jars; unavailable storage fails closed.
 
 Open **Cookies** beside **Send** to view the active workspace's cookies. Values
 stay hidden in the list; **View / edit** reveals the value and attributes. Add or
@@ -676,19 +682,27 @@ preserving existing entries. This preference survives app restarts. Explicit
 request headers remain under your control. Session cookies also survive restarts;
 expired cookies are never sent.
 
-If storage cannot be read, the app opens with that jar disabled and retains the
-unreadable data until you explicitly reset it. The Cookies control flags storage
-warnings; open it for details. A failed automatic save leaves cookies in memory
-and shows a warning. Failed manual edits, deletes, or resets leave existing state
-unchanged. The encryption key uses the same platform storage boundary as saved
-server sessions described above.
+If local storage cannot be read, the app opens with that jar disabled and retains
+the unreadable data until you explicitly reset it. Failed local manual mutations
+leave existing state unchanged. A failed automatic save keeps cookies in memory
+and displays a warning.
 
-Server-executed requests do not use the desktop jar yet. Automatic cookie handling
+Server saves run asynchronously, with a visible synchronization state. Execution
+waits for pending saves. Workspace switching and normal app close also wait for
+unsaved cookie changes to be resolved. Failed saves remain visible; the server's previous jar is
+preserved. **Reload from server** discards unsaved in-memory changes and retrieves
+the current jar. Revision checks prevent one client from silently overwriting
+another client's changes. **Clear / reset jar** explicitly replaces saved cookies,
+including unreadable data. Re-login and reopen the workspace after a session expires.
+
+Server execution uses an isolated jar per execution, captures redirect cookies,
+and merges response changes into encrypted storage. Cookies and cookie-management
+payloads are not published as shared-workspace events. Automatic cookie handling
 for WebSocket handshakes is not included.
 
 ## Deliberate limits
 
-Server-execution cookie jar handoff, response streaming/downloads, certificate controls, proxy
+Response streaming/downloads, certificate controls, proxy
 controls, and native collection-structure import/export are not included yet.
 Specification imports open operations as request tabs rather than manufacturing
 a saved collection.

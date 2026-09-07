@@ -164,3 +164,15 @@ func writeLengthPrefixed(writer byteWriter, value []byte) {
 	_, _ = writer.Write(length[:])
 	_, _ = writer.Write(value)
 }
+
+// Cookie jars share the authenticated user's RAM-only password-derived key,
+// with separate associated data binding both user and workspace.
+func (c *EnvironmentCipher) EncryptCookieJar(key []byte, userID, workspaceID string, plaintext []byte) ([]byte, error) {
+	if len(plaintext) > 1024*1024 {
+		return nil, errors.New("cookie jar exceeds 1 MiB")
+	}
+	return seal(key, plaintext, associatedData([]byte("resolved/cookie-jar/v1"), userID, workspaceID))
+}
+func (c *EnvironmentCipher) DecryptCookieJar(key []byte, userID, workspaceID string, ciphertext []byte) ([]byte, error) {
+	return open(key, ciphertext, associatedData([]byte("resolved/cookie-jar/v1"), userID, workspaceID))
+}

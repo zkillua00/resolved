@@ -225,7 +225,9 @@ impl ApiTester {
             })
             .child(
                 Button::new("cookie-manager")
-                    .label(if self.cookie_jar.warning().is_some() {
+                    .label(if self.cookie_jar.syncing() {
+                        "Cookies…"
+                    } else if self.cookie_jar.warning().is_some() {
                         "Cookies ⚠"
                     } else if self.cookie_jar.enabled() {
                         "Cookies"

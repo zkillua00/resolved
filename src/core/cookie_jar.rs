@@ -11,6 +11,7 @@ pub struct CookieJar {
     id: String,
     vault: CredentialVault,
     state: RwLock<State>,
+    remote: Option<RemoteStorage>,
 }
 struct State {
     store: RfcCookieStore,
@@ -60,6 +61,7 @@ impl CookieJar {
         Ok(Self {
             id,
             vault,
+            remote: None,
             state: RwLock::new(State {
                 store,
                 enabled,
@@ -75,6 +77,7 @@ impl CookieJar {
         Self::load(vault.clone(), id.clone()).unwrap_or_else(|error| Self {
             id,
             vault,
+            remote: None,
             state: RwLock::new(State {
                 store: RfcCookieStore::default(),
                 enabled: false,
@@ -86,6 +89,9 @@ impl CookieJar {
         })
     }
     fn persist(&self, store: &RfcCookieStore, enabled: bool) -> Result<(), String> {
+        if let Some(remote) = &self.remote {
+            return remote.enqueue(RemoteJob::Save(remote_snapshot(store, enabled), false));
+        }
         let mut cookies = Zeroizing::new(Vec::new());
         cookie_store::serde::json::save_incl_expired_and_nonpersistent(store, &mut *cookies)
             .map_err(|e| e.to_string())?;
@@ -104,7 +110,23 @@ impl CookieJar {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .enabled
     }
+    pub fn has_unsaved_changes(&self) -> bool {
+        self.remote
+            .as_ref()
+            .is_some_and(|remote| remote.status.borrow().dirty)
+    }
+    pub fn syncing(&self) -> bool {
+        self.remote
+            .as_ref()
+            .is_some_and(|remote| remote.status.borrow().pending > 0)
+    }
     pub fn warning(&self) -> Option<String> {
+        if let Some(remote) = &self.remote {
+            let status = remote.status.borrow();
+            if let Some(error) = &status.error {
+                return Some(error.clone());
+            }
+        }
         self.state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -130,7 +152,14 @@ impl CookieJar {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let store = RfcCookieStore::default();
-        self.persist(&store, state.enabled)?;
+        if let Some(remote) = &self.remote {
+            remote.enqueue(RemoteJob::Save(
+                remote_snapshot(&store, state.enabled),
+                true,
+            ))?;
+        } else {
+            self.persist(&store, state.enabled)?;
+        }
         state.store = store;
         state.blocked = false;
         state.warning = None;
@@ -556,4 +585,389 @@ mod tests {
                 .is_none()
         );
     }
+    #[test]
+    fn remote_jar_uses_server_storage_and_preserves_sync_errors() {
+        use crate::core::{AppSettings, UpstreamCredential};
+        let (_directory, database, vault) = test_vault();
+        vault
+            .store_upstream_with_settings(
+                &AppSettings::default(),
+                "test-server",
+                &UpstreamCredential::new(
+                    Zeroizing::new("test-bearer".into()),
+                    chrono::Utc::now() + chrono::Duration::hours(1),
+                ),
+            )
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for index in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0u8; 2048];
+                loop {
+                    let count = stream.read(&mut buffer).unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&buffer[..count]);
+                    if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+                        let length = headers
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length: "))
+                            .map(|value| value.parse::<usize>().unwrap())
+                            .unwrap_or(0);
+                        if bytes.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let request = String::from_utf8_lossy(&bytes);
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer test-bearer")
+                );
+                assert!(request.starts_with(if index == 1 || index == 2 {
+                    "PUT "
+                } else {
+                    "GET "
+                }));
+                let (status, body) = if index == 2 {
+                    (
+                        "409 Conflict",
+                        serde_json::json!({"success":false,"error":{"message":"Cookie jar changed on another client. Reload it before saving."}}),
+                    )
+                } else {
+                    (
+                        "200 OK",
+                        serde_json::json!({"success":true,"data":{"enabled":true,"revision":index+1,"cookies":[{"url":"https://example.com/","cookie":"session=server-secret; Path=/; Secure"}]}}),
+                    )
+                };
+                let body = body.to_string();
+                write!(stream,"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            }
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let jar = CookieJar::open_remote(
+            vault,
+            "test-server".into(),
+            "workspace".into(),
+            Url::parse(&format!("http://{address}/")).unwrap(),
+            crate::core::build_upstream_client().unwrap(),
+            runtime.handle(),
+        );
+        runtime.block_on(async {
+            jar.synchronized().await.unwrap();
+            assert_eq!(
+                jar.request_cookie_header(&Url::parse("https://example.com/").unwrap())
+                    .unwrap(),
+                "session=server-secret"
+            );
+            jar.edit(None, "https://example.com/", "manual=edited; Path=/")
+                .unwrap();
+            jar.synchronized().await.unwrap();
+            assert!(!jar.has_unsaved_changes());
+            jar.set_enabled(false).unwrap();
+            assert!(jar.has_unsaved_changes());
+            assert!(
+                jar.synchronized()
+                    .await
+                    .unwrap_err()
+                    .contains("another client")
+            );
+            assert!(jar.warning().unwrap().contains("another client"));
+            assert!(jar.has_unsaved_changes());
+            jar.refresh().await.unwrap();
+            assert!(!jar.has_unsaved_changes());
+            assert!(jar.enabled());
+            assert!(jar.warning().is_none());
+        });
+        assert!(
+            database
+                .load_secure_value(COOKIE_JAR_NAMESPACE, "upstream:test-server:workspace")
+                .unwrap()
+                .is_none()
+        );
+        server.join().unwrap();
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct RemoteCookie {
+    url: String,
+    cookie: String,
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct RemoteSnapshot {
+    enabled: bool,
+    cookies: Vec<RemoteCookie>,
+    #[serde(default)]
+    revision: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    reset: bool,
+}
+#[derive(Clone, Default)]
+pub struct CookieSyncStatus {
+    dirty: bool,
+    pending: usize,
+    error: Option<String>,
+}
+enum RemoteJob {
+    Load,
+    Save(RemoteSnapshot, bool),
+}
+struct RemoteStorage {
+    jobs: tokio::sync::mpsc::UnboundedSender<RemoteJob>,
+    status: tokio::sync::watch::Sender<CookieSyncStatus>,
+}
+impl RemoteStorage {
+    fn enqueue(&self, job: RemoteJob) -> Result<(), String> {
+        self.status.send_modify(|status| {
+            status.pending += 1;
+            status.dirty |= matches!(&job, RemoteJob::Save(..));
+        });
+        if self.jobs.send(job).is_err() {
+            self.status.send_modify(|status| {
+                status.pending -= 1;
+                status.error =
+                    Some("Cookie synchronization stopped. Reopen this workspace.".into());
+            });
+            return Err("Cookie synchronization stopped. Reopen this workspace.".into());
+        }
+        Ok(())
+    }
+}
+fn remote_snapshot(store: &RfcCookieStore, enabled: bool) -> RemoteSnapshot {
+    RemoteSnapshot {
+        enabled,
+        revision: 0,
+        reset: false,
+        cookies: store
+            .iter_unexpired()
+            .map(|cookie| {
+                let domain = cookie.domain.as_cow().unwrap_or_default();
+                RemoteCookie {
+                    url: format!(
+                        "{}://{}{}",
+                        if cookie.secure().unwrap_or(false) {
+                            "https"
+                        } else {
+                            "http"
+                        },
+                        domain,
+                        cookie.path.as_ref()
+                    ),
+                    cookie: normalized_cookie(cookie),
+                }
+            })
+            .collect(),
+    }
+}
+impl CookieJar {
+    pub fn is_remote(&self) -> bool {
+        self.remote.is_some()
+    }
+    pub fn subscribe(&self) -> Option<tokio::sync::watch::Receiver<CookieSyncStatus>> {
+        self.remote.as_ref().map(|remote| remote.status.subscribe())
+    }
+    pub fn reload(&self) -> Result<(), String> {
+        self.remote
+            .as_ref()
+            .ok_or("This is a local cookie jar.")?
+            .enqueue(RemoteJob::Load)
+    }
+    pub async fn synchronized(&self) -> Result<(), String> {
+        let Some(mut status) = self.subscribe() else {
+            return Ok(());
+        };
+        loop {
+            let current = status.borrow().clone();
+            if current.pending == 0 {
+                return current.error.map_or(Ok(()), Err);
+            }
+            status
+                .changed()
+                .await
+                .map_err(|_| "Cookie synchronization stopped.".to_string())?;
+        }
+    }
+    pub async fn refresh(&self) -> Result<(), String> {
+        if self.is_remote() {
+            self.reload()?;
+            self.synchronized().await?;
+        }
+        Ok(())
+    }
+
+    /// Remote jars never use CredentialVault for cookie payloads. It supplies
+    /// only the existing bearer session; password-derived keys stay on the server.
+    pub fn open_remote(
+        vault: CredentialVault,
+        upstream_id: String,
+        workspace_id: String,
+        base_url: Url,
+        client: reqwest::Client,
+        runtime: &tokio::runtime::Handle,
+    ) -> std::sync::Arc<Self> {
+        let (jobs, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (status, _) = tokio::sync::watch::channel(CookieSyncStatus::default());
+        let jar = std::sync::Arc::new(Self {
+            id: format!("upstream:{upstream_id}:{workspace_id}"),
+            vault: vault.clone(),
+            state: RwLock::new(State {
+                store: RfcCookieStore::default(),
+                enabled: false,
+                blocked: true,
+                warning: None,
+            }),
+            remote: Some(RemoteStorage {
+                jobs,
+                status: status.clone(),
+            }),
+        });
+        let weak = std::sync::Arc::downgrade(&jar);
+        jar.reload().expect("new cookie worker is connected");
+        let runtime_handle = runtime.clone();
+        runtime.spawn(async move {
+            let mut revision = 0;
+            let mut pinned_credential = None;
+            while let Some(job) = receiver.recv().await {
+                let fetch = matches!(&job, RemoteJob::Load);
+                let snapshot = match job {
+                    RemoteJob::Load => None,
+                    RemoteJob::Save(mut snapshot, reset) => {
+                        snapshot.revision = revision;
+                        snapshot.reset = reset;
+                        Some(snapshot)
+                    }
+                };
+                if pinned_credential.is_none() {
+                    let credentials = vault.clone();
+                    let upstream = upstream_id.clone();
+                    if let Ok(Ok(Some(credential))) = runtime_handle
+                        .spawn_blocking(move || credentials.load_upstream(&upstream))
+                        .await
+                    {
+                        pinned_credential = Some(credential);
+                    }
+                }
+                // Pin this jar to its opening session. A later login on the same
+                // profile must never upload one user's cookies as another user.
+                let result = match pinned_credential.as_ref() {
+                    Some(credential) if credential.expires_at > chrono::Utc::now() => {
+                        remote_request(
+                            &client,
+                            &base_url,
+                            &workspace_id,
+                            credential.bearer_token(),
+                            snapshot.as_ref(),
+                        )
+                        .await
+                    }
+                    _ => Err(
+                        "Log in again and reopen this workspace to unlock its cookie jar.".into(),
+                    ),
+                };
+                let Some(jar) = weak.upgrade() else {
+                    break;
+                };
+                let result = result.and_then(|snapshot| {
+                    revision = snapshot.revision;
+                    if fetch && status.borrow().pending == 1 {
+                        let mut store = RfcCookieStore::default();
+                        for cookie in snapshot.cookies {
+                            let origin = Url::parse(&cookie.url)
+                                .map_err(|_| "Server cookie origin is invalid.")?;
+                            // Expired cookies are deliberately discarded on reload.
+                            let _ = store.parse(&cookie.cookie, &origin);
+                        }
+                        let mut state = jar
+                            .state
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        *state = State {
+                            store,
+                            enabled: snapshot.enabled,
+                            blocked: false,
+                            warning: None,
+                        };
+                    }
+                    Ok(())
+                });
+                status.send_modify(|status| {
+                    status.pending = status.pending.saturating_sub(1);
+                    if result.is_ok() && status.pending == 0 {
+                        status.dirty = false;
+                    }
+                    status.error = result.err();
+                });
+            }
+        });
+        jar
+    }
+}
+async fn remote_request(
+    client: &reqwest::Client,
+    base: &Url,
+    workspace: &str,
+    token: &str,
+    snapshot: Option<&RemoteSnapshot>,
+) -> Result<RemoteSnapshot, String> {
+    let endpoint = base
+        .join(&format!("api/v1/workspaces/{workspace}/cookie-jar"))
+        .map_err(|e| e.to_string())?;
+    let builder = if let Some(snapshot) = snapshot {
+        client.put(endpoint).json(snapshot)
+    } else {
+        client.get(endpoint)
+    };
+    let mut response = builder
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = response.status();
+    if status.is_redirection() {
+        return Err("The server redirected cookie storage; request refused.".into());
+    }
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err(
+            "This server does not support encrypted cookie jars. Update the server.".into(),
+        );
+    }
+    let mut bytes = Zeroizing::new(Vec::new());
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        if bytes.len() + chunk.len() > 4 * 1024 * 1024 {
+            return Err("The server cookie response is too large.".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    #[derive(Deserialize)]
+    struct Envelope {
+        success: bool,
+        data: Option<RemoteSnapshot>,
+        error: Option<RemoteError>,
+    }
+    #[derive(Deserialize)]
+    struct RemoteError {
+        message: String,
+    }
+    let envelope: Envelope =
+        serde_json::from_slice(&bytes).map_err(|_| "The server cookie response is invalid.")?;
+    if !status.is_success() || !envelope.success {
+        return Err(envelope
+            .error
+            .map(|e| e.message)
+            .unwrap_or_else(|| "Could not synchronize encrypted cookie storage.".into()));
+    }
+    envelope
+        .data
+        .ok_or_else(|| "The server omitted its cookie jar.".into())
 }

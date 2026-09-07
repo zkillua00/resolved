@@ -976,7 +976,7 @@ impl ApiTester {
             return;
         }
 
-        let prepared_cookie_client = match self.cookie_client_for(&provider_id) {
+        let prepared_cookie_client = match self.cookie_client_for(&provider_id, cx) {
             Ok(client) => client,
             Err(error) => {
                 self.fail_workspace_switch(
@@ -1314,7 +1314,7 @@ impl ApiTester {
             self.fail_workspace_switch(format!("Request tabs could not be repaired: {error}"), cx);
             return;
         }
-        let prepared_cookie_client = match self.cookie_client_for(&provider_id) {
+        let prepared_cookie_client = match self.cookie_client_for(&provider_id, cx) {
             Ok(client) => client,
             Err(error) => {
                 self.fail_workspace_switch(
@@ -1386,11 +1386,42 @@ impl ApiTester {
     pub(super) fn cookie_client_for(
         &self,
         provider_id: &WorkspaceProviderId,
+        cx: &mut Context<Self>,
     ) -> Result<(Arc<CookieJar>, Client), RequestError> {
-        let jar = Arc::new(CookieJar::open(
-            self.credential_vault.clone(),
-            provider_id.to_string(),
-        ));
+        let jar = match provider_id {
+            WorkspaceProviderId::Local(_) => Arc::new(CookieJar::open(
+                self.credential_vault.clone(),
+                provider_id.to_string(),
+            )),
+            WorkspaceProviderId::Upstream {
+                upstream_id,
+                workspace_id,
+            } => {
+                let profile = self.settings.upstreams.server(upstream_id).ok_or_else(|| {
+                    RequestError::Upstream("Server profile is unavailable.".into())
+                })?;
+                let base_url = normalize_upstream_url(&profile.base_url)
+                    .map_err(|e| RequestError::Upstream(e.to_string()))?;
+                CookieJar::open_remote(
+                    self.credential_vault.clone(),
+                    upstream_id.clone(),
+                    workspace_id.clone(),
+                    base_url,
+                    self.upstream_client.clone(),
+                    self.runtime.handle(),
+                )
+            }
+        };
+        if let Some(mut changes) = jar.subscribe() {
+            cx.spawn(async move |this, cx| {
+                while changes.changed().await.is_ok() {
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         let client = build_client_with_cookie_jar(jar.clone())?;
         Ok((jar, client))
     }

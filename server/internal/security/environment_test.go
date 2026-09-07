@@ -111,3 +111,34 @@ func TestEnvironmentCipherRejectsShortDeploymentSecret(t *testing.T) {
 		t.Fatal("expected a short deployment secret to fail")
 	}
 }
+
+func TestCookieJarEncryptionBindsPasswordUserWorkspaceAndPurpose(t *testing.T) {
+	cipher, err := NewEnvironmentCipher("cookie jar deployment secret with enough bytes", testEnvironmentPasswordParams())
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, _ := cipher.DeriveUserKey("alice", "original password")
+	encrypted, err := cipher.EncryptCookieJar(key, "alice", "workspace-a", []byte("session=private"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encrypted, []byte("private")) {
+		t.Fatal("plaintext in ciphertext")
+	}
+	plaintext, err := cipher.DecryptCookieJar(key, "alice", "workspace-a", encrypted)
+	if err != nil || string(plaintext) != "session=private" {
+		t.Fatal("roundtrip failed")
+	}
+	wrongKey, _ := cipher.DeriveUserKey("alice", "new password")
+	for _, test := range []struct {
+		key             []byte
+		user, workspace string
+	}{{wrongKey, "alice", "workspace-a"}, {key, "bob", "workspace-a"}, {key, "alice", "workspace-b"}} {
+		if _, err := cipher.DecryptCookieJar(test.key, test.user, test.workspace, encrypted); err == nil {
+			t.Fatal("accepted mismatched binding")
+		}
+	}
+	if _, err := cipher.DecryptValue(key, "alice", "workspace-a", encrypted); err == nil {
+		t.Fatal("cookie ciphertext accepted as environment value")
+	}
+}

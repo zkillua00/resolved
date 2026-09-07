@@ -80,7 +80,8 @@ type allowlistPayload struct {
 }
 
 type Policy struct {
-	Mode string `json:"mode"`
+	CookieJar bool   `json:"cookie_jar"`
+	Mode      string `json:"mode"`
 }
 
 type SettingsRepository struct {

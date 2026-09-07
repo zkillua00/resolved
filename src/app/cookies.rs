@@ -6,6 +6,11 @@ impl ApiTester {
         let jar = self.cookie_jar.clone();
         let this = cx.entity().downgrade();
         let workspace = self.active_workspace_name().to_owned();
+        let storage_description = if jar.is_remote() {
+            "Private to your user in this workspace. Saved on the server using your password-derived key; kept only in memory on this device."
+        } else {
+            "Cookies belong to this workspace and are encrypted by the local device vault."
+        };
         window.open_dialog(cx, move |dialog, _, cx| {
             let toggle_jar = jar.clone();
             let toggle_this = this.clone();
@@ -13,17 +18,22 @@ impl ApiTester {
             let reset_this = this.clone();
             let reset_jar = jar.clone();
             let warning = jar.warning();
+            let reload_jar = jar.clone();
             dialog.title(format!("Cookies — {workspace}")).w(px(720.)).child(
                 v_flex().gap_3()
-                    .child("Cookies belong to this workspace and are stored encrypted. Explicit Cookie headers override the jar.")
+                    .child(storage_description)
+                    .when(jar.syncing(), |view| view.child("Synchronizing encrypted cookie storage…"))
                     .when_some(warning, |view, warning| view.child(div().text_color(cx.theme().danger).child(warning)))
-                    .child(h_flex().gap_2()
+                    .child(h_flex().gap_2().flex_wrap()
                         .child(Button::new("toggle-cookies").debug_selector(|| "toggle-cookies".to_owned()).label(if jar.enabled() { "Disable automatic cookies" } else { "Enable automatic cookies" })
                             .on_click(move |_, window, cx| {
                                 if let Err(error) = toggle_jar.set_enabled(!toggle_jar.enabled()) { window.push_notification(Notification::error(error), cx); }
                                 if let Some(this) = toggle_this.upgrade() { this.update(cx, |_, cx| cx.notify()); }
                                 window.refresh();
                             }))
+                        .when(jar.is_remote(), |view| view.child(Button::new("reload-cookies").label("Reload from server").on_click(move |_, window, cx| {
+                            if let Err(error) = reload_jar.reload() { window.push_notification(Notification::error(error), cx); }
+                        })))
                         .child(Button::new("add-cookie").debug_selector(|| "add-cookie".to_owned()).label("Add cookie").on_click(move |_, window, cx| {
                             if let Some(this) = add_this.upgrade() { this.update(cx, |this, cx| this.open_cookie_editor(None, window, cx)); }
                         }))

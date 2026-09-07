@@ -369,7 +369,7 @@ func RekeyEnvironmentVariableValues(
 			return err
 		}
 	}
-	return nil
+	return RekeyCookieJars(ctx, tx, cipher, userID, oldKey, newKey)
 }
 
 func (r *EnvironmentRepository) loadEnvironments(db *gorm.DB, workspaceID string) ([]Environment, error) {

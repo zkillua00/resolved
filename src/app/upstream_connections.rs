@@ -1260,7 +1260,12 @@ mod tests {
                 );
                 let provider_id = provider.id();
                 app.workspace_providers.register(Arc::new(provider));
-                let prepared_cookie_client = app.cookie_client_for(&provider_id).unwrap();
+                let jar = Arc::new(CookieJar::open(
+                    app.credential_vault.clone(),
+                    "test-upstream",
+                ));
+                let prepared_cookie_client =
+                    (jar.clone(), build_client_with_cookie_jar(jar).unwrap());
                 app.activate_loaded_workspace(
                     provider_id,
                     prepared_cookie_client,

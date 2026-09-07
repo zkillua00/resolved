@@ -49,6 +49,7 @@ func MigrateAndSeed(db *gorm.DB) error {
 		&workspaces.Environment{},
 		&workspaces.EnvironmentVariable{},
 		&workspaces.EnvironmentVariableValue{},
+		&workspaces.CookieJarRecord{},
 		&sharedhistory.Entry{},
 		&activitylog.Entry{},
 	); err != nil {

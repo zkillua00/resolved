@@ -26,9 +26,10 @@ type Service struct {
 type ServiceOption func(*Service)
 
 type Actor struct {
-	UserID         string
-	Owner          bool
-	EnvironmentKey []byte
+	CredentialVersion [32]byte
+	UserID            string
+	Owner             bool
+	EnvironmentKey    []byte
 }
 
 type AccessScope struct {

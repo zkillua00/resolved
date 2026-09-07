@@ -1895,6 +1895,7 @@ impl ApiTester {
                 let vault = self.credential_vault.clone();
                 let client = self.upstream_execution_client.clone();
                 let local_client = self.client.clone();
+                let cookie_jar = self.cookie_jar.clone();
                 let runtime = Arc::clone(&self.runtime);
                 let credential_upstream_id = target.upstream_id.clone();
                 RequestTask::spawn(self.runtime.handle(), async move {
@@ -1918,6 +1919,7 @@ impl ApiTester {
                         credential.bearer_token(),
                         &target.workspace_id,
                         request,
+                        cookie_jar.as_ref(),
                     )
                     .await
                 })

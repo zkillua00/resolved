@@ -2,6 +2,7 @@ package workspaces
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 
 	"resolved-server/internal/auth"
@@ -670,8 +671,9 @@ func (h *Handler) DeleteSavedRequestController() fiber.Handler {
 func actorFromContext(c fiber.Ctx) Actor {
 	principal := auth.PrincipalFromContext(c)
 	return Actor{
-		UserID:         principal.User.ID,
-		Owner:          principal.HasRole(identity.OwnerRoleID),
-		EnvironmentKey: principal.EnvironmentKey(),
+		UserID:            principal.User.ID,
+		Owner:             principal.HasRole(identity.OwnerRoleID),
+		EnvironmentKey:    principal.EnvironmentKey(),
+		CredentialVersion: sha256.Sum256([]byte(principal.User.PasswordHash)),
 	}
 }
