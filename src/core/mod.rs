@@ -1,5 +1,5 @@
-mod cookie_jar;
 mod chain;
+mod cookie_jar;
 mod database;
 mod format;
 mod history;
@@ -22,8 +22,8 @@ mod workspace_provider;
 #[cfg(test)]
 mod mvp_smoke_test;
 
-pub use cookie_jar::CookieJar;
 pub use chain::{ChainFailure, ChainLimits, ChainRun, run_chain};
+pub use cookie_jar::{CookieEntry, CookieJar};
 pub use database::{DatabaseStore, LocalWorkspace};
 pub use format::{
     format_body, format_raw_source, format_script_source, is_probably_text, parse_json_lines,
@@ -33,10 +33,13 @@ pub use interchange::{
     ImportBundle, InterchangeFormat, MAX_INTERCHANGE_BYTES, export_request, import_requests,
 };
 pub use realtime::{RealtimeResourceChange, RealtimeSignal, watch_upstream_changes};
+#[cfg(test)]
+pub use request::build_client;
 pub use request::{
     BodyField, BodyFieldKind, BodyMode, HeaderEntry, QueryParamEntry, RawBodyLanguage,
-    RequestDraft, RequestError, RequestTask, ResponseData, STANDARD_HTTP_METHODS, build_client_with_cookie_jar,
-    query_params_from_url, send_request, spawn_request, url_with_query_params,
+    RequestDraft, RequestError, RequestTask, ResponseData, STANDARD_HTTP_METHODS,
+    build_client_with_cookie_jar, query_params_from_url, send_request, spawn_request,
+    url_with_query_params,
 };
 #[allow(unused_imports)]
 pub use request_namespace::{
@@ -44,8 +47,6 @@ pub use request_namespace::{
     REQUEST_REF_MARKER, RequestNamespaceCatalog, RequestNamespaceNode, RequestRefInfo,
     RuntimeNamespaceSpec, RuntimeNodeKind, is_valid_js_identifier,
 };
-#[cfg(test)]
-pub use request::build_client;
 pub use request_tabs::{
     DEFAULT_REQUEST_TAB_TITLE, RequestTabAssociation, RequestTabCloseScope, RequestTabGroup,
     RequestTabGroupColor, RequestTabGroupId, RequestTabId, RequestTabRecord, RequestTabs,

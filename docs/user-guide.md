@@ -656,9 +656,39 @@ constructs it only when a valid captured HTML response is opened in Preview and
 destroys it when Preview is left, the response is cleared, or loading fails.
 
 
+## Cookies
+
+Locally executed HTTP requests accept `Set-Cookie` response headers and send
+matching cookies on later requests, including redirects. Each workspace has its
+own encrypted jar. Local execution inside a server workspace uses that workspace's
+local jar; cookies are not shared with other workspaces or uploaded to the server.
+An enabled explicit `Cookie` header takes precedence over automatic cookies.
+
+Open **Cookies** beside **Send** to view the active workspace's cookies. Values
+stay hidden in the list; **View / edit** reveals the value and attributes. Add or
+edit using an origin URL and a `Set-Cookie` value, including optional `Path`,
+`Domain`, `Secure`, `HttpOnly`, `Expires`, and `Max-Age` attributes. Editing preserves
+the effective path and absolute expiry unless you change them. Delete individual
+cookies, or use **Clear / reset jar** to remove the entire workspace jar.
+
+**Disable automatic cookies** stops both sending and accepting jar cookies while
+preserving existing entries. This preference survives app restarts. Explicit
+request headers remain under your control. Session cookies also survive restarts;
+expired cookies are never sent.
+
+If storage cannot be read, the app opens with that jar disabled and retains the
+unreadable data until you explicitly reset it. The Cookies control flags storage
+warnings; open it for details. A failed automatic save leaves cookies in memory
+and shows a warning. Failed manual edits, deletes, or resets leave existing state
+unchanged. The encryption key uses the same platform storage boundary as saved
+server sessions described above.
+
+Server-executed requests do not use the desktop jar yet. Automatic cookie handling
+for WebSocket handshakes is not included.
+
 ## Deliberate limits
 
-Cookie jars, response streaming/downloads, certificate controls, proxy
+Server-execution cookie jar handoff, response streaming/downloads, certificate controls, proxy
 controls, and native collection-structure import/export are not included yet.
 Specification imports open operations as request tabs rather than manufacturing
 a saved collection.

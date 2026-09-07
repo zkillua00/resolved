@@ -1260,8 +1260,10 @@ mod tests {
                 );
                 let provider_id = provider.id();
                 app.workspace_providers.register(Arc::new(provider));
+                let prepared_cookie_client = app.cookie_client_for(&provider_id).unwrap();
                 app.activate_loaded_workspace(
                     provider_id,
+                    prepared_cookie_client,
                     workspace,
                     request_tabs,
                     false,
@@ -1369,6 +1371,51 @@ mod tests {
         cx.update(|_, cx| {
             let app = app.read(cx);
             assert_eq!(app.url.read(cx).value(), "https://buffered.example.test");
+        });
+    }
+
+    #[gpui::test]
+    fn cookie_manager_mounts_and_corrupt_jar_does_not_prevent_switch(cx: &mut TestAppContext) {
+        let (app, cx, _directory) = mount_app(cx);
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                let second = app
+                    .database_store
+                    .create_local_workspace("Cookies recovery")
+                    .unwrap();
+                app.credential_vault
+                    .store_cookie_jar(&format!("local:{}", second.id), b"broken")
+                    .unwrap();
+                app.local_workspaces.push(second.clone());
+                app.switch_to_local_workspace(second.id.clone(), window, cx);
+                assert_eq!(
+                    app.workspace_providers.active_id(),
+                    &WorkspaceProviderId::Local(second.id.clone())
+                );
+                assert_eq!(
+                    app.database_store.active_local_workspace_id().unwrap(),
+                    second.id
+                );
+                assert!(!app.cookie_jar.enabled());
+                assert!(app.cookie_jar.warning().is_some());
+                app.open_cookie_manager(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("toggle-cookies").is_some());
+        assert!(cx.debug_bounds("clear-cookies").is_some());
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.cookie_jar.clear().unwrap();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let toggle = cx.debug_bounds("toggle-cookies").unwrap().center();
+        cx.simulate_click(toggle, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert!(app.read(cx).cookie_jar.enabled());
         });
     }
 

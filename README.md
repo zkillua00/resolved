@@ -70,6 +70,10 @@ not encrypt the local database. Run only scripts you trust.
 > that directory can recover the saved sessions. Provisioned macOS builds use
 > the Data Protection Keychain. See the [storage and session details](docs/user-guide.md#self-hosted-servers).
 
+Locally executed HTTP requests use an encrypted cookie jar isolated to the active
+workspace. Open **Cookies** beside **Send** to inspect, edit, delete, clear, or
+disable automatic cookies. See [cookie behavior](docs/user-guide.md#cookies).
+
 ## Documentation
 
 - [Official documentation](https://apiworkbench.dev/docs) — product guides and usage
@@ -83,7 +87,3 @@ not encrypt the local database. Run only scripts you trust.
 ## License
 
 [Apache License 2.0](LICENSE).
-
-Locally executed requests use an encrypted cookie jar isolated to each workspace.
-Explicit Cookie headers take precedence. Cookie management and server execution
-integration are under development.

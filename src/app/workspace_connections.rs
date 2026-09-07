@@ -976,6 +976,16 @@ impl ApiTester {
             return;
         }
 
+        let prepared_cookie_client = match self.cookie_client_for(&provider_id) {
+            Ok(client) => client,
+            Err(error) => {
+                self.fail_workspace_switch(
+                    format!("Could not prepare workspace cookies: {error}"),
+                    cx,
+                );
+                return;
+            }
+        };
         let mut settings = self.settings.clone();
         settings.upstreams.select_local();
         if let Err(error) = self
@@ -991,15 +1001,18 @@ impl ApiTester {
             cx.notify();
             return;
         }
-        self.activate_loaded_workspace(
+        if !self.activate_loaded_workspace(
             provider_id,
+            prepared_cookie_client,
             workspace,
             request_tabs,
             workspace_writable,
             request_tabs_writable,
             window,
             cx,
-        );
+        ) {
+            return;
+        }
         // `activate_loaded_workspace` rebuilds `WorkspaceTabs` from the loaded
         // request tabs, so every tool tab (including ServerTools) is closed and
         // the active tab is a request or the welcome page by construction; no
@@ -1301,6 +1314,16 @@ impl ApiTester {
             self.fail_workspace_switch(format!("Request tabs could not be repaired: {error}"), cx);
             return;
         }
+        let prepared_cookie_client = match self.cookie_client_for(&provider_id) {
+            Ok(client) => client,
+            Err(error) => {
+                self.fail_workspace_switch(
+                    format!("Could not prepare workspace cookies: {error}"),
+                    cx,
+                );
+                return;
+            }
+        };
         if !settings.upstreams.select(&upstream_id) {
             self.fail_workspace_switch("That server is no longer configured.".to_owned(), cx);
             return;
@@ -1319,15 +1342,18 @@ impl ApiTester {
         let workspace_writable = provider.workspace_writable();
         let request_tabs_writable = provider.request_tabs_writable();
         self.workspace_providers.register(Arc::new(provider));
-        self.activate_loaded_workspace(
+        if !self.activate_loaded_workspace(
             provider_id,
+            prepared_cookie_client,
             workspace,
             request_tabs,
             workspace_writable,
             request_tabs_writable,
             window,
             cx,
-        );
+        ) {
+            return;
+        }
         self.workspace_switch_status = WorkspaceSwitchStatus::Idle;
         self.settings_notice = Some(format!("Opened {workspace_name}."));
         self.start_realtime_for_active_upstream(window, cx);
@@ -1357,45 +1383,38 @@ impl ApiTester {
         cx.notify();
     }
 
+    pub(super) fn cookie_client_for(
+        &self,
+        provider_id: &WorkspaceProviderId,
+    ) -> Result<(Arc<CookieJar>, Client), RequestError> {
+        let jar = Arc::new(CookieJar::open(
+            self.credential_vault.clone(),
+            provider_id.to_string(),
+        ));
+        let client = build_client_with_cookie_jar(jar.clone())?;
+        Ok((jar, client))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn activate_loaded_workspace(
         &mut self,
         provider_id: WorkspaceProviderId,
+        prepared_cookie_client: (Arc<CookieJar>, Client),
         workspace: Workspace,
         request_tabs: RequestTabs,
         workspace_writable: bool,
         request_tabs_writable: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let cookie_jar =
-            match CookieJar::load(self.credential_vault.clone(), provider_id.to_string()) {
-                Ok(cookie_jar) => cookie_jar,
-                Err(error) => {
-                    self.settings_notice = Some(format!(
-                        "Could not open this workspace's cookie jar: {error}"
-                    ));
-                    cx.notify();
-                    return;
-                }
-            };
-        let client = match build_client_with_cookie_jar(Arc::new(cookie_jar)) {
-            Ok(client) => client,
-            Err(error) => {
-                self.settings_notice = Some(format!(
-                    "Could not create this workspace's request client: {error}"
-                ));
-                cx.notify();
-                return;
-            }
-        };
+    ) -> bool {
+        let (cookie_jar, client) = prepared_cookie_client;
         if self.workspace_providers.active_id() != &provider_id {
             self.stop_mcp_websocket();
         }
         if let Err(error) = self.workspace_providers.switch(provider_id) {
             self.settings_notice = Some(error.to_string());
             cx.notify();
-            return;
+            return false;
         }
         if let Some(abort_handle) = self.profile_history_abort_handle.take() {
             abort_handle.abort();
@@ -1465,6 +1484,7 @@ impl ApiTester {
 
         self.hide_preview(cx);
         self.client = client;
+        self.cookie_jar = cookie_jar;
         self.replace_workspace(workspace);
         self.workspace_warning = None;
         self.workspace_writable = workspace_writable;
@@ -1517,6 +1537,7 @@ impl ApiTester {
             cx,
         );
         self.restore_active_request_tab(window, cx);
+        true
     }
 
     pub(super) fn restore_selected_upstream(
