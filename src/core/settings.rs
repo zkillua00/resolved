@@ -761,6 +761,8 @@ impl SavedTheme {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ThemeSettings {
+    /// Bundled starter themes are installed once, so deletion survives restart.
+    pub bundled_themes_initialized: bool,
     pub saved_themes: Vec<SavedTheme>,
     pub active_theme_id: Option<String>,
     pub source_path: Option<PathBuf>,

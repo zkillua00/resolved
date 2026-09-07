@@ -92,7 +92,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Name,
         ThemePropertyCategory::Metadata,
         true,
-        "\"Resolved Material Dark\"",
+        "\"Resolved Dark\"",
         "Theme metadata used as the default library name when importing or saving CSS.",
     ),
     property(
@@ -108,7 +108,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Color,
         ThemePropertyCategory::Surfaces,
         true,
-        "#14121a",
+        "#17171b",
         "Main window, workspace, tab, table, and accordion background.",
     ),
     property(
@@ -116,7 +116,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Color,
         ThemePropertyCategory::Surfaces,
         true,
-        "#0f0d14",
+        "#111114",
         "Deepest recessed surface, including editor backgrounds and dark overlays.",
     ),
     property(
@@ -124,7 +124,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Color,
         ThemePropertyCategory::Surfaces,
         true,
-        "#1c1a22",
+        "#1e1e23",
         "Navigation rails, sidebars, group boxes, and low-elevation panels.",
     ),
     property(
@@ -132,7 +132,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Color,
         ThemePropertyCategory::Surfaces,
         true,
-        "#201e26",
+        "#25252b",
         "Nested containers, popovers, and the default active editor line.",
     ),
     property(
@@ -140,7 +140,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Color,
         ThemePropertyCategory::Surfaces,
         true,
-        "#2b2931",
+        "#2e2d34",
         "Hover surfaces, muted controls, progress tracks, and scrollbar thumbs.",
     ),
     property(
@@ -148,7 +148,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Color,
         ThemePropertyCategory::Surfaces,
         true,
-        "#36343c",
+        "#37363d",
         "Strong hover and elevated secondary-control surfaces.",
     ),
     property(
@@ -156,7 +156,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Color,
         ThemePropertyCategory::Surfaces,
         true,
-        "#e6e0eb",
+        "#f4f0e7",
         "Primary application text and the default editor foreground.",
     ),
     property(
@@ -164,7 +164,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Color,
         ThemePropertyCategory::Surfaces,
         true,
-        "#cac4d0",
+        "#b8b6bf",
         "Secondary labels, placeholders, inactive tabs, and subdued metadata.",
     ),
     property(
@@ -172,7 +172,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Color,
         ThemePropertyCategory::Surfaces,
         true,
-        "#49454f",
+        "#4b4a54",
         "Borders, dividers, input outlines, table rows, and the window outline.",
     ),
     property(
@@ -180,15 +180,15 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Color,
         ThemePropertyCategory::Primary,
         true,
-        "#e9ddff",
-        "Primary buttons, active labels, links, and the syntax-keyword fallback.",
+        "#3b4bea",
+        "Primary buttons, enabled switch tracks, and the syntax-keyword fallback.",
     ),
     property(
         "--api-primary-hover",
         ThemePropertyKind::Color,
         ThemePropertyCategory::Primary,
         true,
-        "#d0bcff",
+        "#4f5ef0",
         "Hovered primary controls, caret, active line numbers, and property syntax.",
     ),
     property(
@@ -196,7 +196,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Color,
         ThemePropertyCategory::Primary,
         true,
-        "#b9a6ed",
+        "#303fc9",
         "Pressed primary controls and active links.",
     ),
     property(
@@ -204,15 +204,23 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Color,
         ThemePropertyCategory::Primary,
         true,
-        "#37265e",
+        "#f4f0e7",
         "Text and icons displayed on a primary-colored surface.",
+    ),
+    property(
+        "--api-primary-text",
+        ThemePropertyKind::Color,
+        ThemePropertyCategory::Primary,
+        false,
+        "#a9b0ff",
+        "Standalone accent text and focus indicators; falls back to primary hover when omitted.",
     ),
     property(
         "--api-selection",
         ThemePropertyKind::Color,
         ThemePropertyCategory::Primary,
         true,
-        "#4a4359",
+        "#30365b",
         "Text selection, selected rows, active sidebar entries, and drop targets.",
     ),
     property(
@@ -220,7 +228,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Color,
         ThemePropertyCategory::Primary,
         false,
-        "#5a526a",
+        "#3c4470",
         "Pressed secondary controls; falls back to the selection color when omitted.",
     ),
     property(
@@ -228,7 +236,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Color,
         ThemePropertyCategory::Primary,
         false,
-        "#e9def9",
+        "#f4f0e7",
         "Text on secondary controls; falls back to the main foreground when omitted.",
     ),
     property(
@@ -492,7 +500,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Color,
         ThemePropertyCategory::Editor,
         false,
-        "#948f9a",
+        "#94929e",
         "Inactive code editor line numbers.",
     ),
     property(
@@ -500,7 +508,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Color,
         ThemePropertyCategory::Editor,
         false,
-        "var(--api-primary-hover)",
+        "var(--api-primary-text)",
         "Line number for the line containing the caret.",
     ),
     property(
@@ -508,7 +516,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Color,
         ThemePropertyCategory::Syntax,
         false,
-        "var(--api-primary-hover)",
+        "var(--api-primary-text)",
         "Object keys, CSS properties, and similar property-name captures.",
     ),
     property(
@@ -540,7 +548,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Color,
         ThemePropertyCategory::Syntax,
         false,
-        "var(--api-primary)",
+        "var(--api-primary-text)",
         "Language keywords such as const, if, and return.",
     ),
     property(
@@ -548,7 +556,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Color,
         ThemePropertyCategory::Syntax,
         false,
-        "#948f9a",
+        "#94929e",
         "Source-code comments.",
     ),
     property(
@@ -580,7 +588,7 @@ pub(crate) const THEME_PROPERTIES: &[ThemePropertySpec] = &[
         ThemePropertyKind::Color,
         ThemePropertyCategory::Syntax,
         false,
-        "var(--api-primary)",
+        "var(--api-primary-text)",
         "Function names and calls.",
     ),
 ];

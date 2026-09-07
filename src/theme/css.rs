@@ -1118,7 +1118,7 @@ mod tests {
     #[test]
     fn parses_built_in_theme_and_resolves_aliases() {
         let theme = parse_theme_css(BUILTIN_THEME_CSS).unwrap();
-        assert_eq!(theme.name.as_ref(), "Resolved Material Dark");
+        assert_eq!(theme.name.as_ref(), "Resolved Dark");
         assert_eq!(theme.mode, ThemeMode::Dark);
         assert_eq!(
             theme.palette.token("--api-yellow"),

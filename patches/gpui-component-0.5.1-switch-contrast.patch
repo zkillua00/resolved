@@ -1,0 +1,9 @@
+diff --git a/src/switch.rs b/src/switch.rs
+--- a/src/switch.rs
++++ b/src/switch.rs
+@@ -100,4 +100,4 @@
+         let (bg, toggle_bg) = match checked {
+-            true => (cx.theme().primary, cx.theme().switch_thumb),
++            true => (cx.theme().primary, cx.theme().primary_foreground),
+             false => (cx.theme().switch, cx.theme().switch_thumb),
+         };

@@ -1,3 +1,30 @@
+/* Catppuccin Frappé - Resolved adaptation.
+ * Upstream: https://github.com/catppuccin/palette
+ * Palette adapted for Resolved controls and semantic CSS tokens.
+ * Full upstream license follows.
+MIT License
+
+Copyright (c) 2021 Catppuccin
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+ */
 /*
  * Resolved theme files intentionally use a small, deterministic subset of
  * CSS: one :root color-token rule plus the .app, .button, and .editor
@@ -14,7 +41,7 @@
      * name: default library name when this CSS is imported or saved.
      * appearance: chooses the dark/light GPUI component baseline.
      */
-    --api-theme-name: "Resolved Dark";
+    --api-theme-name: "Catppuccin Frappé";
     --api-appearance: dark;
 
     /*
@@ -27,15 +54,15 @@
      * foreground/muted-foreground: primary and secondary text.
      * outline: borders, dividers, inputs, and table rows.
      */
-    --api-surface: #17171b;
-    --api-surface-lowest: #111114;
-    --api-surface-low: #1e1e23;
-    --api-surface-container: #25252b;
-    --api-surface-high: #2e2d34;
-    --api-surface-highest: #37363d;
-    --api-foreground: #f4f0e7;
-    --api-muted-foreground: #b8b6bf;
-    --api-outline: #4b4a54;
+    --api-surface: #303446;
+    --api-surface-lowest: #232634;
+    --api-surface-low: #292c3c;
+    --api-surface-container: #414559;
+    --api-surface-high: #51576d;
+    --api-surface-highest: #626880;
+    --api-foreground: #c6d0f5;
+    --api-muted-foreground: #a5adce;
+    --api-outline: #737994;
 
     /*
      * Primary interaction
@@ -44,15 +71,15 @@
      * selection: selected text/rows, sidebar entries, and drop targets.
      * secondary-* are optional refinements with semantic fallbacks.
      */
-    --api-primary: #3b4bea;
-    --api-primary-hover: #4f5ef0;
-    --api-primary-active: #303fc9;
-    --api-primary-foreground: #f4f0e7;
-    /* Trace stays legible on Ink for standalone labels, links, and focus. */
-    --api-primary-text: #a9b0ff;
-    --api-selection: #30365b;
-    --api-secondary-active: #3c4470;
-    --api-secondary-foreground: #f4f0e7;
+    --api-primary: #8caaee;
+    --api-primary-hover: #93afef;
+    --api-primary-active: #819cda;
+    --api-primary-foreground: #111114;
+    /* Standalone accent labels, links, and focus indicators. */
+    --api-primary-text: #8caaee;
+    --api-selection: #51576d;
+    --api-secondary-active: #626880;
+    --api-secondary-foreground: #c6d0f5;
 
     /*
      * Status colors
@@ -61,22 +88,22 @@
      * These drive destructive actions, warnings/modified state, successful
      * requests, and informational notices.
      */
-    --api-danger: #8c1d18;
-    --api-danger-hover: #a52a24;
-    --api-danger-active: #71120e;
-    --api-danger-foreground: #ffdad6;
-    --api-warning: #f4d06f;
-    --api-warning-hover: #ffdc82;
-    --api-warning-active: #d7b34f;
-    --api-warning-foreground: #332b00;
-    --api-success: #2f6f44;
-    --api-success-hover: #3d8253;
-    --api-success-active: #245c36;
-    --api-success-foreground: #d0f8d8;
-    --api-info: #385f8e;
-    --api-info-hover: #4771a4;
-    --api-info-active: #2c4d77;
-    --api-info-foreground: #d7e9ff;
+    --api-danger: #e78284;
+    --api-danger-hover: #e48a8f;
+    --api-danger-active: #d57a7e;
+    --api-danger-foreground: #111114;
+    --api-warning: #e5c890;
+    --api-warning-hover: #e2c99a;
+    --api-warning-active: #d3b989;
+    --api-warning-foreground: #111114;
+    --api-success: #a6d189;
+    --api-success-hover: #a9d194;
+    --api-success-active: #9ac182;
+    --api-success-foreground: #111114;
+    --api-info: #8caaee;
+    --api-info-hover: #92aeef;
+    --api-info-active: #839edd;
+    --api-info-foreground: #111114;
 
     /*
      * Semantic palette
@@ -84,18 +111,18 @@
      * HTTP methods, charts, statuses, and selected syntax captures.
      * The matching *-light tokens are optional softer accents.
      */
-    --api-red: #ffb4ab;
-    --api-red-light: #ffdad6;
-    --api-green: #4ade80;
-    --api-green-light: #b8f5c8;
-    --api-blue: #93c5fd;
-    --api-blue-light: #d7e9ff;
-    --api-yellow: var(--api-warning);
-    --api-yellow-light: #ffecb3;
-    --api-magenta: #f0abfc;
-    --api-magenta-light: #f7d5ff;
-    --api-cyan: #67e8f9;
-    --api-cyan-light: #c9f8ff;
+    --api-red: #e78284;
+    --api-red-light: #e0929b;
+    --api-green: #a6d189;
+    --api-green-light: #acd19f;
+    --api-blue: #8caaee;
+    --api-blue-light: #98b2ef;
+    --api-yellow: #e5c890;
+    --api-yellow-light: #dfcaa4;
+    --api-magenta: #ca9ee6;
+    --api-magenta-light: #c9a8e9;
+    --api-cyan: #81c8be;
+    --api-cyan-light: #8fcac9;
 
     /*
      * Code editor chrome (optional)
@@ -106,8 +133,8 @@
     --api-editor-gutter-background: var(--api-surface-lowest);
     --api-editor-foreground: var(--api-foreground);
     --api-editor-active-line: var(--api-surface-container);
-    --api-editor-line-number: #94929e;
-    --api-editor-active-line-number: var(--api-primary-text);
+    --api-editor-line-number: #838ba7;
+    --api-editor-active-line-number: #8caaee;
 
     /*
      * Syntax highlighting (optional)
@@ -115,16 +142,16 @@
      * punctuation, variable, type, and function captures throughout editors.
      * Unspecified captures continue using GPUI's dark/light baseline.
      */
-    --api-syntax-property: var(--api-primary-text);
-    --api-syntax-string: #ffd9e3;
-    --api-syntax-number: #efb8c8;
-    --api-syntax-boolean: var(--api-red);
-    --api-syntax-keyword: var(--api-primary-text);
-    --api-syntax-comment: #94929e;
-    --api-syntax-punctuation: var(--api-muted-foreground);
-    --api-syntax-variable: var(--api-foreground);
-    --api-syntax-type: #ccc2dc;
-    --api-syntax-function: var(--api-primary-text);
+    --api-syntax-property: #8caaee;
+    --api-syntax-string: #a6d189;
+    --api-syntax-number: #e5c890;
+    --api-syntax-boolean: #e78284;
+    --api-syntax-keyword: #ca9ee6;
+    --api-syntax-comment: #838ba7;
+    --api-syntax-punctuation: #a5adce;
+    --api-syntax-variable: #c6d0f5;
+    --api-syntax-type: #81c8be;
+    --api-syntax-function: #8caaee;
 }
 
 /*

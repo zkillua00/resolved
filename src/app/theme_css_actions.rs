@@ -188,7 +188,7 @@ impl ApiTester {
                     None => {
                         crate::theme::configure(cx);
                         self.settings_notice =
-                            Some("Using built-in Resolved Material Dark.".to_owned());
+                            Some("Using built-in Resolved Dark.".to_owned());
                     }
                 }
                 self.refresh_variable_intelligence(cx);

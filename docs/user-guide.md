@@ -330,16 +330,22 @@ and replacing a dirty buffer from disk requires confirmation.
 
 Appearance separates library-wide actions from theme-specific actions. Import
 CSS…, Create from template…, and Reload active sit beside the Themes heading.
-Material Dark and every saved theme have their own row in the compact theme
+Resolved Dark and every saved theme have their own row in the compact theme
 table with an explicit active state; saved-theme rows provide Use theme, Edit
 here, Edit in preferred editor, and Delete… actions for that exact entry.
-Deleting the active entry returns to Material Dark. When a real source file
+Deleting the active entry returns to Resolved Dark. When a real source file
 still exists it is left on disk; SQLite-only themes warn that removal deletes
 their only saved copy. Drafts and preferred-editor copies belong to their
 specific saved theme, so other themes can still be opened, edited, or selected.
 Reload accepts the external copy; Ignore file changes stops tracking it while
 leaving the file on disk. The catalog and active selection live in the existing
 SQLite settings record.
+
+The library includes Resolved Light, Kanagawa Wave/Dragon/Lotus, Catppuccin
+Latte/Frappé/Macchiato/Mocha, and Tokyo Night Night/Storm/Moon/Day. These bundled
+entries are editable and deletable; deleted entries stay deleted after restart.
+Third-party entries show author and license credits, and their CSS retains the
+full upstream license. See [theme attribution](../assets/themes/README.md).
 
 Theme CSS is a constrained native stylesheet, not browser CSS. It contains one
 `:root` token rule plus `.app`, `.button`, and `.editor` class rules. `:root`

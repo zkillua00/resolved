@@ -120,6 +120,7 @@ impl ApiTheme {
         let outline_variant = required(&tokens, "--api-outline");
         let primary_bright = required(&tokens, "--api-primary");
         let primary_lavender = required(&tokens, "--api-primary-hover");
+        let primary_text = optional(&tokens, "--api-primary-text", primary_lavender);
         let primary_active = required(&tokens, "--api-primary-active");
         let primary_foreground = required(&tokens, "--api-primary-foreground");
         let selected_container = required(&tokens, "--api-selection");
@@ -167,8 +168,8 @@ impl ApiTheme {
         colors.border = outline_variant;
         colors.group_box = surface_low;
         colors.group_box_foreground = foreground;
-        colors.caret = primary_lavender;
-        colors.chart_1 = primary_lavender;
+        colors.caret = primary_text;
+        colors.chart_1 = primary_text;
         colors.chart_2 = magenta;
         colors.chart_3 = cyan;
         colors.chart_4 = yellow;
@@ -179,7 +180,7 @@ impl ApiTheme {
         colors.danger_hover = danger_hover;
         colors.description_list_label = surface_low;
         colors.description_list_label_foreground = muted_foreground;
-        colors.drag_border = primary_lavender;
+        colors.drag_border = primary_text;
         colors.drop_target = selected_container.opacity(0.62);
         colors.foreground = foreground;
         colors.info = info;
@@ -187,12 +188,12 @@ impl ApiTheme {
         colors.info_foreground = info_foreground;
         colors.info_hover = info_hover;
         colors.input = outline_variant;
-        colors.link = primary_lavender;
-        colors.link_active = primary_active;
-        colors.link_hover = primary_bright;
+        colors.link = primary_text;
+        colors.link_active = optional(&tokens, "--api-primary-text", primary_active);
+        colors.link_hover = optional(&tokens, "--api-primary-text", primary_bright);
         colors.list = surface;
         colors.list_active = selected_container.opacity(0.58);
-        colors.list_active_border = primary_lavender;
+        colors.list_active_border = primary_text;
         colors.list_even = surface;
         colors.list_head = surface_low;
         colors.list_hover = surface_high;
@@ -205,7 +206,7 @@ impl ApiTheme {
         colors.primary_foreground = primary_foreground;
         colors.primary_hover = primary_lavender;
         colors.progress_bar = primary_lavender;
-        colors.ring = primary_lavender;
+        colors.ring = primary_text;
         colors.scrollbar = surface_lowest;
         colors.scrollbar_thumb = surface_high;
         colors.scrollbar_thumb_hover = surface_highest;
@@ -216,7 +217,7 @@ impl ApiTheme {
         colors.selection = selected_container;
         colors.sidebar = surface_low;
         colors.sidebar_accent = selected_container.opacity(0.62);
-        colors.sidebar_accent_foreground = primary_bright;
+        colors.sidebar_accent_foreground = optional(&tokens, "--api-primary-text", primary_bright);
         colors.sidebar_border = outline_variant;
         colors.sidebar_foreground = foreground;
         colors.sidebar_primary = primary_lavender;
@@ -231,16 +232,17 @@ impl ApiTheme {
         colors.bullish = green;
         colors.bearish = red;
         colors.switch = surface_highest;
+        // Off-state thumb; checked switches use primary_foreground instead.
         colors.switch_thumb = foreground;
         colors.tab = surface;
         colors.tab_active = surface;
-        colors.tab_active_foreground = primary_bright;
+        colors.tab_active_foreground = optional(&tokens, "--api-primary-text", primary_bright);
         colors.tab_bar = surface;
         colors.tab_bar_segmented = surface_high;
         colors.tab_foreground = muted_foreground;
         colors.table = surface;
         colors.table_active = selected_container.opacity(0.58);
-        colors.table_active_border = primary_lavender;
+        colors.table_active_border = primary_text;
         colors.table_even = surface;
         colors.table_head = surface_low;
         colors.table_head_foreground = muted_foreground;
@@ -281,8 +283,8 @@ impl ApiTheme {
                 surface_high,
                 surface_highest,
                 outline_variant,
-                primary_bright,
-                primary_lavender,
+                primary_bright: optional(&tokens, "--api-primary-text", primary_bright),
+                primary_lavender: primary_text,
                 selected_container,
                 component_colors: colors,
                 highlight_theme,
@@ -432,6 +434,32 @@ fn color_hex(color: Hsla) -> String {
 mod tests {
     use super::*;
     use crate::theme::css::{BUILTIN_THEME_CSS, parse_theme_css};
+
+    #[test]
+    fn built_in_switch_thumb_has_contrast_in_both_states() {
+        fn luminance(color: Hsla) -> f32 {
+            let rgb = color.to_rgb();
+            let linear = |v: f32| {
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(rgb.r) + 0.7152 * linear(rgb.g) + 0.0722 * linear(rgb.b)
+        }
+        let theme = parse_theme_css(BUILTIN_THEME_CSS).unwrap();
+        let colors = theme.palette.component_colors;
+        for (track, thumb) in [
+            (colors.primary, colors.primary_foreground),
+            (colors.switch, colors.switch_thumb),
+        ] {
+            let thumb = luminance(thumb);
+            let track = luminance(track);
+            let contrast = (thumb.max(track) + 0.05) / (thumb.min(track) + 0.05);
+            assert!(contrast >= 3.0, "switch thumb contrast is {contrast}:1");
+        }
+    }
 
     #[test]
     fn preserves_unconfigured_default_syntax_captures() {

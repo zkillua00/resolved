@@ -384,7 +384,10 @@ impl ApiTester {
         };
         if settings_writable {
             let mut candidate = settings.clone();
-            if let Ok(true) = crate::theme::reconcile_catalog(&mut candidate.theme) {
+            let catalog_changed =
+                crate::theme::reconcile_catalog(&mut candidate.theme).unwrap_or(false);
+            let presets_changed = crate::theme::install_bundled_themes(&mut candidate.theme);
+            if catalog_changed || presets_changed {
                 match database_store.save_app_settings(&candidate) {
                     Ok(()) => settings = candidate,
                     Err(error) => {

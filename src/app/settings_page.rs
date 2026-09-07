@@ -1551,7 +1551,8 @@ impl ApiTester {
                 .into_any_element();
             rows.push(theme_table_row(
                 "built-in",
-                "Resolved Material Dark".to_owned(),
+                "Resolved Dark".to_owned(),
+                None,
                 built_in_actions,
                 cx,
             ));
@@ -1625,6 +1626,7 @@ impl ApiTester {
                 rows.push(theme_table_row(
                     "unsaved",
                     detached_name,
+                    None,
                     detached_actions,
                     cx,
                 ));
@@ -1820,7 +1822,18 @@ impl ApiTester {
                             }),
                     )
                     .into_any_element();
-                rows.push(theme_table_row(row_key, theme.name.clone(), actions, cx));
+                let attribution = theme
+                    .extra
+                    .get("attribution")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned);
+                rows.push(theme_table_row(
+                    row_key,
+                    theme.name.clone(),
+                    attribution,
+                    actions,
+                    cx,
+                ));
             }
 
             div()
@@ -1886,6 +1899,7 @@ fn theme_table_header(cx: &App) -> AnyElement {
 fn theme_table_row(
     row_key: impl Into<SharedString>,
     name: String,
+    attribution: Option<String>,
     actions: AnyElement,
     cx: &App,
 ) -> AnyElement {
@@ -1923,7 +1937,19 @@ fn theme_table_row(
                     let name = name.clone();
                     move |window, cx| Tooltip::new(name.clone()).build(window, cx)
                 })
-                .child(name),
+                .child(
+                    v_flex()
+                        .child(name)
+                        .when_some(attribution, |column, credit| {
+                            column.child(
+                                div()
+                                    .text_xs()
+                                    .font_normal()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(credit),
+                            )
+                        }),
+                ),
         )
         .child(
             div()

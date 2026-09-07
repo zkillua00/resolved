@@ -213,34 +213,35 @@ semantic runtime fallback.
 
 | Token | Required | Template default | Effect |
 | --- | --- | --- | --- |
-| `--api-theme-name` | Yes | `"Resolved Material Dark"` | Default library name when importing or saving. |
+| `--api-theme-name` | Yes | `"Resolved Dark"` | Default library name when importing or saving. |
 | `--api-appearance` | Yes | `dark` | Selects the dark or light component baseline. |
 
 ### Surfaces and text
 
 | Token | Required | Template default | Effect |
 | --- | --- | --- | --- |
-| `--api-surface` | Yes | `#14121a` | Window, workspace, tab, table, and accordion background. |
-| `--api-surface-lowest` | Yes | `#0f0d14` | Deepest recessed and editor surfaces. |
-| `--api-surface-low` | Yes | `#1c1a22` | Navigation, sidebars, group boxes, and low panels. |
-| `--api-surface-container` | Yes | `#201e26` | Nested containers, popovers, and active editor line. |
-| `--api-surface-high` | Yes | `#2b2931` | Hover surfaces, muted controls, tracks, and thumbs. |
-| `--api-surface-highest` | Yes | `#36343c` | Strong hover and elevated secondary surfaces. |
-| `--api-foreground` | Yes | `#e6e0eb` | Primary text and default editor foreground. |
-| `--api-muted-foreground` | Yes | `#cac4d0` | Secondary text, placeholders, and inactive labels. |
-| `--api-outline` | Yes | `#49454f` | Borders, dividers, inputs, table rows, and window outline. |
+| `--api-surface` | Yes | `#17171b` | Window, workspace, tab, table, and accordion background. |
+| `--api-surface-lowest` | Yes | `#111114` | Deepest recessed and editor surfaces. |
+| `--api-surface-low` | Yes | `#1e1e23` | Navigation, sidebars, group boxes, and low panels. |
+| `--api-surface-container` | Yes | `#25252b` | Nested containers, popovers, and active editor line. |
+| `--api-surface-high` | Yes | `#2e2d34` | Hover surfaces, muted controls, tracks, and thumbs. |
+| `--api-surface-highest` | Yes | `#37363d` | Strong hover and elevated secondary surfaces. |
+| `--api-foreground` | Yes | `#f4f0e7` | Primary text and default editor foreground. |
+| `--api-muted-foreground` | Yes | `#b8b6bf` | Secondary text, placeholders, and inactive labels. |
+| `--api-outline` | Yes | `#4b4a54` | Borders, dividers, inputs, table rows, and window outline. |
 
 ### Primary interaction
 
 | Token | Required | Template default | Effect |
 | --- | --- | --- | --- |
-| `--api-primary` | Yes | `#e9ddff` | Primary buttons, active labels, links, and keyword fallback. |
-| `--api-primary-hover` | Yes | `#d0bcff` | Hovered primary controls, caret, and property syntax. |
-| `--api-primary-active` | Yes | `#b9a6ed` | Pressed primary controls and active links. |
-| `--api-primary-foreground` | Yes | `#37265e` | Text and icons on primary surfaces. |
-| `--api-selection` | Yes | `#4a4359` | Text selection, selected rows, sidebar entries, and drop targets. |
-| `--api-secondary-active` | No | `#5a526a` | Pressed secondary controls; falls back to selection. |
-| `--api-secondary-foreground` | No | `#e9def9` | Secondary-control content; falls back to foreground. |
+| `--api-primary` | Yes | `#3b4bea` | Primary buttons, enabled switch tracks, and keyword fallback. |
+| `--api-primary-text` | No | `#a9b0ff` | Standalone accent labels, links, and focus indicators; falls back to primary hover. |
+| `--api-primary-hover` | Yes | `#4f5ef0` | Hovered primary controls, caret, and property syntax. |
+| `--api-primary-active` | Yes | `#303fc9` | Pressed primary controls and active links. |
+| `--api-primary-foreground` | Yes | `#f4f0e7` | Text and icons on primary surfaces. |
+| `--api-selection` | Yes | `#30365b` | Text selection, selected rows, sidebar entries, and drop targets. |
+| `--api-secondary-active` | No | `#3c4470` | Pressed secondary controls; falls back to selection. |
+| `--api-secondary-foreground` | No | `#f4f0e7` | Secondary-control content; falls back to foreground. |
 
 ### Status colors
 
@@ -288,23 +289,23 @@ semantic runtime fallback.
 | `--api-editor-gutter-background` | No | `var(--api-surface-lowest)` | Line-number and fold gutter; falls back to the editor canvas. |
 | `--api-editor-foreground` | No | `var(--api-foreground)` | Editor text; falls back to foreground. |
 | `--api-editor-active-line` | No | `var(--api-surface-container)` | Caret-line background. |
-| `--api-editor-line-number` | No | `#948f9a` | Inactive line numbers. |
-| `--api-editor-active-line-number` | No | `var(--api-primary-hover)` | Caret-line number. |
+| `--api-editor-line-number` | No | `#94929e` | Inactive line numbers. |
+| `--api-editor-active-line-number` | No | `var(--api-primary-text)` | Caret-line number. |
 
 ### Syntax highlighting
 
 | Token | Required | Template default | Effect |
 | --- | --- | --- | --- |
-| `--api-syntax-property` | No | `var(--api-primary-hover)` | Object keys and property names. |
+| `--api-syntax-property` | No | `var(--api-primary-text)` | Object keys and property names. |
 | `--api-syntax-string` | No | `#ffd9e3` | String literals. |
 | `--api-syntax-number` | No | `#efb8c8` | Numeric literals. |
 | `--api-syntax-boolean` | No | `var(--api-red)` | Boolean and null-like literals. |
-| `--api-syntax-keyword` | No | `var(--api-primary)` | Language keywords. |
-| `--api-syntax-comment` | No | `#948f9a` | Source comments. |
+| `--api-syntax-keyword` | No | `var(--api-primary-text)` | Language keywords. |
+| `--api-syntax-comment` | No | `#94929e` | Source comments. |
 | `--api-syntax-punctuation` | No | `var(--api-muted-foreground)` | Braces, operators, commas, and punctuation. |
 | `--api-syntax-variable` | No | `var(--api-foreground)` | Variables and general identifiers. |
 | `--api-syntax-type` | No | `#ccc2dc` | Type names and annotations. |
-| `--api-syntax-function` | No | `var(--api-primary)` | Function names and calls. |
+| `--api-syntax-function` | No | `var(--api-primary-text)` | Function names and calls. |
 
 ### Optional-token omission fallbacks
 
@@ -313,6 +314,7 @@ Resolved uses the following semantic runtime fallback:
 
 | Optional token | Runtime fallback |
 | --- | --- |
+| `--api-primary-text` | Existing primary/hover/active colors for each accent role |
 | `--api-secondary-active` | `--api-selection` |
 | `--api-secondary-foreground` | `--api-foreground` |
 | `--api-danger-hover` | `--api-danger` |

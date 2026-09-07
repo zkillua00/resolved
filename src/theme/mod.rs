@@ -13,6 +13,9 @@ use crate::core::{SavedTheme, ThemeSettings};
 mod css;
 mod intelligence;
 mod palette;
+mod presets;
+
+pub(crate) use presets::install_bundled_themes;
 mod schema;
 
 pub use css::ThemeCssError as ThemeError;
