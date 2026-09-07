@@ -105,12 +105,16 @@ using Rust 1.95.0 on native hosted runners:
 | --- | --- | --- |
 | macOS 15 | Apple Silicon, Intel | ZIP containing `Resolved.app` |
 | Windows 2025 | x64 | MSIX and public signing certificate |
-| Ubuntu 24.04 | x64, ARM64 | Debian and RPM packages |
+| Ubuntu 24.04 | x64, ARM64 | Debian, RPM, and `.tar.xz` archives |
 
 Runner labels follow the [GitHub-hosted runners reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 Linux packages require compatible system libraries, X11/XWayland and Vulkan;
 RPM output built on Ubuntu is not a promise of compatibility with every RPM
-distribution. Windows ARM64, AppImage/portable Linux archives, the collaboration
+distribution. The `.tar.xz` archives bundle application libraries and WebKit
+helpers using the same pinned `linuxdeploy` release and architecture checksums
+as `linux/Dockerfile`. Extract the archive and run its `resolved` launcher;
+compatible host libraries, X11/XWayland and Vulkan are still required.
+Windows ARM64, AppImage, the collaboration
 server, and the optional MCP adapter are not included in these desktop releases.
 
 Nightly download names and the app's reported version use

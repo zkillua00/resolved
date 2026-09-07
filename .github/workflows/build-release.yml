@@ -71,7 +71,27 @@ jobs:
             libgtk-3-dev libwebkit2gtk-4.1-dev libfontconfig1-dev libasound2-dev \
             libssl-dev libvulkan-dev libwayland-dev libx11-dev libx11-xcb-dev \
             libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-randr0-dev \
-            libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev rpm
+            libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev rpm patchelf file xz-utils
+      - name: Install Linux archive tool
+        if: runner.os == 'Linux'
+        run: |
+          # Same pinned release and checksums as linux/Dockerfile.
+          case "$(uname -m)" in
+            x86_64)
+              tool_arch=x86_64
+              tool_sha256=c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
+              ;;
+            aarch64)
+              tool_arch=aarch64
+              tool_sha256=620095110d693282b8ebeb244a95b5e911cf8f65f76c88b4b47d16ae6346fcff
+              ;;
+            *) echo "Unsupported Linux architecture" >&2; exit 1 ;;
+          esac
+          curl --fail --location --retry 3 \
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-$tool_arch.AppImage" \
+            --output "$RUNNER_TEMP/linuxdeploy"
+          echo "$tool_sha256  $RUNNER_TEMP/linuxdeploy" | sha256sum --check
+          sudo install -m 755 "$RUNNER_TEMP/linuxdeploy" /usr/local/bin/linuxdeploy
       - name: Build and package macOS
         if: runner.os == 'macOS'
         env:
@@ -86,8 +106,10 @@ jobs:
         run: |
           scripts/package-linux.sh release deb
           scripts/package-linux.sh release rpm
+          scripts/package-linux.sh release archive
           mkdir -p dist
-          cp target/release/Resolved-*.deb target/release/Resolved-*.rpm dist/
+          cp target/release/Resolved-*.deb target/release/Resolved-*.rpm \
+            target/release/Resolved-*.tar.xz dist/
       - name: Build and package Windows
         if: runner.os == 'Windows'
         shell: pwsh
@@ -149,7 +171,7 @@ jobs:
 
           macOS: Apple Silicon and Intel application archives, ad-hoc signed (not notarized).
           Windows: x64 MSIX with a per-build self-signed public certificate. Import the matching .cer into Local Machine / Trusted People before installing. Windows may require the WebView2 Evergreen Runtime.
-          Linux: ARM64 and x64 Debian and RPM packages built on Ubuntu 24.04; install with a package manager to resolve runtime dependencies. Compatible system libraries, X11/XWayland and Vulkan are required.
+          Linux: ARM64 and x64 Debian/RPM packages and tar.xz archives built on Ubuntu 24.04. Install packages with a package manager, or extract an archive and run its resolved launcher. Archives bundle application libraries and WebKit helpers; compatible host libraries, X11/XWayland and Vulkan are still required.
 
           Verify downloads against SHA256SUMS.txt.
           EOF
