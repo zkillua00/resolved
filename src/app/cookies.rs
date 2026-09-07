@@ -195,12 +195,16 @@ impl ApiTester {
         });
         let jar = self.cookie_jar.clone();
         let this = cx.entity().downgrade();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, _, cx| {
             let origin_ok = origin.clone(); let header_ok = header.clone(); let jar = jar.clone(); let old = entry.clone(); let this = this.clone();
             dialog.title(if entry.is_some() { "View / edit cookie" } else { "Add cookie" }).w(px(640.)).confirm()
                 .button_props(DialogButtonProps::default().ok_text("Save cookie"))
                 .child(v_flex().gap_2().child("Origin URL").child(Input::new(&origin))
-                    .child("Set-Cookie value (including Path, Domain, Secure, HttpOnly and expiry attributes)").child(Input::new(&header)))
+                    .child(v_flex().gap_1()
+                        .child("Set-Cookie value")
+                        .child(div().text_xs().text_color(cx.theme().muted_foreground)
+                            .child("Including Path, Domain, Secure, HttpOnly and expiry attributes")))
+                    .child(Input::new(&header)))
                 .on_ok(move |_, window, cx| {
                     let result = jar.edit(old.as_ref(), origin_ok.read(cx).value().as_ref(), header_ok.read(cx).value().as_ref());
                     if let Err(error) = result { window.push_notification(Notification::error(error), cx); return false; }
