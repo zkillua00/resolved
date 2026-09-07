@@ -89,8 +89,8 @@ powershell -ExecutionPolicy Bypass -File scripts\package-msix.ps1 -Profile debug
 `run` opens a generated `.app` bundle on macOS, launches through X11/XWayland
 on Linux. Windows must launch the installed MSIX from the Start menu; create its
 development certificate once with `scripts\package-msix.ps1 -InstallCert`.
-Platform prerequisites and distribution commands are in the root
-[README](../README.md#run).
+Platform prerequisites and distribution commands are in the
+[building and packaging guide](building.md).
 
 The generated `vendor/gpui-0.2.2/`, `vendor/gpui-component-0.5.1/`, and
 `vendor/typescript-service-6.0.2/` trees are intentionally ignored. Change the

@@ -2,40 +2,49 @@
 
 ## Brand foundation
 
-**Category:** Native API workbench for macOS.
+**Category:** Native, programmable API workspace.
 
-**Core idea:** Evidence, not assumption.
+**Official app slogan:** Explore. Automate. Resolve.
 
-**Brand line:** From request to evidence.
+**Landing-page slogan:** Your API work, together.
 
-**Product promise:** Resolved keeps authored intent, the effective request sent over the wire, and
-the returned result explicit. API work can remain exploratory without becoming
-ambiguous.
+**Core idea:** Bring API exploration, reusable workflows, and collaboration into
+one working context.
 
-**Positioning:** Resolved is the native Mac API workbench for developers who need to know exactly
-what they sent and understand what came back. It turns variables, scripts, and
-request drafts into inspectable wire state, then keeps the result in a durable
-workspace.
+**Product promise:** Compose requests, understand responses, automate repeatable
+work, and carry that work across environments and teammates.
 
-The name describes a real product boundary. A `RequestTemplate` becomes a
-separate `ResolvedRequest` immediately before execution. Resolution is not a
-claim that the API worked or that the product automatically fixed it. Errors,
-cancellation, redirects, and unsuccessful responses are still clear outcomes.
+**Positioning:** Resolved is a native API workspace for Linux, macOS, and Windows.
+It brings HTTP requests, WebSocket conversations, scripts, tests, environments,
+and reusable collections together. Work locally, connect to a self-hosted
+collaboration server, or operate the workspace through opt-in MCP tools.
 
-## Audience and tension
+The name stays **Resolved**. It expresses progress toward a working result.
+It does not promise automatic fixes or successful API responses: failures,
+cancellation, and test results remain explicit.
 
-The primary audience is Mac-first backend, full-stack, API, and integration
-engineers who repeatedly compose, send, inspect, script, and revisit HTTP
-requests.
+## Audience and product pillars
 
-The central tension is:
+For backend, full-stack, API, and integration engineers working individually or
+with a team. The shared need is continuity between trying an API, understanding
+its behavior, and making that work repeatable.
 
-> API work is exploratory. The result must be exact.
+- **Explore:** Compose HTTP requests, inspect responses, exchange WebSocket
+  messages, and switch environment context without rebuilding a request.
+- **Automate:** Use pre-request and post-response JavaScript, assertions, saved
+  request chaining, snippets, WebSocket automation and replays, and MCP control.
+- **Resolve:** Use the returned results and test outcomes to decide what to do
+  next. Save and revisit useful work, and collaborate through shared workspaces,
+  collections, environment definitions, history, and live change updates.
 
-Resolved occupies the space between a disposable request sender and a broad
-enterprise API platform. Native performance, editor intelligence, persistent
-state, redaction, and detailed response inspection support the promise; they
-are proof rather than the headline.
+“Together” includes both the parts of an individual's workflow and collaboration
+with teammates. Local workspaces do not require the collaboration server.
+Server environment definitions are shared; variable values are per user.
+MCP connects external agents to the app; it is not an embedded AI assistant.
+
+Explicit request state, secret redaction, native editors, persistent drafts, and
+permission controls support the product promise. Keep these concrete details in
+feature explanations rather than making inspection the entire identity.
 
 ## Personality
 
@@ -59,11 +68,23 @@ are proof rather than the headline.
 - Avoid hype, superlatives, startup cliches, hacker slang, mascots, and forced
   jokes.
 
-### Supporting copy
+### Slogan usage and supporting copy
 
-- **Headline:** Know exactly what you sent.
-- **Explanation:** Build the request. Resolve its context. Inspect the result.
-- **Product rhythm:** What you edit. What gets sent. What comes back.
+| Surface | Copy |
+| --- | --- |
+| App welcome screen, product lockup, repository introduction | **Explore. Automate. Resolve.** |
+| Landing-page hero | **Your API work, together.** |
+| Short descriptor | A native, programmable API workspace. |
+| Supporting sentence | Explore, test, and automate APIs in a programmable workspace. |
+| Extended description | Work with HTTP and WebSockets, script repeatable workflows, and collaborate through your own server. |
+
+Use the official slogan with sentence capitalization and a period after each
+verb. Use the landing-page slogan with its comma and final period. Keep one
+slogan per lockup; do not stack both beneath the wordmark. The landing page may
+use Explore, Automate, and Resolve as separate feature sections farther down.
+
+The previous lines “Know exactly what you sent.” and “From request to evidence.”
+are retired. Their emphasis on precision remains a product principle.
 
 ## Visual identity
 
@@ -81,7 +102,7 @@ second logo. The full wordmark remains primary everywhere the available width
 allows it.
 
 The in-product interface remains in the native system face. Monospace is
-reserved for evidence: URLs, methods, status codes, durations, headers, and
+reserved for technical content: URLs, methods, status codes, durations, headers, and
 payloads.
 
 ### Palette
@@ -102,19 +123,23 @@ rather than becoming decorative brand colors.
 
 ### Graphic language
 
-Layouts use alignment, rules, columns, field labels, and real request metadata.
-The recurring visual transition is **intent becoming evidence**:
+Layouts use alignment, rules, columns, field labels, and real API workflows.
+The recurring visual progression is **exploration becoming repeatable work**:
 
-1. Authored state is shown as an outline or annotation.
-2. Wire state becomes registered, opaque, and exact.
-3. Returned evidence is presented as structured metadata, not celebration.
+1. Explore: show an editable request or a WebSocket conversation with context.
+2. Automate: connect that work to scripts, tests, or reusable sequences.
+3. Resolve: show the actual outcome and the saved or shared work it informs.
 
-Motion, when used, is short and decisive: values settle into registration and
-hold. There is no bounce, glow, confetti, or perpetual activity.
+Use connected steps in explanatory layouts, without adding symbols to the
+wordmark or icon. Product imagery should show requests, results, and environment
+context together. Show genuine error states as readily as successful responses.
+
+Motion, when used, follows a meaningful action or state change and then holds.
+There is no bounce, glow, confetti, or perpetual activity.
 
 ## Icon brief
 
-The app icon uses the compact **Res** label in Paper on a Resolve blue macOS
+The app icon uses the compact **Res** label in Paper on a Resolve blue rounded
 tile. The label is large, left-biased, and optically centered on its baseline.
 Its recognition comes from the name and the color field, not from an invented
 metaphor. It must remain legible at 32 and 64 pixels; at 16 pixels the blue tile
@@ -129,14 +154,33 @@ terminal prompts, node diagrams, links, arrows, loops, lightning, rockets,
 miniature app windows, and undistinguished R monograms. The descriptor supplies
 category clarity; the symbol does not need to explain APIs.
 
-## Core lockup
+## Core lockups
 
-Primary lockup:
+Official product lockup:
 
 > Resolved
 >
-> From request to evidence.
+> Explore. Automate. Resolve.
 
-Use the brand line as supporting copy, never as part of the app icon. The
-headline **Know exactly what you sent.** is preferred for product pages and
-launch material.
+Landing-page lockup:
+
+> Resolved
+>
+> Your API work, together.
+
+Slogans are supporting text, never part of the app icon. Keep the existing
+wordmark, compact Res mark, and palette across both uses.
+
+## Asset inventory
+
+- `resolved-wordmark.svg` and `.png`: standalone wordmark; no slogan.
+- `resolved-icon.svg` and `.png`: 1024 × 1024 compact icon master and export.
+- `resolved-brand-board.svg` and `.png`: identity reference showing both slogan
+  roles, the product category, workflow progression, and palette.
+- `../../assets/brand/resolved-icon.png`: full-resolution application asset.
+- `../../assets/brand/resolved-runtime.png`: 256 × 256 in-app image.
+
+The SVG files are the editable design sources. Regenerate corresponding PNG
+exports after visual edits. The SVG wordmark and icon use STIX Two Text Semibold;
+render with that font installed. Preserve the small runtime image for native UI
+use. Platform packaging icons are maintained separately.
