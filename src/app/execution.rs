@@ -385,6 +385,7 @@ impl ApiTester {
         };
         let budget = Arc::clone(&self.chain_budget);
         let local_client = self.client.clone();
+        let cookie_jar = self.cookie_jar.clone();
         let upstream_client = self.upstream_execution_client.clone();
         let target = match self.workspace_providers.active_id() {
             WorkspaceProviderId::Local(_) => None,
@@ -410,6 +411,7 @@ impl ApiTester {
         let task = self.runtime.spawn(async move {
             let sender = move |request: crate::core::RequestDraft| {
                 let local_client = local_client.clone();
+                let cookie_jar = cookie_jar.clone();
                 let upstream_client = upstream_client.clone();
                 let vault = vault.clone();
                 let runtime = Arc::clone(&runtime);
@@ -444,6 +446,7 @@ impl ApiTester {
                                 credential.bearer_token(),
                                 &workspace_id,
                                 request,
+                                cookie_jar.as_ref(),
                             )
                             .await
                         }
@@ -504,6 +507,7 @@ impl ApiTester {
         let chain_cancellation = self.script_cancellation.clone().unwrap_or_default();
         let budget = Arc::clone(&self.chain_budget);
         let local_client = self.client.clone();
+        let cookie_jar = self.cookie_jar.clone();
         let upstream_client = self.upstream_execution_client.clone();
         let vault = self.credential_vault.clone();
         let runtime = Arc::clone(&self.runtime);
@@ -525,6 +529,7 @@ impl ApiTester {
             chain_cancellation,
             budget,
             local_client,
+            cookie_jar,
             upstream_client,
             vault,
             runtime,
@@ -606,6 +611,7 @@ impl ApiTester {
                 let vault = self.credential_vault.clone();
                 let client = self.upstream_execution_client.clone();
                 let local_client = self.client.clone();
+                let cookie_jar = self.cookie_jar.clone();
                 let runtime = Arc::clone(&self.runtime);
                 let credential_upstream_id = target.upstream_id.clone();
                 let request = resolved.request.clone();
@@ -630,6 +636,7 @@ impl ApiTester {
                         credential.bearer_token(),
                         &target.workspace_id,
                         request,
+                        cookie_jar.as_ref(),
                     )
                     .await
                 })
@@ -1267,6 +1274,7 @@ pub(super) struct InlineChainRunner {
     chain_cancellation: crate::core::ScriptCancellation,
     budget: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     local_client: reqwest::Client,
+    cookie_jar: Arc<CookieJar>,
     upstream_client: reqwest::Client,
     vault: crate::core::CredentialVault,
     runtime: std::sync::Arc<tokio::runtime::Runtime>,
@@ -1288,6 +1296,7 @@ impl crate::core::InlineChainer for InlineChainRunner {
                 let chain_cancellation = self.chain_cancellation.clone();
                 let budget = self.budget.clone();
                 let local_client = self.local_client.clone();
+                let cookie_jar = self.cookie_jar.clone();
                 let upstream_client = self.upstream_client.clone();
                 let vault = self.vault.clone();
                 let runtime = self.runtime.clone();
@@ -1299,6 +1308,7 @@ impl crate::core::InlineChainer for InlineChainRunner {
                 async move {
                     let sender = move |request: crate::core::RequestDraft| {
                         let local_client = local_client.clone();
+                        let cookie_jar = cookie_jar.clone();
                         let upstream_client = upstream_client.clone();
                         let vault = vault.clone();
                         let runtime = runtime.clone();
@@ -1333,6 +1343,7 @@ impl crate::core::InlineChainer for InlineChainRunner {
                                         credential.bearer_token(),
                                         &workspace_id,
                                         request,
+                                        cookie_jar.as_ref(),
                                     )
                                     .await
                                 }

@@ -48,10 +48,11 @@ func WithEvents(events resourceevents.Emitter) ServiceOption {
 }
 
 type ExecuteInput struct {
-	Method  string
-	URL     string
-	Headers []Header
-	Body    proxybody.Body
+	UseCookieJar bool
+	Method       string
+	URL          string
+	Headers      []Header
+	Body         proxybody.Body
 }
 
 type WebSocketOpenInput struct {
@@ -235,7 +236,7 @@ func (s *Service) Policy(ctx context.Context) (Policy, error) {
 	if err != nil {
 		return Policy{}, err
 	}
-	return Policy{Mode: settings.Mode}, nil
+	return Policy{Mode: settings.Mode, CookieJar: true}, nil
 }
 
 func (s *Service) Settings(ctx context.Context) (Settings, error) {
@@ -384,7 +385,35 @@ func (s *Service) Execute(
 		s.recordExecution(requestContext, actor, workspaceID, method, target, statusToRecord, time.Since(startedAt))
 	}()
 
-	response, err := s.client.Do(request)
+	client := *s.client
+	var cookies *executionCookieJar
+	if input.UseCookieJar {
+		snapshot, err := s.workspaces.GetCookieJar(ctx, actor, workspaceID)
+		if err != nil {
+			return ExecuteResult{}, err
+		}
+		if snapshot.Enabled {
+			_, explicit := request.Header["Cookie"]
+			cookies = newExecutionCookieJar(snapshot, explicit)
+			client.Jar = cookies
+		}
+	}
+	response, err := client.Do(request)
+	if response != nil {
+		statusToRecord = response.StatusCode
+	}
+	// Persist redirect cookies even when the final transport or body fails.
+	if cookies != nil && len(cookies.updates) > 0 {
+		saveContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		saveErr := s.workspaces.ApplyCookieUpdates(saveContext, actor, workspaceID, cookies.updates)
+		cancel()
+		if saveErr != nil {
+			if response != nil {
+				response.Body.Close()
+			}
+			return ExecuteResult{}, problem.Wrap(saveErr, "save response cookies; request may have been sent")
+		}
+	}
 	if err != nil {
 		return ExecuteResult{}, proxyTransportError(err)
 	}

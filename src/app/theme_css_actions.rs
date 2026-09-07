@@ -1377,7 +1377,12 @@ impl ApiTester {
             self.settings_notice = Some("Your theme changes could not be saved.".into());
             cx.notify();
         }
-        tabs_saved && snippet_saved && theme_saved
+        let cookies_saved = !self.cookie_jar.has_unsaved_changes();
+        if !cookies_saved {
+            self.settings_notice = Some("Cookie changes have not reached encrypted server storage. Wait for synchronization, or open Cookies to resolve the error before leaving this workspace.".into());
+            cx.notify();
+        }
+        tabs_saved && snippet_saved && theme_saved && cookies_saved
     }
 
     fn current_theme_source(&self) -> &str {

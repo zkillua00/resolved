@@ -51,8 +51,23 @@ exist. AES-256-GCM encrypts each environment value with the user ID and variable
 ID as authenticated associated data; its random nonce is stored with the
 encrypted value bytes.
 
+Cookie jars use that same RAM-only derived key, with a separate
+`resolved/cookie-jar/v1` AES-GCM associated-data domain binding user ID and
+workspace ID. Only ciphertext and a revision are persisted in `cookie_jar_records`.
+GET/PUT `/api/v1/workspaces/:workspace_id/cookie-jar` require workspace-read
+permission and access to the workspace; the principal selects the private user
+row, including for owners. PUT uses optimistic revision checks, while an explicit
+reset can replace unreadable data. Cookie writes validate the current credential
+version under the same user-row transaction lock as password changes, preventing
+an in-flight old-key request from overwriting re-encrypted data.
+
+Server execution opts in with `use_cookie_jar`. It loads the caller's private jar
+into a per-execution HTTP client, keeps explicit Cookie headers authoritative,
+and merges response-cookie deltas (including redirects) into encrypted storage.
+Jar contents never enter shared events or the desktop's device-key cookie storage.
+
 A password change derives the new key and transactionally re-encrypts the
-user's values using a current key from one of that user's active in-memory
+user's environment values and cookie jars using a current key from one of that user's active in-memory
 sessions. If values exist but that user has no active session key, the update is
 rejected instead of making the values unreadable. This is server-side
 encryption, not end-to-end or zero-knowledge encryption: the running server

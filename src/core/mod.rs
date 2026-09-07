@@ -1,4 +1,5 @@
 mod chain;
+mod cookie_jar;
 mod database;
 mod format;
 mod history;
@@ -22,6 +23,7 @@ mod workspace_provider;
 mod mvp_smoke_test;
 
 pub use chain::{ChainFailure, ChainLimits, ChainRun, run_chain};
+pub use cookie_jar::{CookieEntry, CookieJar};
 pub use database::{DatabaseStore, LocalWorkspace};
 pub use format::{
     format_body, format_raw_source, format_script_source, is_probably_text, parse_json_lines,
@@ -31,10 +33,13 @@ pub use interchange::{
     ImportBundle, InterchangeFormat, MAX_INTERCHANGE_BYTES, export_request, import_requests,
 };
 pub use realtime::{RealtimeResourceChange, RealtimeSignal, watch_upstream_changes};
+#[cfg(test)]
+pub use request::build_client;
 pub use request::{
     BodyField, BodyFieldKind, BodyMode, HeaderEntry, QueryParamEntry, RawBodyLanguage,
-    RequestDraft, RequestError, RequestTask, ResponseData, STANDARD_HTTP_METHODS, build_client,
-    query_params_from_url, send_request, spawn_request, url_with_query_params,
+    RequestDraft, RequestError, RequestTask, ResponseData, STANDARD_HTTP_METHODS,
+    build_client_with_cookie_jar, query_params_from_url, send_request, spawn_request,
+    url_with_query_params,
 };
 #[allow(unused_imports)]
 pub use request_namespace::{
@@ -82,12 +87,13 @@ pub use upstream::{
     create_upstream_collection, create_upstream_environment, create_upstream_environment_variable,
     create_upstream_saved_request, create_upstream_workspace, delete_upstream_collection,
     delete_upstream_environment, delete_upstream_environment_variable,
-    delete_upstream_saved_request, delete_upstream_workspace, execute_upstream_request,
-    get_upstream_execution_policy, get_upstream_user, get_upstream_workspace,
-    list_upstream_environments, list_upstream_workspaces, login_upstream, move_upstream_collection,
+    delete_upstream_saved_request, delete_upstream_workspace, get_upstream_execution_policy,
+    get_upstream_user, get_upstream_workspace, list_upstream_environments,
+    list_upstream_workspaces, login_upstream, move_upstream_collection,
     move_upstream_saved_request, normalize_upstream_url, put_upstream_environment_variable_value,
-    save_upstream_environment, send_request_for_upstream_workspace, update_upstream_collection,
-    update_upstream_environment, update_upstream_environment_variable,
+    save_upstream_environment,
+    send_request_for_upstream_workspace_with_cookies as send_request_for_upstream_workspace,
+    update_upstream_collection, update_upstream_environment, update_upstream_environment_variable,
     update_upstream_saved_request, update_upstream_workspace, upstream_url_label,
 };
 #[allow(unused_imports)]

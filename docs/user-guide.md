@@ -656,9 +656,53 @@ constructs it only when a valid captured HTML response is opened in Preview and
 destroys it when Preview is left, the response is cleared, or loading fails.
 
 
+## Cookies
+
+HTTP requests accept `Set-Cookie` response headers and send matching cookies on
+later requests, including redirects. An explicit `Cookie` header takes precedence.
+Local-workspace jars are isolated by workspace and encrypted with the device vault.
+
+Server-workspace jars are private to your signed-in user, even in shared workspaces.
+They are stored on that server with the same password-derived key as your environment
+values, using separate authenticated encryption bound to the user and workspace.
+Keys remain in server memory and jars are re-encrypted when your password changes.
+The desktop keeps these cookies only in memory, with no device-key fallback.
+Both local and server execution use this private server-workspace jar. This requires
+a server version supporting encrypted cookie jars; unavailable storage fails closed.
+
+Open **Cookies** beside **Send** to view the active workspace's cookies. Values
+stay hidden in the list; **View / edit** reveals the value and attributes. Add or
+edit using an origin URL and a `Set-Cookie` value, including optional `Path`,
+`Domain`, `Secure`, `HttpOnly`, `Expires`, and `Max-Age` attributes. Editing preserves
+the effective path and absolute expiry unless you change them. Delete individual
+cookies, or use **Clear / reset jar** to remove the entire workspace jar.
+
+**Disable automatic cookies** stops both sending and accepting jar cookies while
+preserving existing entries. This preference survives app restarts. Explicit
+request headers remain under your control. Session cookies also survive restarts;
+expired cookies are never sent.
+
+If local storage cannot be read, the app opens with that jar disabled and retains
+the unreadable data until you explicitly reset it. Failed local manual mutations
+leave existing state unchanged. A failed automatic save keeps cookies in memory
+and displays a warning.
+
+Server saves run asynchronously, with a visible synchronization state. Execution
+waits for pending saves. Workspace switching and normal app close also wait for
+unsaved cookie changes to be resolved. Failed saves remain visible; the server's previous jar is
+preserved. **Reload from server** discards unsaved in-memory changes and retrieves
+the current jar. Revision checks prevent one client from silently overwriting
+another client's changes. **Clear / reset jar** explicitly replaces saved cookies,
+including unreadable data. Re-login and reopen the workspace after a session expires.
+
+Server execution uses an isolated jar per execution, captures redirect cookies,
+and merges response changes into encrypted storage. Cookies and cookie-management
+payloads are not published as shared-workspace events. Automatic cookie handling
+for WebSocket handshakes is not included.
+
 ## Deliberate limits
 
-Cookie jars, response streaming/downloads, certificate controls, proxy
+Response streaming/downloads, certificate controls, proxy
 controls, and native collection-structure import/export are not included yet.
 Specification imports open operations as request tabs rather than manufacturing
 a saved collection.

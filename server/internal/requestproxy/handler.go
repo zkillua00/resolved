@@ -2,6 +2,7 @@ package requestproxy
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"log"
@@ -45,11 +46,12 @@ type websocketOpenResponse struct {
 }
 
 type ExecuteRequest struct {
-	WorkspaceID string         `json:"-" validate:"required"`
-	Method      string         `json:"method" validate:"required,max=64"`
-	URL         string         `json:"url" validate:"required,max=16384"`
-	Headers     []Header       `json:"headers" validate:"max=256"`
-	Body        proxybody.Body `json:"body"`
+	UseCookieJar bool           `json:"use_cookie_jar"`
+	WorkspaceID  string         `json:"-" validate:"required"`
+	Method       string         `json:"method" validate:"required,max=64"`
+	URL          string         `json:"url" validate:"required,max=16384"`
+	Headers      []Header       `json:"headers" validate:"max=256"`
+	Body         proxybody.Body `json:"body"`
 }
 
 type ExecutePayload ExecuteRequest
@@ -180,10 +182,11 @@ func (h *Handler) ExecuteController() fiber.Handler {
 				actorFromContext(c),
 				payload.WorkspaceID,
 				ExecuteInput{
-					Method:  payload.Method,
-					URL:     payload.URL,
-					Headers: payload.Headers,
-					Body:    payload.Body,
+					UseCookieJar: payload.UseCookieJar,
+					Method:       payload.Method,
+					URL:          payload.URL,
+					Headers:      payload.Headers,
+					Body:         payload.Body,
 				},
 			)
 			if err != nil {
@@ -329,8 +332,9 @@ func (h *Handler) AddAllowlistEntryController() fiber.Handler {
 func actorFromContext(c fiber.Ctx) workspaces.Actor {
 	principal := auth.PrincipalFromContext(c)
 	return workspaces.Actor{
-		UserID:         principal.User.ID,
-		Owner:          principal.HasRole(identity.OwnerRoleID),
-		EnvironmentKey: principal.EnvironmentKey(),
+		UserID:            principal.User.ID,
+		Owner:             principal.HasRole(identity.OwnerRoleID),
+		EnvironmentKey:    principal.EnvironmentKey(),
+		CredentialVersion: sha256.Sum256([]byte(principal.User.PasswordHash)),
 	}
 }

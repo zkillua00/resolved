@@ -666,6 +666,8 @@ pub fn build_upstream_execution_client() -> Result<Client, RequestError> {
 #[derive(Deserialize)]
 struct ProxyExecutionPolicy {
     mode: RequestExecutionMode,
+    #[serde(default)]
+    cookie_jar: bool,
 }
 
 pub async fn get_upstream_execution_policy(
@@ -673,6 +675,15 @@ pub async fn get_upstream_execution_policy(
     base_url: &Url,
     bearer_token: &str,
 ) -> Result<RequestExecutionMode, RequestError> {
+    Ok(load_execution_policy(client, base_url, bearer_token)
+        .await?
+        .mode)
+}
+async fn load_execution_policy(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+) -> Result<ProxyExecutionPolicy, RequestError> {
     let endpoint = base_url.join("api/v1/request-execution").map_err(|error| {
         RequestError::Upstream(format!(
             "the server execution policy URL is invalid: {error}"
@@ -693,7 +704,10 @@ pub async fn get_upstream_execution_policy(
     // Servers released before request proxying do not expose a policy route;
     // their server workspaces retain the original local-execution behavior.
     if status == StatusCode::NOT_FOUND {
-        return Ok(RequestExecutionMode::Local);
+        return Ok(ProxyExecutionPolicy {
+            mode: RequestExecutionMode::Local,
+            cookie_jar: false,
+        });
     }
     if response
         .content_length()
@@ -727,7 +741,7 @@ pub async fn get_upstream_execution_policy(
             .unwrap_or_else(|| format!("could not load server execution policy: HTTP {status}"));
         return Err(RequestError::Upstream(message));
     }
-    envelope.data.map(|policy| policy.mode).ok_or_else(|| {
+    envelope.data.ok_or_else(|| {
         RequestError::Upstream(
             "the server response did not include its request execution policy".to_owned(),
         )
@@ -791,6 +805,7 @@ pub async fn add_upstream_proxy_allowlist_entry(
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn send_request_for_upstream_workspace(
     upstream_client: &Client,
     local_client: &Client,
@@ -814,8 +829,55 @@ pub async fn send_request_for_upstream_workspace(
     }
 }
 
+pub async fn send_request_for_upstream_workspace_with_cookies(
+    upstream_client: &Client,
+    local_client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    request: RequestDraft,
+    jar: &super::CookieJar,
+) -> Result<ResponseData, RequestError> {
+    jar.synchronized().await.map_err(RequestError::Upstream)?;
+    let policy = load_execution_policy(upstream_client, base_url, bearer_token).await?;
+    match policy.mode {
+        RequestExecutionMode::Local => {
+            let result = super::request::send_request(local_client, request).await;
+            jar.synchronized().await.map_err(|e| {
+                RequestError::Upstream(format!(
+                    "Request completed, but cookie synchronization failed: {e}"
+                ))
+            })?;
+            result
+        }
+        RequestExecutionMode::Server => {
+            if jar.enabled() && !policy.cookie_jar {
+                return Err(RequestError::Upstream(
+                    "Update this server to support encrypted cookie jars.".into(),
+                ));
+            }
+            let result = execute_upstream_request_with_cookies(
+                upstream_client,
+                base_url,
+                bearer_token,
+                workspace_id,
+                request,
+                jar.enabled(),
+            )
+            .await;
+            jar.refresh().await.map_err(|e| {
+                RequestError::Upstream(format!(
+                    "Request may have been sent, but cookie refresh failed: {e}"
+                ))
+            })?;
+            result
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct ProxyExecuteRequest {
+    use_cookie_jar: bool,
     method: String,
     url: String,
     headers: Vec<ProxyHeader>,
@@ -864,6 +926,7 @@ struct ProxyExecuteResult {
     duration_micros: u64,
 }
 
+#[cfg(test)]
 pub async fn execute_upstream_request(
     client: &Client,
     base_url: &Url,
@@ -871,7 +934,27 @@ pub async fn execute_upstream_request(
     workspace_id: &str,
     request: RequestDraft,
 ) -> Result<ResponseData, RequestError> {
-    let payload = proxy_request_payload(request).await?;
+    execute_upstream_request_with_cookies(
+        client,
+        base_url,
+        bearer_token,
+        workspace_id,
+        request,
+        false,
+    )
+    .await
+}
+async fn execute_upstream_request_with_cookies(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    request: RequestDraft,
+    use_cookie_jar: bool,
+) -> Result<ResponseData, RequestError> {
+    let mut payload = proxy_request_payload(request).await?;
+    payload.use_cookie_jar = use_cookie_jar;
+
     let endpoint = base_url
         .join(&format!("api/v1/workspaces/{workspace_id}/execute"))
         .map_err(|error| {
@@ -1007,6 +1090,7 @@ async fn proxy_request_payload(request: RequestDraft) -> Result<ProxyExecuteRequ
     };
 
     Ok(ProxyExecuteRequest {
+        use_cookie_jar: false,
         method: request.method,
         url: request.url,
         headers,

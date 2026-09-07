@@ -51,6 +51,8 @@ func WithWorkspaces(authService *auth.Service, handler *workspaces.Handler) Modi
 			auth.RequirePermission(identity.PermissionRequestsRead),
 			handler.ListController(),
 		)
+		protected.Get("/workspaces/:workspace_id/cookie-jar", auth.RequirePermission(identity.PermissionWorkspacesRead), handler.CookieJarController())
+		protected.Put("/workspaces/:workspace_id/cookie-jar", auth.RequirePermission(identity.PermissionWorkspacesRead), handler.CookieJarController())
 		protected.Post("/workspaces", auth.RequirePermission(identity.PermissionWorkspacesCreate), handler.CreateController())
 		protected.Get(
 			"/workspaces/:workspace_id",

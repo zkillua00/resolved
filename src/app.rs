@@ -45,7 +45,7 @@ use crate::{
     },
     core::{
         AppSettings, BodyField, BodyFieldKind, BodyMode, COLLECTIONS_CREATE, COLLECTIONS_DELETE,
-        COLLECTIONS_UPDATE, Collection, CollectionFolder, CredentialVault,
+        COLLECTIONS_UPDATE, Collection, CollectionFolder, CookieJar, CredentialVault,
         DEFAULT_REQUEST_TAB_TITLE, DatabaseStore, ENVIRONMENT_VALUES_UPDATE, ENVIRONMENTS_CREATE,
         ENVIRONMENTS_DELETE, ENVIRONMENTS_READ, ENVIRONMENTS_UPDATE, EditorInlineActionPlacement,
         Environment, EnvironmentMutation, EnvironmentVariable, FormatterSettings, HeaderEntry,
@@ -69,21 +69,21 @@ use crate::{
         WORKSPACES_UPDATE, WebSocketAutomationEvent, WebSocketCommand, WebSocketMessageTemplate,
         WebSocketReplay, WebSocketSavedMessage, WebSocketSignal, WebSocketWorkspace, Workspace,
         WorkspaceMutationError, WorkspaceProvider, WorkspaceProviderId, WorkspaceProviderRegistry,
-        add_upstream_proxy_allowlist_entry, binary_preview, build_client, build_upstream_client,
-        build_upstream_execution_client, create_upstream_collection, create_upstream_environment,
-        create_upstream_environment_variable, create_upstream_saved_request,
-        create_upstream_workspace, delete_shared_history, delete_upstream_collection,
-        delete_upstream_environment, delete_upstream_environment_variable,
-        delete_upstream_saved_request, delete_upstream_workspace, execute_websocket_automation,
-        export_request, format_body, generate_snippet, get_upstream_execution_policy,
-        get_upstream_user, get_upstream_workspace, import_requests, is_probably_text,
-        list_upstream_environments, list_upstream_workspaces, login_upstream,
-        move_upstream_collection, move_upstream_saved_request, normalize_upstream_url,
-        put_upstream_environment_variable_value, query_params_from_url, render_message_template,
-        replay_frames, replay_websocket_frames, resolve_request, run_upstream_websocket_connection,
-        run_websocket_connection, save_upstream_environment, send_request_for_upstream_workspace,
-        spawn_request, template_variable_names, update_request_execution_settings,
-        update_upstream_collection, update_upstream_environment,
+        add_upstream_proxy_allowlist_entry, binary_preview, build_client_with_cookie_jar,
+        build_upstream_client, build_upstream_execution_client, create_upstream_collection,
+        create_upstream_environment, create_upstream_environment_variable,
+        create_upstream_saved_request, create_upstream_workspace, delete_shared_history,
+        delete_upstream_collection, delete_upstream_environment,
+        delete_upstream_environment_variable, delete_upstream_saved_request,
+        delete_upstream_workspace, execute_websocket_automation, export_request, format_body,
+        generate_snippet, get_upstream_execution_policy, get_upstream_user, get_upstream_workspace,
+        import_requests, is_probably_text, list_upstream_environments, list_upstream_workspaces,
+        login_upstream, move_upstream_collection, move_upstream_saved_request,
+        normalize_upstream_url, put_upstream_environment_variable_value, query_params_from_url,
+        render_message_template, replay_frames, replay_websocket_frames, resolve_request,
+        run_upstream_websocket_connection, run_websocket_connection, save_upstream_environment,
+        send_request_for_upstream_workspace, spawn_request, template_variable_names,
+        update_request_execution_settings, update_upstream_collection, update_upstream_environment,
         update_upstream_environment_variable, update_upstream_saved_request,
         update_upstream_workspace, upload_shared_history, url_with_query_params,
         watch_upstream_changes,
@@ -110,6 +110,7 @@ mod collection_folder_actions;
 mod collections_actions;
 mod collections_page;
 mod control;
+mod cookies;
 mod drag_drop;
 mod editor_settings;
 mod environment_browser;
@@ -312,6 +313,7 @@ pub struct ApiTester {
     preview_error: Option<String>,
     copied: bool,
     client: Client,
+    cookie_jar: Arc<CookieJar>,
     runtime: Arc<Runtime>,
     history: RequestHistory,
     history_warning: Option<String>,
