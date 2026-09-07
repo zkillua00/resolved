@@ -37,7 +37,7 @@ if (-not (Test-Path $exePath)) {
 }
 
 $identityName = 'nous.resolved'
-$certificateSubject = 'CN=Nous Research'
+$certificateSubject = 'CN=apiworkbench.dev'
 $publisher = $certificateSubject.Substring(3)
 $version = (& cargo metadata --no-deps --format-version 1 |
     ConvertFrom-Json).packages[0].version
@@ -182,7 +182,7 @@ $manifest = @"
             ProcessorArchitecture="$peArch" />
   <Properties>
     <DisplayName>Resolved</DisplayName>
-    <PublisherDisplayName>Nous Research</PublisherDisplayName>
+    <PublisherDisplayName>$publisher</PublisherDisplayName>
     <Logo>assets\resolved-icon.png</Logo>
   </Properties>
   <Resources>

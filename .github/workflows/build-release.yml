@@ -151,7 +151,7 @@ jobs:
           $base = "Resolved-$env:RESOLVED_BUILD_VERSION-windows-x64"
           Copy-Item target/release/Resolved.msix "dist/$base.msix"
           $cert = Get-ChildItem Cert:\CurrentUser\My |
-            Where-Object { $_.Subject -eq 'CN=Nous Research' -and $_.HasPrivateKey } |
+            Where-Object { $_.Subject -eq 'CN=apiworkbench.dev' -and $_.HasPrivateKey } |
             Sort-Object NotBefore -Descending | Select-Object -First 1
           if (-not $cert) { throw 'Missing MSIX signing certificate' }
           Export-Certificate -Cert $cert -FilePath "dist/$base.cer" | Out-Null
