@@ -179,7 +179,10 @@ impl ApiTester {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .when(self.response_tab != ResponseTab::Scripts, |this| this.p_4())
+                    .when(
+                        matches!(self.response_tab, ResponseTab::Headers | ResponseTab::Preview),
+                        |this| this.p_4(),
+                    )
                     .when(self.response_tab == ResponseTab::Body, |this| {
                         this.child(self.render_response_body(cx))
                     })

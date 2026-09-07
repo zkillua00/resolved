@@ -123,6 +123,7 @@ impl PaneEditorState {
                 CodeEditorConfig::default()
                     .language(CodeLanguage::Json)
                     .placeholder("Response body")
+                    .framed(false)
                     .rows(20)
                     .soft_wrap(false)
                     .read_only(true),
@@ -1687,7 +1688,7 @@ impl ApiTester {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .p_4()
+                    .when(session.response_tab != ResponseTab::Body, |this| this.p_4())
                     .when(session.response_tab == ResponseTab::Body, |this| {
                         this.child(self.render_pane_response_body(session, pane_id, cx))
                     })

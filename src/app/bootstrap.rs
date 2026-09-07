@@ -223,6 +223,7 @@ impl ApiTester {
                 CodeEditorConfig::default()
                     .language(CodeLanguage::Json)
                     .placeholder("Response body")
+                    .framed(false)
                     .rows(20)
                     .soft_wrap(false)
                     .read_only(true)
