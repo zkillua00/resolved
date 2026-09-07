@@ -523,6 +523,30 @@ impl ApiTester {
     }
 
     pub(super) fn open_blank_request_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_blank_request_template(
+            DEFAULT_REQUEST_TAB_TITLE,
+            RequestTemplate::default(),
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn open_blank_websocket_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_blank_request_template(
+            "New WebSocket",
+            RequestTemplate::websocket(WebSocketWorkspace::default()),
+            window,
+            cx,
+        );
+    }
+
+    fn open_blank_request_template(
+        &mut self,
+        title: &str,
+        template: RequestTemplate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.sending {
             return;
         }
@@ -545,6 +569,10 @@ impl ApiTester {
             let _ = self
                 .request_tabs
                 .repair_association(&tab_id, association, false);
+            if let Some(tab) = self.request_tabs.get_mut(&tab_id) {
+                tab.set_template(template.clone());
+                tab.set_title(title);
+            }
             self.request_tab_runtime
                 .insert(tab_id.as_str().to_owned(), RequestTabRuntime::default());
             self.hide_preview(cx);
@@ -556,11 +584,12 @@ impl ApiTester {
         self.sidebar_tab = SidebarTab::Collections;
         self.snapshot_active_request_tab(cx);
         let tab_id = if self.selected_collection_id.is_none() {
-            self.request_tabs.open_new()
+            self.request_tabs
+                .open_unsaved(title, template, RequestTabAssociation::default())
         } else {
             self.request_tabs.open_unsaved(
-                DEFAULT_REQUEST_TAB_TITLE,
-                RequestTemplate::default(),
+                title,
+                template,
                 RequestTabAssociation::new(
                     self.selected_folder_id.clone(),
                     self.selected_collection_id.clone(),

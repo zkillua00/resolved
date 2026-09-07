@@ -322,6 +322,7 @@ const PRELUDE: &str = r#"
     if (typeof value === "string") return value;
     if (typeof value === "undefined") return "undefined";
     if (typeof value === "bigint") return `${value}n`;
+    if (value instanceof Error) return value.stack || `${value.name}: ${value.message}`;
     try {
       const json = JSON.stringify(value);
       return json === undefined ? String(value) : json;
@@ -334,13 +335,30 @@ const PRELUDE: &str = r#"
     }
   }
 
+  function consoleValueKind(value) {
+    if (value === null) return "null";
+    if (Array.isArray(value)) return "array";
+    if (value instanceof Error) return "error";
+    const kind = typeof value;
+    return kind === "object" ? "object" : kind;
+  }
+
   function writeLog(level, values) {
     if (logs.length >= input.maxLogEntries || logCharacters >= input.maxLogBytes) return;
-    let message = values.map(printable).join(" ");
-    const remaining = input.maxLogBytes - logCharacters;
-    if (message.length > remaining) message = message.slice(0, remaining);
+    let remaining = input.maxLogBytes - logCharacters;
+    const inspectedValues = [];
+    for (const value of values) {
+      if (remaining <= 0) break;
+      if (inspectedValues.length > 0) remaining -= 1;
+      if (remaining <= 0) break;
+      let preview = printable(value);
+      if (preview.length > remaining) preview = preview.slice(0, remaining);
+      remaining -= preview.length;
+      inspectedValues.push({ kind: consoleValueKind(value), preview });
+    }
+    const message = inspectedValues.map(value => value.preview).join(" ");
     logCharacters += message.length;
-    logs.push({ level, message });
+    logs.push({ level, message, values: inspectedValues });
   }
 
   const scriptConsole = Object.freeze({
@@ -653,11 +671,9 @@ impl SecretRedactor {
         if self.variants.is_empty() {
             return text.to_owned();
         }
-        self.variants
-            .iter()
-            .fold(text.to_owned(), |text, value| {
-                text.replace(value, REDACTED_VALUE)
-            })
+        self.variants.iter().fold(text.to_owned(), |text, value| {
+            text.replace(value, REDACTED_VALUE)
+        })
     }
 }
 
@@ -698,9 +714,17 @@ pub enum ScriptLogLevel {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ScriptLogValue {
+    pub kind: String,
+    pub preview: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ScriptLog {
     pub level: ScriptLogLevel,
     pub message: String,
+    #[serde(default)]
+    pub values: Vec<ScriptLogValue>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1045,6 +1069,46 @@ pub fn execute_post_response_with_chain(
 ) -> Result<PostResponseResult, ScriptError> {
     execute_post_response_inner(
         source,
+        request,
+        response,
+        scope,
+        request_namespace,
+        cancellation,
+        chain_inline,
+    )
+}
+
+/// Evaluates one interactive console entry against the post-response API.
+/// Expressions print their completion value; statement blocks retain normal
+/// script semantics and can write through `console` / `api.console`.
+pub fn execute_post_response_console_with_chain(
+    source: &str,
+    request: &RequestDraft,
+    response: &ResponseData,
+    scope: &ScriptScope,
+    request_namespace: &RequestNamespaceCatalog,
+    cancellation: &ScriptCancellation,
+    chain_inline: Option<&dyn InlineChainer>,
+) -> Result<PostResponseResult, ScriptError> {
+    let encoded = serde_json::to_string(source).unwrap_or_else(|_| "\"\"".to_owned());
+    let wrapped = format!(
+        r#"
+const __resolvedConsoleSource = {encoded};
+const __ResolvedAsyncFunction = Object.getPrototypeOf(async function() {{}}).constructor;
+let __resolvedConsoleRunner;
+try {{
+  __resolvedConsoleRunner = new __ResolvedAsyncFunction(
+    "return (" + __resolvedConsoleSource + "\n);"
+  );
+}} catch (_) {{
+  __resolvedConsoleRunner = new __ResolvedAsyncFunction(__resolvedConsoleSource);
+}}
+const __resolvedConsoleValue = await __resolvedConsoleRunner();
+console.log(__resolvedConsoleValue);
+"#
+    );
+    execute_post_response_inner(
+        &wrapped,
         request,
         response,
         scope,
@@ -1675,6 +1739,14 @@ fn report_from_output(
             Some(ScriptLog {
                 level: log.level,
                 message,
+                values: log
+                    .values
+                    .iter()
+                    .map(|value| ScriptLogValue {
+                        kind: value.kind.clone(),
+                        preview: redactor.scrub(&value.preview),
+                    })
+                    .collect(),
             })
         })
         .collect();
@@ -1960,6 +2032,35 @@ console.log("prepared", api.request.method);
             ]
         );
         assert_eq!(result.report.logs[0].message, "prepared POST");
+        assert_eq!(
+            result.report.logs[0]
+                .values
+                .iter()
+                .map(|value| (value.kind.as_str(), value.preview.as_str()))
+                .collect::<Vec<_>>(),
+            [("string", "prepared"), ("string", "POST")]
+        );
+    }
+
+    #[test]
+    fn console_logs_retain_bounded_object_shape_for_inspection() {
+        let result = execute_pre_request(
+            r#"console.log("state", { connected: true, attempts: [1, 2] });"#,
+            &request(),
+            &ScriptScope::default(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
+        )
+        .expect("console object should be captured");
+
+        let log = &result.report.logs[0];
+        assert_eq!(log.message, r#"state {"connected":true,"attempts":[1,2]}"#);
+        assert_eq!(log.values[0].kind, "string");
+        assert_eq!(log.values[1].kind, "object");
+        assert_eq!(
+            log.values[1].preview,
+            r#"{"connected":true,"attempts":[1,2]}"#
+        );
     }
 
     #[test]
@@ -2046,6 +2147,65 @@ console.info(api.response.durationMs);
                 value: "next-token".to_owned(),
             }]
         );
+    }
+
+    #[test]
+    fn interactive_console_prints_expression_values_with_post_response_api() {
+        let response = ResponseData {
+            status: 201,
+            status_text: "Created".to_owned(),
+            http_version: "HTTP/2".to_owned(),
+            final_url: "https://example.test/users".to_owned(),
+            headers: Vec::new(),
+            content_type: Some("application/json".to_owned()),
+            body: br#"{"ok":true}"#.to_vec().into(),
+            duration: Duration::from_millis(42),
+        };
+
+        let result = execute_post_response_console_with_chain(
+            "({ status: api.response.status, body: api.response.json() })",
+            &request(),
+            &response,
+            &ScriptScope::default(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
+            None,
+        )
+        .expect("console expression should use the post-response API");
+
+        assert_eq!(result.report.logs.len(), 1);
+        assert_eq!(result.report.logs[0].values[0].kind, "object");
+        assert_eq!(
+            result.report.logs[0].message,
+            r#"{"status":201,"body":{"ok":true}}"#
+        );
+    }
+
+    #[test]
+    fn interactive_console_accepts_awaited_statement_blocks() {
+        let response = ResponseData {
+            status: 200,
+            status_text: "OK".to_owned(),
+            http_version: "HTTP/1.1".to_owned(),
+            final_url: "https://example.test".to_owned(),
+            headers: Vec::new(),
+            content_type: None,
+            body: Vec::new().into(),
+            duration: Duration::from_millis(1),
+        };
+
+        let result = execute_post_response_console_with_chain(
+            "await Promise.resolve(); api.console.info('ready');",
+            &request(),
+            &response,
+            &ScriptScope::default(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
+            None,
+        )
+        .expect("console statements should support top-level await");
+
+        assert_eq!(result.report.logs[0].message, "ready");
     }
 
     #[test]
@@ -2447,6 +2607,7 @@ throw new Error("rotated=a%20b/c");
                 super::super::template::RequestTemplate {
                     request: RequestDraft::new("POST", "https://a.test/login"),
                     scripts: Default::default(),
+                    websocket: None,
                 },
             )
             .unwrap();
@@ -2458,6 +2619,7 @@ throw new Error("rotated=a%20b/c");
                 super::super::template::RequestTemplate {
                     request: RequestDraft::new("POST", "https://p.test/login"),
                     scripts: Default::default(),
+                    websocket: None,
                 },
             )
             .unwrap();

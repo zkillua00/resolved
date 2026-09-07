@@ -3,6 +3,7 @@ package requestproxy
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	gorillaWebsocket "github.com/gorilla/websocket"
 	"resolved-server/internal/identity"
 	"resolved-server/internal/problem"
 	"resolved-server/internal/requestproxy/proxybody"
@@ -50,6 +52,11 @@ type ExecuteInput struct {
 	URL     string
 	Headers []Header
 	Body    proxybody.Body
+}
+
+type WebSocketOpenInput struct {
+	URL     string   `json:"url"`
+	Headers []Header `json:"headers"`
 }
 
 type Header struct {
@@ -405,6 +412,161 @@ func (s *Service) Execute(
 		BodyBase64:     base64.StdEncoding.EncodeToString(responseBody),
 		DurationMicros: time.Since(startedAt).Microseconds(),
 	}, nil
+}
+
+// OpenWebSocket applies the same workspace, execution-policy, destination,
+// header, proxy, and hostname-override boundary as Execute before dialing a
+// user-supplied WebSocket target.
+func (s *Service) OpenWebSocket(
+	ctx context.Context,
+	actor workspaces.Actor,
+	workspaceID string,
+	input WebSocketOpenInput,
+) (*gorillaWebsocket.Conn, *url.URL, error) {
+	if len(input.URL) > 16384 {
+		return nil, nil, invalidField("url", "is too long")
+	}
+	if len(input.Headers) > 256 {
+		return nil, nil, invalidField("headers", "contains too many entries")
+	}
+	if _, err := s.workspaces.Get(ctx, actor, workspaceID); err != nil {
+		return nil, nil, err
+	}
+	settings, err := s.settings.Get(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if settings.Mode != ModeServer {
+		return nil, nil, problem.New(
+			problem.KindConflict,
+			"server_execution_disabled",
+			"request execution from this server is disabled by its administrator",
+		)
+	}
+
+	target, err := url.Parse(strings.TrimSpace(input.URL))
+	if err != nil || target.Host == "" {
+		return nil, nil, invalidField("url", "is not a valid WebSocket URL")
+	}
+	if target.Scheme != "ws" && target.Scheme != "wss" {
+		return nil, nil, invalidField("url", "must use ws:// or wss://")
+	}
+	originalTarget := *target
+	originalTarget.Fragment = ""
+
+	overrides := settings.overrideMap()
+	allowlistedRequests, allowlistedAddresses := settings.allowlistMaps()
+	if ip := net.ParseIP(target.Hostname()); ip != nil {
+		if _, overridden := overrides[normalizedHostname(target.Hostname())]; !overridden {
+			_, requestAllowed := allowlistedRequests[originalTarget.String()]
+			_, addressAllowed := allowlistedAddresses[normalizedHostname(target.Hostname())]
+			if reason := blockedIPReason(ip); reason != "" && !requestAllowed && !addressAllowed {
+				return nil, nil, problem.WithFields(
+					"proxy_destination_blocked",
+					"the proxied request was blocked because its destination is not allowed",
+					map[string]string{
+						"request": originalTarget.String(),
+						"address": normalizedHostname(target.Hostname()),
+						"reason":  reason,
+					},
+				)
+			}
+		}
+	}
+
+	requestContext := context.WithValue(ctx, hostnameOverridesContextKey{}, overrides)
+	requestContext = context.WithValue(requestContext, allowlistedRequestsContextKey{}, allowlistedRequests)
+	requestContext = context.WithValue(requestContext, allowlistedAddressesContextKey{}, allowlistedAddresses)
+	request, err := http.NewRequestWithContext(requestContext, http.MethodGet, target.String(), nil)
+	if err != nil {
+		return nil, nil, invalidField("url", "is not a valid WebSocket URL")
+	}
+	if err := applyHeaders(request, input.Headers); err != nil {
+		return nil, nil, err
+	}
+	// Gorilla owns the WebSocket handshake headers. Target subprotocols and
+	// ordinary request headers remain caller-controlled.
+	request.Header.Del("Sec-WebSocket-Key")
+	request.Header.Del("Sec-WebSocket-Version")
+	request.Header.Del("Sec-WebSocket-Extensions")
+	setRequestTargetContext(request)
+	applyWebSocketHostnameOriginOverride(request)
+	if request.Host != "" {
+		request.Header["Host"] = []string{request.Host}
+	}
+
+	transport, ok := s.client.Transport.(*http.Transport)
+	if !ok {
+		return nil, nil, problem.New(problem.KindInternal, "proxy_unavailable", "the request proxy transport is unavailable")
+	}
+	dialer := *gorillaWebsocket.DefaultDialer
+	dialer.HandshakeTimeout = DefaultTimeout
+	dialer.Proxy = webSocketProxySelector(transport.Proxy)
+	dialer.NetDialContext = transport.DialContext
+	dialer.TLSClientConfig = webSocketTLSClientConfig(transport.TLSClientConfig)
+	connection, _, err := dialer.DialContext(request.Context(), request.URL.String(), request.Header)
+	if err != nil {
+		return nil, nil, proxyTransportError(err)
+	}
+	return connection, &originalTarget, nil
+}
+
+func webSocketTLSClientConfig(base *tls.Config) *tls.Config {
+	if base == nil {
+		return nil
+	}
+	config := base.Clone()
+	// A WebSocket opening handshake is HTTP/1.1. The HTTP transport may have
+	// added h2 to its shared TLS configuration, but Gorilla cannot speak HTTP/2
+	// after ALPN selects it.
+	config.NextProtos = []string{"http/1.1"}
+	return config
+}
+
+func webSocketProxySelector(
+	selector func(*http.Request) (*url.URL, error),
+) func(*http.Request) (*url.URL, error) {
+	if selector == nil {
+		return nil
+	}
+	return func(request *http.Request) (*url.URL, error) {
+		proxyRequest := request.Clone(request.Context())
+		proxyURL := *request.URL
+		if proxyURL.Scheme == "wss" {
+			proxyURL.Scheme = "https"
+		} else {
+			proxyURL.Scheme = "http"
+		}
+		proxyRequest.URL = &proxyURL
+		return selector(proxyRequest)
+	}
+}
+
+func applyWebSocketHostnameOriginOverride(request *http.Request) {
+	target, overridden := hostnameOverride(request.Context(), request.URL.Hostname())
+	if !overridden {
+		return
+	}
+	requestURL := *request.URL
+	request.URL = &requestURL
+	if target.Scheme != "" {
+		if target.Scheme == "https" {
+			request.URL.Scheme = "wss"
+		} else {
+			request.URL.Scheme = "ws"
+		}
+	}
+	if net.ParseIP(target.Host) != nil {
+		markProxyBypass(request, request.URL.Hostname())
+		return
+	}
+	if port := request.URL.Port(); port != "" {
+		request.URL.Host = net.JoinHostPort(target.Host, port)
+	} else {
+		request.URL.Host = target.Host
+	}
+	request.Host = request.URL.Host
+	markProxyBypass(request, target.Host)
 }
 
 func resolveRequestURL(value string, overrides map[string]hostnameOverrideTarget) (*url.URL, error) {

@@ -23,7 +23,9 @@ param(
     [ValidateSet('debug', 'release')]
     [string]$Profile = 'debug',
     [switch]$Install,
-    [switch]$InstallCert
+    [switch]$InstallCert,
+    [ValidateRange(0, 65535)]
+    [int]$Revision = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,7 +44,7 @@ $version = (& cargo metadata --no-deps --format-version 1 |
 # MSIX versions use four numeric parts. Release packages start at revision 0;
 # repeated local installs of the same Cargo version advance the revision so
 # Windows deploys the rebuilt executable instead of retaining stale bytes.
-$manifestVersion = [version]"$version.0"
+$manifestVersion = [version]"$version.$Revision"
 if ($Install) {
     $installed = Get-AppxPackage -Name $identityName -ErrorAction SilentlyContinue |
         Sort-Object Version -Descending |

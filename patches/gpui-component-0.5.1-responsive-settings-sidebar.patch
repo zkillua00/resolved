@@ -1,0 +1,132 @@
+diff --git a/src/setting/settings.rs b/src/setting/settings.rs
+index 6be242e..ab603aa 100644
+--- a/src/setting/settings.rs
++++ b/src/setting/settings.rs
+@@ -25,6 +25,7 @@ pub struct Settings {
+     size: Size,
+     sidebar_width: Pixels,
+     sidebar_style: StyleRefinement,
++    content_top_inset: Pixels,
+ }
+ 
+ impl Settings {
+@@ -37,6 +38,7 @@ impl Settings {
+             size: Size::default(),
+             sidebar_width: px(250.0),
+             sidebar_style: StyleRefinement::default(),
++            content_top_inset: px(0.),
+         }
+     }
+ 
+@@ -46,6 +48,12 @@ impl Settings {
+         self
+     }
+ 
++    /// Inset the contents of both panes without moving the pane surfaces.
++    pub fn content_top_inset(mut self, inset: impl Into<Pixels>) -> Self {
++        self.content_top_inset = inset.into();
++        self
++    }
++
+     /// Add a page to the settings.
+     pub fn page(mut self, page: SettingPage) -> Self {
+         self.pages.push(page);
+@@ -147,6 +155,7 @@ impl Settings {
+             .w(relative(1.))
+             .border_0()
+             .refine_style(&self.sidebar_style)
++            .content_top_inset(self.content_top_inset)
+             .collapsed(false)
+             .header(
+                 div()
+@@ -249,6 +258,14 @@ impl RenderOnce for Settings {
+                 deferred_scroll_group_ix: None,
+             }
+         });
++        // Keep the page/search state stable when the requested sidebar width
++        // changes, but give the resizable panel group fresh layout state. Its
++        // cached pixel sizes otherwise override a new width (for example when
++        // application zoom changes), leaving its divider at the old position.
++        let resizable_id = (
++            self.id.clone(),
++            format!("resizable-{:?}", self.sidebar_width),
++        );
+ 
+         let query = state.read(cx).search_input.read(cx).value();
+         let filtered_pages = self.filtered_pages(&query);
+@@ -262,8 +279,9 @@ impl RenderOnce for Settings {
+             group_variant: self.group_variant,
+             layout: Axis::Horizontal,
+         };
++        let content_top_inset = self.content_top_inset;
+ 
+-        h_resizable(self.id.clone())
++        h_resizable(resizable_id)
+             .child(
+                 resizable_panel()
+                     .size(self.sidebar_width)
+@@ -272,10 +290,16 @@ impl RenderOnce for Settings {
+             )
+-            .child(resizable_panel().child(self.render_active_page(
+-                &state,
+-                &filtered_pages,
+-                &options,
+-                window,
+-                cx,
+-            )))
++            .child(resizable_panel().child(
++                div()
++                    .size_full()
++                    .min_h_0()
++                    .pt(content_top_inset)
++                    .child(self.render_active_page(
++                        &state,
++                        &filtered_pages,
++                        &options,
++                        window,
++                        cx,
++                    )),
++            ))
+     }
+ }
+diff --git a/src/sidebar/mod.rs b/src/sidebar/mod.rs
+index 6eb15e5..fc907f1 100644
+--- a/src/sidebar/mod.rs
++++ b/src/sidebar/mod.rs
+@@ -36,6 +36,7 @@ pub struct Sidebar<E: Collapsible + IntoElement + 'static> {
+     side: Side,
+     collapsible: bool,
+     collapsed: bool,
++    content_top_inset: Pixels,
+ }
+ 
+ impl<E: Collapsible + IntoElement> Sidebar<E> {
+@@ -49,6 +50,7 @@ impl<E: Collapsible + IntoElement> Sidebar<E> {
+             side,
+             collapsible: true,
+             collapsed: false,
++            content_top_inset: px(0.),
+         }
+     }
+ 
+@@ -68,6 +70,12 @@ impl<E: Collapsible + IntoElement> Sidebar<E> {
+         self.collapsed = collapsed;
+         self
+     }
++
++    /// Inset the sidebar's children without moving its surface or border.
++    pub fn content_top_inset(mut self, inset: impl Into<Pixels>) -> Self {
++        self.content_top_inset = inset.into();
++        self
++    }
+ 
+     /// Set the header of the sidebar.
+     pub fn header(mut self, header: impl IntoElement) -> Self {
+@@ -215,6 +223,7 @@ impl<E: Collapsible + IntoElement> RenderOnce for Sidebar<E> {
+                 Side::Right => this.border_l_1(),
+             })
+             .refine_style(&self.style)
++            .pt(self.content_top_inset)
+             .when(self.collapsed, |this| this.w(COLLAPSED_WIDTH).gap_2())
+             .when_some(self.header.take(), |this, header| {
+                 this.child(

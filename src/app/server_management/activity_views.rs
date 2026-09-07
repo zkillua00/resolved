@@ -51,7 +51,16 @@ fn render_activity_log(
     let Some(entity) = this.upgrade() else {
         return div().into_any_element();
     };
-    let (status, upstream_id, snapshot_present, audit_visible, feed, active_upstream_id, target, realtime_status) = {
+    let (
+        status,
+        upstream_id,
+        snapshot_present,
+        audit_visible,
+        feed,
+        active_upstream_id,
+        target,
+        realtime_status,
+    ) = {
         let app = entity.read(cx);
         let management = &app.server_management;
         (
@@ -340,7 +349,7 @@ fn render_activity_log(
                                         });
                                     }
                                 }),
-                        ),
+                            ),
                     )
                 })
                 .into_any_element()
@@ -358,12 +367,7 @@ fn schedule_first_load(
     // re-renders while it is Loading/Ready must not schedule busywork every
     // frame. Errors are retried explicitly via the Retry button.
     let already_started = this.upgrade().is_some_and(|entity| {
-        entity
-            .read(cx)
-            .server_management
-            .activity_feed(kind)
-            .status
-            != ActivityLogStatus::Idle
+        entity.read(cx).server_management.activity_feed(kind).status != ActivityLogStatus::Idle
     });
     if already_started {
         return;
@@ -1165,31 +1169,29 @@ mod tests {
                     .size_full()
                     .child(div().h(px(46.)).flex_shrink_0())
                     .child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .w_full()
-                            .child(
-                                div().w_full().h_full().child(
-                                    v_flex()
-                                        .size_full()
-                                        .min_h_0()
-                                        .child(div().h(px(58.)).flex_shrink_0())
-                                        .child(
-                                            v_flex()
-                                                .id("feed-scroll")
-                                                .debug_selector(|| "feed-scroll".to_owned())
-                                                .flex_1()
-                                                .min_h_0()
-                                                .overflow_y_scroll()
-                                                .gap_3()
-                                                .p_4()
-                                                .children(self.entries.iter().map(|entry| {
-                                                    render_activity_entry(entry, cx)
-                                                })),
-                                        ),
-                                ),
+                        div().flex_1().min_h_0().w_full().child(
+                            div().w_full().h_full().child(
+                                v_flex()
+                                    .size_full()
+                                    .min_h_0()
+                                    .child(div().h(px(58.)).flex_shrink_0())
+                                    .child(
+                                        v_flex()
+                                            .id("feed-scroll")
+                                            .debug_selector(|| "feed-scroll".to_owned())
+                                            .flex_1()
+                                            .min_h_0()
+                                            .overflow_y_scroll()
+                                            .gap_3()
+                                            .p_4()
+                                            .children(
+                                                self.entries
+                                                    .iter()
+                                                    .map(|entry| render_activity_entry(entry, cx)),
+                                            ),
+                                    ),
                             ),
+                        ),
                     )
             }
         }
@@ -1199,7 +1201,11 @@ mod tests {
             id: id.to_owned(),
             kind: "change".to_owned(),
             resource: "request".to_owned(),
-            action: if tall { "updated".to_owned() } else { "created".to_owned() },
+            action: if tall {
+                "updated".to_owned()
+            } else {
+                "created".to_owned()
+            },
             resource_id: format!("{id}-rid"),
             workspace_id: "workspace-1".to_owned(),
             collection_id: "collection-1".to_owned(),
@@ -1267,15 +1273,13 @@ mod tests {
         impl Render for FeedListHarness {
             fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
                 let entries = self.entries.clone();
-                v_flex()
-                    .size_full()
-                    .child(
-                        list(self.state.clone(), move |ix, _, cx| {
-                            render_activity_entry(&entries[ix], cx)
-                        })
-                        .flex_1()
-                        .min_h_0(),
-                    )
+                v_flex().size_full().child(
+                    list(self.state.clone(), move |ix, _, cx| {
+                        render_activity_entry(&entries[ix], cx)
+                    })
+                    .flex_1()
+                    .min_h_0(),
+                )
             }
         }
 
@@ -1307,7 +1311,10 @@ mod tests {
         let (_, cx) = cx.add_window_view(|window, cx| {
             gpui_component::init(cx);
             crate::theme::configure(cx);
-            let harness = cx.new(|_| FeedListHarness { entries, state: state.clone() });
+            let harness = cx.new(|_| FeedListHarness {
+                entries,
+                state: state.clone(),
+            });
             gpui_component::Root::new(harness, window, cx)
         });
         cx.update(|window, _| window.activate_window());

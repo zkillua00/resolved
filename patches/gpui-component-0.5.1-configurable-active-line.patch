@@ -1,0 +1,63 @@
+diff --git a/src/input/state.rs b/src/input/state.rs
+index 89b3ffa..0ac0993 100644
+--- a/src/input/state.rs
++++ b/src/input/state.rs
+@@ -575,10 +575,11 @@ pub struct InputState {
+     pub(super) size: Size,
+     pub(super) disabled: bool,
+     pub(super) masked: bool,
+     pub(super) clean_on_escape: bool,
+     pub(super) soft_wrap: bool,
++    pub(super) active_line: bool,
+     pub(super) pattern: Option<regex::Regex>,
+     pub(super) validate: Option<Box<dyn Fn(&str, &mut Context<Self>) -> bool + 'static>>,
+     pub(crate) scroll_handle: ScrollHandle,
+     /// The deferred scroll offset to apply on next layout.
+     pub(crate) deferred_scroll_offset: Option<Point<Pixels>>,
+@@ -669,8 +670,9 @@ impl InputState {
+             selecting: false,
+             disabled: false,
+             masked: false,
+             clean_on_escape: false,
+             soft_wrap: true,
++            active_line: true,
+             loading: false,
+             pattern: None,
+             validate: None,
+@@ -1042,10 +1044,16 @@ impl InputState {
+         debug_assert!(self.mode.is_multi_line());
+         self.soft_wrap = wrap;
+         self
+     }
+ 
++    /// Set whether code editors paint the active line background.
++    pub fn active_line(mut self, active_line: bool) -> Self {
++        self.active_line = active_line;
++        self
++    }
++
+     /// Update the soft wrap mode for multi-line input, default is true.
+     pub fn set_soft_wrap(&mut self, wrap: bool, _: &mut Window, cx: &mut Context<Self>) {
+         debug_assert!(self.mode.is_multi_line());
+         self.soft_wrap = wrap;
+         if wrap {
+diff --git a/src/input/element.rs b/src/input/element.rs
+index 4e7941c..4694c28 100644
+--- a/src/input/element.rs
++++ b/src/input/element.rs
+@@ -1568,11 +1568,14 @@ impl Element for TextElement {
+             } else {
+                 mask_offset_y = px(2.5);
+             }
+         }
+ 
+-        let active_line_color = cx.theme().highlight_theme.style.editor_active_line;
++        let active_line_color = state
++            .active_line
++            .then_some(cx.theme().highlight_theme.style.editor_active_line)
++            .flatten();
+ 
+         // Paint active line
+         let mut offset_y = px(0.);
+         if let Some(line_numbers) = prepaint.line_numbers.as_ref() {
+             offset_y += invisible_top_padding;

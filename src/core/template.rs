@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::request::{BodyMode, RequestDraft};
+use super::websocket::WebSocketWorkspace;
 use super::workspace::{Environment, RequestScripts};
 
 const MAX_VARIABLE_DEPTH: usize = 32;
@@ -20,6 +21,8 @@ pub struct RequestTemplate {
     pub request: RequestDraft,
     #[serde(default)]
     pub scripts: RequestScripts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket: Option<WebSocketWorkspace>,
 }
 
 impl RequestTemplate {
@@ -27,7 +30,19 @@ impl RequestTemplate {
         Self {
             request,
             scripts: RequestScripts::default(),
+            websocket: None,
         }
+    }
+
+    pub fn websocket(document: WebSocketWorkspace) -> Self {
+        Self {
+            websocket: Some(document),
+            ..Self::default()
+        }
+    }
+
+    pub fn is_websocket(&self) -> bool {
+        self.websocket.is_some()
     }
 
     #[allow(dead_code)]
@@ -55,6 +70,8 @@ impl From<RequestDraft> for RequestTemplate {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TemplateField {
     Url,
+    QueryParamKey(usize),
+    QueryParamValue(usize),
     HeaderName(usize),
     HeaderValue(usize),
     Body,
@@ -66,6 +83,12 @@ impl fmt::Display for TemplateField {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Url => formatter.write_str("URL"),
+            Self::QueryParamKey(index) => {
+                write!(formatter, "query parameter {} key", index + 1)
+            }
+            Self::QueryParamValue(index) => {
+                write!(formatter, "query parameter {} value", index + 1)
+            }
             Self::HeaderName(index) => write!(formatter, "header {} name", index + 1),
             Self::HeaderValue(index) => write!(formatter, "header {} value", index + 1),
             Self::Body => formatter.write_str("body"),
@@ -209,6 +232,13 @@ pub fn resolve_request(
     let mut request = template.clone();
 
     request.url = resolver.resolve_text(&request.url, TemplateField::Url)?;
+    for (index, param) in request.query_params.iter_mut().enumerate() {
+        if !param.enabled {
+            continue;
+        }
+        param.key = resolver.resolve_text(&param.key, TemplateField::QueryParamKey(index))?;
+        param.value = resolver.resolve_text(&param.value, TemplateField::QueryParamValue(index))?;
+    }
     for (index, header) in request.headers.iter_mut().enumerate() {
         if !header.enabled {
             continue;
@@ -399,7 +429,7 @@ impl<'a> Resolver<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::request::{BodyField, BodyFieldKind, BodyMode, HeaderEntry};
+    use crate::core::request::{BodyField, BodyFieldKind, BodyMode, HeaderEntry, QueryParamEntry};
     use crate::core::workspace::EnvironmentVariable;
 
     fn environment(variables: Vec<EnvironmentVariable>) -> Environment {
@@ -597,6 +627,22 @@ mod tests {
         assert_eq!(resolved.request.url, "https://private.example.com/health");
         assert_eq!(resolved.sensitive_values, vec!["private"]);
         assert_eq!(resolved.used_variables, vec!["base", "host", "subdomain"]);
+    }
+
+    #[test]
+    fn resolves_enabled_query_param_metadata_and_ignores_disabled_rows() {
+        let environment = environment(vec![variable("account_id", "42", true, false)]);
+        let mut request =
+            RequestDraft::new("GET", "https://example.com/users?account={{account_id}}");
+        let mut disabled = QueryParamEntry::new("debug", "{{missing}}");
+        disabled.enabled = false;
+        request.query_params.push(disabled);
+
+        let resolved = resolve_request(&request, Some(&environment)).unwrap();
+        assert_eq!(resolved.request.url, "https://example.com/users?account=42");
+        assert_eq!(resolved.request.query_params[0].value, "42");
+        assert_eq!(resolved.request.query_params[1].value, "{{missing}}");
+        assert_eq!(resolved.used_variables, vec!["account_id"]);
     }
 
     #[test]
@@ -811,7 +857,8 @@ mod tests {
             let mut legacy = input.to_vec();
             let mut current = input.to_vec();
             for variant in &variants {
-                legacy = legacy_replace_bytes(&legacy, variant.as_bytes(), REDACTED_VALUE.as_bytes());
+                legacy =
+                    legacy_replace_bytes(&legacy, variant.as_bytes(), REDACTED_VALUE.as_bytes());
                 current = replace_bytes(&current, variant.as_bytes(), REDACTED_VALUE.as_bytes());
             }
             assert_eq!(
@@ -825,24 +872,26 @@ mod tests {
     fn redact_secret_bytes_handles_overlapping_empty_and_utf8_borders() {
         // Overlapping secrets: longest-first replacement must not leave a
         // shorter secret spelling inside a replaced span.
-        let out = redact_secret_bytes(b"key=abcd token=abc", &["abcd".to_owned(), "abc".to_owned()]);
+        let out = redact_secret_bytes(
+            b"key=abcd token=abc",
+            &["abcd".to_owned(), "abc".to_owned()],
+        );
         assert_eq!(out, b"key=[REDACTED] token=[REDACTED]");
 
         // Empty secrets list / empty needle are no-ops that copy the input.
         assert_eq!(redact_secret_bytes(b"unchanged", &[]), b"unchanged");
-        assert_eq!(redact_secret_bytes(b"unchanged", &[String::new()]), b"unchanged");
+        assert_eq!(
+            redact_secret_bytes(b"unchanged", &[String::new()]),
+            b"unchanged"
+        );
 
         // Multi-byte UTF-8 secrets scrub on byte boundaries in their raw,
         // form-encoded, and path-encoded spellings.
         let secret = "héllo wörld".to_owned();
-        let haystack = format!(
-            "raw={secret} path=h%C3%A9llo%20w%C3%B6rld form=h%C3%A9llo+w%C3%B6rld"
-        );
+        let haystack =
+            format!("raw={secret} path=h%C3%A9llo%20w%C3%B6rld form=h%C3%A9llo+w%C3%B6rld");
         let out = redact_secret_bytes(haystack.as_bytes(), &[secret]);
-        assert_eq!(
-            out,
-            b"raw=[REDACTED] path=[REDACTED] form=[REDACTED]"
-        );
+        assert_eq!(out, b"raw=[REDACTED] path=[REDACTED] form=[REDACTED]");
         assert_ne!(out, haystack.as_bytes());
         let utf8 = String::from_utf8(out).unwrap();
         assert!(!utf8.contains("h%C3%A9llo"));
@@ -871,10 +920,7 @@ mod tests {
         // query-encoded spelling (`a%20b/c`) collides with the path spelling
         // and is collapsed by the adjacent `dedup()`.
         let variants = secret_variants(&["a b/c".to_owned()]);
-        assert_eq!(
-            variants,
-            vec!["a%20b%2Fc", "a+b%2Fc", "a%20b/c", "a b/c"]
-        );
+        assert_eq!(variants, vec!["a%20b%2Fc", "a+b%2Fc", "a%20b/c", "a b/c"]);
         assert_eq!(variants.iter().map(String::len).max(), Some(9));
 
         assert!(secret_variants(&[]).is_empty());

@@ -137,6 +137,10 @@ impl SnippetDraftSnapshot {
 }
 
 impl ApiTester {
+    pub(super) fn invalidate_snippet_list_cache(&mut self) {
+        SNIPPET_LIST_CACHE.with(|cache| cache.borrow_mut().invalidate());
+    }
+
     pub(in crate::app) fn create_snippet_editor_session(
         snippets: &[Snippet],
         writable: bool,
@@ -1559,7 +1563,7 @@ impl ApiTester {
     ) -> AnyElement {
         let dirty = self.snippet_editor_is_dirty(cx);
         h_flex()
-            .h(px(APP_TITLE_BAR_HEIGHT))
+            .h(APP_TITLE_BAR_HEIGHT)
             .flex_shrink_0()
             .pl(window_chrome::leading_inset())
             .pr(window_chrome::trailing_inset())

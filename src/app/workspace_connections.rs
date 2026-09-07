@@ -1341,8 +1341,10 @@ impl ApiTester {
             return false;
         }
         if !self.flush_local_state(cx) {
-            self.settings_notice =
-                Some("Save or discard the current changes before switching workspaces.".to_owned());
+            self.settings_notice = Some(
+                "The current editor buffers could not be persisted before switching workspaces."
+                    .to_owned(),
+            );
             cx.notify();
             return false;
         }
@@ -1387,6 +1389,9 @@ impl ApiTester {
                 return;
             }
         };
+        if self.workspace_providers.active_id() != &provider_id {
+            self.stop_mcp_websocket();
+        }
         if let Err(error) = self.workspace_providers.switch(provider_id) {
             self.settings_notice = Some(error.to_string());
             cx.notify();

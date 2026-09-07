@@ -29,6 +29,22 @@ impl ApiTester {
                     cx.listener(|this, _: &ClickEvent, window, cx| this.start_request(window, cx)),
                 )
         };
+        let mcp_context = self
+            .active_saved_request_id
+            .as_deref()
+            .and_then(|request_id| {
+                if self.mcp_script_console_operation_id.is_some()
+                    && self.mcp_script_console_request_id.as_deref() == Some(request_id)
+                {
+                    Some("MCP script")
+                } else if self.mcp_http_operation_id == Some(self.request_generation)
+                    && self.mcp_http_request_id.as_deref() == Some(request_id)
+                {
+                    Some("MCP controlled")
+                } else {
+                    None
+                }
+            });
 
         h_flex()
             .w_full()
@@ -194,6 +210,19 @@ impl ApiTester {
                             .child(Input::new(&self.url).appearance(false).large()),
                     ),
             )
+            .when_some(mcp_context, |this, label| {
+                this.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .rounded_full()
+                        .bg(cx.theme().info.opacity(0.12))
+                        .text_xs()
+                        .font_semibold()
+                        .text_color(cx.theme().info)
+                        .child(label),
+                )
+            })
             .child(action)
             .into_any_element()
     }

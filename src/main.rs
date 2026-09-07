@@ -11,6 +11,8 @@ use gpui_component::{Root, WindowExt as _};
 mod app;
 mod brand;
 mod code_editor;
+mod control_server;
+mod control_tools;
 mod core;
 mod debug_overlay;
 mod editor_util;
@@ -33,8 +35,10 @@ use core::DatabaseStore;
 use instance_guard::InstanceGuard;
 use shortcuts::{
     ActivateNextRequestTab, ActivatePreviousRequestTab, CloseRequestTab, FocusRequestUrl,
-    FormatRawBody, NewRequestTab, QuitApp, SaveRequest, SaveRequestAs, SendOrCancelRequest,
-    ShowCollections, ShowEnvironments, ShowHistory, ShowSettings, ToggleMetrics, ToggleNavigation,
+    FormatRawBody, NewRequestTab, QuickSendWebSocketTemplate, QuitApp, SaveRequest, SaveRequestAs,
+    SendOrCancelRequest, ShowCollections, ShowEnvironments, ShowHistory, ShowSettings,
+    ToggleMetrics, ToggleNavigation, ZoomEditorIn, ZoomEditorOut, ZoomEditorReset, ZoomUiIn,
+    ZoomUiOut, ZoomUiReset,
 };
 
 struct AppAssets;
@@ -87,6 +91,7 @@ fn register_app_action_handlers(view: &Entity<ApiTester>, cx: &mut App) {
     register!(ActivateNextRequestTab, on_activate_next_request_tab);
     register!(ActivatePreviousRequestTab, on_activate_previous_request_tab);
     register!(SendOrCancelRequest, on_send_or_cancel_request);
+    register!(QuickSendWebSocketTemplate, on_quick_send_websocket_template);
     register!(SaveRequest, on_save_request);
     register!(SaveRequestAs, on_save_request_as);
     register!(FocusRequestUrl, on_focus_request_url);
@@ -97,6 +102,12 @@ fn register_app_action_handlers(view: &Entity<ApiTester>, cx: &mut App) {
     register!(ShowSettings, on_show_settings);
     register!(ToggleNavigation, on_toggle_navigation);
     register!(ToggleMetrics, on_toggle_metrics);
+    register!(ZoomUiIn, on_zoom_ui_in);
+    register!(ZoomUiOut, on_zoom_ui_out);
+    register!(ZoomUiReset, on_zoom_ui_reset);
+    register!(ZoomEditorIn, on_zoom_editor_in);
+    register!(ZoomEditorOut, on_zoom_editor_out);
+    register!(ZoomEditorReset, on_zoom_editor_reset);
 }
 
 impl AssetSource for AppAssets {

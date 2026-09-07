@@ -1,0 +1,190 @@
+name: Build desktop release
+on:
+  workflow_call:
+    inputs:
+      channel:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  metadata:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      sha: ${{ steps.version.outputs.sha }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - id: version
+        env:
+          CHANNEL: ${{ inputs.channel }}
+        run: python scripts/ci-version.py "$CHANNEL"
+
+  build:
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: macos
+            arch: arm64
+          - os: macos-15-intel
+            platform: macos
+            arch: x64
+          - os: windows-2025
+            platform: windows
+            arch: x64
+          - os: ubuntu-24.04
+            platform: linux
+            arch: x64
+          - os: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      RESOLVED_BUILD_VERSION: ${{ needs.metadata.outputs.version }}
+      API_TESTER_BUILD_NUMBER: ${{ github.run_number }}
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.metadata.outputs.sha }}
+          persist-credentials: false
+      - name: Install Rust
+        shell: bash
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup default 1.95.0
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake clang libclang-dev pkg-config \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libfontconfig1-dev libasound2-dev \
+            libssl-dev libvulkan-dev libwayland-dev libx11-dev libx11-xcb-dev \
+            libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-randr0-dev \
+            libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev rpm patchelf file xz-utils
+      - name: Install Linux archive tool
+        if: runner.os == 'Linux'
+        run: |
+          # Same pinned release and checksums as linux/Dockerfile.
+          case "$(uname -m)" in
+            x86_64)
+              tool_arch=x86_64
+              tool_sha256=c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
+              ;;
+            aarch64)
+              tool_arch=aarch64
+              tool_sha256=620095110d693282b8ebeb244a95b5e911cf8f65f76c88b4b47d16ae6346fcff
+              ;;
+            *) echo "Unsupported Linux architecture" >&2; exit 1 ;;
+          esac
+          curl --fail --location --retry 3 \
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-$tool_arch.AppImage" \
+            --output "$RUNNER_TEMP/linuxdeploy"
+          echo "$tool_sha256  $RUNNER_TEMP/linuxdeploy" | sha256sum --check
+          sudo install -m 755 "$RUNNER_TEMP/linuxdeploy" /usr/local/bin/linuxdeploy
+      - name: Build and package macOS
+        if: runner.os == 'macOS'
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          scripts/bundle-macos.sh release
+          mkdir -p dist
+          cp "target/release/Resolved-$RESOLVED_BUILD_VERSION-$API_TESTER_BUILD_NUMBER-macos.zip" \
+            "dist/Resolved-$RESOLVED_BUILD_VERSION-macos-$ARCH.zip"
+      - name: Build and package Linux
+        if: runner.os == 'Linux'
+        run: |
+          scripts/package-linux.sh release deb
+          scripts/package-linux.sh release rpm
+          scripts/package-linux.sh release archive
+          mkdir -p dist
+          cp target/release/Resolved-*.deb target/release/Resolved-*.rpm \
+            target/release/Resolved-*.tar.xz dist/
+      - name: Build and package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          & ./scripts/cargo.ps1 build --release --locked
+          if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
+          & ./scripts/package-msix.ps1 -Profile release -InstallCert
+          $revision = 0
+          if ($env:CHANNEL -eq 'nightly') { $revision = [int]$env:GITHUB_RUN_NUMBER }
+          & ./scripts/package-msix.ps1 -Profile release -Revision $revision
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          $base = "Resolved-$env:RESOLVED_BUILD_VERSION-windows-x64"
+          Copy-Item target/release/Resolved.msix "dist/$base.msix"
+          $cert = Get-ChildItem Cert:\CurrentUser\My |
+            Where-Object { $_.Subject -eq 'CN=Nous Research' -and $_.HasPrivateKey } |
+            Sort-Object NotBefore -Descending | Select-Object -First 1
+          if (-not $cert) { throw 'Missing MSIX signing certificate' }
+          Export-Certificate -Cert $cert -FilePath "dist/$base.cer" | Out-Null
+          if ((Get-AuthenticodeSignature "dist/$base.msix").Status -eq 'NotSigned') {
+            throw 'MSIX was not signed'
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  publish:
+    needs: [metadata, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+      RELEASE_SHA: ${{ needs.metadata.outputs.sha }}
+      CHANNEL: ${{ inputs.channel }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          path: dist
+          merge-multiple: true
+      - name: Publish complete release
+        shell: bash
+        run: |
+          cd dist
+          sha256sum ./* > SHA256SUMS.txt
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Resolved $RELEASE_VERSION
+
+          Commit: $RELEASE_SHA
+
+          macOS: Apple Silicon and Intel application archives, ad-hoc signed (not notarized).
+          Windows: x64 MSIX with a per-build self-signed public certificate. Import the matching .cer into Local Machine / Trusted People before installing. Windows may require the WebView2 Evergreen Runtime.
+          Linux: ARM64 and x64 Debian/RPM packages and tar.xz archives built on Ubuntu 24.04. Install packages with a package manager, or extract an archive and run its resolved launcher. Archives bundle application libraries and WebKit helpers; compatible host libraries, X11/XWayland and Vulkan are still required.
+
+          Verify downloads against SHA256SUMS.txt.
+          EOF
+          flags=()
+          if [ "$CHANNEL" = nightly ]; then
+            flags+=(--prerelease --latest=false)
+          else
+            flags+=(--verify-tag)
+          fi
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" ./* --clobber
+          else
+            gh release create "$RELEASE_TAG" ./* --target "$RELEASE_SHA" \
+              --title "Resolved $RELEASE_VERSION" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" "${flags[@]}"
+          fi

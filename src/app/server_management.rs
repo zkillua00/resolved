@@ -858,7 +858,7 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         h_flex()
-            .h(px(APP_TITLE_BAR_HEIGHT))
+            .h(APP_TITLE_BAR_HEIGHT)
             .flex_shrink_0()
             .pl(window_chrome::leading_inset())
             .pr(window_chrome::trailing_inset())
@@ -898,6 +898,11 @@ impl ApiTester {
             self.change_log_settings_page(cx),
             self.audit_log_settings_page(cx),
         ];
+        let (message_inset, message_overlay) = super::settings_page::settings_message_overlay(
+            self.settings_warning.clone(),
+            self.settings_notice.clone(),
+            cx,
+        );
 
         v_flex()
             .debug_selector(|| "server-tools-workspace".to_owned())
@@ -905,34 +910,19 @@ impl ApiTester {
             .size_full()
             .min_h_0()
             .bg(cx.theme().background)
-            .child(super::settings_page::settings_sidebar_underlay(
-                px(220.),
-                cx,
-            ))
-            .when_some(self.settings_warning.clone(), |this, warning| {
-                this.child(super::settings_page::dismissible_settings_message(
-                    warning,
-                    cx.theme().danger,
-                    super::settings_page::SettingsMessageKind::Warning,
-                    cx,
-                ))
-            })
-            .when_some(self.settings_notice.clone(), |this, notice| {
-                this.child(super::settings_page::dismissible_settings_message(
-                    notice,
-                    cx.theme().info,
-                    super::settings_page::SettingsMessageKind::Notice,
-                    cx,
-                ))
-            })
             .child(
                 div().flex_1().min_h_0().child(
                     SettingsView::new("api-tester-server-tools")
-                        .sidebar_width(px(220.))
+                        .sidebar_width(
+                            super::settings_page::SETTINGS_SIDEBAR_WIDTH
+                                .to_pixels(cx.theme().font_size),
+                        )
+                        .content_top_inset(message_inset)
                         .with_group_variant(GroupBoxVariant::Outline)
                         .pages(pages),
                 ),
             )
+            .when_some(message_overlay, |this, overlay| this.child(overlay))
             .into_any_element()
     }
 

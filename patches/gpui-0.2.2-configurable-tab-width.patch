@@ -1,0 +1,72 @@
+diff --git a/src/text_system/line.rs b/src/text_system/line.rs
+--- a/src/text_system/line.rs
++++ b/src/text_system/line.rs
+@@ -59,6 +59,17 @@ impl ShapedLine {
+         self
+     }
+ 
++    /// Apply explicit tab stops to a shaped line while preserving byte-index
++    /// mappings for cursor, selection, and hit-testing geometry.
++    pub fn with_tab_width(mut self, tab_width: Pixels) -> Self {
++        if self.text.contains('\t') {
++            let mut layout = self.layout.as_ref().clone();
++            layout.set_tab_width(&self.text, tab_width);
++            self.layout = Arc::new(layout);
++        }
++        self
++    }
++
+     /// Paint the line of text to the window.
+     pub fn paint(
+         &self,
+diff --git a/src/text_system/line_layout.rs b/src/text_system/line_layout.rs
+--- a/src/text_system/line_layout.rs
++++ b/src/text_system/line_layout.rs
+@@ -12,6 +12,6 @@ use super::LineWrapper;
+ 
+ /// A laid out and styled line of text
+-#[derive(Default, Debug)]
++#[derive(Clone, Default, Debug)]
+ pub struct LineLayout {
+     /// The font size for this line
+     pub font_size: Pixels,
+@@ -54,6 +54,39 @@ pub struct DecorationRun {
+ }
+ 
+ impl LineLayout {
++    pub(crate) fn set_tab_width(&mut self, text: &str, tab_width: Pixels) {
++        if tab_width <= px(0.) || !text.contains('\t') {
++            return;
++        }
++
++        let original = self.clone();
++        let mut accumulated_shift = px(0.);
++        for (tab_index, character) in text.char_indices() {
++            if character != '\t' {
++                continue;
++            }
++
++            let start = original.x_for_index(tab_index) + accumulated_shift;
++            let actual_end =
++                original.x_for_index(tab_index + character.len_utf8()) + accumulated_shift;
++            let desired_end = start + tab_width - start % tab_width;
++            let shift = desired_end - actual_end;
++            if shift == px(0.) {
++                continue;
++            }
++
++            for run in &mut self.runs {
++                for glyph in &mut run.glyphs {
++                    if glyph.index > tab_index {
++                        glyph.position.x += shift;
++                    }
++                }
++            }
++            self.width += shift;
++            accumulated_shift += shift;
++        }
++    }
++
+     /// The index for the character at the given x coordinate
+     pub fn index_for_x(&self, x: Pixels) -> Option<usize> {
+         if x >= self.width {

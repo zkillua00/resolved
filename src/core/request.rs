@@ -16,7 +16,7 @@ use url::Url;
 use super::{CookieJar, DbStringEnum};
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-const DEFAULT_USER_AGENT: &str = concat!("resolved/", env!("CARGO_PKG_VERSION"));
+const DEFAULT_USER_AGENT: &str = concat!("resolved/", env!("RESOLVED_BUILD_VERSION"));
 const MAX_BUFFERED_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// Common HTTP methods offered by editable method controls and script
@@ -45,6 +45,34 @@ impl HeaderEntry {
             shared: true,
             name: name.into(),
             value: value.into(),
+        }
+    }
+}
+
+/// One persisted query-parameter row.
+///
+/// The request URL remains the wire-format source of truth. These rows retain
+/// the structured editor state that cannot be represented in a URL, such as a
+/// disabled parameter or its description.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueryParamEntry {
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub value: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+impl QueryParamEntry {
+    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            enabled: true,
+            key: key.into(),
+            value: value.into(),
+            description: String::new(),
         }
     }
 }
@@ -117,6 +145,8 @@ pub enum RawBodyLanguage {
     Text,
     #[default]
     Json,
+    #[serde(rename = "jsonl")]
+    JsonLines,
     Xml,
     Html,
     #[serde(rename = "javascript")]
@@ -140,6 +170,7 @@ impl RawBodyLanguage {
         &[
             Self::Text,
             Self::Json,
+            Self::JsonLines,
             Self::Xml,
             Self::Html,
             Self::JavaScript,
@@ -160,6 +191,7 @@ impl RawBodyLanguage {
         match self {
             Self::Text => "text",
             Self::Json => "json",
+            Self::JsonLines => "jsonl",
             Self::Xml => "xml",
             Self::Html => "html",
             Self::JavaScript => "javascript",
@@ -187,6 +219,7 @@ impl RawBodyLanguage {
         match self {
             Self::Text => "Text",
             Self::Json => "JSON",
+            Self::JsonLines => "JSONL",
             Self::Xml => "XML",
             Self::Html => "HTML",
             Self::JavaScript => "JavaScript",
@@ -207,6 +240,7 @@ impl RawBodyLanguage {
         match self {
             Self::Text => "text/plain; charset=utf-8",
             Self::Json => "application/json",
+            Self::JsonLines => "application/x-ndjson",
             Self::Xml => "application/xml",
             Self::Html => "text/html; charset=utf-8",
             Self::JavaScript => "application/javascript",
@@ -332,6 +366,8 @@ pub struct RequestDraft {
     pub method: String,
     pub url: String,
     #[serde(default)]
+    pub query_params: Vec<QueryParamEntry>,
+    #[serde(default)]
     pub headers: Vec<HeaderEntry>,
     #[serde(default)]
     pub body: String,
@@ -348,6 +384,7 @@ impl Default for RequestDraft {
         Self {
             method: "GET".to_owned(),
             url: String::new(),
+            query_params: Vec::new(),
             headers: Vec::new(),
             body: String::new(),
             body_mode: BodyMode::Raw,
@@ -359,9 +396,11 @@ impl Default for RequestDraft {
 
 impl RequestDraft {
     pub fn new(method: impl Into<String>, url: impl Into<String>) -> Self {
+        let url = url.into();
         Self {
             method: method.into(),
-            url: url.into(),
+            query_params: query_params_from_url(&url),
+            url,
             ..Self::default()
         }
     }
@@ -412,6 +451,57 @@ impl RequestDraft {
             headers,
         })
     }
+}
+
+/// Parse the URL's raw query into editable rows without requiring the rest of
+/// the URL to be valid yet. This keeps the Params editor usable while a user is
+/// still typing a URL or using unresolved `{{variables}}`.
+pub fn query_params_from_url(url: &str) -> Vec<QueryParamEntry> {
+    let before_fragment = url.split_once('#').map_or(url, |(head, _)| head);
+    let Some((_, query)) = before_fragment.split_once('?') else {
+        return Vec::new();
+    };
+
+    url::form_urlencoded::parse(query.as_bytes())
+        .filter(|(key, value)| !key.is_empty() || !value.is_empty())
+        .map(|(key, value)| QueryParamEntry::new(key.into_owned(), value.into_owned()))
+        .collect()
+}
+
+/// Replace the URL's query with the enabled structured rows while preserving
+/// its fragment and repeated keys. Empty placeholder rows are intentionally
+/// omitted from the URL.
+pub fn url_with_query_params(url: &str, params: &[QueryParamEntry]) -> String {
+    let (before_fragment, fragment) = url
+        .split_once('#')
+        .map_or((url, None), |(head, fragment)| (head, Some(fragment)));
+    let base = before_fragment
+        .split_once('?')
+        .map_or(before_fragment, |(base, _)| base);
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for param in params.iter().filter(|param| {
+        param.enabled && (!param.key.trim().is_empty() || !param.value.trim().is_empty())
+    }) {
+        serializer.append_pair(&param.key, &param.value);
+    }
+    // Keep Resolved template placeholders readable/editable in the URL bar.
+    let query = serializer
+        .finish()
+        .replace("%7B", "{")
+        .replace("%7D", "}")
+        .replace("%7b", "{")
+        .replace("%7d", "}");
+
+    let mut rebuilt = base.to_owned();
+    if !query.is_empty() {
+        rebuilt.push('?');
+        rebuilt.push_str(&query);
+    }
+    if let Some(fragment) = fragment {
+        rebuilt.push('#');
+        rebuilt.push_str(fragment);
+    }
+    rebuilt
 }
 
 struct PreparedRequest {
@@ -1018,6 +1108,50 @@ mod tests {
     }
 
     #[test]
+    fn query_params_round_trip_repeated_keys_and_preserve_fragments() {
+        let params = query_params_from_url(
+            "https://example.com/search?tag=rust&tag=gpui&q=hello+world#results",
+        );
+        assert_eq!(
+            params,
+            vec![
+                QueryParamEntry::new("tag", "rust"),
+                QueryParamEntry::new("tag", "gpui"),
+                QueryParamEntry::new("q", "hello world"),
+            ]
+        );
+        assert_eq!(
+            url_with_query_params("https://example.com/search?old=1#results", &params),
+            "https://example.com/search?tag=rust&tag=gpui&q=hello+world#results"
+        );
+    }
+
+    #[test]
+    fn disabled_query_params_stay_in_editor_state_but_not_in_url() {
+        let mut disabled = QueryParamEntry::new("secret", "not-sent");
+        disabled.enabled = false;
+        disabled.description = "Retain for later".to_owned();
+        let params = vec![QueryParamEntry::new("page", "2"), disabled.clone()];
+
+        assert_eq!(
+            url_with_query_params("https://example.com/items?old=1", &params),
+            "https://example.com/items?page=2"
+        );
+        let encoded = serde_json::to_string(&params).unwrap();
+        let decoded: Vec<QueryParamEntry> = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded[1], disabled);
+    }
+
+    #[test]
+    fn query_param_url_builder_keeps_template_placeholders_readable() {
+        let params = vec![QueryParamEntry::new("account", "{{account_id}}")];
+        assert_eq!(
+            url_with_query_params("https://example.com/users", &params),
+            "https://example.com/users?account={{account_id}}"
+        );
+    }
+
+    #[test]
     fn prepared_request_rejects_non_http_schemes() {
         let error = RequestDraft::new("GET", "file:///tmp/test")
             .prepared()
@@ -1367,7 +1501,7 @@ mod tests {
         assert!(received.starts_with("post /echo http/1.1\r\n"));
         assert!(received.contains(concat!(
             "user-agent: resolved/",
-            env!("CARGO_PKG_VERSION"),
+            env!("RESOLVED_BUILD_VERSION"),
             "\r\n"
         )));
         assert!(received.contains("x-test-request: yes\r\n"));

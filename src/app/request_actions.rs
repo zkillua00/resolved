@@ -1,6 +1,229 @@
 use super::*;
 
 impl ApiTester {
+    pub(super) fn request_query_param_count(&self, cx: &App) -> usize {
+        self.query_params
+            .iter()
+            .filter(|row| {
+                row.enabled
+                    && (!input_text_is_blank(&row.key, cx) || !input_text_is_blank(&row.value, cx))
+            })
+            .count()
+    }
+
+    pub(super) fn push_query_param_row(
+        &mut self,
+        key: impl Into<SharedString>,
+        value: impl Into<SharedString>,
+        description: impl Into<SharedString>,
+        enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = self.next_query_param_id;
+        self.next_query_param_id = self.next_query_param_id.wrapping_add(1);
+        let key_catalog = Rc::clone(&self.template_variable_catalog);
+        let key_state = cx.new(|cx| template_input_state(window, cx, key_catalog, "Key", key));
+        let value_catalog = Rc::clone(&self.template_variable_catalog);
+        let value_state =
+            cx.new(|cx| template_input_state(window, cx, value_catalog, "Value", value));
+        let description_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Description")
+                .default_value(description.into())
+        });
+
+        let key_template_input = key_state.clone();
+        let key_subscription =
+            cx.subscribe_in(&key_state, window, move |this, input, event, window, cx| {
+                this.track_template_input_focus(input, event);
+                if matches!(event, InputEvent::Change) {
+                    this.schedule_template_input_refresh(&key_template_input, cx);
+                    this.sync_url_from_query_params(window, cx);
+                }
+                if matches!(event, InputEvent::PressEnter { .. })
+                    && let Some(row) = this.query_params.iter().find(|row| row.id == id)
+                {
+                    row.value.read(cx).focus_handle(cx).focus(window);
+                }
+            });
+        let value_template_input = value_state.clone();
+        let value_subscription = cx.subscribe_in(
+            &value_state,
+            window,
+            move |this, input, event, window, cx| {
+                this.track_template_input_focus(input, event);
+                if matches!(event, InputEvent::Change) {
+                    this.schedule_template_input_refresh(&value_template_input, cx);
+                    this.sync_url_from_query_params(window, cx);
+                }
+                if matches!(event, InputEvent::PressEnter { .. })
+                    && let Some(row) = this.query_params.iter().find(|row| row.id == id)
+                {
+                    row.description.read(cx).focus_handle(cx).focus(window);
+                }
+            },
+        );
+        let description_subscription = cx.subscribe_in(
+            &description_state,
+            window,
+            move |this, _, event, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.refresh_request_dirty_part(RequestDirtyPart::Params, cx);
+                }
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.focus_next_query_param_row(id, window, cx);
+                }
+            },
+        );
+        self.refresh_template_input(&key_state, cx);
+        self.refresh_template_input(&value_state, cx);
+        self.query_params.push(QueryParamRow {
+            id,
+            key: key_state,
+            value: value_state,
+            description: description_state,
+            enabled,
+            _subscriptions: vec![
+                key_subscription,
+                value_subscription,
+                description_subscription,
+            ],
+        });
+        self.refresh_request_dirty_part(RequestDirtyPart::Params, cx);
+    }
+
+    pub(super) fn focus_next_query_param_row(
+        &mut self,
+        row_id: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.query_params.iter().position(|row| row.id == row_id) else {
+            return;
+        };
+        if index + 1 == self.query_params.len() {
+            self.push_query_param_row("", "", "", true, window, cx);
+        }
+        if let Some(input) = self.query_params.get(index + 1).map(|row| row.key.clone()) {
+            input.read(cx).focus_handle(cx).focus(window);
+        }
+    }
+
+    pub(super) fn toggle_query_param_row(
+        &mut self,
+        row_id: usize,
+        enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(row) = self.query_params.iter_mut().find(|row| row.id == row_id) {
+            row.enabled = enabled;
+        }
+        self.sync_url_from_query_params(window, cx);
+        cx.notify();
+    }
+
+    pub(super) fn remove_query_param_row(
+        &mut self,
+        row_id: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.query_params.retain(|row| row.id != row_id);
+        if self.query_params.is_empty() {
+            self.push_query_param_row("", "", "", true, window, cx);
+        }
+        self.sync_url_from_query_params(window, cx);
+        cx.notify();
+    }
+
+    pub(super) fn sync_query_params_from_url(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let url = self.url.read(cx).value().to_string();
+        let parsed = query_params_from_url(&url);
+        let mut existing = self.normalized_query_params(cx);
+        let current = existing
+            .iter()
+            .filter(|param| param.enabled)
+            .map(|param| (param.key.clone(), param.value.clone()))
+            .collect::<Vec<_>>();
+        let incoming = parsed
+            .iter()
+            .map(|param| (param.key.clone(), param.value.clone()))
+            .collect::<Vec<_>>();
+        if current == incoming {
+            return;
+        }
+
+        let mut reconciled = Vec::with_capacity(parsed.len() + existing.len());
+        for mut param in parsed {
+            if let Some(index) = existing.iter().position(|candidate| {
+                candidate.enabled && candidate.key == param.key && candidate.value == param.value
+            }) {
+                param.description = existing.remove(index).description;
+            }
+            reconciled.push(param);
+        }
+        reconciled.extend(existing.into_iter().filter(|param| !param.enabled));
+
+        self.query_params.clear();
+        for param in reconciled {
+            self.push_query_param_row(
+                param.key,
+                param.value,
+                param.description,
+                param.enabled,
+                window,
+                cx,
+            );
+        }
+        if self.query_params.is_empty() {
+            self.push_query_param_row("", "", "", true, window, cx);
+        }
+        self.refresh_request_dirty_part(RequestDirtyPart::Params, cx);
+        cx.notify();
+    }
+
+    fn sync_url_from_query_params(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.url.read(cx).value().to_string();
+        let params = self.normalized_query_params(cx);
+        let updated = url_with_query_params(&current, &params);
+        if updated != current {
+            self.syncing_query_params = true;
+            self.url.update(cx, |state, cx| {
+                state.set_value(updated, window, cx);
+            });
+            self.syncing_query_params = false;
+            self.refresh_request_dirty_part(RequestDirtyPart::Url, cx);
+        }
+        self.refresh_request_dirty_part(RequestDirtyPart::Params, cx);
+    }
+
+    fn normalized_query_params(&self, cx: &App) -> Vec<QueryParamEntry> {
+        self.query_params
+            .iter()
+            .filter_map(|row| {
+                let key = row.key.read(cx).value().to_string();
+                let value = row.value.read(cx).value().to_string();
+                let description = row.description.read(cx).value().to_string();
+                if key.trim().is_empty() && value.trim().is_empty() && description.trim().is_empty()
+                {
+                    return None;
+                }
+                Some(QueryParamEntry {
+                    enabled: row.enabled,
+                    key,
+                    value,
+                    description,
+                })
+            })
+            .collect()
+    }
+
     pub(super) fn request_header_count(&self, cx: &App) -> usize {
         self.headers
             .iter()
@@ -329,6 +552,7 @@ impl ApiTester {
         let method = self.method.read(cx).value().trim().to_ascii_uppercase();
 
         let mut draft = RequestDraft::new(method, self.url.read(cx).value().to_string());
+        draft.query_params = self.normalized_query_params(cx);
         draft.headers = self.normalized_header_entries(cx);
         draft.body = self.body.read(cx).value(cx).to_string();
         draft.body_mode = self.body_mode;
@@ -338,12 +562,16 @@ impl ApiTester {
     }
 
     pub(super) fn request_template(&self, cx: &App) -> RequestTemplate {
+        if self.request_tabs.active().template().is_websocket() {
+            return RequestTemplate::websocket(self.websocket_workspace.document.clone());
+        }
         RequestTemplate {
             request: self.draft(cx),
             scripts: RequestScripts {
                 pre_request: self.pre_request_script.read(cx).value(cx).to_string(),
                 post_response: self.post_response_script.read(cx).value(cx).to_string(),
             },
+            websocket: None,
         }
     }
 
@@ -371,6 +599,7 @@ impl ApiTester {
         for part in [
             RequestDirtyPart::Method,
             RequestDirtyPart::Url,
+            RequestDirtyPart::Params,
             RequestDirtyPart::Headers,
             RequestDirtyPart::RawBody,
             RequestDirtyPart::BodyMode,
@@ -395,6 +624,14 @@ impl ApiTester {
             }
             RequestDirtyPart::Url => {
                 !input_text_equals(&self.url, baseline.request.url.as_str(), cx)
+            }
+            RequestDirtyPart::Params => {
+                let baseline_params = if baseline.request.query_params.is_empty() {
+                    query_params_from_url(&baseline.request.url)
+                } else {
+                    baseline.request.query_params.clone()
+                };
+                self.normalized_query_params(cx) != baseline_params
             }
             RequestDirtyPart::Headers => {
                 self.normalized_header_entries(cx) != baseline.request.headers
@@ -565,15 +802,31 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) {
         self.request_dirty.begin_hydration();
-        let RequestTemplate { request, scripts } = template;
+        let RequestTemplate {
+            request,
+            scripts,
+            websocket,
+        } = template;
+        if let Some(document) = websocket {
+            self.load_websocket_document(document, window, cx);
+        } else {
+            self.leave_websocket_view();
+        }
+        let query_params = if request.query_params.is_empty() {
+            query_params_from_url(&request.url)
+        } else {
+            request.query_params.clone()
+        };
         self.body_mode = request.body_mode;
         self.raw_body_language = request.raw_body_language;
         self.method.update(cx, |state, cx| {
             state.set_value(request.method, window, cx);
         });
+        self.syncing_query_params = true;
         self.url.update(cx, |state, cx| {
             state.set_value(request.url, window, cx);
         });
+        self.syncing_query_params = false;
         self.body.update(cx, |state, cx| {
             state.set_value(request.body, window, cx);
         });
@@ -583,6 +836,21 @@ impl ApiTester {
         self.post_response_script.update(cx, |editor, cx| {
             editor.set_value(scripts.post_response, window, cx);
         });
+
+        self.query_params.clear();
+        for param in query_params {
+            self.push_query_param_row(
+                param.key,
+                param.value,
+                param.description,
+                param.enabled,
+                window,
+                cx,
+            );
+        }
+        if self.query_params.is_empty() {
+            self.push_query_param_row("", "", "", true, window, cx);
+        }
 
         self.headers.clear();
         for header in request.headers {

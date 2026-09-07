@@ -10,8 +10,8 @@ use gpui_component::{
     ActiveTheme as _, RopeExt as _,
     highlighter::Diagnostic,
     input::{
-        CompletionProvider, Copy, Cut, HoverProvider, Input, InputEvent, InputState, Paste,
-        SelectAll, TabSize,
+        CompletionProvider, Copy, Cut, HoverProvider, Input, InputEvent, InputInlineAction,
+        InputState, Paste, SelectAll, TabSize,
     },
     menu::{PopupMenu, PopupMenuItem},
 };
@@ -139,6 +139,8 @@ pub struct CodeEditorConfig {
     tab_size: TabSize,
     indent_guides: bool,
     framed: bool,
+    embedded: bool,
+    active_line: bool,
     format_action: bool,
     completion_provider: Option<Rc<dyn CompletionProvider>>,
     hover_provider: Option<Rc<dyn HoverProvider>>,
@@ -160,6 +162,8 @@ impl Default for CodeEditorConfig {
             tab_size: TabSize::default(),
             indent_guides: true,
             framed: true,
+            embedded: false,
+            active_line: true,
             format_action: false,
             completion_provider: None,
             hover_provider: None,
@@ -228,6 +232,19 @@ impl CodeEditorConfig {
         self
     }
 
+    /// Render the buffer flush inside a host-owned surface. The host provides
+    /// its own border, background, and spacing (for example a console prompt).
+    pub fn embedded(mut self, embedded: bool) -> Self {
+        self.embedded = embedded;
+        self
+    }
+
+    /// Controls the editor's full-width active-line fill.
+    pub fn active_line(mut self, active_line: bool) -> Self {
+        self.active_line = active_line;
+        self
+    }
+
     pub fn format_action(mut self, format_action: bool) -> Self {
         self.format_action = format_action;
         self
@@ -275,6 +292,7 @@ impl CodeEditorConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeEditorEvent {
     FormatRequested,
+    InlineActionRequested { id: usize },
 }
 
 /// Reusable syntax-highlighted editor view backed by
@@ -290,6 +308,7 @@ pub struct CodeEditor {
     read_only: bool,
     auto_close: bool,
     framed: bool,
+    embedded: bool,
     completion_enabled: bool,
     format_action: bool,
     context_menu: Option<Entity<PopupMenu>>,
@@ -317,6 +336,8 @@ impl CodeEditor {
             tab_size,
             indent_guides,
             framed,
+            embedded,
+            active_line,
             format_action,
             completion_provider,
             hover_provider,
@@ -333,7 +354,8 @@ impl CodeEditor {
                 .soft_wrap(soft_wrap)
                 .line_number(line_numbers)
                 .tab_size(tab_size)
-                .indent_guides(indent_guides);
+                .indent_guides(indent_guides)
+                .active_line(active_line);
 
             if !placeholder.is_empty() {
                 state = state.placeholder(placeholder);
@@ -348,6 +370,9 @@ impl CodeEditor {
 
         let input_subscription = cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
             cx.emit(event.clone());
+            if let InputEvent::InlineAction { id } = event {
+                cx.emit(CodeEditorEvent::InlineActionRequested { id: *id });
+            }
             if matches!(event, InputEvent::Change) && this.diagnostic_provider.is_some() {
                 this.schedule_diagnostic_refresh(cx);
             }
@@ -360,6 +385,7 @@ impl CodeEditor {
             read_only,
             auto_close,
             framed,
+            embedded,
             completion_enabled,
             format_action,
             context_menu: None,
@@ -378,6 +404,10 @@ impl CodeEditor {
     /// Returns the underlying input entity for focus and advanced editor APIs.
     pub fn input_state(&self) -> Entity<InputState> {
         self.input.clone()
+    }
+
+    pub fn has_open_input_menu(&self, cx: &App) -> bool {
+        self.input.read(cx).is_context_menu_open(cx)
     }
 
     pub fn language(&self) -> &CodeLanguage {
@@ -420,6 +450,11 @@ impl CodeEditor {
         self.input.update(cx, |input, cx| {
             input.set_highlighter(highlighter_language, cx)
         });
+    }
+
+    pub fn set_inline_actions(&mut self, actions: Vec<InputInlineAction>, cx: &mut Context<Self>) {
+        self.input
+            .update(cx, |input, cx| input.set_inline_actions(actions, cx));
     }
 
     pub fn set_placeholder(
@@ -752,18 +787,20 @@ impl Render for CodeEditor {
                     .border_1()
                     .border_color(cx.api_outline_variant())
             })
-            .when_some(editor_style.border_radius, |this, radius| {
-                this.rounded(radius)
+            .when(!self.embedded, |this| {
+                this.when_some(editor_style.border_radius, |this, radius| {
+                    this.rounded(radius)
+                })
+                .mt(editor_style.margin.top)
+                .mr(editor_style.margin.right)
+                .mb(editor_style.margin.bottom)
+                .ml(editor_style.margin.left)
+                .pt(editor_style.padding.top)
+                .pr(editor_style.padding.right)
+                .pb(editor_style.padding.bottom)
+                .pl(editor_style.padding.left)
+                .bg(cx.api_surface_lowest())
             })
-            .mt(editor_style.margin.top)
-            .mr(editor_style.margin.right)
-            .mb(editor_style.margin.bottom)
-            .ml(editor_style.margin.left)
-            .pt(editor_style.padding.top)
-            .pr(editor_style.padding.right)
-            .pb(editor_style.padding.bottom)
-            .pl(editor_style.padding.left)
-            .bg(cx.api_surface_lowest())
             .overflow_hidden()
             .child(
                 Input::new(&self.input)
@@ -998,8 +1035,8 @@ fn has_odd_escape_prefix(input: &InputState, cursor: usize) -> bool {
 mod tests {
     use super::*;
     use gpui::{
-        ListAlignment, ListState, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, div,
-        list, point, px, size,
+        Hsla, ListAlignment, ListState, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext,
+        TextRun, div, list, point, px, size,
     };
     use gpui_component::Rope;
     use gpui_component::setting::{SettingGroup, SettingItem, SettingPage, Settings};
@@ -1018,6 +1055,47 @@ mod tests {
     };
     use lsp_types::{CompletionContext, CompletionItem, CompletionResponse};
     use std::cell::Cell;
+
+    #[gpui::test]
+    fn shaped_hard_tabs_follow_the_configured_visual_width(cx: &mut TestAppContext) {
+        let mut measured = None;
+        let (_, _) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            crate::theme::configure(cx);
+            let style = window.text_style();
+            let font_size = style.font_size.to_pixels(window.rem_size());
+            let run = |len| TextRun {
+                len,
+                font: style.font(),
+                color: Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let space_width = window
+                .text_system()
+                .shape_line(" ".into(), font_size, &[run(1)], None)
+                .width;
+            let one_space_tab = window
+                .text_system()
+                .shape_line("\tX".into(), font_size, &[run(2)], None)
+                .with_tab_width(space_width)
+                .x_for_index(1);
+            let four_space_tab = window
+                .text_system()
+                .shape_line("\tX".into(), font_size, &[run(2)], None)
+                .with_tab_width(space_width * 4.)
+                .x_for_index(1);
+            measured = Some((space_width, one_space_tab, four_space_tab));
+
+            let editor = cx.new(|cx| CodeEditor::new(CodeEditorConfig::default(), window, cx));
+            gpui_component::Root::new(editor, window, cx)
+        });
+
+        let (space_width, one_space_tab, four_space_tab) = measured.expect("measure tab widths");
+        assert!((one_space_tab - space_width).abs() < px(0.01));
+        assert!((four_space_tab - space_width * 4.).abs() < px(0.01));
+    }
 
     struct FixedCompletionProvider;
 

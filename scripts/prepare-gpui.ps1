@@ -21,7 +21,8 @@ $pinned = @(
             "$projectDir\patches\gpui-0.2.2-retained-line-layout-cache.patch",
             "$projectDir\patches\gpui-0.2.2-reentrant-async-context.patch",
             "$projectDir\patches\gpui-0.2.2-windows-clip-children.patch",
-            "$projectDir\patches\gpui-0.2.2-linux-raw-window-handle.patch"
+            "$projectDir\patches\gpui-0.2.2-linux-raw-window-handle.patch",
+            "$projectDir\patches\gpui-0.2.2-configurable-tab-width.patch"
         )
     },
     @{
@@ -30,13 +31,37 @@ $pinned = @(
         sha256  = 'd021d46b4088d3d93a57ccdf443da85695a77272108caca2f6fe5369f584966a'
         patches = @(
             "$projectDir\patches\gpui-component-0.5.1-input-integration.patch",
-            "$projectDir\patches\gpui-component-0.5.1-code-folding.patch"
+            "$projectDir\patches\gpui-component-0.5.1-code-folding.patch",
+            "$projectDir\patches\gpui-component-0.5.1-indent-guide-layout.patch",
+            "$projectDir\patches\gpui-component-0.5.1-responsive-settings-sidebar.patch",
+            "$projectDir\patches\gpui-component-0.5.1-inline-actions.patch",
+            "$projectDir\patches\gpui-component-0.5.1-public-input-menu-state.patch",
+            "$projectDir\patches\gpui-component-0.5.1-completion-edge-placement.patch",
+            "$projectDir\patches\gpui-component-0.5.1-configurable-active-line.patch"
         )
     }
 )
 
 function Get-FileSha256([string]$path) {
     (Get-FileHash -Path $path -Algorithm SHA256).Hash.ToLower()
+}
+
+function Get-PatchedTreeSha256([string]$root) {
+    $lines = Get-ChildItem -Path $root -File -Recurse |
+        Where-Object { $_.Name -ne '.api-tester-patch-sha256' } |
+        ForEach-Object {
+            $relative = [IO.Path]::GetRelativePath($root, $_.FullName).Replace('\', '/')
+            "$(Get-FileSha256 $_.FullName)  ./$relative"
+        } |
+        Sort-Object
+    $canonical = ($lines -join "`n") + "`n"
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($canonical)
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        -join ($hasher.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })
+    } finally {
+        $hasher.Dispose()
+    }
 }
 
 function Invoke-PrepareCrate($crate) {
@@ -52,7 +77,9 @@ function Invoke-PrepareCrate($crate) {
     $sourceIsCurrent =
         (Test-Path $markerFile) -and
         ((Get-Content $markerFile -TotalCount 1) -eq $patchSha) -and
-        ((Get-Content $markerFile | Select-Object -Skip 1 -First 1) -eq $crate.sha256)
+        ((Get-Content $markerFile | Select-Object -Skip 1 -First 1) -eq $crate.sha256) -and
+        ((Get-Content $markerFile | Select-Object -Skip 2 -First 1) -eq
+            (Get-PatchedTreeSha256 $vendorDir))
     if ($sourceIsCurrent) {
         return
     }
@@ -113,8 +140,9 @@ function Invoke-PrepareCrate($crate) {
             }
         }
 
+        $treeSha = Get-PatchedTreeSha256 $sourceDir
         Set-Content -Path (Join-Path $sourceDir '.api-tester-patch-sha256') `
-            -Value @($patchSha, $crate.sha256) -Encoding ascii
+            -Value @($patchSha, $crate.sha256, $treeSha) -Encoding ascii
 
         New-Item -ItemType Directory -Path $vendorRoot -Force | Out-Null
         if (Test-Path $vendorDir) { Remove-Item -Recurse -Force $vendorDir }

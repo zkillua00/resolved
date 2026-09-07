@@ -17,6 +17,12 @@ impl ApiTester {
             self.response_editor.clone(),
             self.snippet_editor.editor.clone(),
             self.snippet_editor.preview_editor.clone(),
+            self.websocket_workspace.headers.clone(),
+            self.websocket_workspace.composer.clone(),
+            self.websocket_workspace.template_payload.clone(),
+            self.websocket_workspace.automation.clone(),
+            self.websocket_workspace.timeline_preview.clone(),
+            self.websocket_workspace.library_preview.clone(),
         ];
         editors.extend(
             self.theme_editors

@@ -288,6 +288,7 @@ pub(crate) fn request_for_shared_history(
     redacted
         .headers
         .retain(|header| header.enabled && header.shared);
+    redacted.query_params.retain(|param| param.enabled);
     match redacted.body_mode {
         BodyMode::None => {
             redacted.body.clear();
@@ -380,6 +381,21 @@ fn redact_request_with_known_secrets(
 ) -> RequestDraft {
     let mut redacted = request.clone();
 
+    redacted.query_params = redacted
+        .query_params
+        .into_iter()
+        .map(|mut param| {
+            let sensitive_key = is_sensitive_field(&param.key);
+            param.key = redact_secret_values(&param.key, known_secrets);
+            param.value = if sensitive_key {
+                REDACTED_VALUE.to_owned()
+            } else {
+                redact_secret_values(&param.value, known_secrets)
+            };
+            param.description = redact_secret_values(&param.description, known_secrets);
+            param
+        })
+        .collect();
     redacted.headers = redacted
         .headers
         .into_iter()
@@ -556,7 +572,7 @@ fn is_sensitive_field(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{BodyField, BodyMode, HeaderEntry};
+    use super::super::{BodyField, BodyMode, HeaderEntry, QueryParamEntry};
     use super::*;
     use std::time::Duration;
 
@@ -604,6 +620,15 @@ mod tests {
             url: "https://user:url-pass@example.com/items?api_key=literal-key&value=rotated%20secret"
                 .to_owned(),
             headers: vec![HeaderEntry::new("Authorization", "Bearer header-token")],
+            query_params: vec![
+                QueryParamEntry::new("api_key", "literal-key"),
+                QueryParamEntry {
+                    enabled: false,
+                    key: "note".to_owned(),
+                    value: "rotated secret".to_owned(),
+                    description: "header-token".to_owned(),
+                },
+            ],
             body: r#"{"token":"literal-body","nested":{"password":"body-pass"},"echo":"rotated secret"}"#
                 .to_owned(),
             ..RequestDraft::default()
@@ -631,6 +656,9 @@ mod tests {
             );
         }
         assert_eq!(entry.request.headers[0].value, REDACTED_VALUE);
+        assert_eq!(entry.request.query_params[0].value, REDACTED_VALUE);
+        assert_eq!(entry.request.query_params[1].value, REDACTED_VALUE);
+        assert_eq!(entry.request.query_params[1].description, REDACTED_VALUE);
         assert!(entry.request.body.contains(REDACTED_VALUE));
     }
 

@@ -1,20 +1,22 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" role="img" aria-labelledby="title desc">
   <title id="title">Resolved brand board</title>
-  <desc id="desc">The Resolved wordmark, app icon, message, palette, and state language.</desc>
+  <desc id="desc">The Resolved wordmark, app icon, official and landing-page slogans, palette, and workflow language.</desc>
 
   <rect width="1600" height="1000" fill="#F4F0E7"/>
 
   <text x="96" y="96" fill="#37363D"
     font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="24"
-    font-weight="600" letter-spacing="3">NATIVE API WORKBENCH FOR macOS</text>
+    font-weight="600" letter-spacing="3">NATIVE, PROGRAMMABLE API WORKSPACE</text>
 
   <text x="88" y="310" fill="#17171B"
     font-family="STIX Two Text, Charter, Georgia, serif" font-size="224"
     font-weight="600" letter-spacing="-6">Resolved</text>
 
-  <text x="100" y="406" fill="#37363D"
+  <text x="100" y="359" fill="#77747C" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="16" font-weight="600" letter-spacing="2">OFFICIAL APP SLOGAN</text>
+
+  <text x="100" y="416" fill="#37363D"
     font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="42"
-    font-weight="500">From request to evidence.</text>
+    font-weight="500">Explore. Automate. Resolve.</text>
 
   <g aria-label="Resolved app icon">
     <rect x="1144" y="80" width="360" height="360" rx="79" fill="#3B4BEA"/>
@@ -25,18 +27,20 @@
 
   <line x1="96" y1="510" x2="1504" y2="510" stroke="#D7D1C6" stroke-width="2"/>
 
-  <text x="96" y="606" fill="#17171B"
+  <text x="96" y="552" fill="#77747C" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="16" font-weight="600" letter-spacing="2">LANDING PAGE</text>
+
+  <text x="96" y="620" fill="#17171B"
     font-family="STIX Two Text, Charter, Georgia, serif" font-size="66"
-    font-weight="600">Evidence, not assumption.</text>
+    font-weight="600">Your API work, together.</text>
 
   <text x="96" y="676" fill="#37363D"
     font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="30"
-    font-weight="500">Know exactly what you sent.</text>
+    font-weight="500">HTTP · WebSockets · Scripts · Shared workspaces</text>
 
   <g font-family="Avenir Next, Helvetica Neue, sans-serif">
-    <text x="96" y="778" fill="#77747C" font-size="20" font-weight="600" letter-spacing="2">AUTHORED</text>
-    <text x="390" y="778" fill="#77747C" font-size="20" font-weight="600" letter-spacing="2">SENT</text>
-    <text x="684" y="778" fill="#77747C" font-size="20" font-weight="600" letter-spacing="2">RETURNED</text>
+    <text x="96" y="778" fill="#77747C" font-size="20" font-weight="600" letter-spacing="2">EXPLORE</text>
+    <text x="390" y="778" fill="#77747C" font-size="20" font-weight="600" letter-spacing="2">AUTOMATE</text>
+    <text x="684" y="778" fill="#77747C" font-size="20" font-weight="600" letter-spacing="2">RESOLVE</text>
     <line x1="96" y1="812" x2="330" y2="812" stroke="#A9B0FF" stroke-width="3"/>
     <line x1="390" y1="812" x2="624" y2="812" stroke="#3B4BEA" stroke-width="8"/>
     <line x1="684" y1="812" x2="918" y2="812" stroke="#17171B" stroke-width="8"/>

@@ -20,7 +20,7 @@ pub(in crate::app) struct RequestTabRuntime {
 impl Default for RequestTabRuntime {
     fn default() -> Self {
         Self {
-            request_pane: RequestPane::Headers,
+            request_pane: RequestPane::Params,
             response_tab: ResponseTab::Body,
             pretty_body: true,
             response: None,

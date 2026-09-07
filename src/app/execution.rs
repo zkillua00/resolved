@@ -1,11 +1,56 @@
 use super::*;
+use serde::Deserialize;
 use std::sync::atomic::Ordering;
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct McpHttpRequestOverrides {
+    pub method: Option<String>,
+    pub url: Option<String>,
+    pub query_parameters: Option<Vec<QueryParamEntry>>,
+    pub headers: Option<Vec<HeaderEntry>>,
+    pub body: Option<String>,
+    pub body_mode: Option<BodyMode>,
+    pub raw_body_language: Option<RawBodyLanguage>,
+    pub body_fields: Option<Vec<BodyField>>,
+}
+
+impl McpHttpRequestOverrides {
+    fn apply(self, request: &mut RequestDraft) {
+        if let Some(method) = self.method {
+            request.method = method;
+        }
+        if let Some(url) = self.url {
+            request.url = url;
+            request.query_params = query_params_from_url(&request.url);
+        }
+        if let Some(query_parameters) = self.query_parameters {
+            request.url = url_with_query_params(&request.url, &query_parameters);
+            request.query_params = query_parameters;
+        }
+        if let Some(headers) = self.headers {
+            request.headers = headers;
+        }
+        if let Some(body) = self.body {
+            request.body = body;
+        }
+        if let Some(body_mode) = self.body_mode {
+            request.body_mode = body_mode;
+        }
+        if let Some(raw_body_language) = self.raw_body_language {
+            request.raw_body_language = raw_body_language;
+        }
+        if let Some(body_fields) = self.body_fields {
+            request.body_fields = body_fields;
+        }
+    }
+}
 
 // Script errors intentionally carry a full structured report and diagnostic.
 // Keeping the unboxed error preserves that context across the background task.
 #[allow(clippy::result_large_err)]
 impl ApiTester {
-    fn script_scope(environment: Option<&Environment>) -> ScriptScope {
+    pub(super) fn script_scope(environment: Option<&Environment>) -> ScriptScope {
         let mut script_environment = ScriptEnvironment::default();
         if let Some(environment) = environment {
             for variable in environment
@@ -55,7 +100,63 @@ impl ApiTester {
 
         self.dismiss_template_variable_popover();
         self.request_notice = None;
+        self.mcp_script_console_operation_id = None;
+        self.mcp_script_console_request_id = None;
         let template = self.request_template(cx);
+        self.begin_request_template(template, window, cx);
+    }
+
+    pub(super) fn start_control_http_request(
+        &mut self,
+        request_id: &str,
+        overrides: Option<McpHttpRequestOverrides>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<u64, String> {
+        if self.sending || self.script_console_running {
+            return Err(
+                "Another request or script-console evaluation is already running.".to_owned(),
+            );
+        }
+        if self.active_environment_editor_is_dirty(cx) {
+            return Err(
+                "The active environment has unsaved changes. Save or Revert them before executing through MCP."
+                    .to_owned(),
+            );
+        }
+        let (collection, request) = self
+            .workspace
+            .saved_request(request_id)
+            .ok_or_else(|| format!("request '{request_id}' was not found"))?;
+        let collection_id = collection.id.clone();
+        if request.definition.is_websocket() {
+            return Err(format!(
+                "request '{request_id}' is a WebSocket document; use connect_websocket"
+            ));
+        }
+        let mut template = request.definition.clone();
+        if let Some(overrides) = overrides {
+            overrides.apply(&mut template.request);
+        }
+        if template.request.method.trim().is_empty() {
+            return Err("HTTP method cannot be empty.".to_owned());
+        }
+        self.dismiss_template_variable_popover();
+        self.request_notice = None;
+        self.open_saved_request_tab(collection_id, request_id.to_owned(), window, cx);
+        let operation_id = self.begin_request_template(template, window, cx);
+        self.mcp_http_operation_id = Some(operation_id);
+        self.mcp_http_request_id = Some(request_id.to_owned());
+        self.mcp_http_exchange = None;
+        Ok(operation_id)
+    }
+
+    pub(super) fn begin_request_template(
+        &mut self,
+        template: RequestTemplate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> u64 {
         let environment_id = self.workspace.active_environment_id.clone();
         let mut scope = Self::script_scope(
             environment_id
@@ -106,6 +207,7 @@ impl ApiTester {
             });
         })
         .detach();
+        generation
     }
 
     pub(super) fn finish_pre_request(
@@ -300,8 +402,10 @@ impl ApiTester {
         };
         let vault = self.credential_vault.clone();
         let runtime = Arc::clone(&self.runtime);
-        let mut limits = crate::core::ChainLimits::default();
-        limits.script_timeout = self.settings.script.timeout();
+        let limits = crate::core::ChainLimits {
+            script_timeout: self.settings.script.timeout(),
+            ..Default::default()
+        };
 
         let task = self.runtime.spawn(async move {
             let sender = move |request: crate::core::RequestDraft| {
@@ -390,14 +494,14 @@ impl ApiTester {
     /// to `run_chain` so chained scripts can await further. Each pipeline is
     /// bounded by the script timeout. Returns one `Result` per request, in
     /// input order; `Err` on chain failure so the awaiting script rejects.
-    fn build_inline_chainer(&self, environment_id: &Option<String>) -> InlineChainRunner {
+    pub(super) fn build_inline_chainer(
+        &self,
+        environment_id: &Option<String>,
+    ) -> InlineChainRunner {
         let workspace = self.workspace.clone();
         let namespace = self.request_namespace.clone();
         let environment_id = environment_id.clone();
-        let chain_cancellation = self
-            .script_cancellation
-            .clone()
-            .unwrap_or_else(crate::core::ScriptCancellation::new);
+        let chain_cancellation = self.script_cancellation.clone().unwrap_or_default();
         let budget = Arc::clone(&self.chain_budget);
         let local_client = self.client.clone();
         let upstream_client = self.upstream_execution_client.clone();
@@ -410,8 +514,10 @@ impl ApiTester {
                 Err(_) => None,
             },
         };
-        let mut limits = crate::core::ChainLimits::default();
-        limits.script_timeout = self.settings.script.timeout();
+        let limits = crate::core::ChainLimits {
+            script_timeout: self.settings.script.timeout(),
+            ..Default::default()
+        };
         InlineChainRunner {
             workspace,
             namespace,
@@ -436,15 +542,15 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !run.environment_mutations.is_empty() {
-            if let Some(environment_id) = self.workspace.active_environment_id.clone() {
-                let _ = self.apply_environment_mutations(
-                    Some(&environment_id),
-                    &run.environment_mutations,
-                    window,
-                    cx,
-                );
-            }
+        if !run.environment_mutations.is_empty()
+            && let Some(environment_id) = self.workspace.active_environment_id.clone()
+        {
+            let _ = self.apply_environment_mutations(
+                Some(&environment_id),
+                &run.environment_mutations,
+                window,
+                cx,
+            );
         }
         for entry in &run.history {
             self.history.push(entry.clone());
@@ -781,10 +887,12 @@ impl ApiTester {
         } else {
             self.hide_preview(cx);
         }
+        self.capture_mcp_http_exchange(generation);
+        self.advance_mcp_request_sequence(window, cx);
         cx.notify();
     }
 
-    fn run_post_chain(
+    pub(super) fn run_post_chain(
         &mut self,
         generation: u64,
         environment_id: Option<String>,
@@ -828,8 +936,13 @@ impl ApiTester {
             // as "Request cancelled" and silently dropping the history entry.
             return;
         }
+        let mcp_operation_id = (self.mcp_http_operation_id == Some(self.request_generation))
+            .then_some(self.request_generation);
         self.request_generation = self.request_generation.wrapping_add(1);
         self.finish_cancelled(cx);
+        if let Some(operation_id) = mcp_operation_id {
+            self.capture_mcp_http_exchange(operation_id);
+        }
     }
 
     pub(super) fn finish_cancelled(&mut self, cx: &mut Context<Self>) {
@@ -841,6 +954,7 @@ impl ApiTester {
         self.request_error = Some("Request cancelled".to_owned());
         self.preview_error = None;
         self.hide_preview(cx);
+        self.capture_mcp_http_exchange(self.request_generation);
         cx.notify();
     }
 
@@ -877,6 +991,7 @@ impl ApiTester {
         self.request_error = Some(message);
         self.persist_history();
         self.upload_shared_history_entry(shared_history, cx);
+        self.capture_mcp_http_exchange(self.request_generation);
         cx.notify();
     }
 
@@ -1145,7 +1260,7 @@ impl ApiTester {
     }
 }
 
-struct InlineChainRunner {
+pub(super) struct InlineChainRunner {
     workspace: crate::core::Workspace,
     namespace: crate::core::RequestNamespaceCatalog,
     environment_id: Option<String>,

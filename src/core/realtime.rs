@@ -187,7 +187,7 @@ async fn run_connection(
         HeaderValue::from_static(concat!(
             env!("CARGO_PKG_NAME"),
             "/",
-            env!("CARGO_PKG_VERSION")
+            env!("RESOLVED_BUILD_VERSION")
         )),
     );
 

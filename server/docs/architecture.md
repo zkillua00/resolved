@@ -319,6 +319,7 @@ Permissions in the initial catalog are:
 | `PUT` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/requests/:request_id/collection` | `requests.update` |
 | `DELETE` | `/api/v1/workspaces/:workspace_id/collections/:collection_id/requests/:request_id` | `requests.delete` |
 | `POST` | `/api/v1/workspaces/:workspace_id/execute` | `requests.execute` plus workspace access |
+| `GET` | `/api/v1/workspaces/:workspace_id/execute` | authenticated WebSocket upgrade; `requests.execute` plus workspace access |
 | `GET` | `/api/v1/workspaces/:workspace_id/environments` | `environments.read` |
 | `POST` | `/api/v1/workspaces/:workspace_id/environments` | `environments.create` |
 | `GET` | `/api/v1/workspaces/:workspace_id/environments/:environment_id` | `environments.read` |
@@ -382,8 +383,9 @@ The authenticated policy route exposes only that mode; reading or replacing the
 full configuration, including hostname overrides, has separate server-settings
 permissions.
 
-Server mode moves only the HTTP exchange onto the self-hosted server. Variable
-resolution and pre-request/post-response scripts remain inside the desktop app.
+Server mode moves HTTP exchanges and user-created WebSocket connections onto
+the self-hosted server. Variable resolution and pre-request/post-response
+scripts remain inside the desktop app.
 For multipart bodies, Resolved reads selected local files and sends their bytes
 to the execution endpoint; local paths are never included in the server
 payload.
@@ -396,6 +398,14 @@ headers. Hop-by-hop headers and caller-supplied content lengths are discarded;
 target redirects are bounded by Go's standard ten-redirect policy. The endpoint
 also reloads the execution policy and rejects the request before connecting if
 an administrator has returned the deployment to local mode.
+
+WebSocket execution uses a conventional authenticated `GET` upgrade on the
+same execution resource. The first text frame contains the resolved target URL
+and headers. The server opens the upstream `ws://` or `wss://` connection and
+replies with an `opened` control message before relaying text, binary, ping,
+pong, and close frames. An `error` control message terminates setup failures.
+The collaboration bearer token authenticates only the outer connection and is
+never forwarded to the target.
 
 Hostname overrides are exact, case-insensitive mappings from the request URL's
 hostname to another hostname or IP. An IP target is DNS-style: it changes only

@@ -360,7 +360,8 @@ impl RequestNamespaceCatalog {
     /// fed straight to the embedded language service.
     pub fn declaration_source(&self) -> String {
         let mut buffer = String::new();
-        buffer.push_str("// Resolved request-reference namespace built from the active workspace.\n");
+        buffer
+            .push_str("// Resolved request-reference namespace built from the active workspace.\n");
         for root in self.roots() {
             if root.status != NodeStatus::Exposed {
                 continue;
@@ -432,7 +433,7 @@ fn build_collection_namespace(
     let mut requests = collection
         .requests
         .iter()
-        .filter(|request| request.folder_id.is_none())
+        .filter(|request| request.folder_id.is_none() && !request.definition.is_websocket())
         .collect::<Vec<_>>();
     requests.sort_by(|a, b| a.name.cmp(&b.name));
     for request in requests {
@@ -476,7 +477,10 @@ fn build_folder_namespace(
     let mut requests = collection
         .requests
         .iter()
-        .filter(|request| request.folder_id.as_deref() == Some(folder.id.as_str()))
+        .filter(|request| {
+            request.folder_id.as_deref() == Some(folder.id.as_str())
+                && !request.definition.is_websocket()
+        })
         .collect::<Vec<_>>();
     requests.sort_by(|a, b| a.name.cmp(&b.name));
     for request in requests {
@@ -611,6 +615,7 @@ mod tests {
         RequestTemplate {
             request: RequestDraft::new(method, url),
             scripts: Default::default(),
+            websocket: None,
         }
     }
 

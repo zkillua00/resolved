@@ -88,6 +88,21 @@ impl ApiPalette {
 }
 
 impl ApiTheme {
+    /// Scale this theme's typography by the given zoom multipliers while
+    /// leaving the palette and layout untouched.
+    ///
+    /// [`crate::theme::apply`] only ever feeds freshly parsed (unscaled)
+    /// themes through this conversion, so the scaling never compounds even
+    /// when a zoom change re-applies the active theme source.
+    pub(crate) fn scaled(mut self, zoom: super::ThemeZoom) -> Self {
+        self.classes.app.font_size = self.classes.app.font_size * zoom.ui;
+        self.classes.editor.font_size = self.classes.editor.font_size * zoom.editor;
+        if let Some(size) = self.classes.button.font_size.as_mut() {
+            *size = *size * zoom.ui;
+        }
+        self
+    }
+
     pub(crate) fn from_resolved(
         name: String,
         mode: ThemeMode,

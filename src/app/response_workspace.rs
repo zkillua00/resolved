@@ -40,7 +40,7 @@ impl ApiTester {
                         .flex_1()
                         .min_h_0()
                         .when(has_script_console, |this| {
-                            this.p_4().child(self.render_script_results(cx))
+                            this.child(self.render_script_results(cx))
                         })
                         .when(!has_script_console, |this| {
                             this.items_center()
@@ -179,7 +179,7 @@ impl ApiTester {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .p_4()
+                    .when(self.response_tab != ResponseTab::Scripts, |this| this.p_4())
                     .when(self.response_tab == ResponseTab::Body, |this| {
                         this.child(self.render_response_body(cx))
                     })

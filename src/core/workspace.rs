@@ -5,10 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::{
-    script::EnvironmentMutation,
-    template::RequestTemplate,
-};
+use super::{script::EnvironmentMutation, template::RequestTemplate};
 
 pub const WORKSPACE_FILE_VERSION: u32 = 1;
 
@@ -1604,6 +1601,7 @@ mod tests {
                 pre_request: "request.headers.test = 'one';".to_owned(),
                 post_response: "assert(response.status === 200);".to_owned(),
             },
+            websocket: None,
         }
     }
 

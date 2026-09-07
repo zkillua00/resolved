@@ -1,4 +1,5 @@
 mod cookie_jar;
+mod chain;
 mod database;
 mod format;
 mod history;
@@ -7,7 +8,6 @@ mod realtime;
 mod request;
 mod request_namespace;
 mod request_tabs;
-mod chain;
 mod script;
 mod secure_store;
 mod settings;
@@ -15,6 +15,7 @@ mod snippet;
 mod template;
 mod upstream;
 mod upstream_management;
+mod websocket;
 mod workspace;
 mod workspace_provider;
 
@@ -22,17 +23,26 @@ mod workspace_provider;
 mod mvp_smoke_test;
 
 pub use cookie_jar::CookieJar;
+pub use chain::{ChainFailure, ChainLimits, ChainRun, run_chain};
 pub use database::{DatabaseStore, LocalWorkspace};
-pub use format::{format_body, format_raw_source, format_script_source, is_probably_text};
+pub use format::{
+    format_body, format_raw_source, format_script_source, is_probably_text, parse_json_lines,
+};
 pub use history::{HistoryEntry, REDACTED_VALUE, RequestHistory};
 pub use interchange::{
     ImportBundle, InterchangeFormat, MAX_INTERCHANGE_BYTES, export_request, import_requests,
 };
 pub use realtime::{RealtimeResourceChange, RealtimeSignal, watch_upstream_changes};
 pub use request::{
-    BodyField, BodyFieldKind, BodyMode, HeaderEntry, RawBodyLanguage, RequestDraft, RequestError,
-    RequestTask, ResponseData, STANDARD_HTTP_METHODS, build_client_with_cookie_jar,
-    send_request, spawn_request,
+    BodyField, BodyFieldKind, BodyMode, HeaderEntry, QueryParamEntry, RawBodyLanguage,
+    RequestDraft, RequestError, RequestTask, ResponseData, STANDARD_HTTP_METHODS, build_client_with_cookie_jar,
+    query_params_from_url, send_request, spawn_request, url_with_query_params,
+};
+#[allow(unused_imports)]
+pub use request_namespace::{
+    AccessStep, CHAIN_MAX_DEPTH, CHAIN_MAX_TOTAL, NAMESPACE_REF_MARKER, NodeKind, NodeStatus,
+    REQUEST_REF_MARKER, RequestNamespaceCatalog, RequestNamespaceNode, RequestRefInfo,
+    RuntimeNamespaceSpec, RuntimeNodeKind, is_valid_js_identifier,
 };
 #[cfg(test)]
 pub use request::build_client;
@@ -40,26 +50,23 @@ pub use request_tabs::{
     DEFAULT_REQUEST_TAB_TITLE, RequestTabAssociation, RequestTabCloseScope, RequestTabGroup,
     RequestTabGroupColor, RequestTabGroupId, RequestTabId, RequestTabRecord, RequestTabs,
 };
-#[allow(unused_imports)]
-pub use request_namespace::{
-    AccessStep, CHAIN_MAX_DEPTH, CHAIN_MAX_TOTAL, NAMESPACE_REF_MARKER, REQUEST_REF_MARKER,
-    NodeKind, NodeStatus, RequestNamespaceCatalog, RequestNamespaceNode, RequestRefInfo,
-    RuntimeNamespaceSpec, RuntimeNodeKind, is_valid_js_identifier,
-};
-pub use script::{
-    ChainedRequest, EnvironmentMutation, InlineChainer, MAX_SCRIPT_SOURCE_BYTES, PostResponseResult,
-    PreRequestResult, ScriptCancellation, ScriptDiagnostic, ScriptEnvironment,
-    ScriptError, ScriptErrorKind, ScriptLogLevel, ScriptPhase, ScriptReport, ScriptScope,
-    execute_post_response_with_chain, execute_pre_request_with_chain,
-};
 #[cfg(test)]
-pub use script::{ScriptLog, ScriptTestResult};
+pub use script::ScriptTestResult;
+pub use script::{
+    ChainedRequest, EnvironmentMutation, InlineChainer, MAX_SCRIPT_SOURCE_BYTES,
+    PostResponseResult, PreRequestResult, ScriptCancellation, ScriptDiagnostic, ScriptEnvironment,
+    ScriptError, ScriptErrorKind, ScriptLog, ScriptLogLevel, ScriptPhase, ScriptReport,
+    ScriptScope, execute_post_response_console_with_chain, execute_post_response_with_chain,
+    execute_pre_request_with_chain,
+};
 #[allow(unused_imports)]
 pub use secure_store::{CredentialVault, CredentialVaultError, UpstreamCredential};
 #[allow(unused_imports)]
 pub use settings::{
-    AppSettings, EditorSettings, FormatterQuoteStyle, FormatterSemicolons, FormatterSettings,
-    FormatterTrailingCommas, MetricsPosition, SavedTheme, ShortcutOverride, ThemeSettings,
+    AppSettings, DEFAULT_ZOOM_PERCENT, EditorInlineActionPlacement, EditorSettings,
+    FormatterQuoteStyle, FormatterSemicolons, FormatterSettings, FormatterTrailingCommas,
+    MAX_ZOOM_PERCENT, MIN_ZOOM_PERCENT, McpSettings, MetricsPosition, SavedTheme, ShortcutOverride,
+    ThemeSettings, ZOOM_STEP_PERCENT, ZoomSettings,
 };
 pub(crate) use snippet::{GENERATOR_WRAPPER_PREFIX, GENERATOR_WRAPPER_SUFFIX};
 pub use snippet::{
@@ -106,11 +113,18 @@ pub use upstream_management::{
     replace_management_user_roles, replace_management_workspace_users, update_management_role,
     update_management_user, update_request_execution_settings, upload_shared_history,
 };
-pub use workspace::{
-    Collection, CollectionFolder, Environment, RequestScripts, ResourceCreator, SavedRequest,
-    Workspace, WorkspaceMutationError, apply_environment_mutations_to_workspace,
+pub use websocket::{
+    MAX_WEBSOCKET_MESSAGE_BYTES, MAX_WEBSOCKET_TIMELINE_ENTRIES, WebSocketAutomationEvent,
+    WebSocketCommand, WebSocketMessageTemplate, WebSocketReplay, WebSocketSavedMessage,
+    WebSocketSignal, WebSocketWorkspace, binary_preview, execute_websocket_automation,
+    render_message_template, replay_frames, replay_websocket_frames,
+    run_upstream_websocket_connection, run_websocket_connection, template_variable_names,
 };
-pub use chain::{ChainFailure, ChainLimits, ChainRun, run_chain};
+pub use workspace::{
+    Collection, CollectionFolder, Environment, EnvironmentVariable, RequestScripts,
+    ResourceCreator, SavedRequest, Workspace, WorkspaceMutationError,
+    apply_environment_mutations_to_workspace,
+};
 #[allow(unused_imports)]
 pub use workspace_provider::{
     LocalWorkspaceProvider, RemoteWorkspaceProvider, WorkspaceProvider, WorkspaceProviderError,

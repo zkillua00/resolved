@@ -7,7 +7,7 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         h_flex()
-            .h(px(APP_TITLE_BAR_HEIGHT))
+            .h(APP_TITLE_BAR_HEIGHT)
             .flex_shrink_0()
             .pl(window_chrome::leading_inset())
             .pr(window_chrome::trailing_inset())
@@ -42,6 +42,18 @@ impl ApiTester {
                             .tooltip("Open the request import workspace")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_request_import_panel(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("welcome-title-new-websocket")
+                            .label("New WebSocket")
+                            .large()
+                            .h(px(38.))
+                            .outline()
+                            .rounded(px(20.))
+                            .disabled(self.sending)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_blank_websocket_tab(window, cx);
                             })),
                     )
                     .child(
@@ -106,6 +118,16 @@ impl ApiTester {
                                     .disabled(self.sending)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.open_blank_request_tab(window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("welcome-new-websocket")
+                                    .label("New WebSocket")
+                                    .large()
+                                    .outline()
+                                    .disabled(self.sending)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_blank_websocket_tab(window, cx);
                                     })),
                             )
                             .child(

@@ -378,6 +378,116 @@ func TestRequestProxyExecutesFromServerWithDynamicPermissionAndWorkspaceScope(t 
 	}
 }
 
+func TestRequestProxyRelaysWebSocketExecution(t *testing.T) {
+	app, usersService, _, closeDatabase := newTestServer(t)
+	defer closeDatabase()
+
+	owner, err := usersService.BootstrapOwner(t.Context(), users.CreateInput{
+		Email: "websocket-owner", DisplayName: "WebSocket Owner", Password: ownerPassword,
+	})
+	if err != nil {
+		t.Fatalf("bootstrap owner: %v", err)
+	}
+	ownerLogin := login(t, app, owner.Email, ownerPassword)
+	workspace := request[[]workspaces.WorkspaceView](
+		t, app, http.MethodGet, "/api/v1/workspaces", ownerLogin.Token, nil, fiber.StatusOK,
+	).Data[0]
+
+	targetUpgrader := gorillaWebsocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, incoming *http.Request) {
+		connection, upgradeErr := targetUpgrader.Upgrade(writer, incoming, nil)
+		if upgradeErr != nil {
+			t.Errorf("upgrade target websocket: %v", upgradeErr)
+			return
+		}
+		defer connection.Close()
+		messageType, payload, readErr := connection.ReadMessage()
+		if readErr != nil {
+			t.Errorf("read target websocket message: %v", readErr)
+			return
+		}
+		if incoming.Header.Get("X-Target") != "yes" {
+			t.Errorf("target header = %q", incoming.Header.Get("X-Target"))
+		}
+		if writeErr := connection.WriteMessage(messageType, payload); writeErr != nil {
+			t.Errorf("echo target websocket message: %v", writeErr)
+		}
+	}))
+	defer target.Close()
+	targetPort := target.Listener.Addr().(*net.TCPAddr).Port
+	request[requestproxy.Settings](
+		t,
+		app,
+		http.MethodPut,
+		"/api/v1/request-execution/settings",
+		ownerLogin.Token,
+		map[string]any{
+			"mode": requestproxy.ModeServer,
+			"hostname_overrides": []map[string]string{
+				{"hostname": "socket.internal", "target": "http://127.0.0.1"},
+			},
+		},
+		fiber.StatusOK,
+	)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- app.Listener(listener, fiber.ListenConfig{DisableStartupMessage: true})
+	}()
+	defer func() {
+		if err := app.ShutdownWithTimeout(2 * time.Second); err != nil {
+			t.Errorf("shutdown Fiber app: %v", err)
+		}
+		if err := <-serverErr; err != nil {
+			t.Errorf("serve Fiber app: %v", err)
+		}
+	}()
+
+	executionURL := fmt.Sprintf(
+		"ws://%s/api/v1/workspaces/%s/execute", listener.Addr().String(), workspace.ID,
+	)
+	headers := http.Header{"Authorization": []string{"Bearer " + ownerLogin.Token}}
+	client, response, err := gorillaWebsocket.DefaultDialer.Dial(executionURL, headers)
+	if err != nil {
+		if response != nil {
+			t.Fatalf("dial execution websocket: %v (status %s)", err, response.Status)
+		}
+		t.Fatalf("dial execution websocket: %v", err)
+	}
+	defer client.Close()
+	if err := client.WriteJSON(map[string]any{
+		"url":     fmt.Sprintf("ws://socket.internal:%d/echo", targetPort),
+		"headers": []map[string]string{{"name": "X-Target", "value": "yes"}},
+	}); err != nil {
+		t.Fatalf("write execution descriptor: %v", err)
+	}
+	var opened struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	}
+	if err := client.ReadJSON(&opened); err != nil {
+		t.Fatalf("read execution response: %v", err)
+	}
+	if opened.Type != "opened" {
+		t.Fatalf("execution response = %+v", opened)
+	}
+	if err := client.WriteMessage(gorillaWebsocket.TextMessage, []byte("hello")); err != nil {
+		t.Fatalf("write execution message: %v", err)
+	}
+	messageType, payload, err := client.ReadMessage()
+	if err != nil {
+		t.Fatalf("read execution echo: %v", err)
+	}
+	if messageType != gorillaWebsocket.TextMessage || string(payload) != "hello" {
+		t.Fatalf("execution echo = type %d payload %q", messageType, payload)
+	}
+	_ = client.Close()
+}
+
 func TestAuthenticatedWebsocketPublishesResourceChanges(t *testing.T) {
 	app, usersService, _, closeDatabase := newTestServer(t)
 	t.Cleanup(closeDatabase)

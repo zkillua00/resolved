@@ -10,6 +10,186 @@ enum ShortcutRecorderCommand {
 }
 
 impl ApiTester {
+    pub(super) fn set_mcp_follow_agent_activity(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.settings.mcp.follow_agent_activity == enabled {
+            return;
+        }
+        let mut candidate = self.settings.clone();
+        candidate.mcp.follow_agent_activity = enabled;
+        match self.commit_settings(candidate, false, cx) {
+            Ok(()) => {
+                self.settings_notice = Some(if enabled {
+                    "Resolved will follow MCP agent activity.".to_owned()
+                } else {
+                    "Resolved will no longer refocus views as MCP agent activity changes."
+                        .to_owned()
+                });
+            }
+            Err(error) => self.settings_notice = Some(error),
+        }
+        cx.notify();
+    }
+
+    pub(super) fn set_mcp_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.settings.mcp.enabled == enabled {
+            return;
+        }
+        let mut candidate = self.settings.clone();
+        candidate.mcp.enabled = enabled;
+        match self.commit_settings(candidate, false, cx) {
+            Ok(()) => match self.sync_control_server(cx) {
+                Ok(()) => {
+                    self.settings_notice = Some(if enabled {
+                        "MCP agent control enabled.".to_owned()
+                    } else {
+                        "MCP agent control disabled.".to_owned()
+                    });
+                }
+                Err(error) => {
+                    self.settings_notice = Some(format!("MCP could not start: {error}"));
+                }
+            },
+            Err(error) => self.settings_notice = Some(error),
+        }
+        cx.notify();
+    }
+
+    pub(super) fn set_mcp_tool_enabled(
+        &mut self,
+        tool_name: &str,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tool) = crate::control_tools::tool(tool_name) else {
+            return;
+        };
+        let mut candidate = self.settings.clone();
+        if enabled {
+            candidate.mcp.enabled_tools.insert(tool.name.to_owned());
+        } else {
+            candidate.mcp.enabled_tools.remove(tool.name);
+        }
+        if candidate.mcp == self.settings.mcp {
+            return;
+        }
+        match self.commit_settings(candidate, false, cx) {
+            Ok(()) => {
+                if !enabled {
+                    match tool.name {
+                        "connect_websocket" => self.stop_mcp_websocket(),
+                        "execute_http_request" => self.stop_mcp_http_request(cx),
+                        "run_script_console" => self.stop_mcp_script_console(),
+                        _ => {}
+                    }
+                }
+                self.settings_notice = Some(format!(
+                    "{} MCP tool {}.",
+                    tool.label,
+                    if enabled { "enabled" } else { "disabled" }
+                ));
+            }
+            Err(error) => self.settings_notice = Some(error),
+        }
+        cx.notify();
+    }
+
+    pub(super) fn set_mcp_tool_group_enabled(
+        &mut self,
+        group_id: &str,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(group) = crate::control_tools::tool_group(group_id).copied() else {
+            return;
+        };
+        let mut candidate = self.settings.clone();
+        for tool_name in group.tools {
+            if enabled {
+                candidate.mcp.enabled_tools.insert((*tool_name).to_owned());
+            } else {
+                candidate.mcp.enabled_tools.remove(*tool_name);
+            }
+        }
+        if candidate.mcp == self.settings.mcp {
+            return;
+        }
+        match self.commit_settings(candidate, false, cx) {
+            Ok(()) => {
+                if !enabled {
+                    match group.id {
+                        "http" => self.stop_mcp_http_request(cx),
+                        "script_console" => self.stop_mcp_script_console(),
+                        "websocket" => self.stop_mcp_websocket(),
+                        _ => {}
+                    }
+                }
+                self.settings_notice = Some(format!(
+                    "All {} MCP tools {}.",
+                    group.label,
+                    if enabled { "enabled" } else { "disabled" }
+                ));
+            }
+            Err(error) => self.settings_notice = Some(error),
+        }
+        cx.notify();
+    }
+
+    pub(super) fn set_mcp_open_tool_groups(
+        &mut self,
+        open_group_indices: &[usize],
+        cx: &mut Context<Self>,
+    ) {
+        self.mcp_open_tool_groups = open_group_indices
+            .iter()
+            .filter_map(|index| crate::control_tools::CONTROL_TOOL_GROUPS.get(*index))
+            .map(|group| group.id.to_owned())
+            .collect();
+        cx.notify();
+    }
+
+    pub(super) fn set_all_mcp_tool_groups_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if open {
+            self.mcp_open_tool_groups = crate::control_tools::CONTROL_TOOL_GROUPS
+                .iter()
+                .map(|group| group.id.to_owned())
+                .collect();
+        } else {
+            self.mcp_open_tool_groups.clear();
+        }
+        cx.notify();
+    }
+
+    pub(super) fn set_mcp_remote_workspaces_enabled(
+        &mut self,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.mcp.allow_remote_workspaces == enabled {
+            return;
+        }
+        let mut candidate = self.settings.clone();
+        candidate.mcp.allow_remote_workspaces = enabled;
+        match self.commit_settings(candidate, false, cx) {
+            Ok(()) => {
+                if !enabled
+                    && matches!(
+                        self.workspace_providers.active_id(),
+                        WorkspaceProviderId::Upstream { .. }
+                    )
+                {
+                    self.stop_mcp_runtime_operations(cx);
+                }
+                self.settings_notice = Some(if enabled {
+                    "MCP access to server workspaces enabled.".to_owned()
+                } else {
+                    "MCP access to server workspaces disabled.".to_owned()
+                });
+            }
+            Err(error) => self.settings_notice = Some(error),
+        }
+        cx.notify();
+    }
+
     pub(super) fn begin_recording_shortcut(
         &mut self,
         shortcut_id: ShortcutId,
@@ -235,6 +415,29 @@ impl ApiTester {
             return;
         }
         self.commit_editor_settings_change(candidate, "Editor pair insertion updated.", window, cx);
+    }
+
+    pub(super) fn set_editor_inline_action_placement(
+        &mut self,
+        placement: EditorInlineActionPlacement,
+        cx: &mut Context<Self>,
+    ) {
+        let mut candidate = self.settings.clone();
+        candidate.editor.inline_action_placement = placement;
+        if candidate.editor == self.settings.editor {
+            return;
+        }
+        match self.commit_settings(candidate, false, cx) {
+            Ok(()) => {
+                self.refresh_websocket_composer_inline_actions(cx);
+                self.settings_notice = Some(format!(
+                    "Inline editor actions now appear {}.",
+                    placement.label().to_lowercase()
+                ));
+            }
+            Err(error) => self.settings_notice = Some(error),
+        }
+        cx.notify();
     }
 
     pub(super) fn set_formatter_indent_size(&mut self, indent_size: u8, cx: &mut Context<Self>) {

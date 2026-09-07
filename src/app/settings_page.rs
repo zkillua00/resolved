@@ -6,7 +6,8 @@ use gpui_component::switch::Switch;
 
 use super::*;
 
-const SETTINGS_SIDEBAR_WIDTH: Pixels = px(220.);
+pub(super) const SETTINGS_SIDEBAR_WIDTH: Rems = Rems(13.75);
+const SETTINGS_MESSAGE_ROW_INSET: Rems = Rems(3.5);
 
 impl ApiTester {
     /// Memoized parse of a theme's CSS source. Parsing happens once per
@@ -39,7 +40,7 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         h_flex()
-            .h(px(APP_TITLE_BAR_HEIGHT))
+            .h(APP_TITLE_BAR_HEIGHT)
             .flex_shrink_0()
             .pl(window_chrome::leading_inset())
             .pr(window_chrome::trailing_inset())
@@ -91,6 +92,7 @@ impl ApiTester {
                         self.editor_line_numbers_setting_item(cx),
                         self.editor_indent_guides_setting_item(cx),
                         self.editor_auto_close_pairs_setting_item(cx),
+                        self.editor_inline_action_placement_setting_item(cx),
                     ]),
             )
             .group(
@@ -107,6 +109,12 @@ impl ApiTester {
                         self.formatter_semicolons_setting_item(cx),
                         self.formatter_trailing_commas_setting_item(cx),
                     ]),
+            )
+            .group(
+                SettingGroup::new()
+                    .title("Zoom")
+                    .description("Adjust code editor text size independently of the interface.")
+                    .item(self.editor_zoom_setting_item(cx)),
             );
         let mut keyboard_page = SettingPage::new("Keyboard")
             .description("Record shortcuts directly. Defaults follow familiar macOS conventions.")
@@ -128,14 +136,47 @@ impl ApiTester {
             );
         }
 
-        let appearance_page = SettingPage::new("Appearance").resettable(false).group(
-            SettingGroup::new()
-                .with_variant(GroupBoxVariant::Normal)
-                .items([
-                    self.theme_global_actions_setting_item(cx),
-                    self.theme_library_setting_item(cx),
-                ]),
-        );
+        let appearance_page = SettingPage::new("Appearance")
+            .resettable(false)
+            .group(
+                SettingGroup::new()
+                    .with_variant(GroupBoxVariant::Normal)
+                    .items([
+                        self.theme_global_actions_setting_item(cx),
+                        self.theme_library_setting_item(cx),
+                    ]),
+            )
+            .group(
+                SettingGroup::new()
+                    .title("Zoom")
+                    .description(
+                        "Make the whole interface larger or smaller without changing the theme.",
+                    )
+                    .item(self.ui_zoom_setting_item(cx)),
+            );
+        let mcp_page = SettingPage::new("MCP")
+            .description(
+                "Let local agent clients inspect or change Resolved through explicit tools.",
+            )
+            .resettable(false)
+            .group(
+                SettingGroup::new()
+                    .title("Connection")
+                    .description(
+                        "No local control socket or session token exists while MCP is disabled.",
+                    )
+                    .items([
+                        self.mcp_enabled_setting_item(cx),
+                        self.mcp_follow_agent_activity_setting_item(cx),
+                        self.mcp_remote_workspaces_setting_item(cx),
+                    ]),
+            )
+            .group(
+                SettingGroup::new()
+                    .title("Tools")
+                    .description("Disabled tools are neither advertised nor accepted by Resolved.")
+                    .item(self.mcp_tools_setting_item(cx)),
+            );
         let developer_page = SettingPage::new("Developer Settings")
             .description("Enable diagnostics for inspecting Resolved while it is running.")
             .resettable(false)
@@ -149,47 +190,346 @@ impl ApiTester {
                     ]),
             );
 
-        let mut pages = Vec::with_capacity(6);
+        let mut pages = Vec::with_capacity(7);
         pages.push(servers_page);
         pages.extend([
             snippets_page,
             editor_page,
             keyboard_page,
             appearance_page,
+            mcp_page,
             developer_page,
         ]);
+
+        let (message_inset, message_overlay) = settings_message_overlay(
+            self.settings_warning.clone(),
+            self.settings_notice.clone(),
+            cx,
+        );
 
         v_flex()
             .relative()
             .size_full()
             .min_h_0()
             .bg(cx.theme().background)
-            .child(settings_sidebar_underlay(SETTINGS_SIDEBAR_WIDTH, cx))
-            .when_some(self.settings_warning.clone(), |this, warning| {
-                this.child(dismissible_settings_message(
-                    warning,
-                    cx.theme().danger,
-                    SettingsMessageKind::Warning,
-                    cx,
-                ))
-            })
-            .when_some(self.settings_notice.clone(), |this, notice| {
-                this.child(dismissible_settings_message(
-                    notice,
-                    cx.theme().info,
-                    SettingsMessageKind::Notice,
-                    cx,
-                ))
-            })
             .child(
                 div().flex_1().min_h_0().child(
                     SettingsView::new("api-tester-settings")
-                        .sidebar_width(SETTINGS_SIDEBAR_WIDTH)
+                        .sidebar_width(SETTINGS_SIDEBAR_WIDTH.to_pixels(cx.theme().font_size))
+                        .content_top_inset(message_inset)
                         .with_group_variant(GroupBoxVariant::Outline)
                         .pages(pages),
                 ),
             )
+            .when_some(message_overlay, |this, overlay| this.child(overlay))
             .into_any_element()
+    }
+
+    fn mcp_enabled_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Enable MCP",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let checked = state.settings.mcp.enabled;
+                let writable = state.settings_writable;
+                let change_this = this.clone();
+                Switch::new("mcp-enabled")
+                    .checked(checked)
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        "Allow configured local MCP clients to connect",
+                    ))
+                    .on_click(move |checked, _, cx| {
+                        if let Some(this) = change_this.upgrade() {
+                            this.update(cx, |this, cx| this.set_mcp_enabled(*checked, cx));
+                        }
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description("Starts a per-user authenticated control channel for the MCP adapter.")
+    }
+
+    fn mcp_tools_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        let search_text =
+            crate::control_tools::CONTROL_TOOL_GROUPS
+                .iter()
+                .flat_map(|group| {
+                    std::iter::once(group.label)
+                        .chain(std::iter::once(group.description))
+                        .chain(group.tools.iter().filter_map(|name| {
+                            crate::control_tools::tool(name).map(|tool| tool.label)
+                        }))
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+
+        SettingItem::render_searchable(search_text, move |_, _, cx| {
+            let Some(entity) = this.upgrade() else {
+                return div().into_any_element();
+            };
+            let state = entity.read(cx);
+            let writable = state.settings_writable;
+            let enabled_tools = state.settings.mcp.enabled_tools.clone();
+            let open_groups = state.mcp_open_tool_groups.clone();
+
+            let expand_this = this.clone();
+            let collapse_this = this.clone();
+            let toggle_this = this.clone();
+            let mut accordion = Accordion::new("mcp-tool-groups")
+                .multiple(true)
+                .on_toggle_click(move |indices, _, cx| {
+                    if let Some(this) = toggle_this.upgrade() {
+                        this.update(cx, |this, cx| {
+                            this.set_mcp_open_tool_groups(indices, cx);
+                        });
+                    }
+                });
+
+            for group in crate::control_tools::CONTROL_TOOL_GROUPS {
+                let enabled_count = group
+                    .tools
+                    .iter()
+                    .filter(|name| enabled_tools.contains(**name))
+                    .count();
+                let open = open_groups.contains(group.id);
+                let title = h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_3()
+                    .child(div().font_semibold().child(group.label))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{enabled_count} of {} enabled", group.tools.len())),
+                    );
+
+                let enable_this = this.clone();
+                let disable_this = this.clone();
+                let group_id = group.id;
+                let mut contents = v_flex().w_full().gap_3().child(
+                    h_flex()
+                        .w_full()
+                        .items_start()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(group.description),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "mcp-enable-group-{group_id}"
+                                    )))
+                                    .label("Enable all")
+                                    .small()
+                                    .ghost()
+                                    .disabled(!writable)
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            if let Some(this) = enable_this.upgrade() {
+                                                this.update(cx, |this, cx| {
+                                                    this.set_mcp_tool_group_enabled(
+                                                        group_id, true, cx,
+                                                    );
+                                                });
+                                            }
+                                        },
+                                    ),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "mcp-disable-group-{group_id}"
+                                    )))
+                                    .label("Disable all")
+                                    .small()
+                                    .ghost()
+                                    .disabled(!writable)
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            if let Some(this) = disable_this.upgrade() {
+                                                this.update(cx, |this, cx| {
+                                                    this.set_mcp_tool_group_enabled(
+                                                        group_id, false, cx,
+                                                    );
+                                                });
+                                            }
+                                        },
+                                    ),
+                                ),
+                        ),
+                );
+
+                for tool_name in group.tools {
+                    let tool = crate::control_tools::tool(tool_name)
+                        .expect("MCP tool groups must reference registered tools");
+                    let checked = enabled_tools.contains(tool.name);
+                    let change_this = this.clone();
+                    contents = contents.child(
+                        h_flex()
+                            .w_full()
+                            .items_start()
+                            .justify_between()
+                            .gap_3()
+                            .py_1()
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .gap_1()
+                                    .child(div().text_sm().child(tool.label))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(tool.description),
+                                    ),
+                            )
+                            .child(
+                                Switch::new(SharedString::from(format!("mcp-tool-{}", tool.name)))
+                                    .checked(checked)
+                                    .disabled(!writable)
+                                    .tooltip(settings_control_tooltip(
+                                        writable,
+                                        if tool.read_only {
+                                            "Allow this read-only MCP tool"
+                                        } else {
+                                            "Allow this MCP tool to change workspace data"
+                                        },
+                                    ))
+                                    .on_click(move |checked, _, cx| {
+                                        if let Some(this) = change_this.upgrade() {
+                                            this.update(cx, |this, cx| {
+                                                this.set_mcp_tool_enabled(tool.name, *checked, cx);
+                                            });
+                                        }
+                                    }),
+                            ),
+                    );
+                }
+
+                accordion = accordion
+                    .item(|item: AccordionItem| item.title(title).open(open).child(contents));
+            }
+
+            v_flex()
+                .w_full()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_end()
+                        .gap_1()
+                        .child(
+                            Button::new("mcp-expand-all-tool-groups")
+                                .label("Expand all")
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    if let Some(this) = expand_this.upgrade() {
+                                        this.update(cx, |this, cx| {
+                                            this.set_all_mcp_tool_groups_open(true, cx);
+                                        });
+                                    }
+                                }),
+                        )
+                        .child(
+                            Button::new("mcp-collapse-all-tool-groups")
+                                .label("Collapse all")
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    if let Some(this) = collapse_this.upgrade() {
+                                        this.update(cx, |this, cx| {
+                                            this.set_all_mcp_tool_groups_open(false, cx);
+                                        });
+                                    }
+                                }),
+                        ),
+                )
+                .child(accordion)
+                .into_any_element()
+        })
+    }
+
+    fn mcp_follow_agent_activity_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Follow agent activity",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let checked = state.settings.mcp.follow_agent_activity;
+                let writable = state.settings_writable;
+                let change_this = this.clone();
+                Switch::new("mcp-follow-agent-activity")
+                    .checked(checked)
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        "Keep the visible workspace on the request the MCP agent is using",
+                    ))
+                    .on_click(move |checked, _, cx| {
+                        if let Some(this) = change_this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.set_mcp_follow_agent_activity(*checked, cx);
+                            });
+                        }
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description(
+            "Shows the HTTP response, script console, or WebSocket console as the agent changes execution context.",
+        )
+    }
+
+    fn mcp_remote_workspaces_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Allow server workspaces",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let checked = state.settings.mcp.allow_remote_workspaces;
+                let writable = state.settings_writable;
+                let change_this = this.clone();
+                Switch::new("mcp-remote-workspaces")
+                    .checked(checked)
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        "Allow MCP tools to access connected server workspaces",
+                    ))
+                    .on_click(move |checked, _, cx| {
+                        if let Some(this) = change_this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.set_mcp_remote_workspaces_enabled(*checked, cx);
+                            });
+                        }
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description(
+            "Permits workspace tools on the active server workspace; server RBAC still applies.",
+        )
     }
 
     fn snippet_library_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
@@ -238,7 +578,7 @@ impl ApiTester {
                     .label(format!("{selected} spaces"))
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(settings_control_tooltip(
                         writable,
@@ -335,6 +675,58 @@ impl ApiTester {
             }),
         )
         .description("Wrap long lines visually without changing their contents.")
+    }
+
+    fn editor_inline_action_placement_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Inline actions",
+            SettingField::<SharedString>::render(move |_, _, cx| {
+                let Some(entity) = this.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = entity.read(cx);
+                let selected = state.settings.editor.inline_action_placement;
+                let writable = state.settings_writable;
+                let menu_this = this.clone();
+
+                Button::new("editor-inline-action-placement-picker")
+                    .label(selected.label())
+                    .dropdown_caret(true)
+                    .outline()
+                    .w(px(220.))
+                    .disabled(!writable)
+                    .tooltip(settings_control_tooltip(
+                        writable,
+                        "Choose where editor actions are inserted relative to their record",
+                    ))
+                    .dropdown_menu(move |mut menu, _, _| {
+                        menu = menu.min_w(px(220.));
+                        for placement in crate::core::EditorInlineActionPlacement::ALL {
+                            let item_this = menu_this.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(placement.label())
+                                    .checked(placement == selected)
+                                    .on_click(move |_, _, cx| {
+                                        if placement == selected {
+                                            return;
+                                        }
+                                        if let Some(this) = item_this.upgrade() {
+                                            this.update(cx, |this, cx| {
+                                                this.set_editor_inline_action_placement(
+                                                    placement, cx,
+                                                );
+                                            });
+                                        }
+                                    }),
+                            );
+                        }
+                        menu
+                    })
+                    .into_any_element()
+            }),
+        )
+        .description("Place JSONL send actions above each record or after its closing line.")
     }
 
     fn editor_line_numbers_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
@@ -453,7 +845,7 @@ impl ApiTester {
                     .label(format!("{selected} spaces"))
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(settings_control_tooltip(
                         writable,
@@ -536,7 +928,7 @@ impl ApiTester {
                     .label(format!("{selected} columns"))
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(settings_control_tooltip(
                         writable,
@@ -586,7 +978,7 @@ impl ApiTester {
                     .label(selected.label())
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(settings_control_tooltip(
                         writable,
@@ -641,7 +1033,7 @@ impl ApiTester {
                     .label(selected.label())
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(settings_control_tooltip(
                         writable,
@@ -693,7 +1085,7 @@ impl ApiTester {
                     .label(selected.label())
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(settings_control_tooltip(
                         writable,
@@ -900,7 +1292,7 @@ impl ApiTester {
                     .label(selected.label())
                     .dropdown_caret(true)
                     .outline()
-                    .w(px(220.))
+                    .w(rems(13.75))
                     .disabled(!writable)
                     .tooltip(if writable {
                         "Choose which workspace corner contains the Metrics HUD"
@@ -1633,6 +2025,49 @@ pub(super) enum SettingsMessageKind {
     Notice,
 }
 
+pub(super) fn settings_message_overlay(
+    warning: Option<String>,
+    notice: Option<String>,
+    cx: &mut Context<ApiTester>,
+) -> (Pixels, Option<AnyElement>) {
+    let mut messages = Vec::with_capacity(2);
+    if let Some(warning) = warning {
+        messages.push(dismissible_settings_message(
+            warning,
+            cx.theme().danger,
+            SettingsMessageKind::Warning,
+            cx,
+        ));
+    }
+    if let Some(notice) = notice {
+        messages.push(dismissible_settings_message(
+            notice,
+            cx.theme().info,
+            SettingsMessageKind::Notice,
+            cx,
+        ));
+    }
+
+    if messages.is_empty() {
+        return (px(0.), None);
+    }
+
+    let inset =
+        Rems(SETTINGS_MESSAGE_ROW_INSET.0 * messages.len() as f32).to_pixels(cx.theme().font_size);
+    let overlay = deferred(
+        v_flex()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .children(messages),
+    )
+    .with_priority(1)
+    .into_any_element();
+
+    (inset, Some(overlay))
+}
+
 pub(super) fn dismissible_settings_message(
     message: String,
     color: Hsla,
@@ -1643,8 +2078,10 @@ pub(super) fn dismissible_settings_message(
         SettingsMessageKind::Warning => "dismiss-settings-warning",
         SettingsMessageKind::Notice => "dismiss-settings-notice",
     };
+    let background = cx.theme().background.blend(color.opacity(0.1));
 
     h_flex()
+        .occlude()
         .mx_4()
         .mt_3()
         .px_3()
@@ -1653,7 +2090,7 @@ pub(super) fn dismissible_settings_message(
         .rounded_md()
         .border_1()
         .border_color(color.opacity(0.45))
-        .bg(color.opacity(0.1))
+        .bg(background)
         .text_sm()
         .text_color(color)
         .child(div().flex_1().min_w_0().child(message))
@@ -1671,18 +2108,5 @@ pub(super) fn dismissible_settings_message(
                     cx.notify();
                 })),
         )
-        .into_any_element()
-}
-
-pub(super) fn settings_sidebar_underlay(sidebar_width: Pixels, cx: &App) -> AnyElement {
-    div()
-        .absolute()
-        .top_0()
-        .bottom_0()
-        .left_0()
-        .w(sidebar_width)
-        .bg(cx.theme().sidebar)
-        .border_r_1()
-        .border_color(cx.theme().sidebar_border)
         .into_any_element()
 }

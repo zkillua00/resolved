@@ -1,0 +1,16 @@
+name: Version builds
+on:
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: version-build-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    uses: ./.github/workflows/build-release.yml
+    with:
+      channel: version

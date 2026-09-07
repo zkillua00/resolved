@@ -187,6 +187,12 @@ func WithRequestProxy(authService *auth.Service, handler *requestproxy.Handler) 
 			auth.RequirePermission(identity.PermissionRequestsExecute),
 			handler.ExecuteController(),
 		)
+		app.Get(
+			"/api/v1/workspaces/:workspace_id/execute",
+			authService.Middleware(),
+			auth.RequirePermission(identity.PermissionRequestsExecute),
+			handler.WebSocketController(),
+		)
 	}
 }
 

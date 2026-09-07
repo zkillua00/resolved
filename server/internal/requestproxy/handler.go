@@ -1,17 +1,47 @@
 package requestproxy
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log"
+	"net/http"
+	"time"
+
 	"resolved-server/internal/auth"
 	"resolved-server/internal/httpkit"
 	"resolved-server/internal/identity"
+	"resolved-server/internal/problem"
 	"resolved-server/internal/requestproxy/proxybody"
 	"resolved-server/internal/workspaces"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/fiber/v3/middleware/adaptor"
+	gorillaWebsocket "github.com/gorilla/websocket"
 )
 
 type Handler struct {
-	service *Service
+	service        *Service
+	websocketSlots chan struct{}
+}
+
+const (
+	maxWebSocketExecutions      = 500
+	maxWebSocketDescriptorBytes = 1024 * 1024
+	maxWebSocketMessageBytes    = 16 * 1024 * 1024
+)
+
+type websocketExecutionContextKey struct{}
+
+type websocketExecutionContext struct {
+	actor       workspaces.Actor
+	workspaceID string
+}
+
+type websocketOpenResponse struct {
+	Type        string `json:"type"`
+	Message     string `json:"message,omitempty"`
+	Subprotocol string `json:"subprotocol,omitempty"`
 }
 
 type ExecuteRequest struct {
@@ -39,7 +69,10 @@ type AddAllowlistEntryRequest struct {
 type AddAllowlistEntryPayload AddAllowlistEntryRequest
 
 func NewHandler(service *Service) *Handler {
-	return &Handler{service: service}
+	return &Handler{
+		service:        service,
+		websocketSlots: make(chan struct{}, maxWebSocketExecutions),
+	}
 }
 
 func (request *ExecuteRequest) BindFiber(c fiber.Ctx) error {
@@ -159,6 +192,119 @@ func (h *Handler) ExecuteController() fiber.Handler {
 			return httpkit.NewSuccessResponse(fiber.StatusOK, result)
 		},
 	)
+}
+
+func (h *Handler) WebSocketController() fiber.Handler {
+	handler := adaptor.HTTPHandlerWithContext(http.HandlerFunc(h.handleWebSocket))
+	return func(c fiber.Ctx) error {
+		select {
+		case h.websocketSlots <- struct{}{}:
+			defer func() { <-h.websocketSlots }()
+		default:
+			return fiber.ErrTooManyRequests
+		}
+		ctx := context.WithValue(c.Context(), websocketExecutionContextKey{}, websocketExecutionContext{
+			actor:       actorFromContext(c),
+			workspaceID: c.Params("workspace_id"),
+		})
+		c.SetContext(ctx)
+		return handler(c)
+	}
+}
+
+func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	outer, err := (&gorillaWebsocket.Upgrader{
+		HandshakeTimeout: 5 * time.Second,
+		CheckOrigin:      func(*http.Request) bool { return true },
+	}).Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer outer.Close()
+	outer.SetReadLimit(maxWebSocketDescriptorBytes)
+
+	messageType, payload, err := outer.ReadMessage()
+	if err != nil || messageType != gorillaWebsocket.TextMessage {
+		_ = outer.WriteJSON(websocketOpenResponse{Type: "error", Message: "the first frame must be a WebSocket execution descriptor"})
+		return
+	}
+	var input WebSocketOpenInput
+	if err := json.Unmarshal(payload, &input); err != nil {
+		_ = outer.WriteJSON(websocketOpenResponse{Type: "error", Message: "the WebSocket execution descriptor is invalid"})
+		return
+	}
+	fiberContext, contextOK := adaptor.LocalContextFromHTTPRequest(r)
+	if !contextOK {
+		fiberContext = r.Context()
+	}
+	route, ok := fiberContext.Value(websocketExecutionContextKey{}).(websocketExecutionContext)
+	if !ok {
+		_ = outer.WriteJSON(websocketOpenResponse{Type: "error", Message: "the WebSocket execution context is unavailable"})
+		return
+	}
+	startedAt := time.Now()
+	upstream, target, err := h.service.OpenWebSocket(fiberContext, route.actor, route.workspaceID, input)
+	if err != nil {
+		writeWebSocketOpenError(outer, err)
+		return
+	}
+	defer upstream.Close()
+	outer.SetReadLimit(maxWebSocketMessageBytes)
+	upstream.SetReadLimit(maxWebSocketMessageBytes)
+	defer func() {
+		h.service.recordExecution(
+			fiberContext, route.actor, route.workspaceID, "WEBSOCKET", target, 101, time.Since(startedAt),
+		)
+	}()
+	if err := outer.WriteJSON(websocketOpenResponse{Type: "opened", Subprotocol: upstream.Subprotocol()}); err != nil {
+		return
+	}
+
+	errors := make(chan error, 2)
+	bridgeWebSocketControlFrames(outer, upstream)
+	bridgeWebSocketControlFrames(upstream, outer)
+	go relayWebSocket(outer, upstream, errors)
+	go relayWebSocket(upstream, outer, errors)
+	<-errors
+}
+
+func writeWebSocketOpenError(connection *gorillaWebsocket.Conn, err error) {
+	var requestError *problem.Error
+	if !errors.As(err, &requestError) || requestError.Kind == problem.KindInternal {
+		log.Printf("open proxied websocket: %v", err)
+		_ = connection.WriteJSON(websocketOpenResponse{Type: "error", Message: "the server could not open the WebSocket connection"})
+		return
+	}
+	_ = connection.WriteJSON(websocketOpenResponse{Type: "error", Message: requestError.Message})
+}
+
+func bridgeWebSocketControlFrames(source, destination *gorillaWebsocket.Conn) {
+	write := func(messageType int, payload []byte) error {
+		return destination.WriteControl(messageType, payload, time.Now().Add(5*time.Second))
+	}
+	source.SetPingHandler(func(payload string) error {
+		return write(gorillaWebsocket.PingMessage, []byte(payload))
+	})
+	source.SetPongHandler(func(payload string) error {
+		return write(gorillaWebsocket.PongMessage, []byte(payload))
+	})
+	source.SetCloseHandler(func(code int, text string) error {
+		return write(gorillaWebsocket.CloseMessage, gorillaWebsocket.FormatCloseMessage(code, text))
+	})
+}
+
+func relayWebSocket(source, destination *gorillaWebsocket.Conn, errors chan<- error) {
+	for {
+		messageType, payload, err := source.ReadMessage()
+		if err != nil {
+			errors <- err
+			return
+		}
+		if err := destination.WriteMessage(messageType, payload); err != nil {
+			errors <- err
+			return
+		}
+	}
 }
 
 func (h *Handler) AddAllowlistEntryController() fiber.Handler {

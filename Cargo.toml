@@ -1,6 +1,6 @@
 [package]
 name = "api-tester"
-version = "0.4.1"
+version = "0.4.3"
 edition = "2024"
 description = "A native desktop API workbench that keeps request intent, wire state, and responses explicit"
 license = "Apache-2.0"

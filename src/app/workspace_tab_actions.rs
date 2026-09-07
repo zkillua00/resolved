@@ -58,6 +58,7 @@ impl ApiTester {
 
         let was_welcome = self.workspace_tabs.browse_requests();
         self.sidebar_tab = sidebar_tab;
+        self.navigation_sidebar_open = sidebar_tab != SidebarTab::Environments;
         if was_welcome {
             self.hide_preview(cx);
             self.restore_active_request_tab(window, cx);
@@ -71,6 +72,23 @@ impl ApiTester {
             self.show_preview(window, cx);
         }
         cx.notify();
+    }
+
+    pub(super) fn toggle_navigation_sidebar(
+        &mut self,
+        sidebar_tab: SidebarTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspace_tabs.active() == ActiveWorkspaceTab::Request
+            && self.sidebar_tab == sidebar_tab
+            && self.navigation_sidebar_open
+        {
+            self.navigation_sidebar_open = false;
+            cx.notify();
+        } else {
+            self.activate_request_workspace(sidebar_tab, window, cx);
+        }
     }
 
     pub(super) fn activate_workspace_tab(
@@ -119,6 +137,45 @@ impl ApiTester {
                     }
                 }
             },
+        }
+    }
+
+    /// Activate a tab in the strip that owns it. Secondary panes keep their
+    /// selection local; only the pane hosting the global request surface uses
+    /// the legacy global activation path.
+    pub(super) fn activate_workspace_tab_in_pane(
+        &mut self,
+        tab: WorkspaceTab,
+        pane_id: Option<PaneId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane_id) = pane_id else {
+            self.activate_workspace_tab(tab, window, cx);
+            return;
+        };
+        let global_tab = self.workspace_tabs.active_tab(&self.request_tabs);
+        let primary_pane_id = self.panes.pane_for_tab(&global_tab);
+        if primary_pane_id == Some(pane_id) {
+            self.activate_workspace_tab(tab, window, cx);
+            return;
+        }
+        if !self
+            .panes
+            .pane(pane_id)
+            .is_some_and(|pane| pane.contains(&tab))
+        {
+            return;
+        }
+        let changed = self
+            .panes
+            .pane_mut(pane_id)
+            .is_some_and(|pane| pane.activate(&tab));
+        if let WorkspaceTab::Request(tab_id) = tab {
+            self.ensure_pane_editor_for(pane_id, tab_id, window, cx);
+        }
+        if changed {
+            cx.notify();
         }
     }
 

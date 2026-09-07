@@ -22,7 +22,9 @@ pub struct AppSettings {
     pub theme: ThemeSettings,
     pub editor: EditorSettings,
     pub formatter: FormatterSettings,
+    pub zoom: ZoomSettings,
     pub script: ScriptSettings,
+    pub mcp: McpSettings,
     pub navigation_compact: bool,
     pub metrics_position: MetricsPosition,
     pub upstreams: UpstreamSettings,
@@ -30,6 +32,51 @@ pub struct AppSettings {
     /// build changes a setting it understands.
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// Local Model Context Protocol exposure. The transport is absent unless
+/// `enabled` is true, and every call is checked against `enabled_tools` inside
+/// the desktop process as well as filtered from MCP discovery.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct McpSettings {
+    pub enabled: bool,
+    /// Keep the native workspace focused on the HTTP, script-console, or
+    /// WebSocket execution currently being driven through MCP.
+    pub follow_agent_activity: bool,
+    /// Allow workspace-scoped MCP tools to inspect or change connected server
+    /// workspaces. Server RBAC remains authoritative when this is enabled.
+    pub allow_remote_workspaces: bool,
+    #[serde(default = "default_mcp_tools")]
+    pub enabled_tools: std::collections::BTreeSet<String>,
+    /// Preserve fields written by a newer application version.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl McpSettings {
+    pub fn tool_enabled(&self, name: &str) -> bool {
+        self.enabled && self.enabled_tools.contains(name)
+    }
+}
+
+impl Default for McpSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            follow_agent_activity: true,
+            allow_remote_workspaces: false,
+            enabled_tools: default_mcp_tools(),
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
+fn default_mcp_tools() -> std::collections::BTreeSet<String> {
+    crate::control_tools::CONTROL_TOOLS
+        .iter()
+        .map(|tool| tool.name.to_owned())
+        .collect()
 }
 
 const DEFAULT_EDITOR_TAB_SIZE: u8 = 2;
@@ -40,6 +87,14 @@ const MAX_INDENT_SIZE: u64 = 16;
 const MIN_FORMATTER_LINE_WIDTH: u64 = 40;
 const MAX_FORMATTER_LINE_WIDTH: u64 = 240;
 const DEFAULT_SCRIPT_TIMEOUT_MS: u64 = 30_000;
+/// Neutral zoom: baseline theme typography, no up- or down-scaling.
+pub const DEFAULT_ZOOM_PERCENT: u16 = 100;
+/// Minimum zoom as a percentage of the baseline theme font size.
+pub const MIN_ZOOM_PERCENT: u16 = 50;
+/// Maximum zoom as a percentage of the baseline theme font size.
+pub const MAX_ZOOM_PERCENT: u16 = 200;
+/// Amount each zoom-in/zoom-out step changes the percentage.
+pub const ZOOM_STEP_PERCENT: u16 = 10;
 
 fn default_script_timeout_ms() -> u64 {
     DEFAULT_SCRIPT_TIMEOUT_MS
@@ -120,6 +175,7 @@ pub struct EditorSettings {
         deserialize_with = "deserialize_bool_default_true"
     )]
     pub auto_close_pairs: bool,
+    pub inline_action_placement: EditorInlineActionPlacement,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -133,7 +189,27 @@ impl Default for EditorSettings {
             line_numbers: true,
             indent_guides: true,
             auto_close_pairs: true,
+            inline_action_placement: EditorInlineActionPlacement::Above,
             extra: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EditorInlineActionPlacement {
+    #[default]
+    Above,
+    After,
+}
+
+impl EditorInlineActionPlacement {
+    pub const ALL: [Self; 2] = [Self::Above, Self::After];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Above => "Above record",
+            Self::After => "After record",
         }
     }
 }
@@ -149,6 +225,107 @@ impl EditorSettings {
     pub fn set_tab_size(&mut self, tab_size: u8) {
         self.tab_size = tab_size.clamp(MIN_INDENT_SIZE as u8, MAX_INDENT_SIZE as u8);
     }
+}
+
+/// Independent typography zoom for the application interface and for code
+/// editors, stored as percentages of the active theme's baseline font sizes.
+///
+/// Kept separate from the CSS theme so changing zoom never rewrites a user's
+/// saved theme source, and kept as integers so persisted settings round-trip
+/// exactly and stay comparable.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ZoomSettings {
+    /// Interface zoom as a percentage of the theme's `.app` font size.
+    #[serde(
+        default = "default_zoom_percent",
+        deserialize_with = "deserialize_zoom_ui"
+    )]
+    pub ui: u16,
+    /// Code editor zoom as a percentage of the theme's `.editor` font size.
+    #[serde(
+        default = "default_zoom_percent",
+        deserialize_with = "deserialize_zoom_editor"
+    )]
+    pub editor: u16,
+    /// Preserve fields written by a newer application version.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl Default for ZoomSettings {
+    fn default() -> Self {
+        Self {
+            ui: DEFAULT_ZOOM_PERCENT,
+            editor: DEFAULT_ZOOM_PERCENT,
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
+impl ZoomSettings {
+    /// Clamp a raw percentage into the supported zoom range.
+    pub fn clamped(percent: u16) -> u16 {
+        percent.clamp(MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT)
+    }
+
+    /// The interface zoom as a multiplier applied to the theme's UI font.
+    pub fn effective_ui(&self) -> f32 {
+        Self::clamped(self.ui) as f32 / 100.0
+    }
+
+    /// The editor zoom as a multiplier applied to the theme's editor font.
+    pub fn effective_editor(&self) -> f32 {
+        Self::clamped(self.editor) as f32 / 100.0
+    }
+
+    /// Adjust the interface zoom by `ZOOM_STEP_PERCENT` steps (`+1` in, `-1`
+    /// out, `0` resets to the baseline), clamping to the supported range.
+    pub fn step_ui(&mut self, steps: i16) {
+        self.ui = Self::clamped(
+            (i32::from(self.ui) + i32::from(steps) * i32::from(ZOOM_STEP_PERCENT))
+                .clamp(i32::from(MIN_ZOOM_PERCENT), i32::from(MAX_ZOOM_PERCENT)) as u16,
+        );
+    }
+
+    /// Adjust the editor zoom by `ZOOM_STEP_PERCENT` steps (see [`step_ui`]).
+    pub fn step_editor(&mut self, steps: i16) {
+        self.editor = Self::clamped(
+            (i32::from(self.editor) + i32::from(steps) * i32::from(ZOOM_STEP_PERCENT))
+                .clamp(i32::from(MIN_ZOOM_PERCENT), i32::from(MAX_ZOOM_PERCENT)) as u16,
+        );
+    }
+}
+
+const fn default_zoom_percent() -> u16 {
+    DEFAULT_ZOOM_PERCENT
+}
+
+fn deserialize_zoom_ui<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_zoom(deserializer)
+}
+
+fn deserialize_zoom_editor<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_zoom(deserializer)
+}
+
+fn deserialize_zoom<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(bounded_integer(
+        &value,
+        u64::from(DEFAULT_ZOOM_PERCENT),
+        u64::from(MIN_ZOOM_PERCENT),
+        u64::from(MAX_ZOOM_PERCENT),
+    ) as u16)
 }
 
 /// Options consumed by the built-in JSON and JavaScript formatters.
@@ -632,9 +809,47 @@ mod tests {
         assert_eq!(settings.theme, ThemeSettings::default());
         assert_eq!(settings.editor, EditorSettings::default());
         assert_eq!(settings.formatter, FormatterSettings::default());
+        assert_eq!(settings.mcp, McpSettings::default());
+        assert!(!settings.mcp.enabled);
+        assert!(settings.mcp.follow_agent_activity);
+        assert!(!settings.mcp.allow_remote_workspaces);
+        assert_eq!(
+            settings.mcp.enabled_tools.len(),
+            crate::control_tools::CONTROL_TOOLS.len()
+        );
         assert_eq!(settings.upstreams, UpstreamSettings::default());
         assert!(!settings.navigation_compact);
         assert_eq!(settings.metrics_position, MetricsPosition::BottomRight);
+    }
+
+    #[test]
+    fn mcp_settings_round_trip_and_preserve_unknown_tools() {
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "mcp": {
+                "enabled": true,
+                "follow_agent_activity": false,
+                "allow_remote_workspaces": true,
+                "enabled_tools": ["status", "future_tool"],
+                "future_policy": "prompt"
+            }
+        }))
+        .unwrap();
+
+        assert!(settings.mcp.enabled);
+        assert!(!settings.mcp.follow_agent_activity);
+        assert!(settings.mcp.allow_remote_workspaces);
+        assert!(settings.mcp.tool_enabled("status"));
+        assert!(!settings.mcp.tool_enabled("get_request"));
+        assert!(settings.mcp.enabled_tools.contains("future_tool"));
+        assert_eq!(
+            settings.mcp.extra.get("future_policy"),
+            Some(&serde_json::json!("prompt"))
+        );
+        let encoded = serde_json::to_value(&settings).unwrap();
+        assert_eq!(
+            serde_json::from_value::<AppSettings>(encoded).unwrap(),
+            settings
+        );
     }
 
     #[test]
@@ -891,6 +1106,29 @@ mod tests {
     }
 
     #[test]
+    fn inline_action_placement_round_trips_with_above_as_the_legacy_default() {
+        let legacy: EditorSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            legacy.inline_action_placement,
+            EditorInlineActionPlacement::Above
+        );
+
+        for placement in EditorInlineActionPlacement::ALL {
+            let settings = EditorSettings {
+                inline_action_placement: placement,
+                ..Default::default()
+            };
+            let encoded = serde_json::to_value(&settings).unwrap();
+            assert_eq!(
+                serde_json::from_value::<EditorSettings>(encoded)
+                    .unwrap()
+                    .inline_action_placement,
+                placement
+            );
+        }
+    }
+
+    #[test]
     fn saved_theme_ids_are_unique_and_lookup_is_stable() {
         let first = SavedTheme::new("First", "first source", None);
         let second = SavedTheme::new(
@@ -951,6 +1189,52 @@ mod tests {
         let decoded: SavedTheme = serde_json::from_str(&encoded).unwrap();
 
         assert_eq!(decoded, theme);
+    }
+
+    #[test]
+    fn zoom_settings_default_clamp_and_round_trip() {
+        let default = ZoomSettings::default();
+        assert_eq!(default.ui, DEFAULT_ZOOM_PERCENT);
+        assert_eq!(default.editor, DEFAULT_ZOOM_PERCENT);
+        assert_eq!(default.effective_ui(), 1.0);
+        assert_eq!(default.effective_editor(), 1.0);
+
+        let mut zoom = ZoomSettings::default();
+        zoom.step_ui(1);
+        assert_eq!(zoom.ui, 110);
+        zoom.step_editor(-3);
+        assert_eq!(zoom.editor, 70);
+        // Steps clamp to the supported range.
+        zoom.step_ui(-20);
+        assert_eq!(zoom.ui, 50);
+        zoom.step_ui(400);
+        assert_eq!(zoom.ui, 200);
+        assert_eq!(zoom.effective_ui(), 2.0);
+
+        // Malformed stored values fall back or clamp instead of bricking load.
+        let settings: AppSettings = serde_json::from_str(
+            r#"{
+                "zoom": {
+                    "ui": 10,
+                    "editor": "999",
+                    "future_zoom_option": { "smooth": true }
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(settings.zoom.ui, 50);
+        assert_eq!(settings.zoom.editor, 200);
+        assert_eq!(
+            settings.zoom.extra.get("future_zoom_option"),
+            Some(&serde_json::json!({ "smooth": true }))
+        );
+
+        // Old settings without a `zoom` key load with defaults.
+        let from_old: ZoomSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(from_old, default);
+        let encoded = serde_json::to_string(&default).unwrap();
+        let decoded: ZoomSettings = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, default);
     }
 
     #[test]

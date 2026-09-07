@@ -166,7 +166,7 @@ impl ApiTester {
             .debug_selector(|| "upstream-login-page".to_owned())
             .child(
                 h_flex()
-                    .h(px(APP_TITLE_BAR_HEIGHT))
+                    .h(APP_TITLE_BAR_HEIGHT)
                     .flex_shrink_0()
                     .pl(window_chrome::leading_inset())
                     .pr(window_chrome::trailing_inset())
@@ -1335,6 +1335,14 @@ mod tests {
 
         cx.update(|window, cx| {
             app.update(cx, |app, cx| {
+                app.url.update(cx, |url, cx| {
+                    url.set_value("https://buffered.example.test", window, cx)
+                });
+            });
+        });
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
                 app.switch_to_local_workspace(default_id.clone(), window, cx);
             });
         });
@@ -1350,6 +1358,17 @@ mod tests {
                 second_id,
                 app.database_store.active_local_workspace_id().unwrap()
             );
+        });
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.switch_to_local_workspace(second_id, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let app = app.read(cx);
+            assert_eq!(app.url.read(cx).value(), "https://buffered.example.test");
         });
     }
 

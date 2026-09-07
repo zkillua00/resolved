@@ -5,9 +5,10 @@
 use std::sync::OnceLock;
 
 use gpui::{
-    App, AppContext as _, Application, Bounds, ClickEvent, Context, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Window,
-    WindowBounds, WindowOptions, div, px, size,
+    App, AppContext as _, Application, Bounds, ClickEvent, Context, Entity,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    StatefulInteractiveElement as _, Styled as _, Window, WindowBounds, WindowOptions, div, px,
+    size,
 };
 use gpui_wry::WebView as GpuiWebView;
 use wry::{NewWindowResponse, WebViewBuilder};
@@ -17,7 +18,11 @@ static LOG_PATH: OnceLock<String> = OnceLock::new();
 fn log(message: &str) {
     let Some(path) = LOG_PATH.get() else { return };
     use std::io::Write as _;
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(file, "{message}");
     }
 }
@@ -93,7 +98,12 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| ProbeRoot { webview: None, clicked: false }),
+            |_, cx| {
+                cx.new(|_| ProbeRoot {
+                    webview: None,
+                    clicked: false,
+                })
+            },
         );
         log(&format!("open_window -> {opened:?}"));
         cx.activate(true);

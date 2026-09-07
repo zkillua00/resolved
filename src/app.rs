@@ -12,19 +12,19 @@ use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Corner, Entity, EntityId,
     EntityInputHandler, ExternalPaths, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _,
-    PathPromptOptions, Pixels, Point, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, Timer, WeakEntity, Window, anchored, deferred, div, img,
-    point, prelude::FluentBuilder as _, px,
+    PathPromptOptions, Pixels, Point, Rems, Render, ScrollHandle, ScrollWheelEvent, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Timer, WeakEntity, Window,
+    anchored, deferred, div, img, point, prelude::FluentBuilder as _, px, rems,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Root, RopeExt as _, Selectable as _,
     Sizable as _, StyledExt as _, WindowExt as _,
+    accordion::{Accordion, AccordionItem},
     button::{Button, ButtonVariant, ButtonVariants as _},
     checkbox::Checkbox,
-    clipboard::Clipboard,
     dialog::DialogButtonProps,
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputInlineAction, InputInlineActionPlacement, InputState},
     menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
     notification::Notification,
     popover::Popover,
@@ -47,10 +47,11 @@ use crate::{
         AppSettings, BodyField, BodyFieldKind, BodyMode, COLLECTIONS_CREATE, COLLECTIONS_DELETE,
         COLLECTIONS_UPDATE, Collection, CollectionFolder, CookieJar, CredentialVault,
         DEFAULT_REQUEST_TAB_TITLE, DatabaseStore, ENVIRONMENT_VALUES_UPDATE, ENVIRONMENTS_CREATE,
-        ENVIRONMENTS_DELETE, ENVIRONMENTS_READ, ENVIRONMENTS_UPDATE, Environment,
-        EnvironmentMutation, FormatterSettings, HeaderEntry, HistoryEntry, HostnameOverride,
-        ImportBundle, InterchangeFormat, LocalWorkspace, LocalWorkspaceProvider,
-        MAX_INTERCHANGE_BYTES, MAX_SNIPPET_NAME_BYTES, PostResponseResult, PreRequestResult,
+        ENVIRONMENTS_DELETE, ENVIRONMENTS_READ, ENVIRONMENTS_UPDATE, EditorInlineActionPlacement,
+        Environment, EnvironmentMutation, EnvironmentVariable, FormatterSettings, HeaderEntry,
+        HistoryEntry, HostnameOverride, ImportBundle, InterchangeFormat, LocalWorkspace,
+        LocalWorkspaceProvider, MAX_INTERCHANGE_BYTES, MAX_SNIPPET_NAME_BYTES,
+        MAX_WEBSOCKET_TIMELINE_ENTRIES, PostResponseResult, PreRequestResult, QueryParamEntry,
         REDACTED_VALUE, REQUESTS_CREATE, REQUESTS_DELETE, REQUESTS_UPDATE, RawBodyLanguage,
         RealtimeResourceChange, RealtimeSignal, RemoteWorkspaceProvider, RequestDraft,
         RequestError, RequestExecutionMode, RequestExecutionSettings, RequestHistory,
@@ -58,25 +59,34 @@ use crate::{
         RequestTabGroupColor, RequestTabGroupId, RequestTabId, RequestTabRecord, RequestTabs,
         RequestTask, RequestTemplate, ResourceCreator, ResponseData, SERVER_SETTINGS_UPDATE,
         STANDARD_HTTP_METHODS, SavedRequest, SavedTheme, ScriptCancellation, ScriptDiagnostic,
-        ScriptEnvironment, ScriptError, ScriptErrorKind, ScriptLogLevel, ScriptPhase, ScriptReport,
-        ScriptScope, SharedHistoryUpload, ShortcutOverride, Snippet, SnippetCancellation,
-        SnippetCategory, SnippetKind, SnippetLog, SnippetRequirement, SnippetSelection,
-        SnippetSelectionArea, SnippetSelectionSource, SnippetTextRange, UpstreamCollectionView,
-        UpstreamCredential, UpstreamEnvironmentView, UpstreamProfile, UpstreamSavedRequestView,
-        UpstreamWorkspaceError, UpstreamWorkspaceSummary, UpstreamWorkspaceView, WORKSPACES_CREATE,
-        WORKSPACES_DELETE, WORKSPACES_UPDATE, Workspace, WorkspaceMutationError, WorkspaceProvider,
-        WorkspaceProviderId, WorkspaceProviderRegistry, add_upstream_proxy_allowlist_entry,
-        build_client_with_cookie_jar, build_upstream_client, build_upstream_execution_client,
-        create_upstream_collection, create_upstream_environment, create_upstream_saved_request,
+        ScriptEnvironment, ScriptError, ScriptErrorKind, ScriptLog, ScriptLogLevel, ScriptPhase,
+        ScriptReport, ScriptScope, SharedHistoryUpload, ShortcutOverride, Snippet,
+        SnippetCancellation, SnippetCategory, SnippetKind, SnippetLog, SnippetRequirement,
+        SnippetSelection, SnippetSelectionArea, SnippetSelectionSource, SnippetTextRange,
+        UpstreamCollectionView, UpstreamCredential, UpstreamEnvironmentView, UpstreamProfile,
+        UpstreamSavedRequestView, UpstreamWorkspaceError, UpstreamWorkspaceSummary,
+        UpstreamWorkspaceView, WORKSPACES_CREATE, WORKSPACES_DELETE, WORKSPACES_READ,
+        WORKSPACES_UPDATE, WebSocketAutomationEvent, WebSocketCommand, WebSocketMessageTemplate,
+        WebSocketReplay, WebSocketSavedMessage, WebSocketSignal, WebSocketWorkspace, Workspace,
+        WorkspaceMutationError, WorkspaceProvider, WorkspaceProviderId, WorkspaceProviderRegistry,
+        add_upstream_proxy_allowlist_entry, binary_preview, build_client_with_cookie_jar, build_upstream_client,
+        build_upstream_execution_client, create_upstream_collection, create_upstream_environment,
+        create_upstream_environment_variable, create_upstream_saved_request,
         create_upstream_workspace, delete_shared_history, delete_upstream_collection,
-        delete_upstream_environment, delete_upstream_saved_request, delete_upstream_workspace,
-        export_request, format_body, generate_snippet, get_upstream_user, get_upstream_workspace,
-        import_requests, is_probably_text, list_upstream_environments, list_upstream_workspaces,
-        login_upstream, move_upstream_collection, move_upstream_saved_request,
-        normalize_upstream_url, resolve_request, save_upstream_environment,
-        send_request_for_upstream_workspace, spawn_request, update_request_execution_settings,
-        update_upstream_collection, update_upstream_saved_request, update_upstream_workspace,
-        upload_shared_history, watch_upstream_changes,
+        delete_upstream_environment, delete_upstream_environment_variable,
+        delete_upstream_saved_request, delete_upstream_workspace, execute_websocket_automation,
+        export_request, format_body, generate_snippet, get_upstream_execution_policy,
+        get_upstream_user, get_upstream_workspace, import_requests, is_probably_text,
+        list_upstream_environments, list_upstream_workspaces, login_upstream,
+        move_upstream_collection, move_upstream_saved_request, normalize_upstream_url,
+        put_upstream_environment_variable_value, query_params_from_url, render_message_template,
+        replay_frames, replay_websocket_frames, resolve_request, run_upstream_websocket_connection,
+        run_websocket_connection, save_upstream_environment, send_request_for_upstream_workspace,
+        spawn_request, template_variable_names, update_request_execution_settings,
+        update_upstream_collection, update_upstream_environment,
+        update_upstream_environment_variable, update_upstream_saved_request,
+        update_upstream_workspace, upload_shared_history, url_with_query_params,
+        watch_upstream_changes,
     },
     debug_overlay::DebugOverlay,
     request_dirty::{RequestDirtyPart, RequestDirtyState},
@@ -99,6 +109,7 @@ mod bootstrap;
 mod collection_folder_actions;
 mod collections_actions;
 mod collections_page;
+mod control;
 mod drag_drop;
 mod editor_settings;
 mod environment_browser;
@@ -116,6 +127,7 @@ mod pane_editor;
 mod pane_tree;
 mod pending_delete;
 mod persistence;
+mod query_params_editor;
 mod realtime;
 mod request_actions;
 mod request_body_editor;
@@ -153,12 +165,14 @@ mod title_bar;
 mod ui_utils;
 mod upstream_connections;
 mod upstream_workspace_actions;
+mod websocket_workspace;
 mod welcome_page;
 mod window_chrome;
 mod workspace_connections;
 mod workspace_panes;
 mod workspace_tab;
 mod workspace_tab_actions;
+mod zoom_settings;
 
 use environment_variable_grid::EnvironmentVariableRow;
 use execution_stage::*;
@@ -166,6 +180,7 @@ use headers_editor::HeaderRow;
 use pane_editor::*;
 use pane_tree::*;
 use pending_delete::*;
+use query_params_editor::QueryParamRow;
 use request_interchange::RequestInterchangeState;
 use request_pane::*;
 use request_tab_runtime::*;
@@ -177,6 +192,7 @@ use template_variable_popover_model::*;
 use template_variables::*;
 use ui_utils::*;
 use upstream_connections::*;
+use websocket_workspace::*;
 use workspace_connections::*;
 use workspace_tab::*;
 
@@ -185,7 +201,12 @@ const TEMPLATE_HOVER_DEBOUNCE: Duration = Duration::from_millis(120);
 const REQUEST_TABS_PERSIST_DEBOUNCE: Duration = Duration::from_millis(450);
 const THEME_EDITOR_VALIDATION_DEBOUNCE: Duration = Duration::from_millis(100);
 const THEME_EDITOR_PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
-const APP_TITLE_BAR_HEIGHT: f32 = 52.;
+/// Height of every in-app title bar, in rems so interface zoom scales it.
+const APP_TITLE_BAR_HEIGHT: Rems = Rems(3.25);
+/// Docked HTTP editors need enough vertical room for both halves of their
+/// request/response split. Shorter panes scroll as a whole instead of clipping
+/// the response editor below the pane boundary.
+const MIN_DOCKED_REQUEST_SURFACE_HEIGHT: Pixels = px(720.);
 
 struct ThemeEditorSession {
     theme_id: Option<String>,
@@ -244,6 +265,9 @@ pub struct ApiTester {
     pre_request_script: Entity<CodeEditor>,
     post_response_script: Entity<CodeEditor>,
     response_editor: Entity<CodeEditor>,
+    query_params: Vec<QueryParamRow>,
+    next_query_param_id: usize,
+    syncing_query_params: bool,
     headers: Vec<HeaderRow>,
     next_header_id: usize,
     body_mode: BodyMode,
@@ -256,6 +280,12 @@ pub struct ApiTester {
     sending: bool,
     execution_stage: Option<ExecutionStage>,
     request_generation: u64,
+    mcp_http_operation_id: Option<u64>,
+    mcp_http_request_id: Option<String>,
+    mcp_http_exchange: Option<control::McpHttpExchangeSnapshot>,
+    mcp_scoped_local_workspace_id: Option<String>,
+    mcp_request_sequence_generation: u64,
+    mcp_request_sequence: Option<control::McpRequestSequence>,
     abort_handle: Option<AbortHandle>,
     script_cancellation: Option<ScriptCancellation>,
     request_namespace: crate::core::RequestNamespaceCatalog,
@@ -267,6 +297,18 @@ pub struct ApiTester {
     script_diagnostic: Option<ScriptDiagnostic>,
     pre_script_report: Option<ScriptReport>,
     post_script_report: Option<ScriptReport>,
+    script_console_input: Entity<CodeEditor>,
+    script_console_running: bool,
+    mcp_script_console_generation: u64,
+    mcp_script_console_operation_id: Option<u64>,
+    mcp_script_console_request_id: Option<String>,
+    mcp_script_console_owned: bool,
+    script_console_history: Vec<String>,
+    script_console_history_cursor: Option<usize>,
+    script_console_history_draft: String,
+    script_console_scroll: ScrollHandle,
+    script_console_expanded_rows: HashSet<String>,
+    script_console_cleared_key: Option<u64>,
     preview_error: Option<String>,
     copied: bool,
     client: Client,
@@ -277,6 +319,9 @@ pub struct ApiTester {
     snippets: Vec<Snippet>,
     workspace: Workspace,
     database_store: DatabaseStore,
+    _control_server: Option<crate::control_server::ControlServer>,
+    mcp_websocket_generation: u64,
+    mcp_websocket: Option<control::ControlWebSocketConnection>,
     workspace_providers: WorkspaceProviderRegistry,
     local_workspaces: Vec<LocalWorkspace>,
     credential_vault: CredentialVault,
@@ -290,8 +335,10 @@ pub struct ApiTester {
     realtime_status: RealtimeConnectionStatus,
     realtime_refresh_generation: u64,
     realtime_refresh_abort_handle: Option<AbortHandle>,
+    websocket_workspace: WebSocketWorkspaceState,
     workspace_name: Entity<InputState>,
     sidebar_tab: SidebarTab,
+    navigation_sidebar_open: bool,
     navigation_compact: bool,
     selected_collection_id: Option<String>,
     selected_folder_id: Option<String>,
@@ -311,12 +358,18 @@ pub struct ApiTester {
     workspace_tabs: WorkspaceTabs,
     panes: PaneRoot,
     pane_editors: HashMap<PaneId, PaneEditorState>,
+    primary_pane_scroll: ScrollHandle,
+    /// Independent network jobs started from secondary panes, keyed by request
+    /// tab so switching a pane cannot redirect a completion into another tab.
+    pane_request_generation: u64,
+    pane_requests_in_flight: HashMap<String, u64>,
     settings: AppSettings,
     settings_warning: Option<String>,
     settings_writable: bool,
     base_key_bindings: Vec<gpui::KeyBinding>,
     recording_shortcut_id: Option<ShortcutId>,
     settings_notice: Option<String>,
+    mcp_open_tool_groups: HashSet<String>,
     server_management: server_management::ServerManagementState,
     server_management_generation: u64,
     server_management_abort_handle: Option<AbortHandle>,

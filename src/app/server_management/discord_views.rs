@@ -30,8 +30,12 @@ pub(super) fn render_user_management(this: &WeakEntity<ApiTester>, cx: &mut App)
             management.status.clone(),
             management.upstream_id.clone(),
             snapshot.is_some(),
-            snapshot.and_then(|snapshot| snapshot.users.as_ref()).cloned(),
-            snapshot.and_then(|snapshot| snapshot.roles.as_ref()).cloned(),
+            snapshot
+                .and_then(|snapshot| snapshot.users.as_ref())
+                .cloned(),
+            snapshot
+                .and_then(|snapshot| snapshot.roles.as_ref())
+                .cloned(),
             management.selected_user_id.clone(),
             management.status.busy(),
             snapshot.is_some_and(|snapshot| snapshot.has_permission(USERS_CREATE)),
@@ -83,15 +87,9 @@ pub(super) fn render_user_management(this: &WeakEntity<ApiTester>, cx: &mut App)
         cx,
     );
     let detail = match selected {
-        Some(user) => render_user_detail(
-            user,
-            &roles,
-            can_update,
-            can_assign_roles,
-            busy,
-            this,
-            cx,
-        ),
+        Some(user) => {
+            render_user_detail(user, &roles, can_update, can_assign_roles, busy, this, cx)
+        }
         None => management_detail_empty("No users on this server.", cx),
     };
     management_split_panel(sidebar, detail)
@@ -430,7 +428,9 @@ pub(super) fn render_role_management(this: &WeakEntity<ApiTester>, cx: &mut App)
         let state = entity.read(cx);
         let management = &state.server_management;
         let snapshot = management.snapshot.as_ref();
-        let roles = snapshot.and_then(|snapshot| snapshot.roles.as_ref()).cloned();
+        let roles = snapshot
+            .and_then(|snapshot| snapshot.roles.as_ref())
+            .cloned();
         let drafts = management.role_permission_drafts.clone();
         // One dedup pass per frame: how many permission keys each role row
         // shows. Rows read their own precomputed count instead of building a
@@ -645,7 +645,10 @@ fn render_role_detail(
         // permission list) instead of materializing a key set per frame.
         let checked = match draft {
             Some(draft) => draft.selected.contains(&permission.key),
-            None => role.permissions.iter().any(|owned| owned.key == permission.key),
+            None => role
+                .permissions
+                .iter()
+                .any(|owned| owned.key == permission.key),
         };
         let action_this = this.clone();
         let action_role_id = role.id.clone();
@@ -896,7 +899,9 @@ pub(super) fn render_resource_management(this: &WeakEntity<ApiTester>, cx: &mut 
             snapshot
                 .and_then(|snapshot| snapshot.workspaces.as_ref())
                 .cloned(),
-            snapshot.and_then(|snapshot| snapshot.users.as_ref()).cloned(),
+            snapshot
+                .and_then(|snapshot| snapshot.users.as_ref())
+                .cloned(),
             management.selected_resource.clone(),
             management.status.busy(),
             snapshot.is_some_and(|snapshot| snapshot.has_permission(WORKSPACES_ASSIGN_USERS)),

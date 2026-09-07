@@ -90,12 +90,30 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.handle_websocket_quick_send_submit(window, cx) {
+            return;
+        }
         if self.sending {
             self.cancel_request(cx);
         } else {
             self.activate_request_workspace(SidebarTab::Collections, window, cx);
             self.start_request(window, cx);
         }
+    }
+
+    pub(crate) fn on_quick_send_websocket_template(
+        &mut self,
+        _: &shortcuts::QuickSendWebSocketTemplate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspace_tabs.active() != ActiveWorkspaceTab::Request
+            || self.sidebar_tab != SidebarTab::Collections
+            || !self.request_tabs.active().template().is_websocket()
+        {
+            return;
+        }
+        self.open_websocket_quick_send(window, cx);
     }
 
     pub(crate) fn on_save_request(
@@ -178,7 +196,7 @@ impl ApiTester {
                 let editor = self.post_response_script.clone();
                 self.format_script_editor(editor, "post-response", window, cx);
             }
-            RequestPane::Headers => {
+            RequestPane::Params | RequestPane::Headers => {
                 self.request_notice =
                     Some("Open a raw body or script editor to format its buffer.".to_owned());
                 cx.notify();

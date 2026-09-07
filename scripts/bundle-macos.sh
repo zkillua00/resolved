@@ -4,9 +4,6 @@ set -eu
 project_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 profile="${1:-release}"
 
-"$project_dir/scripts/prepare-gpui.sh"
-"$project_dir/scripts/prepare-typescript-service.sh"
-
 case "$profile" in
     debug)
         cargo_profile="dev"
@@ -22,7 +19,7 @@ case "$profile" in
         ;;
 esac
 
-cargo build --manifest-path "$project_dir/Cargo.toml" --profile "$cargo_profile"
+"$project_dir/scripts/cargo.sh" build --locked --profile "$cargo_profile"
 
 bundle_dir="$project_dir/target/$binary_dir/Resolved.app"
 contents_dir="$bundle_dir/Contents"
@@ -108,7 +105,7 @@ fi
 echo "$bundle_dir ($package_version, build $build_number)"
 
 if [ "$profile" = "release" ]; then
-    archive_name="Resolved-$package_version-$build_number-macos.zip"
+    archive_name="Resolved-${RESOLVED_BUILD_VERSION:-$package_version}-$build_number-macos.zip"
     archive_path="$project_dir/target/$binary_dir/$archive_name"
     archive_staging_dir="$(mktemp -d "$project_dir/target/$binary_dir/.resolved-package.XXXXXX")"
     archive_staging_path="$archive_staging_dir/$archive_name"

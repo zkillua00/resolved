@@ -57,9 +57,7 @@ try {
     $extracted = Join-Path $tempRoot 'extracted'
     $pkgLib = Join-Path $extracted 'package/lib'
     New-Item -ItemType Directory -Path (Join-Path $extracted 'package') | Out-Null
-    tar -xzf $archive -C $extracted package/lib/typescript.js `
-        'package/lib/lib.es5.d.ts' 'package/lib/lib.esnext.d.ts' `
-        'package/lib/lib.decorators.d.ts' 'package/lib/lib.decorators.legacy.d.ts' `
+    tar -xzf $archive -C $extracted package/lib `
         package/LICENSE.txt package/ThirdPartyNoticeText.txt
     if ($LASTEXITCODE -ne 0) { throw "tar extraction failed for $archiveName" }
 
@@ -67,8 +65,8 @@ try {
     # compiler, license, and notices, mirroring the shell driver's checks.
     $declarations = @(Get-ChildItem -Path $pkgLib -Filter 'lib.es*.d.ts')
     $decorators = @(Get-ChildItem -Path $pkgLib -Filter 'lib.decorators*.d.ts')
-    if (($declarations.Count + 1) -ne $expectedDeclarationCount) {
-        throw "TypeScript $typescriptVersion archive layout changed: found $($declarations.Count + 1) declaration files, expected $expectedDeclarationCount"
+    if (($declarations.Count + $decorators.Count) -ne $expectedDeclarationCount) {
+        throw "TypeScript $typescriptVersion archive layout changed: found $($declarations.Count + $decorators.Count) declaration files, expected $expectedDeclarationCount"
     }
     if ($decorators.Count -lt 2) {
         throw "TypeScript $typescriptVersion archive layout changed: lib.decorators* missing"
@@ -76,7 +74,7 @@ try {
 
     New-Item -ItemType Directory -Path (Join-Path $vendorDir 'lib') -Force | Out-Null
     Copy-Item (Join-Path $pkgLib 'typescript.js') (Join-Path $vendorDir 'lib/typescript.js')
-    foreach ($declaration in $declarations) {
+    foreach ($declaration in ($declarations + $decorators)) {
         Copy-Item $declaration.FullName (Join-Path $vendorDir "lib/$($declaration.Name)")
     }
     Copy-Item (Join-Path $extracted 'package/LICENSE.txt') (Join-Path $vendorDir 'LICENSE.txt')

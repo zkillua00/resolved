@@ -12,7 +12,7 @@ impl ApiTester {
             .and_then(|editor_id| self.theme_editor_title(editor_id))
             .unwrap_or_else(|| "Theme CSS".to_owned());
         h_flex()
-            .h(px(APP_TITLE_BAR_HEIGHT))
+            .h(APP_TITLE_BAR_HEIGHT)
             .flex_shrink_0()
             .pl(window_chrome::leading_inset())
             .pr(window_chrome::trailing_inset())

@@ -19,6 +19,8 @@ pub(in crate::app) struct PaneEditorState {
     pre_request_script: Entity<CodeEditor>,
     post_response_script: Entity<CodeEditor>,
     response_editor: Entity<CodeEditor>,
+    query_params: Vec<QueryParamRow>,
+    next_query_param_id: usize,
     headers: Vec<HeaderRow>,
     next_header_id: usize,
     body_mode: BodyMode,
@@ -43,10 +45,17 @@ pub(in crate::app) struct PaneEditorState {
     preview_error: Option<String>,
     copied: bool,
     request_notice: Option<String>,
+    pub(in crate::app) pane_scroll: ScrollHandle,
+    _url_subscription: Subscription,
 }
 
 impl PaneEditorState {
-    fn new(active_tab_id: RequestTabId, window: &mut Window, cx: &mut Context<ApiTester>) -> Self {
+    fn new(
+        pane_id: PaneId,
+        active_tab_id: RequestTabId,
+        window: &mut Window,
+        cx: &mut Context<ApiTester>,
+    ) -> Self {
         let snippet_menu_owner = cx.entity().downgrade();
         let method = cx.new(|cx| {
             InputState::new(window, cx)
@@ -54,6 +63,11 @@ impl PaneEditorState {
                 .default_value("GET")
         });
         let url = cx.new(|cx| InputState::new(window, cx).placeholder("URL"));
+        let url_subscription = cx.subscribe_in(&url, window, move |this, _, event, window, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.pane_sync_query_params_from_url(pane_id, window, cx);
+            }
+        });
         let body = cx.new(|cx| {
             CodeEditor::new(
                 CodeEditorConfig::default()
@@ -122,13 +136,15 @@ impl PaneEditorState {
             pre_request_script,
             post_response_script,
             response_editor,
+            query_params: Vec::new(),
+            next_query_param_id: 0,
             headers: Vec::new(),
             next_header_id: 0,
             body_mode: BodyMode::Raw,
             raw_body_language: RawBodyLanguage::Json,
             body_fields: Vec::new(),
             next_body_field_id: 0,
-            request_pane: RequestPane::Headers,
+            request_pane: RequestPane::Params,
             response_tab: ResponseTab::Body,
             pretty_body: true,
             response: None,
@@ -142,6 +158,8 @@ impl PaneEditorState {
             preview_error: None,
             copied: false,
             request_notice: None,
+            pane_scroll: ScrollHandle::default(),
+            _url_subscription: url_subscription,
         };
         this.set_raw_body_language(cx);
         this
@@ -158,6 +176,66 @@ impl PaneEditorState {
         let language = code_language_for_raw_body(self.raw_body_language);
         self.body
             .update(cx, |editor, cx| editor.set_language(language, cx));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_query_param_row(
+        &mut self,
+        pane_id: PaneId,
+        key: impl Into<SharedString>,
+        value: impl Into<SharedString>,
+        description: impl Into<SharedString>,
+        enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<ApiTester>,
+    ) {
+        let id = self.next_query_param_id;
+        self.next_query_param_id = self.next_query_param_id.wrapping_add(1);
+        let key_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Key")
+                .default_value(key.into())
+        });
+        let value_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Value")
+                .default_value(value.into())
+        });
+        let description_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Description")
+                .default_value(description.into())
+        });
+        let key_subscription =
+            cx.subscribe_in(&key_state, window, move |this, _, event, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.pane_sync_url_from_query_params(pane_id, window, cx);
+                }
+            });
+        let value_subscription =
+            cx.subscribe_in(&value_state, window, move |this, _, event, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.pane_sync_url_from_query_params(pane_id, window, cx);
+                }
+            });
+        let description_subscription =
+            cx.subscribe(&description_state, |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            });
+        self.query_params.push(QueryParamRow {
+            id,
+            key: key_state,
+            value: value_state,
+            description: description_state,
+            enabled,
+            _subscriptions: vec![
+                key_subscription,
+                value_subscription,
+                description_subscription,
+            ],
+        });
     }
 
     fn push_header_row(
@@ -225,6 +303,7 @@ impl PaneEditorState {
     /// Load a request template plus its persisted runtime into this session.
     fn load_template(
         &mut self,
+        pane_id: PaneId,
         template: &RequestTemplate,
         runtime: &RequestTabRuntime,
         formatter: &FormatterSettings,
@@ -248,6 +327,27 @@ impl PaneEditorState {
         self.post_response_script.update(cx, |editor, cx| {
             editor.set_value(template.scripts.post_response.clone(), window, cx);
         });
+
+        self.query_params.clear();
+        let query_params = if template.request.query_params.is_empty() {
+            query_params_from_url(&template.request.url)
+        } else {
+            template.request.query_params.clone()
+        };
+        for param in query_params {
+            self.push_query_param_row(
+                pane_id,
+                param.key,
+                param.value,
+                param.description,
+                param.enabled,
+                window,
+                cx,
+            );
+        }
+        if self.query_params.is_empty() {
+            self.push_query_param_row(pane_id, "", "", "", true, window, cx);
+        }
 
         self.headers.clear();
         for header in &template.request.headers {
@@ -307,16 +407,14 @@ impl PaneEditorState {
         self.preview_error = runtime.preview_error.clone();
         self.copied = runtime.copied;
         self.request_notice = runtime.request_notice.clone();
-        let content = match &self.response {
-            Some(response) if is_probably_text(&response.body) => None,
-            Some(response) => Some(format!(
-                "Binary response ({}).",
-                format_bytes(response.size_bytes())
-            )),
-            None => None,
-        };
-        if let Some(content) = content {
+        if let Some(response) = &self.response {
+            let language = response_language(response);
+            let content = self.formatted_body.clone().map_or_else(
+                || format!("Binary response ({}).", format_bytes(response.size_bytes())),
+                |body| body.to_string(),
+            );
             self.response_editor.update(cx, |editor, cx| {
+                editor.set_language(language, cx);
                 editor.set_value(content, window, cx);
             });
         } else {
@@ -328,10 +426,13 @@ impl PaneEditorState {
 
     /// Snapshot the current editor contents back into a request template.
     fn snapshot_template(&self, cx: &App) -> RequestTemplate {
+        let query_params = self.normalized_query_params(cx);
+        let url = url_with_query_params(self.url.read(cx).value().as_ref(), &query_params);
         RequestTemplate {
             request: RequestDraft {
                 method: self.method.read(cx).value().to_string(),
-                url: self.url.read(cx).value().to_string(),
+                url,
+                query_params,
                 headers: self
                     .headers
                     .iter()
@@ -360,7 +461,29 @@ impl PaneEditorState {
                 pre_request: self.pre_request_script.read(cx).value(cx).to_string(),
                 post_response: self.post_response_script.read(cx).value(cx).to_string(),
             },
+            websocket: None,
         }
+    }
+
+    fn normalized_query_params(&self, cx: &App) -> Vec<QueryParamEntry> {
+        self.query_params
+            .iter()
+            .filter_map(|row| {
+                let key = row.key.read(cx).value().to_string();
+                let value = row.value.read(cx).value().to_string();
+                let description = row.description.read(cx).value().to_string();
+                if key.trim().is_empty() && value.trim().is_empty() && description.trim().is_empty()
+                {
+                    return None;
+                }
+                Some(QueryParamEntry {
+                    enabled: row.enabled,
+                    key,
+                    value,
+                    description,
+                })
+            })
+            .collect()
     }
 
     /// Build the per-pane runtime snapshot keyed by a request tab id.
@@ -467,6 +590,7 @@ impl ApiTester {
             };
             if !record.is_dirty() {
                 session.load_template(
+                    pane_id,
                     record.template(),
                     &runtime,
                     &self.settings.formatter,
@@ -485,6 +609,12 @@ impl ApiTester {
     pub(super) fn reconcile_pane_editors(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active_workspace_tab = self.workspace_tabs.active_tab(&self.request_tabs);
         let primary_pane_id = self.panes.pane_for_tab(&active_workspace_tab);
+        // A pane session is only a secondary-surface cache. Keeping it after
+        // that pane becomes primary lets its stale runtime win if the pane is
+        // demoted again, which used to make responses disappear on tab changes.
+        if let Some(primary_pane_id) = primary_pane_id {
+            self.pane_editors.remove(&primary_pane_id);
+        }
         let mut live = std::collections::HashSet::new();
         let pane_ids = self
             .panes
@@ -507,7 +637,7 @@ impl ApiTester {
             .retain(|pane_id, _| live.contains(pane_id));
     }
 
-    fn ensure_pane_editor_for(
+    pub(super) fn ensure_pane_editor_for(
         &mut self,
         pane_id: PaneId,
         tab_id: RequestTabId,
@@ -543,8 +673,9 @@ impl ApiTester {
                 self.request_tab_runtime
                     .insert(old_id.as_str().to_owned(), runtime);
             }
-            let mut session = PaneEditorState::new(tab_id.clone(), window, cx);
+            let mut session = PaneEditorState::new(pane_id, tab_id.clone(), window, cx);
             session.load_template(
+                pane_id,
                 record.template(),
                 &runtime,
                 &self.settings.formatter,
@@ -671,6 +802,14 @@ impl ApiTester {
             .iter()
             .filter(|row| row.enabled && !input_text_is_blank(&row.name, cx))
             .count();
+        let query_param_count = session
+            .query_params
+            .iter()
+            .filter(|row| {
+                row.enabled
+                    && (!input_text_is_blank(&row.key, cx) || !input_text_is_blank(&row.value, cx))
+            })
+            .count();
         let key = session.dom_key(pane_id);
 
         v_flex()
@@ -684,6 +823,7 @@ impl ApiTester {
                 TabBar::new(SharedString::from(format!("{key}-request-tabs")))
                     .underline()
                     .children([
+                        format!("Params ({query_param_count})"),
                         format!("Headers ({header_count})"),
                         "Body".to_owned(),
                         "Pre-request".to_owned(),
@@ -698,6 +838,9 @@ impl ApiTester {
                 div()
                     .flex_1()
                     .min_h_0()
+                    .when(session.request_pane == RequestPane::Params, |this| {
+                        this.child(self.render_pane_query_params_editor(session, pane_id, cx))
+                    })
                     .when(session.request_pane == RequestPane::Headers, |this| {
                         this.child(self.render_pane_headers_editor(session, pane_id, cx))
                     })
@@ -723,6 +866,11 @@ impl ApiTester {
         let method = session.method.read(cx).value().trim().to_ascii_uppercase();
         let color = method_color(&method, cx);
         let key = session.dom_key(pane_id);
+        let send_button_id: SharedString = format!("{key}-send-request").into();
+        let sending = session
+            .active_tab_id
+            .as_ref()
+            .is_some_and(|tab_id| self.pane_requests_in_flight.contains_key(tab_id.as_str()));
 
         h_flex()
             .w_full()
@@ -762,6 +910,19 @@ impl ApiTester {
                             .min_w_0()
                             .child(Input::new(&session.url).appearance(false).large()),
                     ),
+            )
+            .child(
+                Button::new(send_button_id)
+                    .label(if sending { "Sending…" } else { "Send" })
+                    .large()
+                    .h(px(44.))
+                    .rounded(px(12.))
+                    .primary()
+                    .disabled(sending)
+                    .debug_selector(|| "secondary-pane-send-request".to_owned())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.start_pane_request(pane_id, window, cx);
+                    })),
             )
             .into_any_element()
     }
@@ -820,6 +981,123 @@ impl ApiTester {
                     ),
             )
             .into_any_element()
+    }
+
+    fn render_pane_query_params_editor(
+        &self,
+        session: &PaneEditorState,
+        pane_id: PaneId,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let key = session.dom_key(pane_id);
+        let enabled_count = session
+            .query_params
+            .iter()
+            .filter(|row| {
+                row.enabled
+                    && (!input_text_is_blank(&row.key, cx) || !input_text_is_blank(&row.value, cx))
+            })
+            .count();
+        let columns = h_flex()
+            .h(px(34.))
+            .w_full()
+            .flex_shrink_0()
+            .bg(cx.api_surface_low())
+            .text_xs()
+            .font_semibold()
+            .text_color(cx.theme().muted_foreground)
+            .child(div().w(px(44.)))
+            .child(pane_query_param_heading("KEY", cx))
+            .child(pane_query_param_heading("VALUE", cx))
+            .child(pane_query_param_heading("DESCRIPTION", cx))
+            .child(div().w(px(44.)));
+        let rows =
+            session
+                .query_params
+                .iter()
+                .map(|row| {
+                    let id = row.id;
+                    h_flex()
+                        .id(SharedString::from(format!("{key}-query-param-{id}")))
+                        .w_full()
+                        .h(px(44.))
+                        .flex_shrink_0()
+                        .border_t_1()
+                        .border_color(cx.api_outline_variant())
+                        .when(!row.enabled, |this| this.opacity(0.55))
+                        .child(
+                            div()
+                                .w(px(44.))
+                                .h_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    Checkbox::new(SharedString::from(format!(
+                                        "{key}-query-param-enabled-{id}"
+                                    )))
+                                    .checked(row.enabled)
+                                    .small()
+                                    .on_click(cx.listener(
+                                        move |this, checked: &bool, window, cx| {
+                                            this.pane_toggle_query_param(
+                                                pane_id, id, *checked, window, cx,
+                                            );
+                                        },
+                                    )),
+                                ),
+                        )
+                        .child(pane_query_param_input(&row.key, cx))
+                        .child(pane_query_param_input(&row.value, cx))
+                        .child(pane_query_param_input(&row.description, cx))
+                        .child(
+                            div()
+                                .w(px(44.))
+                                .h_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "{key}-delete-query-param-{id}"
+                                    )))
+                                    .icon(IconName::Delete)
+                                    .xsmall()
+                                    .ghost()
+                                    .tooltip("Delete parameter")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.pane_remove_query_param(pane_id, id, window, cx);
+                                    })),
+                                ),
+                        )
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>();
+        let add_control = Button::new(SharedString::from(format!("{key}-add-query-param")))
+            .icon(IconName::Plus)
+            .label("Add parameter")
+            .small()
+            .ghost()
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.pane_push_query_param(pane_id, window, cx);
+            }));
+
+        self.render_row_editor(
+            SharedString::from(format!("{key}-query-params-scroll")),
+            h_flex()
+                .gap_2()
+                .child(div().text_sm().font_semibold().child("Query Params"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("{enabled_count} enabled")),
+                ),
+            Some(columns.into_any_element()),
+            rows,
+            add_control,
+            cx,
+        )
     }
 
     fn render_pane_headers_editor(
@@ -1346,8 +1624,8 @@ impl ApiTester {
                                     .ghost()
                                     .rounded(px(18.))
                                     .selected(session.pretty_body)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.pane_toggle_pretty(pane_id, cx);
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.pane_toggle_pretty(pane_id, window, cx);
                                     })),
                             )
                             .child(
@@ -1439,25 +1717,16 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let key = session.dom_key(pane_id);
-        let Some(response) = &session.response else {
+        let Some(_) = &session.response else {
             return div().size_full().into_any_element();
         };
-        // The formatted text is precomputed when the response arrives or the
-        // pretty toggle changes; only binary bodies fall through to the cheap
-        // size label here.
-        let content = session.formatted_body.clone().unwrap_or_else(|| {
-            format!("Binary response ({}).", format_bytes(response.size_bytes())).into()
-        });
         div()
             .id(SharedString::from(format!("{key}-response-body")))
+            .debug_selector(|| "secondary-pane-response-code-editor".to_owned())
             .size_full()
             .min_h_0()
-            .overflow_y_scroll()
-            .whitespace_nowrap()
-            .font_family(cx.theme().mono_font_family.clone())
-            .text_xs()
-            .text_color(cx.theme().foreground)
-            .child(content)
+            .bg(cx.api_surface_lowest())
+            .child(session.response_editor.clone())
             .into_any_element()
     }
 
@@ -1504,6 +1773,35 @@ impl ApiTester {
     }
 }
 
+fn pane_query_param_heading(label: &'static str, cx: &App) -> impl IntoElement {
+    div()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .px_3()
+        .border_l_1()
+        .border_color(cx.api_outline_variant())
+        .flex()
+        .items_center()
+        .child(label)
+}
+
+fn pane_query_param_input(input: &Entity<InputState>, cx: &App) -> impl IntoElement {
+    div()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .border_l_1()
+        .border_color(cx.api_outline_variant())
+        .child(
+            Input::new(input)
+                .appearance(false)
+                .small()
+                .size_full()
+                .px_3(),
+        )
+}
+
 fn status_color(status: u16, cx: &App) -> Hsla {
     match status {
         200..=299 => cx.theme().success,
@@ -1513,6 +1811,234 @@ fn status_color(status: u16, cx: &App) -> Hsla {
 }
 
 impl ApiTester {
+    fn start_pane_request(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.pane_editors.get(&pane_id) else {
+            return;
+        };
+        let Some(tab_id) = session.active_tab_id.clone() else {
+            return;
+        };
+        if self.pane_requests_in_flight.contains_key(tab_id.as_str()) {
+            return;
+        }
+        let template = session.snapshot_template(cx);
+        if let Some(record) = self.request_tabs.get_mut(&tab_id) {
+            record.set_template(template.clone());
+        } else {
+            return;
+        }
+
+        let validation_error = if template.request.method.trim().is_empty() {
+            Some("HTTP method cannot be empty.".to_owned())
+        } else if self.active_environment_editor_is_dirty(cx) {
+            Some(
+                "The active environment has unsaved changes. Save or Revert them before sending."
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
+        if let Some(message) = validation_error {
+            self.finish_pane_request_error(&tab_id, message, window, cx);
+            return;
+        }
+
+        let environment = self.workspace.active_environment();
+        let mut resolved = match resolve_request(&template.request, environment) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                self.finish_pane_request_error(&tab_id, error.to_string(), window, cx);
+                return;
+            }
+        };
+        if let Some(environment) = environment {
+            resolved.sensitive_values.extend(
+                environment
+                    .variables
+                    .iter()
+                    .filter(|variable| variable.enabled && variable.secret)
+                    .map(|variable| variable.value.clone()),
+            );
+        }
+
+        self.pane_request_generation = self.pane_request_generation.wrapping_add(1);
+        let generation = self.pane_request_generation;
+        self.pane_requests_in_flight
+            .insert(tab_id.as_str().to_owned(), generation);
+        if let Some(session) = self.pane_editors.get_mut(&pane_id) {
+            session.response = None;
+            session.response_request = None;
+            session.response_sensitive_values.clear();
+            session.formatted_body = None;
+            session.request_error = None;
+            session.script_diagnostic = None;
+            session.pre_script_report = None;
+            session.post_script_report = None;
+            session.preview_error = None;
+            session.copied = false;
+        }
+
+        let request = resolved.request.clone();
+        let task = match self.workspace_providers.active_id() {
+            WorkspaceProviderId::Local(_) => {
+                spawn_request(self.runtime.handle(), self.client.clone(), request)
+            }
+            WorkspaceProviderId::Upstream { .. } => {
+                let target = match self.active_upstream_workspace() {
+                    Ok(target) => target,
+                    Err(error) => {
+                        self.pane_requests_in_flight.remove(tab_id.as_str());
+                        self.finish_pane_request_error(&tab_id, error.to_string(), window, cx);
+                        return;
+                    }
+                };
+                let vault = self.credential_vault.clone();
+                let client = self.upstream_execution_client.clone();
+                let local_client = self.client.clone();
+                let runtime = Arc::clone(&self.runtime);
+                let credential_upstream_id = target.upstream_id.clone();
+                RequestTask::spawn(self.runtime.handle(), async move {
+                    let credential = runtime
+                        .spawn_blocking(move || vault.load_upstream(&credential_upstream_id))
+                        .await
+                        .map_err(|error| RequestError::TaskFailed(error.to_string()))?
+                        .map_err(|error| RequestError::Upstream(error.to_string()))?
+                        .ok_or_else(|| {
+                            RequestError::Upstream("Log in to this server again.".to_owned())
+                        })?;
+                    if credential.expires_at <= Utc::now() {
+                        return Err(RequestError::Upstream(
+                            "Log in to this server again.".to_owned(),
+                        ));
+                    }
+                    send_request_for_upstream_workspace(
+                        &client,
+                        &local_client,
+                        &target.base_url,
+                        credential.bearer_token(),
+                        &target.workspace_id,
+                        request,
+                    )
+                    .await
+                })
+            }
+        };
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.wait().await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.finish_pane_request(tab_id, generation, resolved, result, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_pane_request_error(
+        &mut self,
+        tab_id: &RequestTabId,
+        message: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let message = message;
+        let runtime = self
+            .request_tab_runtime
+            .entry(tab_id.as_str().to_owned())
+            .or_default();
+        runtime.response = None;
+        runtime.response_request = None;
+        runtime.response_sensitive_values.clear();
+        runtime.request_error = Some(message.clone());
+        self.refresh_visible_pane_runtime(tab_id, window, cx);
+    }
+
+    fn finish_pane_request(
+        &mut self,
+        tab_id: RequestTabId,
+        generation: u64,
+        resolved: crate::core::ResolvedRequest,
+        result: Result<ResponseData, RequestError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pane_requests_in_flight.get(tab_id.as_str()) != Some(&generation) {
+            return;
+        }
+        self.pane_requests_in_flight.remove(tab_id.as_str());
+        if self.request_tabs.get(&tab_id).is_none() {
+            cx.notify();
+            return;
+        }
+
+        let runtime = self
+            .request_tab_runtime
+            .entry(tab_id.as_str().to_owned())
+            .or_default();
+        runtime.response_request = Some(resolved.request.clone());
+        runtime.response_sensitive_values = resolved.sensitive_values.clone();
+        runtime.script_diagnostic = None;
+        runtime.pre_script_report = None;
+        runtime.post_script_report = None;
+        runtime.preview_error = None;
+        runtime.copied = false;
+        match result {
+            Ok(mut response) => {
+                response.final_url = resolved.redact_secrets(&response.final_url);
+                runtime.response = Some(response.clone());
+                runtime.request_error = None;
+                let history_entry = HistoryEntry::completed_with_secrets(
+                    &resolved.request,
+                    &response,
+                    &resolved.sensitive_values,
+                );
+                self.history.push(history_entry);
+                self.persist_history();
+            }
+            Err(error) => {
+                runtime.response = None;
+                runtime.request_error = Some(resolved.redact_secrets(&error.to_string()));
+            }
+        }
+        self.refresh_visible_pane_runtime(&tab_id, window, cx);
+        cx.notify();
+    }
+
+    fn refresh_visible_pane_runtime(
+        &mut self,
+        tab_id: &RequestTabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(record) = self.request_tabs.get(tab_id).cloned() else {
+            return;
+        };
+        let runtime = self
+            .request_tab_runtime
+            .get(tab_id.as_str())
+            .cloned()
+            .unwrap_or_default();
+        let pane_ids = self
+            .pane_editors
+            .iter()
+            .filter_map(|(pane_id, session)| {
+                (session.active_tab_id.as_ref() == Some(tab_id)).then_some(*pane_id)
+            })
+            .collect::<Vec<_>>();
+        for pane_id in pane_ids {
+            if let Some(session) = self.pane_editors.get_mut(&pane_id) {
+                session.load_template(
+                    pane_id,
+                    record.template(),
+                    &runtime,
+                    &self.settings.formatter,
+                    window,
+                    cx,
+                );
+            }
+        }
+    }
+
     fn pane_set_request_pane(
         &mut self,
         pane_id: PaneId,
@@ -1521,6 +2047,126 @@ impl ApiTester {
     ) {
         if let Some(session) = self.pane_editor_mut(pane_id) {
             session.request_pane = pane;
+        }
+        cx.notify();
+    }
+
+    fn pane_push_query_param(
+        &mut self,
+        pane_id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = self.pane_editor_mut(pane_id) {
+            session.push_query_param_row(pane_id, "", "", "", true, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn pane_remove_query_param(
+        &mut self,
+        pane_id: PaneId,
+        row_id: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = self.pane_editor_mut(pane_id) {
+            session.query_params.retain(|row| row.id != row_id);
+            if session.query_params.is_empty() {
+                session.push_query_param_row(pane_id, "", "", "", true, window, cx);
+            }
+        }
+        self.pane_sync_url_from_query_params(pane_id, window, cx);
+    }
+
+    fn pane_toggle_query_param(
+        &mut self,
+        pane_id: PaneId,
+        row_id: usize,
+        enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = self.pane_editor_mut(pane_id)
+            && let Some(row) = session.query_params.iter_mut().find(|row| row.id == row_id)
+        {
+            row.enabled = enabled;
+        }
+        self.pane_sync_url_from_query_params(pane_id, window, cx);
+    }
+
+    fn pane_sync_url_from_query_params(
+        &mut self,
+        pane_id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.pane_editors.get(&pane_id) else {
+            return;
+        };
+        let params = session.normalized_query_params(cx);
+        let input = session.url.clone();
+        let current = input.read(cx).value().to_string();
+        let updated = url_with_query_params(&current, &params);
+        if updated != current {
+            input.update(cx, |state, cx| state.set_value(updated, window, cx));
+        }
+        cx.notify();
+    }
+
+    fn pane_sync_query_params_from_url(
+        &mut self,
+        pane_id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.pane_editors.get(&pane_id) else {
+            return;
+        };
+        let url = session.url.read(cx).value().to_string();
+        let mut existing = session.normalized_query_params(cx);
+        let incoming_params = query_params_from_url(&url);
+        let current = existing
+            .iter()
+            .filter(|param| param.enabled)
+            .map(|param| (param.key.clone(), param.value.clone()))
+            .collect::<Vec<_>>();
+        let incoming = incoming_params
+            .iter()
+            .map(|param| (param.key.clone(), param.value.clone()))
+            .collect::<Vec<_>>();
+        if current == incoming {
+            return;
+        }
+
+        let mut reconciled = Vec::with_capacity(incoming_params.len() + existing.len());
+        for mut param in incoming_params {
+            if let Some(index) = existing.iter().position(|candidate| {
+                candidate.enabled && candidate.key == param.key && candidate.value == param.value
+            }) {
+                param.description = existing.remove(index).description;
+            }
+            reconciled.push(param);
+        }
+        reconciled.extend(existing.into_iter().filter(|param| !param.enabled));
+
+        let Some(session) = self.pane_editors.get_mut(&pane_id) else {
+            return;
+        };
+        session.query_params.clear();
+        for param in reconciled {
+            session.push_query_param_row(
+                pane_id,
+                param.key,
+                param.value,
+                param.description,
+                param.enabled,
+                window,
+                cx,
+            );
+        }
+        if session.query_params.is_empty() {
+            session.push_query_param_row(pane_id, "", "", "", true, window, cx);
         }
         cx.notify();
     }
@@ -1663,7 +2309,7 @@ impl ApiTester {
         cx.notify();
     }
 
-    fn pane_toggle_pretty(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
+    fn pane_toggle_pretty(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
         let formatter = self.settings.formatter.clone();
         if let Some(session) = self.pane_editor_mut(pane_id) {
             session.pretty_body = !session.pretty_body;
@@ -1673,6 +2319,17 @@ impl ApiTester {
                     SharedString::from(format_body(&response.body, session.pretty_body, &formatter))
                 })
             });
+            if let Some(response) = &session.response {
+                let language = response_language(response);
+                let content = session.formatted_body.clone().map_or_else(
+                    || format!("Binary response ({}).", format_bytes(response.size_bytes())),
+                    |body| body.to_string(),
+                );
+                session.response_editor.update(cx, |editor, cx| {
+                    editor.set_language(language, cx);
+                    editor.set_value(content, window, cx);
+                });
+            }
         }
         cx.notify();
     }
@@ -1710,12 +2367,14 @@ impl ApiTester {
 mod tests {
     use super::*;
     use gpui::{TestAppContext, px, size};
+    use std::time::Duration;
 
     fn template_with_content() -> RequestTemplate {
         RequestTemplate {
             request: RequestDraft {
                 method: "POST".to_owned(),
                 url: "https://example.com/submit".to_owned(),
+                query_params: Vec::new(),
                 headers: vec![
                     HeaderEntry {
                         enabled: true,
@@ -1739,6 +2398,20 @@ mod tests {
                 pre_request: "api.log('pre');".to_owned(),
                 post_response: "api.log('post');".to_owned(),
             },
+            websocket: None,
+        }
+    }
+
+    fn completed_response() -> ResponseData {
+        ResponseData {
+            status: 200,
+            status_text: "OK".to_owned(),
+            http_version: "HTTP/2".to_owned(),
+            final_url: "https://example.com/submit".to_owned(),
+            headers: Vec::new(),
+            content_type: Some("application/json".to_owned()),
+            body: br#"{"ok":true}"#.to_vec().into(),
+            duration: Duration::from_millis(42),
         }
     }
 
@@ -1772,7 +2445,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let (first, second) = cx.update(|_, cx| {
+        let (first, second, third) = cx.update(|_, cx| {
             let app = app.read(cx);
             let ids = app
                 .request_tabs
@@ -1780,7 +2453,7 @@ mod tests {
                 .iter()
                 .map(|tab| tab.id().clone())
                 .collect::<Vec<_>>();
-            (ids[0].clone(), ids[1].clone())
+            (ids[0].clone(), ids[1].clone(), ids[2].clone())
         });
 
         // Give the second tab a known template so the round-trip is meaningful,
@@ -1794,10 +2467,22 @@ mod tests {
                     .get_mut(&second)
                     .expect("second tab")
                     .set_template(tmpl.clone());
+                app.request_tabs
+                    .get_mut(&third)
+                    .expect("third tab")
+                    .set_template(tmpl.clone());
+                app.request_tab_runtime.insert(
+                    second.as_str().to_owned(),
+                    RequestTabRuntime {
+                        response: Some(completed_response()),
+                        ..RequestTabRuntime::default()
+                    },
+                );
                 app.panes = PaneRoot::from_tabs(
                     vec![
                         WorkspaceTab::Request(first.clone()),
                         WorkspaceTab::Request(second.clone()),
+                        WorkspaceTab::Request(third.clone()),
                     ],
                     0,
                 );
@@ -1812,20 +2497,102 @@ mod tests {
                     secondary_id,
                     0,
                 );
+                app.panes.move_tab_between_panes(
+                    &WorkspaceTab::Request(third.clone()),
+                    primary_id,
+                    secondary_id,
+                    1,
+                );
                 app.reconcile_pane_editors(window, cx);
                 (primary_id, secondary_id)
             })
         });
         cx.run_until_parked();
 
+        assert!(
+            cx.debug_bounds("secondary-pane-send-request").is_some(),
+            "a secondary request pane must retain its Send button",
+        );
+        assert!(
+            cx.debug_bounds("secondary-pane-response-code-editor")
+                .is_some(),
+            "secondary responses must render through the same code-editor surface",
+        );
+
+        cx.update(|_, cx| {
+            let app = app.read(cx);
+            assert!(
+                app.primary_pane_scroll.max_offset().height > px(0.),
+                "a short primary pane must expose vertical overflow",
+            );
+            assert!(
+                app.pane_editors
+                    .get(&secondary_id)
+                    .expect("secondary pane session")
+                    .pane_scroll
+                    .max_offset()
+                    .height
+                    > px(0.),
+                "a short secondary pane must expose vertical overflow",
+            );
+            assert_eq!(
+                app.pane_editors
+                    .get(&secondary_id)
+                    .and_then(|session| session.response.as_ref())
+                    .map(|response| response.status),
+                Some(200),
+                "the secondary pane must render its stored response",
+            );
+        });
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.activate_workspace_tab_in_pane(
+                    WorkspaceTab::Request(third.clone()),
+                    Some(secondary_id),
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.activate_workspace_tab_in_pane(
+                    WorkspaceTab::Request(second.clone()),
+                    Some(secondary_id),
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
         cx.update(|_, cx| {
             app.update(cx, |app, cx| {
+                assert_eq!(
+                    app.request_tabs.active_tab_id(),
+                    &first,
+                    "secondary-pane selection must not replace the global request surface",
+                );
+                assert_eq!(
+                    app.panes
+                        .pane(secondary_id)
+                        .and_then(|pane| pane.active_tab()),
+                    Some(WorkspaceTab::Request(second.clone())),
+                );
                 assert!(app.panes.pane(secondary_id).is_some());
                 let session = app
                     .pane_editors
                     .get(&secondary_id)
                     .expect("secondary pane must own a request editor session");
                 assert_eq!(session.active_tab_id.as_ref(), Some(&second));
+                assert_eq!(
+                    session.response.as_ref().map(|response| response.status),
+                    Some(200),
+                    "switching away and back must restore the pane-local response",
+                );
                 assert_eq!(
                     session.method.read(cx).value().as_ref(),
                     "POST",
@@ -1835,6 +2602,60 @@ mod tests {
                 let round_trip = session.snapshot_template(cx);
                 assert_eq!(round_trip.request, tmpl.request);
                 assert_eq!(round_trip.scripts, tmpl.scripts);
+            });
+        });
+
+        // Completions are keyed to request tabs, not to the globally active
+        // request or the pane's current selection. Finishing one request must
+        // leave another request running and its response must survive a
+        // switch away and back.
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.pane_requests_in_flight
+                    .insert(second.as_str().to_owned(), 41);
+                app.pane_requests_in_flight
+                    .insert(third.as_str().to_owned(), 42);
+                let resolved = resolve_request(&tmpl.request, None).expect("resolve request");
+                app.finish_pane_request(
+                    second.clone(),
+                    41,
+                    resolved,
+                    Ok(completed_response()),
+                    window,
+                    cx,
+                );
+                assert!(!app.pane_requests_in_flight.contains_key(second.as_str()));
+                assert_eq!(
+                    app.pane_requests_in_flight.get(third.as_str()),
+                    Some(&42),
+                    "a different pane request must remain in flight",
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.activate_workspace_tab_in_pane(
+                    WorkspaceTab::Request(third.clone()),
+                    Some(secondary_id),
+                    window,
+                    cx,
+                );
+                app.activate_workspace_tab_in_pane(
+                    WorkspaceTab::Request(second.clone()),
+                    Some(secondary_id),
+                    window,
+                    cx,
+                );
+                assert_eq!(
+                    app.pane_editors
+                        .get(&secondary_id)
+                        .and_then(|session| session.response.as_ref())
+                        .map(|response| response.status),
+                    Some(200),
+                    "completed response must remain attached to its request tab",
+                );
             });
         });
     }

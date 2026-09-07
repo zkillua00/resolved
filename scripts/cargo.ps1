@@ -99,6 +99,7 @@ switch ($args[0]) {
     'run' {
         # Mirrors cargo.sh run: build, package into an MSIX shell that
         # supplies package identity, then launch with the optional args.
+        Invoke-Prepare
         $profile = 'debug'
         $rest = @($args | Select-Object -Skip 1)
         if ($rest.Count -gt 0 -and $rest[0] -eq '--release') {

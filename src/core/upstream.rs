@@ -639,7 +639,7 @@ pub fn build_upstream_client() -> Result<Client, UpstreamLoginError> {
         .user_agent(concat!(
             env!("CARGO_PKG_NAME"),
             "/",
-            env!("CARGO_PKG_VERSION")
+            env!("RESOLVED_BUILD_VERSION")
         ))
         // Never replay a login/password body to a redirect target.
         .redirect(Policy::none())
@@ -655,7 +655,7 @@ pub fn build_upstream_execution_client() -> Result<Client, RequestError> {
         .user_agent(concat!(
             env!("CARGO_PKG_NAME"),
             "/",
-            env!("CARGO_PKG_VERSION")
+            env!("RESOLVED_BUILD_VERSION")
         ))
         .redirect(Policy::none())
         .timeout(PROXY_TIMEOUT)
@@ -903,7 +903,7 @@ async fn proxy_request_payload(request: RequestDraft) -> Result<ProxyExecuteRequ
     {
         headers.push(ProxyHeader {
             name: "User-Agent".to_owned(),
-            value: concat!("resolved/", env!("CARGO_PKG_VERSION")).to_owned(),
+            value: concat!("resolved/", env!("RESOLVED_BUILD_VERSION")).to_owned(),
         });
     }
 
@@ -3228,7 +3228,7 @@ mod tests {
             );
             assert!(body["headers"].as_array().unwrap().iter().any(|header| {
                 header["name"] == "User-Agent"
-                    && header["value"] == concat!("resolved/", env!("CARGO_PKG_VERSION"))
+                    && header["value"] == concat!("resolved/", env!("RESOLVED_BUILD_VERSION"))
             }));
 
             let response_body = serde_json::to_vec(&serde_json::json!({

@@ -3,6 +3,7 @@ use super::*;
 impl ApiTester {
     pub(super) fn render_request_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let header_count = self.request_header_count(cx);
+        let query_param_count = self.request_query_param_count(cx);
         let status = if let Some(notice) = self.request_notice.clone() {
             Some(
                 div()
@@ -48,6 +49,7 @@ impl ApiTester {
                 TabBar::new("request-tabs")
                     .underline()
                     .children([
+                        format!("Params ({query_param_count})"),
                         format!("Headers ({header_count})"),
                         "Body".to_owned(),
                         "Pre-request".to_owned(),
@@ -63,6 +65,9 @@ impl ApiTester {
                 div()
                     .flex_1()
                     .min_h_0()
+                    .when(self.request_pane == RequestPane::Params, |this| {
+                        this.child(self.render_query_params_editor(cx))
+                    })
                     .when(self.request_pane == RequestPane::Headers, |this| {
                         this.child(self.render_headers_editor(cx))
                     })

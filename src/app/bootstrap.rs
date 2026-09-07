@@ -7,7 +7,10 @@ fn startup_or_exit<T, E: std::fmt::Display>(what: &str, result: Result<T, E>) ->
     match result {
         Ok(value) => value,
         Err(error) => {
-            eprintln!("{} could not start: {what}: {error}", env!("CARGO_PKG_NAME"));
+            eprintln!(
+                "{} could not start: {what}: {error}",
+                env!("CARGO_PKG_NAME")
+            );
             std::process::exit(1);
         }
     }
@@ -33,7 +36,14 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_with_database_store(base_key_bindings, DatabaseStore::default(), window, cx)
+        let database_store = DatabaseStore::default();
+        let mut this =
+            Self::new_with_database_store(base_key_bindings, database_store.clone(), window, cx);
+        if let Err(error) = this.sync_control_server(cx) {
+            tracing::warn!(%error, "local agent control is unavailable");
+            this.settings_warning = Some(format!("MCP could not start: {error}"));
+        }
+        this
     }
 
     pub(super) fn new_with_database_store(
@@ -141,7 +151,8 @@ impl ApiTester {
             if let Some(service) = typescript_service.clone() {
                 intelligence = intelligence.with_typescript_service(service);
             }
-            intelligence = intelligence.with_request_namespace(Rc::clone(&script_request_namespace));
+            intelligence =
+                intelligence.with_request_namespace(Rc::clone(&script_request_namespace));
             let intelligence = Rc::new(intelligence);
             let diagnostic_intelligence = Rc::clone(&intelligence);
             CodeEditor::new(
@@ -219,6 +230,31 @@ impl ApiTester {
                         snippet_menu_owner,
                         SnippetMenuSurface::ResponseBody,
                     )),
+                window,
+                cx,
+            )
+        });
+        let console_completion_catalog = Rc::clone(&script_variable_catalog);
+        let script_console_input = cx.new(|cx| {
+            let mut intelligence =
+                ScriptCompletionProvider::for_interactive_console(console_completion_catalog);
+            if let Some(service) = typescript_service.clone() {
+                intelligence = intelligence.with_typescript_service(service);
+            }
+            intelligence =
+                intelligence.with_request_namespace(Rc::clone(&script_request_namespace));
+            let intelligence = Rc::new(intelligence);
+            CodeEditor::new(
+                CodeEditorConfig::default()
+                    .language(CodeLanguage::JavaScript)
+                    .rows(3)
+                    .soft_wrap(true)
+                    .line_numbers(false)
+                    .framed(false)
+                    .embedded(true)
+                    .active_line(false)
+                    .completion_provider(intelligence.clone())
+                    .hover_provider(intelligence),
                 window,
                 cx,
             )
@@ -379,6 +415,13 @@ impl ApiTester {
                 tracing::error!("built-in shortcuts could not be applied: {error}");
             }
         }
+        crate::theme::set_zoom(
+            crate::theme::ThemeZoom {
+                ui: settings.zoom.effective_ui(),
+                editor: settings.zoom.effective_editor(),
+            },
+            cx,
+        );
         if let Some(css_source) = settings.theme.css_source.as_deref()
             && let Err(error) = crate::theme::parse_and_apply(css_source, cx)
         {
@@ -518,6 +561,111 @@ impl ApiTester {
                 .placeholder("Password")
                 .masked(true)
         });
+        let websocket_workspace =
+            WebSocketWorkspaceState::new(&WebSocketWorkspace::default(), window, cx);
+        let websocket_url_subscription = cx.subscribe(
+            &websocket_workspace.url,
+            |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.sync_active_websocket_document(cx);
+                }
+            },
+        );
+        let websocket_headers_subscription = cx.subscribe(
+            &websocket_workspace.headers,
+            |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.sync_active_websocket_document(cx);
+                }
+            },
+        );
+        let websocket_composer_subscription = cx.subscribe(
+            &websocket_workspace.composer,
+            |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.sync_active_websocket_document(cx);
+                    this.refresh_websocket_composer_inline_actions(cx);
+                }
+            },
+        );
+        let websocket_composer_format_subscription = cx.subscribe_in(
+            &websocket_workspace.composer,
+            window,
+            |this, _, event: &CodeEditorEvent, window, cx| match event {
+                CodeEditorEvent::FormatRequested => {
+                    this.format_websocket_composer(window, cx);
+                }
+                CodeEditorEvent::InlineActionRequested { id } => {
+                    this.send_websocket_json_record(*id, cx);
+                }
+            },
+        );
+        let websocket_timeline_preview_format_subscription = cx.subscribe_in(
+            &websocket_workspace.timeline_preview,
+            window,
+            |this, _, event: &CodeEditorEvent, window, cx| {
+                if matches!(event, CodeEditorEvent::FormatRequested) {
+                    this.format_websocket_timeline_preview(window, cx);
+                }
+            },
+        );
+        let websocket_library_preview_format_subscription = cx.subscribe_in(
+            &websocket_workspace.library_preview,
+            window,
+            |this, _, event: &CodeEditorEvent, window, cx| {
+                if matches!(event, CodeEditorEvent::FormatRequested) {
+                    this.format_websocket_library_preview(window, cx);
+                }
+            },
+        );
+        let websocket_template_format_subscription = cx.subscribe_in(
+            &websocket_workspace.template_payload,
+            window,
+            |this, _, event: &CodeEditorEvent, window, cx| {
+                if matches!(event, CodeEditorEvent::FormatRequested) {
+                    this.format_websocket_template(window, cx);
+                }
+            },
+        );
+        let websocket_automation_subscription = cx.subscribe(
+            &websocket_workspace.automation,
+            |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.sync_active_websocket_document(cx);
+                }
+            },
+        );
+        let websocket_timeline_filter_subscription = cx.subscribe(
+            &websocket_workspace.timeline_filter,
+            |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    if this.websocket_workspace.timeline_following {
+                        this.websocket_workspace.timeline_scroll.scroll_to_bottom();
+                    }
+                    cx.notify();
+                }
+            },
+        );
+        let websocket_library_search_subscription = cx.subscribe(
+            &websocket_workspace.library_search,
+            |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            },
+        );
+        let websocket_quick_send_query_subscription = cx.subscribe_in(
+            &websocket_workspace.quick_send_query,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.reset_websocket_quick_send_selection(cx);
+                }
+                if matches!(event, InputEvent::PressEnter { secondary: false }) {
+                    this.select_websocket_quick_send_template(window, cx);
+                }
+            },
+        );
 
         let cookie_jar = startup_or_exit(
             "failed to open the active workspace cookie jar",
@@ -560,6 +708,9 @@ impl ApiTester {
             if matches!(event, InputEvent::Change) {
                 let input = this.url.clone();
                 this.schedule_template_input_refresh(&input, cx);
+                if !this.syncing_query_params {
+                    this.sync_query_params_from_url(window, cx);
+                }
                 this.refresh_request_dirty_part(RequestDirtyPart::Url, cx);
             }
             if matches!(event, InputEvent::PressEnter { secondary: false }) {
@@ -616,6 +767,56 @@ impl ApiTester {
                 }
             },
         );
+        let script_console_change_subscription =
+            cx.subscribe(&script_console_input, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.script_console_scroll.scroll_to_bottom();
+                    cx.notify();
+                }
+            });
+        let script_console_key_target = cx.entity().downgrade();
+        let script_console_key_subscription = cx.intercept_keystrokes(move |event, window, cx| {
+            let Some(target) = script_console_key_target.upgrade() else {
+                return;
+            };
+            let editor = target.read(cx).script_console_input.clone();
+            if !editor.read(cx).focus_handle(cx).is_focused(window) {
+                return;
+            }
+            if editor.read(cx).has_open_input_menu(cx) {
+                return;
+            }
+
+            let modifiers = event.keystroke.modifiers;
+            let unmodified =
+                !modifiers.platform && !modifiers.control && !modifiers.alt && !modifiers.function;
+            match event.keystroke.key.as_str() {
+                "enter" if unmodified && modifiers.shift => {
+                    cx.stop_propagation();
+                    window.dispatch_action(
+                        Box::new(gpui_component::input::Enter { secondary: true }),
+                        cx,
+                    );
+                }
+                "enter" if unmodified => {
+                    cx.stop_propagation();
+                    target.update(cx, |this, cx| this.evaluate_script_console(window, cx));
+                }
+                "up" if unmodified && !modifiers.shift => {
+                    cx.stop_propagation();
+                    target.update(cx, |this, cx| {
+                        this.navigate_script_console_history(-1, window, cx)
+                    });
+                }
+                "down" if unmodified && !modifiers.shift => {
+                    cx.stop_propagation();
+                    target.update(cx, |this, cx| {
+                        this.navigate_script_console_history(1, window, cx)
+                    });
+                }
+                _ => {}
+            }
+        });
         let collection_name_subscription =
             cx.subscribe_in(&collection_name, window, |this, _, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
@@ -647,6 +848,7 @@ impl ApiTester {
         );
         let quit_subscription = cx.on_app_quit(|this, cx| {
             this.stop_realtime();
+            this.stop_websocket();
             this.flush_local_state(cx);
             async {}
         });
@@ -664,6 +866,37 @@ impl ApiTester {
                 this.capture_shortcut_keystroke(keystroke, cx);
             });
         });
+        let quick_send_escape_target = cx.entity().downgrade();
+        let websocket_quick_send_escape_subscription =
+            cx.intercept_keystrokes(move |event, _, cx| {
+                let Some(target) = quick_send_escape_target.upgrade() else {
+                    return;
+                };
+                let quick_send = target.read(cx);
+                if !quick_send.websocket_workspace.quick_send_open {
+                    return;
+                }
+                let stage = quick_send.websocket_workspace.quick_send_stage;
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        cx.stop_propagation();
+                        target.update(cx, |this, cx| this.close_websocket_quick_send(cx));
+                    }
+                    "up" if stage == WebSocketQuickSendStage::Picker => {
+                        cx.stop_propagation();
+                        target.update(cx, |this, cx| {
+                            this.move_websocket_quick_send_selection(-1, cx)
+                        });
+                    }
+                    "down" if stage == WebSocketQuickSendStage::Picker => {
+                        cx.stop_propagation();
+                        target.update(cx, |this, cx| {
+                            this.move_websocket_quick_send_selection(1, cx)
+                        });
+                    }
+                    _ => {}
+                }
+            });
 
         let mut this = Self {
             method,
@@ -672,18 +905,27 @@ impl ApiTester {
             pre_request_script,
             post_response_script,
             response_editor,
+            query_params: Vec::new(),
+            next_query_param_id: 0,
+            syncing_query_params: false,
             headers: Vec::new(),
             next_header_id: 0,
             body_mode: BodyMode::Raw,
             raw_body_language: RawBodyLanguage::Json,
             body_fields: Vec::new(),
             next_body_field_id: 0,
-            request_pane: RequestPane::Headers,
+            request_pane: RequestPane::Params,
             response_tab: ResponseTab::Body,
             pretty_body: true,
             sending: false,
             execution_stage: None,
             request_generation: 0,
+            mcp_http_operation_id: None,
+            mcp_http_request_id: None,
+            mcp_http_exchange: None,
+            mcp_scoped_local_workspace_id: None,
+            mcp_request_sequence_generation: 0,
+            mcp_request_sequence: None,
             abort_handle: None,
             script_cancellation: None,
             request_namespace: crate::core::RequestNamespaceCatalog::default(),
@@ -695,6 +937,18 @@ impl ApiTester {
             script_diagnostic: None,
             pre_script_report: None,
             post_script_report: None,
+            script_console_input,
+            script_console_running: false,
+            mcp_script_console_generation: 0,
+            mcp_script_console_operation_id: None,
+            mcp_script_console_request_id: None,
+            mcp_script_console_owned: false,
+            script_console_history: Vec::new(),
+            script_console_history_cursor: None,
+            script_console_history_draft: String::new(),
+            script_console_scroll: ScrollHandle::new(),
+            script_console_expanded_rows: HashSet::new(),
+            script_console_cleared_key: None,
             preview_error: None,
             copied: false,
             client,
@@ -705,6 +959,9 @@ impl ApiTester {
             snippets,
             workspace,
             database_store,
+            _control_server: None,
+            mcp_websocket_generation: 0,
+            mcp_websocket: None,
             workspace_providers,
             local_workspaces,
             credential_vault,
@@ -718,8 +975,10 @@ impl ApiTester {
             realtime_status: RealtimeConnectionStatus::Inactive,
             realtime_refresh_generation: 0,
             realtime_refresh_abort_handle: None,
+            websocket_workspace,
             workspace_name,
             sidebar_tab: SidebarTab::Collections,
+            navigation_sidebar_open: true,
             navigation_compact,
             selected_collection_id,
             selected_folder_id,
@@ -739,12 +998,19 @@ impl ApiTester {
             workspace_tabs,
             panes,
             pane_editors: HashMap::new(),
+            primary_pane_scroll: ScrollHandle::default(),
+            pane_request_generation: 0,
+            pane_requests_in_flight: HashMap::new(),
             settings,
             settings_warning,
             settings_writable,
             base_key_bindings,
             recording_shortcut_id: None,
             settings_notice: None,
+            mcp_open_tool_groups: crate::control_tools::CONTROL_TOOL_GROUPS
+                .iter()
+                .map(|group| group.id.to_owned())
+                .collect(),
             server_management: server_management::ServerManagementState::default(),
             server_management_generation: 0,
             server_management_abort_handle: None,
@@ -803,16 +1069,32 @@ impl ApiTester {
                 pre_request_format_subscription,
                 post_response_subscription,
                 post_response_format_subscription,
+                script_console_change_subscription,
+                script_console_key_subscription,
                 collection_name_subscription,
                 folder_name_subscription,
                 saved_request_name_subscription,
                 request_interchange_subscription,
                 quit_subscription,
                 shortcut_capture_subscription,
+                websocket_quick_send_escape_subscription,
                 upstream_login_password_subscription,
+                websocket_url_subscription,
+                websocket_headers_subscription,
+                websocket_composer_subscription,
+                websocket_composer_format_subscription,
+                websocket_timeline_preview_format_subscription,
+                websocket_library_preview_format_subscription,
+                websocket_template_format_subscription,
+                websocket_automation_subscription,
+                websocket_timeline_filter_subscription,
+                websocket_library_search_subscription,
+                websocket_quick_send_query_subscription,
             ],
         };
         this.apply_code_editor_settings(window, cx);
+        this.refresh_websocket_composer_inline_actions(cx);
+        this.push_query_param_row("", "", "", true, window, cx);
         this.push_header_row("", "", true, true, window, cx);
         this.refresh_variable_intelligence(cx);
         this.loaded_request_baseline = this.request_template(cx);
