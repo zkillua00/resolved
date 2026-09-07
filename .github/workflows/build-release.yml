@@ -202,14 +202,16 @@ jobs:
           EOF
           flags=()
           if [ "$CHANNEL" = nightly ]; then
-            flags+=(--prerelease --latest=false)
+            flags+=(--prerelease --latest=false --target "$RELEASE_SHA")
           else
+            # The version tag already pins the commit. Passing --target can trigger
+            # GitHub's additional workflow-write permission check for older commits.
             flags+=(--verify-tag)
           fi
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" ./* --clobber
           else
-            gh release create "$RELEASE_TAG" ./* --target "$RELEASE_SHA" \
+            gh release create "$RELEASE_TAG" ./* \
               --title "Resolved $RELEASE_VERSION" \
               --notes-file "$RUNNER_TEMP/release-notes.md" "${flags[@]}"
           fi
