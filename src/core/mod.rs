@@ -55,10 +55,10 @@ pub use request_tabs::{
 pub use script::ScriptTestResult;
 pub use script::{
     ChainedRequest, EnvironmentMutation, InlineChainer, MAX_SCRIPT_SOURCE_BYTES,
-    PostResponseResult, PreRequestResult, ScriptCancellation, ScriptDiagnostic, ScriptEnvironment,
-    ScriptError, ScriptErrorKind, ScriptLog, ScriptLogLevel, ScriptPhase, ScriptReport,
-    ScriptScope, execute_post_response_console_with_chain, execute_post_response_with_chain,
-    execute_pre_request_with_chain,
+    PostResponseResult, PreRequestResult, ScriptCancellation, ScriptConsoleSession,
+    ScriptDiagnostic, ScriptEnvironment, ScriptError, ScriptErrorKind, ScriptLog, ScriptLogLevel,
+    ScriptPhase, ScriptReport, ScriptScope, execute_post_response_console_session,
+    execute_post_response_with_chain, execute_pre_request_with_chain,
 };
 #[allow(unused_imports)]
 pub use secure_store::{CredentialVault, CredentialVaultError, UpstreamCredential};

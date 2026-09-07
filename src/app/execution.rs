@@ -164,6 +164,10 @@ impl ApiTester {
                 .and_then(|id| self.workspace.environment(id)),
         );
         scope.script_timeout = self.settings.script.timeout();
+        self.script_console_session = None;
+        self.script_console_session_key = None;
+        self.script_console_reports.clear();
+        self.script_console_hidden_rows = 0;
         self.request_generation = self.request_generation.wrapping_add(1);
         let generation = self.request_generation;
         self.request_history_target = self.active_upstream_workspace().ok();
@@ -945,6 +949,10 @@ impl ApiTester {
         }
         let mcp_operation_id = (self.mcp_http_operation_id == Some(self.request_generation))
             .then_some(self.request_generation);
+        self.script_console_session = None;
+        self.script_console_session_key = None;
+        self.script_console_reports.clear();
+        self.script_console_hidden_rows = 0;
         self.request_generation = self.request_generation.wrapping_add(1);
         self.finish_cancelled(cx);
         if let Some(operation_id) = mcp_operation_id {

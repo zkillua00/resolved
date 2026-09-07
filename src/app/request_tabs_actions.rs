@@ -61,6 +61,8 @@ struct SnapshotFingerprint {
     script_diagnostic: Option<ScriptDiagnostic>,
     pre_script_report: Option<ScriptReport>,
     post_script_report: Option<ScriptReport>,
+    script_console_reports: Vec<ScriptReport>,
+    script_console_hidden_rows: usize,
     preview_error: Option<String>,
     request_notice: Option<String>,
 }
@@ -77,6 +79,8 @@ impl SnapshotFingerprint {
             script_diagnostic: this.script_diagnostic.clone(),
             pre_script_report: this.pre_script_report.clone(),
             post_script_report: this.post_script_report.clone(),
+            script_console_reports: this.script_console_reports.clone(),
+            script_console_hidden_rows: this.script_console_hidden_rows,
             preview_error: this.preview_error.clone(),
             request_notice: this.request_notice.clone(),
         }
@@ -93,6 +97,8 @@ impl SnapshotFingerprint {
             script_diagnostic: runtime.script_diagnostic.clone(),
             pre_script_report: runtime.pre_script_report.clone(),
             post_script_report: runtime.post_script_report.clone(),
+            script_console_reports: runtime.script_console_reports.clone(),
+            script_console_hidden_rows: runtime.script_console_hidden_rows,
             preview_error: runtime.preview_error.clone(),
             request_notice: runtime.request_notice.clone(),
         }
@@ -104,6 +110,13 @@ impl PartialEq for SnapshotFingerprint {
         self.request_pane == other.request_pane
             && self.response_tab == other.response_tab
             && self.pretty_body == other.pretty_body
+            && self.script_console_hidden_rows == other.script_console_hidden_rows
+            && self.script_console_reports.len() == other.script_console_reports.len()
+            && self
+                .script_console_reports
+                .iter()
+                .zip(&other.script_console_reports)
+                .all(|(left, right)| script_report_fingerprint_eq(Some(left), Some(right)))
             && self.copied == other.copied
             && self.response_body == other.response_body
             && self.request_error == other.request_error
@@ -238,6 +251,8 @@ impl ApiTester {
                 script_diagnostic: self.script_diagnostic.clone(),
                 pre_script_report: self.pre_script_report.clone(),
                 post_script_report: self.post_script_report.clone(),
+                script_console_reports: self.script_console_reports.clone(),
+                script_console_hidden_rows: self.script_console_hidden_rows,
                 preview_error: self.preview_error.clone(),
                 copied: self.copied,
                 request_notice: self.request_notice.clone(),
@@ -436,6 +451,8 @@ impl ApiTester {
         self.script_diagnostic = runtime.script_diagnostic;
         self.pre_script_report = runtime.pre_script_report;
         self.post_script_report = runtime.post_script_report;
+        self.script_console_reports = runtime.script_console_reports;
+        self.script_console_hidden_rows = runtime.script_console_hidden_rows;
         self.preview_error = runtime.preview_error;
         self.copied = runtime.copied;
         self.request_notice = runtime.request_notice;
@@ -1053,6 +1070,8 @@ mod snapshot_tests {
             script_diagnostic: None,
             pre_script_report: None,
             post_script_report: None,
+            script_console_reports: Vec::new(),
+            script_console_hidden_rows: 0,
             preview_error: None,
             request_notice: None,
         }

@@ -42,6 +42,8 @@ pub(in crate::app) struct PaneEditorState {
     script_diagnostic: Option<ScriptDiagnostic>,
     pre_script_report: Option<ScriptReport>,
     post_script_report: Option<ScriptReport>,
+    script_console_reports: Vec<ScriptReport>,
+    script_console_hidden_rows: usize,
     preview_error: Option<String>,
     copied: bool,
     request_notice: Option<String>,
@@ -155,6 +157,8 @@ impl PaneEditorState {
             script_diagnostic: None,
             pre_script_report: None,
             post_script_report: None,
+            script_console_reports: Vec::new(),
+            script_console_hidden_rows: 0,
             preview_error: None,
             copied: false,
             request_notice: None,
@@ -404,6 +408,8 @@ impl PaneEditorState {
         self.script_diagnostic = runtime.script_diagnostic.clone();
         self.pre_script_report = runtime.pre_script_report.clone();
         self.post_script_report = runtime.post_script_report.clone();
+        self.script_console_reports = runtime.script_console_reports.clone();
+        self.script_console_hidden_rows = runtime.script_console_hidden_rows;
         self.preview_error = runtime.preview_error.clone();
         self.copied = runtime.copied;
         self.request_notice = runtime.request_notice.clone();
@@ -499,6 +505,8 @@ impl PaneEditorState {
             script_diagnostic: self.script_diagnostic.clone(),
             pre_script_report: self.pre_script_report.clone(),
             post_script_report: self.post_script_report.clone(),
+            script_console_reports: self.script_console_reports.clone(),
+            script_console_hidden_rows: self.script_console_hidden_rows,
             preview_error: self.preview_error.clone(),
             copied: self.copied,
             request_notice: self.request_notice.clone(),
@@ -1878,6 +1886,8 @@ impl ApiTester {
             session.script_diagnostic = None;
             session.pre_script_report = None;
             session.post_script_report = None;
+            session.script_console_reports.clear();
+            session.script_console_hidden_rows = 0;
             session.preview_error = None;
             session.copied = false;
         }
@@ -1986,6 +1996,8 @@ impl ApiTester {
         runtime.script_diagnostic = None;
         runtime.pre_script_report = None;
         runtime.post_script_report = None;
+        runtime.script_console_reports.clear();
+        runtime.script_console_hidden_rows = 0;
         runtime.preview_error = None;
         runtime.copied = false;
         match result {

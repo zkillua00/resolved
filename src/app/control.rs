@@ -3226,12 +3226,7 @@ impl ApiTester {
                 "script-console operation {operation_id} is no longer current"
             ));
         }
-        let model = crate::app::script_console::script_console_model(
-            self.pre_script_report.as_ref(),
-            self.post_script_report.as_ref(),
-            self.script_diagnostic.as_ref(),
-            self.request_error.as_deref(),
-        );
+        let model = self.visible_script_console_model();
         Ok(json!({
             "operation_id": self.mcp_script_console_operation_id,
             "state": if self.script_console_running { "running" } else { "idle" },

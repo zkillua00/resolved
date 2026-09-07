@@ -123,15 +123,7 @@ pub(super) fn script_console_model(
         }
 
         if rows.is_empty() {
-            let message = "No console output or tests.".to_owned();
-            rows.push(ScriptConsoleRow {
-                label: "EMPTY".to_owned(),
-                message: message.clone(),
-                detail: None,
-                copy_value: message,
-                tone: ScriptConsoleTone::Neutral,
-                values: Vec::new(),
-            });
+            continue;
         }
 
         sections.push(ScriptConsoleSection {
@@ -278,19 +270,8 @@ pub(super) fn script_console_value_color(kind: &str, cx: &App) -> Hsla {
 }
 
 impl ApiTester {
-    fn append_script_console_report(&mut self, mut report: ScriptReport) {
-        let current = self.post_script_report.get_or_insert_with(|| ScriptReport {
-            phase: ScriptPhase::PostResponse,
-            duration: Duration::ZERO,
-            logs: Vec::new(),
-            tests: Vec::new(),
-            response_body_truncated: false,
-        });
-        current.duration += report.duration;
-        current.logs.append(&mut report.logs);
-        current.tests.append(&mut report.tests);
-        current.response_body_truncated |= report.response_body_truncated;
-        self.script_console_cleared_key = None;
+    fn append_script_console_report(&mut self, report: ScriptReport) {
+        self.script_console_reports.push(report);
         self.script_console_scroll.scroll_to_bottom();
     }
 
@@ -382,8 +363,14 @@ impl ApiTester {
         let cancellation = ScriptCancellation::new();
         self.script_cancellation = Some(cancellation.clone());
         let chainer = self.build_inline_chainer(&environment_id);
+        let session_key = (generation, format!("{tab_id:?}"));
+        if self.script_console_session_key.as_ref() != Some(&session_key) {
+            self.script_console_session = None;
+        }
+        self.script_console_session_key = Some(session_key);
+        let mut session = self.script_console_session.take();
         let task = self.runtime.spawn_blocking(move || {
-            crate::core::execute_post_response_console_with_chain(
+            let result = crate::core::execute_post_response_console_session(
                 &source,
                 &request,
                 &response,
@@ -391,7 +378,9 @@ impl ApiTester {
                 &namespace,
                 &cancellation,
                 Some(&chainer),
-            )
+                &mut session,
+            );
+            (result, session)
         });
 
         cx.spawn_in(window, async move |this, cx| {
@@ -406,6 +395,10 @@ impl ApiTester {
                     cx.notify();
                     return;
                 }
+                let result = result.map(|(result, session)| {
+                    this.script_console_session = session;
+                    result
+                });
                 match result {
                     Ok(Ok(result)) => {
                         let chained = result.chained_requests.clone();
@@ -518,34 +511,45 @@ impl ApiTester {
         });
     }
 
-    pub(super) fn copy_script_results(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn visible_script_console_model(&self) -> ScriptConsoleModel {
         let mut model = script_console_model(
             self.pre_script_report.as_ref(),
             self.post_script_report.as_ref(),
             self.script_diagnostic.as_ref(),
             self.request_error.as_deref(),
         );
-        if self.script_console_cleared_key
-            == Some(script_console_content_key(self.request_generation, &model))
-        {
-            model = ScriptConsoleModel::default();
+        for report in &self.script_console_reports {
+            model
+                .sections
+                .extend(script_console_model(None, Some(report), None, None).sections);
         }
-        cx.write_to_clipboard(ClipboardItem::new_string(model.copy_all_text()));
+        let mut hidden = self.script_console_hidden_rows;
+        for section in &mut model.sections {
+            let count = hidden.min(section.rows.len());
+            section.rows.drain(..count);
+            hidden -= count;
+        }
+        model.sections.retain(|section| !section.rows.is_empty());
+        model
+    }
+
+    fn clear_script_console(&mut self, cx: &mut Context<Self>) {
+        self.script_console_hidden_rows += self.visible_script_console_model().row_count();
+        self.script_console_expanded_rows.clear();
+        self.copied = false;
+        cx.notify();
+    }
+
+    pub(super) fn copy_script_results(&mut self, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(
+            self.visible_script_console_model().copy_all_text(),
+        ));
         self.copied = true;
         cx.notify();
     }
 
     pub(super) fn render_script_results(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut model = script_console_model(
-            self.pre_script_report.as_ref(),
-            self.post_script_report.as_ref(),
-            self.script_diagnostic.as_ref(),
-            self.request_error.as_deref(),
-        );
-        let console_content_key = script_console_content_key(self.request_generation, &model);
-        if self.script_console_cleared_key == Some(console_content_key) {
-            model = ScriptConsoleModel::default();
-        }
+        let model = self.visible_script_console_model();
         let row_count = model.row_count();
         let prompt_lines = self
             .script_console_input
@@ -595,6 +599,7 @@ impl ApiTester {
                         .id(row_id)
                         .w_full()
                         .min_h(px(24.))
+                        .flex_shrink_0()
                         .items_start()
                         .px_1()
                         .py(px(2.))
@@ -661,7 +666,11 @@ impl ApiTester {
                                     div()
                                         .min_w_0()
                                         .whitespace_normal()
-                                        .child(row.message.clone())
+                                        .child(if is_command {
+                                            console_command_text(&row.message, cx)
+                                        } else {
+                                            gpui::StyledText::new(row.message.clone())
+                                        })
                                         .into_any_element()
                                 } else {
                                     h_flex()
@@ -693,13 +702,16 @@ impl ApiTester {
                                 row_owner.clone(),
                                 Some(row_copy_value.clone()),
                                 row_copy_all.clone(),
-                                console_content_key,
                             )
                         })
                         .into_any_element()
                 });
 
-                v_flex().w_full().children(rows).into_any_element()
+                v_flex()
+                    .w_full()
+                    .flex_shrink_0()
+                    .children(rows)
+                    .into_any_element()
             })
             .collect::<Vec<_>>();
         let prompt = h_flex()
@@ -787,6 +799,13 @@ impl ApiTester {
                     )
                     .child(div().flex_1())
                     .child(
+                        Button::new("clear-script-console")
+                            .label("Clear")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| this.clear_script_console(cx))),
+                    )
+                    .child(
                         Button::new(("copy-all-script-output", generation))
                             .icon(if self.copied {
                                 IconName::Check
@@ -816,7 +835,6 @@ impl ApiTester {
                             context_owner.clone(),
                             None,
                             copy_all_text.clone(),
-                            console_content_key,
                         )
                     })),
             )
@@ -829,7 +847,6 @@ fn script_console_context_menu(
     owner: WeakEntity<ApiTester>,
     row: Option<String>,
     all: String,
-    console_content_key: u64,
 ) -> PopupMenu {
     if let Some(row) = row {
         menu = menu.item(
@@ -853,23 +870,11 @@ fn script_console_context_menu(
         PopupMenuItem::new("Clear console").on_click(move |_, _, cx| {
             if let Some(owner) = clear_owner.upgrade() {
                 owner.update(cx, |this, cx| {
-                    this.script_console_cleared_key = Some(console_content_key);
-                    this.script_console_expanded_rows.clear();
-                    this.copied = false;
-                    cx.notify();
+                    this.clear_script_console(cx);
                 });
             }
         }),
     )
-}
-
-fn script_console_content_key(generation: u64, model: &ScriptConsoleModel) -> u64 {
-    use std::hash::{DefaultHasher, Hash as _, Hasher as _};
-
-    let mut hasher = DefaultHasher::new();
-    generation.hash(&mut hasher);
-    model.copy_all_text().hash(&mut hasher);
-    hasher.finish()
 }
 
 #[cfg(test)]
@@ -896,6 +901,40 @@ mod interactive_tests {
             gpui_component::Root::new(view, window, cx)
         });
         (app.expect("capture app entity"), visual, directory)
+    }
+
+    #[gpui::test]
+    fn console_clear_keeps_reports_and_new_entries_do_not_restore_old_tests(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, cx, _directory) = mount_app(cx);
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                let mut report = ScriptReport {
+                    phase: ScriptPhase::PostResponse,
+                    duration: Duration::ZERO,
+                    logs: Vec::new(),
+                    tests: Vec::new(),
+                    response_body_truncated: false,
+                };
+                app.pre_script_report = Some(report.clone());
+                app.post_script_report = Some(report.clone());
+                assert_eq!(app.visible_script_console_model().row_count(), 0);
+                report.tests.push(crate::core::ScriptTestResult {
+                    name: "once".to_owned(),
+                    passed: true,
+                    message: None,
+                });
+                app.append_script_console_report(report);
+                app.clear_script_console(cx);
+                assert!(app.post_script_report.is_some());
+                assert_eq!(app.visible_script_console_model().row_count(), 0);
+                app.append_script_console_error("new entry".to_owned());
+                let model = app.visible_script_console_model();
+                assert_eq!(model.row_count(), 1);
+                assert!(!model.copy_all_text().contains("once"));
+            })
+        });
     }
 
     #[gpui::test]
@@ -935,4 +974,12 @@ mod interactive_tests {
             "draft"
         );
     }
+}
+
+fn console_command_text(source: &str, cx: &App) -> gpui::StyledText {
+    let rope = gpui_component::Rope::from_str(source);
+    let mut highlighter = gpui_component::highlighter::SyntaxHighlighter::new("javascript");
+    highlighter.update(None, &rope);
+    let styles = highlighter.styles(&(0..source.len()), &cx.theme().highlight_theme);
+    gpui::StyledText::new(source.to_owned()).with_highlights(styles)
 }

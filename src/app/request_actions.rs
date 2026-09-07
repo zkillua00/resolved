@@ -899,6 +899,9 @@ impl ApiTester {
         self.script_diagnostic = None;
         self.pre_script_report = None;
         self.post_script_report = None;
+        self.script_console_reports.clear();
+        self.script_console_hidden_rows = 0;
+        self.script_console_session = None;
         self.preview_error = None;
         self.copied = false;
         if let Some(collection_id) = collection_id

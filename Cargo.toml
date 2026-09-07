@@ -37,7 +37,7 @@ reqwest = { version = "=0.13.4", default-features = false, features = [
 cookie_store = "=0.22.1"
 ring = "=0.17.14"
 rustls = { version = "=0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
-rquickjs = { version = "=0.12.1", default-features = false, features = ["std"] }
+rquickjs = { version = "=0.12.1", default-features = false, features = ["std", "parallel"] }
 rquickjs-serde = "=0.6.1"
 rusqlite = { version = "=0.40.1", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }

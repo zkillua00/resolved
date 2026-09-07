@@ -165,10 +165,9 @@ fn script_console_includes_network_failure_after_pre_script_output() {
     };
 
     let model = script_console_model(Some(&report), None, None, Some("connection refused"));
-    assert_eq!(model.sections.len(), 2);
-    assert_eq!(model.sections[0].rows[0].label, "EMPTY");
-    assert_eq!(model.sections[1].title, "Request");
-    assert_eq!(model.sections[1].rows[0].copy_value, "connection refused");
+    assert_eq!(model.sections.len(), 1);
+    assert_eq!(model.sections[0].title, "Request");
+    assert_eq!(model.sections[0].rows[0].copy_value, "connection refused");
     assert!(model.copy_all_text().contains("[ERROR] connection refused"));
 }
 

@@ -477,6 +477,16 @@ const PRELUDE: &str = r#"
     enumerable: false,
     writable: false,
   });
+  Object.defineProperty(globalThis, "__API_TESTER_RESET", {
+    value: () => {
+      logs.length = 0;
+      tests.length = 0;
+      environmentMutations.length = 0;
+      scheduledRequests.length = 0;
+      nativeOps.length = 0;
+      logCharacters = 0;
+    }
+  });
   delete globalThis.__API_TESTER_INPUT;
 })();
 "#;
@@ -911,6 +921,7 @@ fn execute_pre_request_inner(
         scope.script_timeout,
         &redactor,
         &scope.environment.secret_names,
+        None,
     )?;
     extend_redactor_with_secret_mutations(&mut redactor, scope, &run.output.environment_mutations);
     let report = report_from_run(phase, &run, false, &redactor);
@@ -990,6 +1001,7 @@ fn execute_post_response_inner(
     request_namespace: &RequestNamespaceCatalog,
     cancellation: &ScriptCancellation,
     chain_inline: Option<&dyn InlineChainer>,
+    console_session: Option<&mut Option<ScriptConsoleSession>>,
 ) -> Result<PostResponseResult, ScriptError> {
     let phase = ScriptPhase::PostResponse;
     if source.trim().is_empty() {
@@ -1022,6 +1034,7 @@ fn execute_post_response_inner(
         scope.script_timeout,
         &redactor,
         &scope.environment.secret_names,
+        console_session,
     )?;
     extend_redactor_with_secret_mutations(&mut redactor, scope, &run.output.environment_mutations);
     let report = report_from_run(phase, &run, truncated, &redactor);
@@ -1053,6 +1066,7 @@ pub fn execute_post_response(
         request_namespace,
         cancellation,
         None,
+        None,
     )
 }
 
@@ -1075,12 +1089,14 @@ pub fn execute_post_response_with_chain(
         request_namespace,
         cancellation,
         chain_inline,
+        None,
     )
 }
 
 /// Evaluates one interactive console entry against the post-response API.
 /// Expressions print their completion value; statement blocks retain normal
 /// script semantics and can write through `console` / `api.console`.
+#[cfg(test)]
 pub fn execute_post_response_console_with_chain(
     source: &str,
     request: &RequestDraft,
@@ -1090,32 +1106,84 @@ pub fn execute_post_response_console_with_chain(
     cancellation: &ScriptCancellation,
     chain_inline: Option<&dyn InlineChainer>,
 ) -> Result<PostResponseResult, ScriptError> {
-    let encoded = serde_json::to_string(source).unwrap_or_else(|_| "\"\"".to_owned());
-    let wrapped = format!(
-        r#"
-const __resolvedConsoleSource = {encoded};
-const __ResolvedAsyncFunction = Object.getPrototypeOf(async function() {{}}).constructor;
-let __resolvedConsoleRunner;
-try {{
-  __resolvedConsoleRunner = new __ResolvedAsyncFunction(
-    "return (" + __resolvedConsoleSource + "\n);"
-  );
-}} catch (_) {{
-  __resolvedConsoleRunner = new __ResolvedAsyncFunction(__resolvedConsoleSource);
-}}
-const __resolvedConsoleValue = await __resolvedConsoleRunner();
-console.log(__resolvedConsoleValue);
-"#
-    );
-    execute_post_response_inner(
-        &wrapped,
+    execute_post_response_console_session(
+        source,
         request,
         response,
         scope,
         request_namespace,
         cancellation,
         chain_inline,
+        &mut None,
     )
+}
+
+/// A bounded JavaScript realm retained between console entries.
+/// Move it between blocking tasks; only one evaluation may own it at a time.
+pub struct ScriptConsoleSession {
+    context: JsContext,
+    runtime: JsRuntime,
+    secrets: Vec<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_post_response_console_session(
+    source: &str,
+    request: &RequestDraft,
+    response: &ResponseData,
+    scope: &ScriptScope,
+    request_namespace: &RequestNamespaceCatalog,
+    cancellation: &ScriptCancellation,
+    chain_inline: Option<&dyn InlineChainer>,
+    session: &mut Option<ScriptConsoleSession>,
+) -> Result<PostResponseResult, ScriptError> {
+    let mut scope = scope.clone();
+    if let Some(session) = session.as_ref() {
+        scope.extra_secrets.extend(session.secrets.iter().cloned());
+    }
+    let result = execute_post_response_inner(
+        source,
+        request,
+        response,
+        &scope,
+        request_namespace,
+        cancellation,
+        chain_inline,
+        Some(session),
+    );
+    if let Some(session) = session.as_mut() {
+        let mut redactor = scope.redactor();
+        if let Ok(result) = &result {
+            extend_redactor_with_secret_mutations(
+                &mut redactor,
+                &scope,
+                &result.environment_mutations,
+            );
+        }
+        // Failed entries may have changed a secret before throwing, too.
+        session.context.with(|ctx| {
+            if let Ok(value) = ctx.eval::<Value<'_>, _>("__API_TESTER_FINISH()")
+                && let Ok(output) = rquickjs_serde::from_value_strict::<EngineOutput>(value)
+            {
+                extend_redactor_with_secret_mutations(
+                    &mut redactor,
+                    &scope,
+                    &output.environment_mutations,
+                );
+            }
+        });
+        session.secrets = redactor.secrets;
+    }
+    // Abandoned jobs must never resume during the next entry.
+    if result.as_ref().is_err_and(|error| {
+        !matches!(
+            error.diagnostic.kind,
+            ScriptErrorKind::Syntax | ScriptErrorKind::Runtime
+        )
+    }) {
+        *session = None;
+    }
+    result
 }
 
 fn extend_redactor_with_secret_mutations(
@@ -1190,6 +1258,7 @@ fn run_engine(
     timeout: std::time::Duration,
     redactor: &SecretRedactor,
     secret_names: &BTreeSet<String>,
+    mut console_session: Option<&mut Option<ScriptConsoleSession>>,
 ) -> Result<EngineRun, ScriptError> {
     if cancellation.is_cancelled() {
         return Err(simple_error(
@@ -1206,15 +1275,33 @@ fn run_engine(
     let timed_out_for_interrupt = Arc::clone(&timed_out);
     let cancelled_for_interrupt = Arc::clone(&cancellation.cancelled);
 
-    let runtime = JsRuntime::new().map_err(|error| {
-        engine_error(
-            phase,
-            ScriptErrorKind::Engine,
-            error.to_string(),
-            started.elapsed(),
-            redactor,
-        )
-    })?;
+    let interactive = console_session.is_some();
+    let existing = console_session.as_deref_mut().and_then(Option::take);
+    let initialized = existing.is_some();
+    let (runtime, context) = if let Some(session) = existing {
+        (session.runtime, session.context)
+    } else {
+        let runtime = JsRuntime::new().map_err(|error| {
+            engine_error(
+                phase,
+                ScriptErrorKind::Engine,
+                error.to_string(),
+                started.elapsed(),
+                redactor,
+            )
+        })?;
+        let context = JsContext::full(&runtime).map_err(|error| {
+            engine_error(
+                phase,
+                ScriptErrorKind::Engine,
+                error.to_string(),
+                started.elapsed(),
+                redactor,
+            )
+        })?;
+
+        (runtime, context)
+    };
     runtime.set_memory_limit(SCRIPT_MEMORY_LIMIT_BYTES);
     runtime.set_max_stack_size(SCRIPT_STACK_LIMIT_BYTES);
     runtime.set_interrupt_handler(Some(Box::new(move || {
@@ -1228,17 +1315,16 @@ fn run_engine(
         false
     })));
 
-    let context = JsContext::full(&runtime).map_err(|error| {
-        engine_error(
-            phase,
-            ScriptErrorKind::Engine,
-            error.to_string(),
-            started.elapsed(),
-            redactor,
-        )
-    })?;
+    if let Some(slot) = console_session {
+        *slot = Some(ScriptConsoleSession {
+            runtime: runtime.clone(),
+            context: context.clone(),
+            secrets: redactor.secrets.clone(),
+        });
+    }
 
     context.with(|ctx| -> Result<(), ScriptError> {
+        if !initialized {
         let input_value = rquickjs_serde::to_value(ctx.clone(), &input).map_err(|error| {
             engine_error(
                 phase,
@@ -1260,7 +1346,9 @@ fn run_engine(
                 )
             })?;
 
-        ctx.eval::<(), _>(PRELUDE).map_err(|error| {
+        }
+
+        ctx.eval::<(), _>(if initialized { "__API_TESTER_RESET()" } else { PRELUDE }).map_err(|error| {
             engine_error(
                 phase,
                 ScriptErrorKind::Engine,
@@ -1346,7 +1434,7 @@ fn run_engine(
             concat!(
                 "globalThis.__API_TESTER_SETTLED = { done: false, rejected: false, reason: undefined };\n",
                 "globalThis.__API_TESTER_MAIN.then(\n",
-                "  function(value) { globalThis.__API_TESTER_SETTLED.done = true; },\n",
+                "  function(value) { globalThis.__API_TESTER_SETTLED.done = true; globalThis.__API_TESTER_SETTLED.value = value; },\n",
                 "  function(reason) {\n",
                 "    globalThis.__API_TESTER_SETTLED.done = true;\n",
                 "    globalThis.__API_TESTER_SETTLED.rejected = true;\n",
@@ -1653,15 +1741,21 @@ fn run_engine(
     }
 
     let output: EngineOutput = context.with(|ctx| {
-        let value: Value<'_> = ctx.eval("__API_TESTER_FINISH()").map_err(|error| {
-            engine_error(
-                phase,
-                ScriptErrorKind::Runtime,
-                format!("could not collect script output: {error}"),
-                started.elapsed(),
-                redactor,
-            )
-        })?;
+        let value: Value<'_> = ctx
+            .eval(if interactive {
+                "console.log(globalThis.__API_TESTER_SETTLED.value.value); __API_TESTER_FINISH()"
+            } else {
+                "__API_TESTER_FINISH()"
+            })
+            .map_err(|error| {
+                engine_error(
+                    phase,
+                    ScriptErrorKind::Runtime,
+                    format!("could not collect script output: {error}"),
+                    started.elapsed(),
+                    redactor,
+                )
+            })?;
         rquickjs_serde::from_value_strict(value).map_err(|error| {
             engine_error(
                 phase,
@@ -2172,6 +2266,78 @@ console.info(api.response.durationMs);
             None,
         )
         .expect("console expression should use the post-response API");
+
+        let mut session = None;
+        for (source, expected) in [
+            ("const saved = { count: 1 }; let count = 2;", "undefined"),
+            ("saved.count += count; saved", r#"{"count":3}"#),
+            ("count += 1; count", "3"),
+            ("await Promise.resolve(saved.count)", "3"),
+            ("api.test('once', () => api.assert(true));", "undefined"),
+            ("count", "3"),
+        ] {
+            let entry = execute_post_response_console_session(
+                source,
+                &request(),
+                &response,
+                &ScriptScope::default(),
+                &RequestNamespaceCatalog::default(),
+                &ScriptCancellation::new(),
+                None,
+                &mut session,
+            )
+            .expect(source);
+            assert_eq!(
+                entry.report.logs.last().unwrap().message,
+                expected,
+                "{source}"
+            );
+            assert_eq!(
+                entry.report.tests.len(),
+                usize::from(source.contains("api.test"))
+            );
+        }
+
+        for source in ["throw new Error('entry failed')", "const = ;"] {
+            assert!(
+                execute_post_response_console_session(
+                    source,
+                    &request(),
+                    &response,
+                    &ScriptScope::default(),
+                    &RequestNamespaceCatalog::default(),
+                    &ScriptCancellation::new(),
+                    None,
+                    &mut session
+                )
+                .is_err()
+            );
+        }
+        let recovered = execute_post_response_console_session(
+            "saved.count",
+            &request(),
+            &response,
+            &ScriptScope::default(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
+            None,
+            &mut session,
+        )
+        .unwrap();
+        assert_eq!(recovered.report.logs[0].message, "3");
+        session = None;
+        let reset = execute_post_response_console_session(
+            "typeof saved",
+            &request(),
+            &response,
+            &ScriptScope::default(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
+            None,
+            &mut session,
+        )
+        .unwrap();
+        assert_eq!(reset.report.logs[0].message, "undefined");
 
         assert_eq!(result.report.logs.len(), 1);
         assert_eq!(result.report.logs[0].values[0].kind, "object");
