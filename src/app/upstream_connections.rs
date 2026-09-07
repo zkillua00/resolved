@@ -1432,6 +1432,9 @@ mod tests {
             });
         });
         cx.run_until_parked();
+        let header = cx.debug_bounds("cookie-value-header").unwrap().center();
+        cx.simulate_mouse_move(header, None, gpui::Modifiers::none());
+        cx.run_until_parked();
         let eye = cx.debug_bounds("toggle-cookie-values").unwrap().center();
         cx.update(|_, cx| assert!(!app.read(cx).cookie_values_visible));
         cx.simulate_click(eye, gpui::Modifiers::none());

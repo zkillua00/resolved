@@ -7,6 +7,7 @@ impl ApiTester {
         id: SharedString,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let value_header_group: SharedString = format!("{id}-cookie-value-header").into();
         let jar = self.cookie_jar.clone();
         let entries = jar.entries();
         let selected = entries
@@ -38,10 +39,11 @@ impl ApiTester {
                 .bg(cx.api_surface_low()).text_xs().font_semibold()
                 .text_color(cx.theme().muted_foreground)
                 .child(cookie_table_cell("NAME".to_owned(), cx))
-                .child(h_flex().flex_1().min_w_0().h_full().px_3().gap_2().justify_between()
+                .child(h_flex().id("cookie-value-header").debug_selector(|| "cookie-value-header".to_owned()).group(value_header_group.clone()).flex_1().min_w_0().h_full().px_3().gap_2().justify_between()
                     .border_l_1().border_color(cx.api_outline_variant())
                     .child("VALUE")
-                    .child(Button::new("toggle-cookie-values")
+                    .child(div().flex_shrink_0().invisible().group_hover(value_header_group, |style| style.visible())
+                        .child(Button::new("toggle-cookie-values")
                         .debug_selector(|| "toggle-cookie-values".to_owned())
                         .icon(if self.cookie_values_visible { IconName::EyeOff } else { IconName::Eye })
                         .tooltip(if self.cookie_values_visible { "Hide cookie values" } else { "Show cookie values" })
@@ -50,7 +52,7 @@ impl ApiTester {
                             this.cookie_values_visible = !this.cookie_values_visible;
                             this.cookie_value_visibility.clear();
                             cx.notify();
-                        }))))
+                        })))))
                 .children(["DOMAIN", "PATH"].into_iter()
                     .map(|label| cookie_table_cell(label.to_owned(), cx))))
             .child(v_flex().id("cookie-list").flex_1().min_h_0().overflow_y_scroll()
