@@ -74,6 +74,59 @@ pub struct WebSocketReplay {
 pub struct WebSocketReplayFrame {
     pub delay_ms: u64,
     pub payload: String,
+    #[serde(default)]
+    pub direction: WebSocketReplayDirection,
+    /// Binary payloads are always base64, never a lossy display preview.
+    #[serde(default)]
+    pub binary: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSocketReplayDirection {
+    #[default]
+    Sent,
+    Received,
+}
+
+impl WebSocketReplayFrame {
+    pub fn command(&self) -> Result<Option<WebSocketCommand>, String> {
+        if self.direction == WebSocketReplayDirection::Received {
+            return Ok(None);
+        }
+        if self.binary {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .decode(&self.payload)
+                .map(|bytes| Some(WebSocketCommand::SendBinary(bytes)))
+                .map_err(|error| format!("Invalid recorded binary frame: {error}"))
+        } else {
+            Ok(Some(WebSocketCommand::SendText(self.payload.clone())))
+        }
+    }
+}
+
+/// Compare each direction independently: response latency may change interleaving.
+/// Payloads and frame types are exact; timing is displayed, not treated as a failure.
+pub fn compare_replay_frames<'a>(
+    saved: &'a [WebSocketReplayFrame],
+    actual: &'a [WebSocketReplayFrame],
+    direction: WebSocketReplayDirection,
+) -> Vec<(
+    Option<&'a WebSocketReplayFrame>,
+    Option<&'a WebSocketReplayFrame>,
+)> {
+    let saved: Vec<_> = saved
+        .iter()
+        .filter(|frame| frame.direction == direction)
+        .collect();
+    let actual: Vec<_> = actual
+        .iter()
+        .filter(|frame| frame.direction == direction)
+        .collect();
+    (0..saved.len().max(actual.len()))
+        .map(|index| (saved.get(index).copied(), actual.get(index).copied()))
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -221,22 +274,6 @@ pub fn render_message_template(
     }
     rendered.push_str(&source[cursor..]);
     Ok(rendered)
-}
-
-pub fn replay_frames(sent: &[(Instant, String)]) -> Vec<WebSocketReplayFrame> {
-    let mut previous = None;
-    sent.iter()
-        .map(|(at, payload)| {
-            let delay_ms = previous
-                .map(|last: Instant| at.saturating_duration_since(last).as_millis() as u64)
-                .unwrap_or(0);
-            previous = Some(*at);
-            WebSocketReplayFrame {
-                delay_ms,
-                payload: payload.clone(),
-            }
-        })
-        .collect()
 }
 
 pub fn execute_websocket_automation(
@@ -501,23 +538,6 @@ async fn drive_websocket_connection<S>(
     }
 }
 
-pub async fn replay_websocket_frames(
-    frames: Vec<WebSocketReplayFrame>,
-    sender: UnboundedSender<WebSocketCommand>,
-) {
-    for frame in frames {
-        if frame.delay_ms > 0 {
-            tokio::time::sleep(Duration::from_millis(frame.delay_ms)).await;
-        }
-        if sender
-            .send(WebSocketCommand::SendText(frame.payload))
-            .is_err()
-        {
-            return;
-        }
-    }
-}
-
 pub fn binary_preview(bytes: &[u8]) -> String {
     if let Ok(text) = std::str::from_utf8(bytes) {
         text.to_owned()
@@ -574,14 +594,64 @@ mod tests {
     }
 
     #[test]
-    fn replay_preserves_inter_message_delays() {
-        let start = Instant::now();
-        let frames = replay_frames(&[
-            (start, "one".to_owned()),
-            (start + Duration::from_millis(42), "two".to_owned()),
-        ]);
-        assert_eq!(frames[0].delay_ms, 0);
-        assert_eq!(frames[1].delay_ms, 42);
+    fn replay_legacy_frames_are_outgoing_text() {
+        let frame: WebSocketReplayFrame =
+            serde_json::from_str(r#"{"delay_ms":42,"payload":"hello"}"#).unwrap();
+        assert_eq!(
+            frame.command().unwrap(),
+            Some(WebSocketCommand::SendText("hello".into()))
+        );
+        let mut received = frame.clone();
+        received.direction = WebSocketReplayDirection::Received;
+        assert_eq!(received.command().unwrap(), None);
+        received.binary = true;
+        received.direction = WebSocketReplayDirection::Sent;
+        received.payload = "/wAB".into();
+        assert_eq!(
+            received.command().unwrap(),
+            Some(WebSocketCommand::SendBinary(vec![255, 0, 1]))
+        );
+        assert_eq!(
+            serde_json::from_str::<WebSocketReplayFrame>(
+                &serde_json::to_string(&received).unwrap()
+            )
+            .unwrap(),
+            received
+        );
+        received.payload = "invalid!".into();
+        assert!(received.command().is_err());
+    }
+
+    #[test]
+    fn replay_comparison_keeps_missing_extra_and_changed_responses() {
+        let frame = |payload: &str, direction| WebSocketReplayFrame {
+            delay_ms: 0,
+            payload: payload.into(),
+            direction,
+            binary: false,
+        };
+        let saved = vec![
+            frame("request", WebSocketReplayDirection::Sent),
+            frame("expected", WebSocketReplayDirection::Received),
+        ];
+        let actual = vec![
+            frame("changed", WebSocketReplayDirection::Received),
+            frame("request", WebSocketReplayDirection::Sent),
+            frame("extra", WebSocketReplayDirection::Received),
+        ];
+        let sent = compare_replay_frames(&saved, &actual, WebSocketReplayDirection::Sent);
+        assert_eq!(sent[0].0, sent[0].1);
+        let received = compare_replay_frames(&saved, &actual, WebSocketReplayDirection::Received);
+        assert_ne!(
+            received[0].0.unwrap().payload,
+            received[0].1.unwrap().payload
+        );
+        assert!(received[1].0.is_none());
+        assert!(
+            compare_replay_frames(&saved, &[], WebSocketReplayDirection::Received)[0]
+                .1
+                .is_none()
+        );
     }
 
     #[tokio::test]

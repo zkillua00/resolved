@@ -47,6 +47,7 @@ pub(super) struct ControlWebSocketConnection {
     abort_handle: AbortHandle,
     events: Vec<ControlWebSocketEvent>,
     next_event_id: u64,
+    automation_paused: Arc<std::sync::atomic::AtomicBool>,
 }
 
 enum ControlWebSocketIncoming {
@@ -673,6 +674,16 @@ async fn reload_remote_environments(
 }
 
 impl ApiTester {
+    pub(super) fn pause_mcp_websocket_automation(&mut self, paused: bool) {
+        if let Some(id) = self.websocket_workspace.mcp_connection_id {
+            if let Ok(connection) = self.control_websocket_mut(id) {
+                connection
+                    .automation_paused
+                    .store(paused, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
     pub(super) fn record_mcp_websocket_ui_text(&mut self, payload: String) {
         let Some(connection_id) = self.websocket_workspace.mcp_connection_id else {
             return;
@@ -3371,6 +3382,8 @@ impl ApiTester {
                     .collect::<std::collections::BTreeMap<_, _>>()
             })
             .unwrap_or_default();
+        let automation_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task_automation_paused = automation_paused.clone();
         let automation_commands = command_sender.clone();
         let automation_events = event_sender.clone();
         self.runtime.spawn(async move {
@@ -3395,7 +3408,9 @@ impl ApiTester {
                 {
                     return;
                 }
-                if !automation_enabled {
+                if !automation_enabled
+                    || task_automation_paused.load(std::sync::atomic::Ordering::SeqCst)
+                {
                     continue;
                 }
                 let Some(automation_event) = automation_event else {
@@ -3407,6 +3422,9 @@ impl ApiTester {
                     execute_websocket_automation(&source, &automation_event, &values)
                 })
                 .await;
+                if task_automation_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                    continue;
+                }
                 match output {
                     Ok(Ok(output)) => {
                         for log in output.logs {
@@ -3462,6 +3480,7 @@ impl ApiTester {
             abort_handle,
             events: Vec::new(),
             next_event_id: 1,
+            automation_paused,
         });
         cx.spawn(async move |weak_this, cx| {
             while let Some(event) = event_receiver.recv().await {

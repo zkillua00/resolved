@@ -117,9 +117,9 @@ pub use upstream_management::{
 };
 pub use websocket::{
     MAX_WEBSOCKET_MESSAGE_BYTES, MAX_WEBSOCKET_TIMELINE_ENTRIES, WebSocketAutomationEvent,
-    WebSocketCommand, WebSocketMessageTemplate, WebSocketReplay, WebSocketSavedMessage,
-    WebSocketSignal, WebSocketWorkspace, binary_preview, execute_websocket_automation,
-    render_message_template, replay_frames, replay_websocket_frames,
+    WebSocketCommand, WebSocketMessageTemplate, WebSocketReplay, WebSocketReplayDirection,
+    WebSocketReplayFrame, WebSocketSavedMessage, WebSocketSignal, WebSocketWorkspace,
+    binary_preview, compare_replay_frames, execute_websocket_automation, render_message_template,
     run_upstream_websocket_connection, run_websocket_connection, template_variable_names,
 };
 pub use workspace::{

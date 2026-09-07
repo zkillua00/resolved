@@ -58,6 +58,13 @@ pub(in crate::app) struct WebSocketTimelineEntry {
     pub(in crate::app) payload: String,
 }
 
+struct WebSocketReplayRun {
+    id: String,
+    frames: Vec<WebSocketReplayFrame>,
+    last_at: Option<Instant>,
+    status: &'static str,
+}
+
 pub(in crate::app) struct WebSocketWorkspaceState {
     pub(in crate::app) document: WebSocketWorkspace,
     pub(in crate::app) url: Entity<InputState>,
@@ -87,7 +94,12 @@ pub(in crate::app) struct WebSocketWorkspaceState {
     selected_timeline_entry: Option<u64>,
     pub(in crate::app) timeline_preview: Entity<CodeEditor>,
     next_timeline_entry_id: u64,
-    sent_session: Vec<(Instant, String)>,
+    recorded_session: Vec<WebSocketReplayFrame>,
+    recorded_at: Option<Instant>,
+    selected_replay: Option<String>,
+    replay_diff: bool,
+    replay_run: Option<WebSocketReplayRun>,
+    replay_task: Option<Task<()>>,
     active_template_id: Option<String>,
     template_values: Vec<(String, Entity<InputState>)>,
     template_value_subscriptions: Vec<Subscription>,
@@ -230,7 +242,12 @@ impl WebSocketWorkspaceState {
             selected_timeline_entry: None,
             timeline_preview,
             next_timeline_entry_id: 0,
-            sent_session: Vec::new(),
+            recorded_session: Vec::new(),
+            recorded_at: None,
+            selected_replay: None,
+            replay_diff: false,
+            replay_run: None,
+            replay_task: None,
             active_template_id: None,
             template_values: Vec::new(),
             template_value_subscriptions: Vec::new(),
@@ -319,6 +336,9 @@ impl ApiTester {
             .update(cx, |editor, cx| {
                 editor.set_value(document.automation_source.clone(), window, cx)
             });
+        self.websocket_workspace.selected_replay = None;
+        self.websocket_workspace.replay_run = None;
+        self.websocket_workspace.replay_task = None;
         self.websocket_workspace.document = document;
         self.refresh_websocket_composer_inline_actions(cx);
         self.websocket_workspace.notice = None;
@@ -330,7 +350,8 @@ impl ApiTester {
         self.websocket_workspace.timeline_following = true;
         self.websocket_workspace.selected_timeline_entry = None;
         self.websocket_workspace.timeline_scroll.scroll_to_bottom();
-        self.websocket_workspace.sent_session.clear();
+        self.websocket_workspace.recorded_session.clear();
+        self.websocket_workspace.recorded_at = None;
         self.websocket_workspace.active_template_id = None;
         self.websocket_workspace.template_values.clear();
         self.websocket_workspace
@@ -448,6 +469,7 @@ impl ApiTester {
     }
 
     pub(super) fn stop_websocket(&mut self) {
+        self.finish_websocket_replay("Connection closed");
         if let Some(sender) = self.websocket_workspace.command_sender.take() {
             let _ = sender.send(WebSocketCommand::Close);
         }
@@ -459,6 +481,7 @@ impl ApiTester {
     }
 
     pub(super) fn leave_websocket_view(&mut self) {
+        self.finish_websocket_replay("Stopped");
         if self.websocket_workspace.mcp_connection_id.is_some() {
             self.websocket_workspace.command_sender = None;
             self.websocket_workspace.mcp_connection_id = None;
@@ -523,7 +546,8 @@ impl ApiTester {
         self.websocket_workspace.command_sender = Some(command_sender);
         self.websocket_workspace.status = WebSocketConnectionStatus::Connecting;
         self.websocket_workspace.notice = None;
-        self.websocket_workspace.sent_session.clear();
+        self.websocket_workspace.recorded_session.clear();
+        self.websocket_workspace.recorded_at = None;
         let vault = self.credential_vault.clone();
         let runtime = Arc::clone(&self.runtime);
         let upstream_client = self.upstream_execution_client.clone();
@@ -641,7 +665,7 @@ impl ApiTester {
                 self.run_websocket_automation(WebSocketAutomationEvent::text(payload), window, cx);
             }
             WebSocketSignal::Binary(bytes) => {
-                let preview = binary_preview(&bytes);
+                let preview = base64::engine::general_purpose::STANDARD.encode(&bytes);
                 self.push_websocket_timeline(
                     WebSocketTimelineDirection::Received,
                     "binary",
@@ -689,7 +713,8 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.websocket_workspace.document.automation_enabled {
+        if self.websocket_replay_running() || !self.websocket_workspace.document.automation_enabled
+        {
             return;
         }
         let environment = self
@@ -712,7 +737,9 @@ impl ApiTester {
         cx.spawn_in(window, async move |this, cx| {
             let output = task.await;
             let _ = this.update_in(cx, |this, _, cx| {
-                if this.websocket_workspace.generation != generation {
+                if this.websocket_workspace.generation != generation
+                    || this.websocket_replay_running()
+                {
                     return;
                 }
                 match output {
@@ -751,6 +778,49 @@ impl ApiTester {
         kind: &'static str,
         payload: String,
     ) {
+        if matches!(kind, "text" | "binary") && direction != WebSocketTimelineDirection::System {
+            let now = Instant::now();
+            let frame = WebSocketReplayFrame {
+                delay_ms: self
+                    .websocket_workspace
+                    .recorded_at
+                    .map(|at| now.saturating_duration_since(at).as_millis() as u64)
+                    .unwrap_or(0),
+                payload: payload.clone(),
+                direction: if direction == WebSocketTimelineDirection::Sent {
+                    WebSocketReplayDirection::Sent
+                } else {
+                    WebSocketReplayDirection::Received
+                },
+                binary: kind == "binary",
+            };
+            self.websocket_workspace.recorded_at = Some(now);
+            if let Some(run) = self
+                .websocket_workspace
+                .replay_run
+                .as_mut()
+                .filter(|run| run.status == "Running")
+            {
+                let mut actual = frame.clone();
+                actual.delay_ms = run
+                    .last_at
+                    .map(|at| now.saturating_duration_since(at).as_millis() as u64)
+                    .unwrap_or(0);
+                run.last_at = Some(now);
+                run.frames.push(actual);
+                if run.frames.len() >= MAX_WEBSOCKET_TIMELINE_ENTRIES {
+                    self.finish_websocket_replay("Recording limit reached");
+                }
+            }
+            self.websocket_workspace.recorded_session.push(frame);
+            if self.websocket_workspace.recorded_session.len() > MAX_WEBSOCKET_TIMELINE_ENTRIES {
+                self.websocket_workspace.recorded_session.remove(0);
+                self.websocket_workspace.recorded_session[0].delay_ms = 0;
+            }
+        }
+        if matches!(kind, "close" | "error") {
+            self.finish_websocket_replay("Connection closed");
+        }
         let should_follow = self.websocket_workspace.timeline.is_empty()
             || websocket_scroll_is_at_bottom(&self.websocket_workspace.timeline_scroll);
         self.websocket_workspace.timeline_following = should_follow;
@@ -830,7 +900,12 @@ impl ApiTester {
         let payload = event
             .payload
             .clone()
-            .or_else(|| event.binary.as_deref().map(binary_preview))
+            .or_else(|| {
+                event
+                    .binary
+                    .as_deref()
+                    .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes))
+            })
             .unwrap_or_default();
         let kind = if event.kind == "script_error" {
             "script error"
@@ -863,6 +938,8 @@ impl ApiTester {
     }
 
     fn clear_websocket_timeline(&mut self) {
+        self.websocket_workspace.recorded_session.clear();
+        self.websocket_workspace.recorded_at = None;
         self.websocket_workspace.timeline.clear();
         self.websocket_workspace.selected_timeline_entry = None;
         self.websocket_workspace.timeline_following = true;
@@ -885,6 +962,12 @@ impl ApiTester {
         _reset_composer: bool,
         cx: &mut Context<Self>,
     ) {
+        if self.websocket_replay_running() {
+            self.websocket_workspace.notice =
+                Some("Stop playback before sending another message.".into());
+            cx.notify();
+            return;
+        }
         let payload = match self.resolve_websocket_text(&payload) {
             Ok(payload) => payload,
             Err(error) => {
@@ -897,6 +980,12 @@ impl ApiTester {
     }
 
     fn send_resolved_websocket_payload(&mut self, payload: String, cx: &mut Context<Self>) {
+        if self.websocket_replay_running() {
+            self.websocket_workspace.notice =
+                Some("Stop playback before sending another message.".into());
+            cx.notify();
+            return;
+        }
         let Some(sender) = self.websocket_workspace.command_sender.as_ref() else {
             self.websocket_workspace.notice = Some("Connect before sending a message.".to_owned());
             cx.notify();
@@ -911,9 +1000,6 @@ impl ApiTester {
             cx.notify();
             return;
         }
-        self.websocket_workspace
-            .sent_session
-            .push((Instant::now(), payload.clone()));
         self.push_websocket_timeline(WebSocketTimelineDirection::Sent, "text", payload.clone());
         self.record_mcp_websocket_ui_text(payload);
         self.websocket_workspace.notice = None;
@@ -1550,31 +1636,56 @@ impl ApiTester {
             .value()
             .trim()
             .to_owned();
-        let frames = replay_frames(&self.websocket_workspace.sent_session);
-        if name.is_empty() || frames.is_empty() {
+        let frames = self.websocket_workspace.recorded_session.clone();
+        if name.is_empty()
+            || !frames
+                .iter()
+                .any(|frame| frame.direction == WebSocketReplayDirection::Sent)
+        {
             self.websocket_workspace.notice =
                 Some("A replay needs a name and at least one sent message.".to_owned());
             cx.notify();
             return;
         }
+        let id = new_websocket_id("replay");
+        self.websocket_workspace.selected_replay = Some(id.clone());
         self.websocket_workspace
             .document
             .replays
-            .push(WebSocketReplay {
-                id: new_websocket_id("replay"),
-                name,
-                frames,
-            });
+            .push(WebSocketReplay { id, name, frames });
         self.persist_websocket_document(cx);
     }
 
+    fn websocket_replay_running(&self) -> bool {
+        self.websocket_workspace
+            .replay_run
+            .as_ref()
+            .is_some_and(|run| run.status == "Running")
+    }
+
+    fn finish_websocket_replay(&mut self, status: &'static str) {
+        if let Some(run) = self
+            .websocket_workspace
+            .replay_run
+            .as_mut()
+            .filter(|run| run.status == "Running")
+        {
+            run.status = status;
+        }
+        self.websocket_workspace.replay_task = None;
+        self.pause_mcp_websocket_automation(false);
+    }
+
     fn play_websocket_replay(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(sender) = self.websocket_workspace.command_sender.clone() else {
+        if self.websocket_replay_running() {
+            return;
+        }
+        if self.websocket_workspace.status != WebSocketConnectionStatus::Connected {
             self.websocket_workspace.notice =
                 Some("Connect before replaying a session.".to_owned());
             cx.notify();
             return;
-        };
+        }
         let Some(replay) = self
             .websocket_workspace
             .document
@@ -1585,14 +1696,84 @@ impl ApiTester {
             return;
         };
         let frames = replay.frames.clone();
-        for frame in &frames {
-            self.push_websocket_timeline(
-                WebSocketTimelineDirection::Sent,
-                "replay",
-                frame.payload.clone(),
-            );
+        if let Some(error) = frames.iter().find_map(|frame| frame.command().err()) {
+            self.websocket_workspace.notice = Some(error);
+            cx.notify();
+            return;
         }
-        self.runtime.spawn(replay_websocket_frames(frames, sender));
+        self.pause_mcp_websocket_automation(true);
+        self.clear_websocket_timeline();
+        self.websocket_workspace.section = WebSocketSection::Console;
+        self.websocket_workspace.replay_diff = false;
+        self.websocket_workspace.selected_replay = Some(id.to_owned());
+        self.websocket_workspace.replay_run = Some(WebSocketReplayRun {
+            id: id.to_owned(),
+            frames: Vec::new(),
+            last_at: None,
+            status: "Running",
+        });
+        self.websocket_workspace.notice = None;
+        let generation = self.websocket_workspace.generation;
+        self.websocket_workspace.replay_task = Some(cx.spawn(async move |this, cx| {
+            let started = Instant::now();
+            let mut elapsed = Duration::ZERO;
+            for frame in frames {
+                elapsed = elapsed.saturating_add(Duration::from_millis(frame.delay_ms));
+                Timer::after(elapsed.saturating_sub(started.elapsed())).await;
+                let keep_running = this
+                    .update(cx, |this, cx| {
+                        if this.websocket_workspace.generation != generation
+                            || !this.websocket_replay_running()
+                        {
+                            return false;
+                        }
+                        if let Some(command) = frame.command().expect("validated replay") {
+                            let sent = this
+                                .websocket_workspace
+                                .command_sender
+                                .as_ref()
+                                .is_some_and(|sender| sender.send(command).is_ok());
+                            if !sent {
+                                if let Some(run) = this.websocket_workspace.replay_run.as_mut() {
+                                    run.status = "Send failed";
+                                }
+                                this.pause_mcp_websocket_automation(false);
+                                cx.notify();
+                                return false;
+                            }
+                            this.push_websocket_timeline(
+                                WebSocketTimelineDirection::Sent,
+                                if frame.binary { "binary" } else { "text" },
+                                frame.payload.clone(),
+                            );
+                            if !frame.binary {
+                                this.record_mcp_websocket_ui_text(frame.payload.clone());
+                            }
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_running {
+                    return;
+                }
+            }
+            Timer::after(Duration::from_secs(2)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.websocket_workspace.generation == generation {
+                    if let Some(run) = this
+                        .websocket_workspace
+                        .replay_run
+                        .as_mut()
+                        .filter(|run| run.status == "Running")
+                    {
+                        run.status = "Complete";
+                    }
+                    this.pause_mcp_websocket_automation(false);
+                    cx.notify();
+                }
+            });
+        }));
         cx.notify();
     }
 
@@ -2645,6 +2826,25 @@ impl ApiTester {
             .debug_selector(|| "websocket-console".to_owned())
             .size_full()
             .min_h_0()
+                    .when_some(self.websocket_workspace.replay_run.as_ref(), |pane, run| {
+                        pane.child(h_flex().px_4().py_2().gap_2().border_b_1().border_color(cx.api_outline_variant())
+                        .child(div().text_xs().px_2().py_1().rounded_md().bg(cx.theme().sidebar_accent)
+                            .child(if run.status == "Running" { "Replaying" } else { run.status }))
+                            .child(Button::new("console-diff-replay").label("Diff replay").small()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(run) = &this.websocket_workspace.replay_run {
+                                        this.websocket_workspace.selected_replay = Some(run.id.clone());
+                                        this.websocket_workspace.replay_diff = true;
+                                        this.websocket_workspace.section = WebSocketSection::Replays;
+                                        cx.notify();
+                                    }
+                                })))
+                            .when(run.status == "Running", |bar| bar.child(Button::new("console-stop-replay").label("Stop").small()
+                                .on_click(cx.listener(|this, _, _, cx| { this.finish_websocket_replay("Stopped"); cx.notify(); }))))
+                            .when(run.status != "Running", |bar| bar.child(Button::new("console-exit-replay").label("Exit replay").small()
+                                .on_click(cx.listener(|this, _, _, cx| { this.websocket_workspace.replay_run = None; cx.notify(); }))))
+                        )
+                    })
             .child(
                 h_flex()
                     .gap_2()
@@ -2733,6 +2933,7 @@ impl ApiTester {
                     })
                     .child(
                         Button::new("clear-websocket-timeline")
+                            .disabled(self.websocket_replay_running())
                             .label("Clear")
                             .small()
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -3077,61 +3278,288 @@ impl ApiTester {
     }
 
     fn render_websocket_replays(&self, cx: &mut Context<Self>) -> AnyElement {
-        v_flex()
-            .size_full()
-            .min_h_0()
-            .overflow_y_scrollbar()
-            .p_3()
-            .gap_3()
-            .child(div().font_semibold().child("Save current session"))
+        let state = &self.websocket_workspace;
+        let selected = state
+            .document
+            .replays
+            .iter()
+            .find(|replay| Some(&replay.id) == state.selected_replay.as_ref());
+        let sidebar = v_flex()
+            .debug_selector(|| "websocket-replay-sidebar".to_owned())
+            .w(px(260.))
+            .h_full()
+            .flex_shrink_0()
+            .border_r_1()
+            .border_color(cx.api_outline_variant())
             .child(
                 h_flex()
+                    .h(px(56.))
+                    .px_4()
+                    .border_b_1()
+                    .border_color(cx.api_outline_variant())
+                    .child(div().font_semibold().child("Replays")),
+            )
+            .child(
+                v_flex()
+                    .p_3()
                     .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(Input::new(&self.websocket_workspace.replay_name)),
-                    )
+                    .child(Input::new(&state.replay_name))
                     .child(
                         Button::new("save-websocket-replay")
-                            .label("Save replay")
-                            .primary()
+                            .label("Save current session")
+                            .small()
+                            .outline()
+                            .disabled(self.websocket_replay_running())
                             .on_click(cx.listener(|this, _, _, cx| this.save_websocket_replay(cx))),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "{} recorded messages · sent + received",
+                                state.recorded_session.len()
+                            )),
                     ),
             )
-            .children(
-                self.websocket_workspace
-                    .document
-                    .replays
-                    .iter()
-                    .map(|replay| {
+            .child(
+                v_flex()
+                    .id("replay-library-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .p_2()
+                    .gap_1()
+                    .when(state.document.replays.is_empty(), |list| {
+                        list.child(
+                            div()
+                                .p_3()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Send and receive messages, then save the session here."),
+                        )
+                    })
+                    .children(state.document.replays.iter().map(|replay| {
                         let id = replay.id.clone();
-                        h_flex()
-                            .gap_2()
+                        let sent = replay
+                            .frames
+                            .iter()
+                            .filter(|frame| frame.direction == WebSocketReplayDirection::Sent)
+                            .count();
+                        v_flex()
+                            .id(SharedString::from(format!("replay-row-{}", replay.id)))
                             .px_3()
                             .py_2()
+                            .gap_1()
                             .rounded_md()
-                            .border_1()
-                            .border_color(cx.api_outline_variant())
-                            .child(div().flex_1().child(replay.name.clone()))
+                            .cursor_pointer()
+                            .when(Some(&replay.id) == state.selected_replay.as_ref(), |row| {
+                                row.bg(cx.theme().sidebar_accent)
+                            })
+                            .hover(|row| row.bg(cx.theme().sidebar_accent.opacity(0.6)))
+                            .child(div().text_sm().font_semibold().child(replay.name.clone()))
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(format!("{} messages", replay.frames.len())),
+                                    .child(format!(
+                                        "{sent} sent · {} received",
+                                        replay.frames.len() - sent
+                                    )),
                             )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.websocket_workspace.selected_replay = Some(id.clone());
+                                this.websocket_workspace.replay_diff = false;
+                                cx.notify();
+                            }))
+                    })),
+            );
+        let detail = if let Some(replay) = selected {
+            let play_id = replay.id.clone();
+            let delete_id = replay.id.clone();
+            let run = state.replay_run.as_ref().filter(|run| run.id == replay.id);
+            let diff = state.replay_diff && run.is_some();
+            let mut rows = Vec::new();
+            if diff {
+                let run = run.unwrap();
+                for (direction, label) in [
+                    (WebSocketReplayDirection::Sent, "Sent"),
+                    (WebSocketReplayDirection::Received, "Received"),
+                ] {
+                    rows.push(
+                        div()
+                            .px_4()
+                            .py_2()
+                            .font_semibold()
+                            .child(label)
+                            .into_any_element(),
+                    );
+                    for (index, (saved, actual)) in
+                        compare_replay_frames(&replay.frames, &run.frames, direction)
+                            .into_iter()
+                            .enumerate()
+                    {
+                        let status = match (saved, actual) {
+                            (Some(a), Some(b))
+                                if a.payload == b.payload && a.binary == b.binary =>
+                            {
+                                "Match"
+                            }
+                            (Some(_), Some(_)) => "Changed",
+                            (Some(_), None) if run.status == "Running" => "Pending",
+                            (Some(_), None) => "Missing",
+                            (None, Some(_)) => "Extra",
+                            _ => unreachable!(),
+                        };
+                        rows.push(
+                            v_flex()
+                                .px_4()
+                                .py_3()
+                                .gap_2()
+                                .border_b_1()
+                                .border_color(cx.api_outline_variant())
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(
+                                            if status == "Changed"
+                                                || status == "Missing"
+                                                || status == "Extra"
+                                            {
+                                                cx.theme().danger
+                                            } else {
+                                                cx.theme().muted_foreground
+                                            },
+                                        )
+                                        .child(format!("{} · {status}", index + 1)),
+                                )
+                                .child(
+                                    h_flex()
+                                        .items_start()
+                                        .gap_4()
+                                        .child(self.render_websocket_replay_payload(saved, cx))
+                                        .child(self.render_websocket_replay_payload(actual, cx)),
+                                )
+                                .into_any_element(),
+                        );
+                    }
+                }
+            } else {
+                let mut elapsed = 0u64;
+                for (index, frame) in replay.frames.iter().enumerate() {
+                    elapsed = elapsed.saturating_add(frame.delay_ms);
+                    rows.push(
+                        v_flex()
+                            .px_4()
+                            .py_3()
+                            .gap_2()
+                            .border_b_1()
+                            .border_color(cx.api_outline_variant())
                             .child(
-                                Button::new(SharedString::from(format!(
-                                    "play-replay-{}",
-                                    replay.id
-                                )))
-                                .label("Replay")
-                                .small()
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| this.play_websocket_replay(&id, cx),
-                                )),
+                                h_flex()
+                                    .gap_2()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!(
+                                        "{} · {}",
+                                        index + 1,
+                                        if frame.direction == WebSocketReplayDirection::Sent {
+                                            "↑ Sent"
+                                        } else {
+                                            "↓ Received"
+                                        }
+                                    ))
+                                    .child(div().flex_1())
+                                    .child(format!("+{elapsed} ms")),
                             )
-                    }),
+                            .child(self.render_websocket_replay_payload(Some(frame), cx))
+                            .into_any_element(),
+                    );
+                }
+            }
+            v_flex().debug_selector(|| "websocket-replay-detail".to_owned()).flex_1().min_w_0().h_full()
+                .child(h_flex().h(px(56.)).px_4().gap_2().border_b_1().border_color(cx.api_outline_variant())
+                    .child(div().flex_1().min_w_0().font_semibold().child(replay.name.clone()))
+                    .when(run.is_some(), |bar| bar.child(Button::new("replay-toggle-diff").label(if diff { "Saved history" } else { "Diff replay" }).small()
+                        .on_click(cx.listener(|this, _, _, cx| { this.websocket_workspace.replay_diff = !this.websocket_workspace.replay_diff; cx.notify(); }))))
+                    .child(Button::new("play-selected-replay").label("Replay").primary().small()
+                        .disabled(self.websocket_replay_running() || state.status != WebSocketConnectionStatus::Connected)
+                        .on_click(cx.listener(move |this, _, _, cx| this.play_websocket_replay(&play_id, cx))))
+                    .child(Button::new("delete-selected-replay").icon(IconName::Delete).tooltip("Delete replay").small().ghost().disabled(self.websocket_replay_running())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.websocket_workspace.document.replays.retain(|replay| replay.id != delete_id);
+                            this.websocket_workspace.selected_replay = None;
+                            if this.websocket_workspace.replay_run.as_ref().is_some_and(|run| run.id == delete_id) { this.websocket_workspace.replay_run = None; }
+                            this.persist_websocket_document(cx);
+                        }))))
+                .child(div().px_4().py_2().text_xs().text_color(cx.theme().muted_foreground)
+                    .child(if diff { "Exact payload comparison by direction and message order. Timing differences do not affect matches." } else { "Replays send recorded outgoing messages at their original timing, then wait 2 seconds for responses. Automation is paused during playback." }))
+                .when(diff, |pane| pane.child(h_flex().px_4().py_2().gap_4().bg(cx.api_surface_low()).text_xs()
+                    .child(div().flex_1().child("Saved replay"))
+                    .child(div().flex_1().child(format!("Latest play · {}", run.unwrap().status)))))
+                .child(v_flex().id("replay-history-scroll").flex_1().min_h_0().overflow_y_scrollbar().children(rows))
+                .into_any_element()
+        } else {
+            v_flex()
+                .flex_1()
+                .h_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(div().font_semibold().child("Select a replay"))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Inspect a saved conversation or play it again."),
+                )
+                .into_any_element()
+        };
+        h_flex()
+            .debug_selector(|| "websocket-replays-workspace".to_owned())
+            .size_full()
+            .min_h_0()
+            .items_start()
+            .child(sidebar)
+            .child(detail)
+            .into_any_element()
+    }
+
+    fn render_websocket_replay_payload(
+        &self,
+        frame: Option<&WebSocketReplayFrame>,
+        cx: &App,
+    ) -> AnyElement {
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .gap_1()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        frame
+                            .map(|frame| {
+                                if frame.binary {
+                                    "Binary · base64"
+                                } else {
+                                    "Text"
+                                }
+                            })
+                            .unwrap_or("No message"),
+                    ),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .whitespace_normal()
+                    .child(
+                        frame
+                            .map(|frame| frame.payload.clone())
+                            .unwrap_or_else(|| "—".into()),
+                    ),
             )
             .into_any_element()
     }
@@ -3425,6 +3853,73 @@ mod tests {
             websocket_timeline_kind_label("script error"),
             "Script error"
         );
+    }
+
+    #[gpui::test]
+    fn replay_records_both_directions_and_lays_out_sidebar_and_history(cx: &mut TestAppContext) {
+        let (app, cx, _directory) = mount_app(cx);
+        cx.simulate_resize(size(px(900.), px(560.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.open_blank_websocket_tab(window, cx);
+                app.push_websocket_timeline(
+                    WebSocketTimelineDirection::System,
+                    "open",
+                    "Connected".into(),
+                );
+                app.push_websocket_timeline(
+                    WebSocketTimelineDirection::Sent,
+                    "text",
+                    "request".into(),
+                );
+                app.push_websocket_timeline(
+                    WebSocketTimelineDirection::Received,
+                    "text",
+                    "response".into(),
+                );
+                app.push_websocket_timeline(
+                    WebSocketTimelineDirection::Received,
+                    "binary",
+                    "/wAB".into(),
+                );
+                app.websocket_workspace
+                    .replay_name
+                    .update(cx, |input, cx| input.set_value("Conversation", window, cx));
+                app.save_websocket_replay(cx);
+                let replay = &app.websocket_workspace.document.replays[0];
+                assert_eq!(replay.frames.len(), 3);
+                assert_eq!(replay.frames[0].direction, WebSocketReplayDirection::Sent);
+                assert_eq!(
+                    replay.frames[1].direction,
+                    WebSocketReplayDirection::Received
+                );
+                assert!(replay.frames[2].binary);
+                assert_eq!(
+                    replay
+                        .frames
+                        .iter()
+                        .filter_map(|frame| frame.command().unwrap())
+                        .collect::<Vec<_>>(),
+                    vec![WebSocketCommand::SendText("request".into())]
+                );
+                let document = serde_json::to_string(&app.websocket_workspace.document).unwrap();
+                assert_eq!(
+                    serde_json::from_str::<WebSocketWorkspace>(&document).unwrap(),
+                    app.websocket_workspace.document
+                );
+                app.clear_websocket_timeline();
+                assert_eq!(app.websocket_workspace.document.replays[0].frames.len(), 3);
+                app.websocket_workspace.section = WebSocketSection::Replays;
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let workspace = cx.debug_bounds("websocket-replays-workspace").unwrap();
+        let sidebar = cx.debug_bounds("websocket-replay-sidebar").unwrap();
+        let detail = cx.debug_bounds("websocket-replay-detail").unwrap();
+        assert!(sidebar.is_contained_within(&workspace));
+        assert!(detail.is_contained_within(&workspace));
+        assert!(sidebar.right() <= detail.left());
     }
 
     #[gpui::test]
