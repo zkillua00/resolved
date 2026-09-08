@@ -35,7 +35,11 @@ pub(super) fn render_open_tabs_menu(app: &ApiTester, cx: &mut Context<ApiTester>
                                 .unwrap_or_else(|| "Group".to_owned())
                         })
                     });
-                    (request.display_title().to_owned(), None, group_label)
+                    (
+                        super::tab_item::request_tab_label(app, request, cx),
+                        None,
+                        group_label,
+                    )
                 }
                 WorkspaceTab::Tool(WorkspaceToolTab::Snippets) => {
                     ("Snippets".to_owned(), Some(IconName::CaseSensitive), None)

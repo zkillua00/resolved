@@ -49,6 +49,7 @@ pub(in crate::app) struct PaneEditorState {
     request_notice: Option<String>,
     pub(in crate::app) pane_scroll: ScrollHandle,
     _url_subscription: Subscription,
+    _method_subscription: Subscription,
 }
 
 impl PaneEditorState {
@@ -63,6 +64,11 @@ impl PaneEditorState {
             InputState::new(window, cx)
                 .placeholder("METHOD")
                 .default_value("GET")
+        });
+        let method_subscription = cx.subscribe(&method, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
         });
         let url = cx.new(|cx| InputState::new(window, cx).placeholder("URL"));
         let url_subscription = cx.subscribe_in(&url, window, move |this, _, event, window, cx| {
@@ -165,6 +171,7 @@ impl PaneEditorState {
             request_notice: None,
             pane_scroll: ScrollHandle::default(),
             _url_subscription: url_subscription,
+            _method_subscription: method_subscription,
         };
         this.set_raw_body_language(cx);
         this
@@ -518,6 +525,25 @@ impl PaneEditorState {
 impl ApiTester {
     fn pane_editor_mut(&mut self, pane_id: PaneId) -> Option<&mut PaneEditorState> {
         self.pane_editors.get_mut(&pane_id)
+    }
+
+    /// Read the live editor method, including tabs hosted in secondary panes.
+    pub(super) fn request_tab_method(&self, tab: &RequestTabRecord, cx: &App) -> String {
+        if tab.template().is_websocket() {
+            return "WS".to_owned();
+        }
+        let method = if self.request_tabs.active_tab_id() == tab.id() {
+            self.method.read(cx).value().to_string()
+        } else if let Some(session) = self
+            .pane_editors
+            .values()
+            .find(|session| session.active_tab_id.as_ref() == Some(tab.id()))
+        {
+            session.method.read(cx).value().to_string()
+        } else {
+            tab.template().request.method.clone()
+        };
+        method.trim().to_ascii_uppercase()
     }
 
     /// Persist the editor contents of every request currently shown outside
