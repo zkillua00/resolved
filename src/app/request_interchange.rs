@@ -40,6 +40,7 @@ pub(super) struct RequestInterchangeState {
     export_editor: Entity<CodeEditor>,
     import_preview: ImportPreview,
     export_error: Option<String>,
+    loaded_import: Option<(String, ImportBundle)>,
 }
 
 impl RequestInterchangeState {
@@ -52,6 +53,7 @@ impl RequestInterchangeState {
             export_editor,
             import_preview: ImportPreview::Empty,
             export_error: None,
+            loaded_import: None,
         }
     }
 }
@@ -122,9 +124,7 @@ impl ApiTester {
             CodeEditor::new(
                 CodeEditorConfig::default()
                     .language(CodeLanguage::Plain)
-                    .placeholder(
-                        "Paste cURL, Wget, PowerShell, OpenAPI, AsyncAPI, an IntelliJ HTTP file, or request code",
-                    )
+                    .placeholder("Paste Postman JSON, Swagger 2.0, OpenAPI, cURL, or request code")
                     .rows(18)
                     .soft_wrap(false)
                     .line_numbers(true)
@@ -186,7 +186,7 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.sending {
+        if self.sending || self.workspace_switch_status.busy() {
             return;
         }
         if self.request_tabs.active().template().is_websocket() {
@@ -245,6 +245,339 @@ impl ApiTester {
         }
     }
 
+    fn request_import_bundle(&self, source: &str) -> Result<ImportBundle, String> {
+        if let Some((loaded_source, bundle)) = &self.request_interchange.loaded_import
+            && loaded_source == source
+        {
+            return Ok(bundle.clone());
+        }
+        import_requests(source).map_err(|error| error.to_string())
+    }
+
+    fn preview_imported_files(
+        &mut self,
+        bundle: ImportBundle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspace_switch_status.busy() {
+            return;
+        }
+        let source = format!(
+            "Loaded {} requests from {}.\n\n{}\n\nChoose Open tabs or Import and save below.\nPaste new source to replace this import.",
+            bundle.requests.len(),
+            bundle.source_format,
+            bundle
+                .collections
+                .iter()
+                .map(|c| format!(
+                    "{} · {} requests · {} folders",
+                    c.name,
+                    c.requests.len(),
+                    c.folders.len()
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        self.request_interchange
+            .import_editor
+            .update(cx, |editor, cx| {
+                editor.set_value(source.clone(), window, cx)
+            });
+        self.request_interchange.loaded_import = Some((source, bundle));
+        self.request_interchange.open = true;
+        self.request_interchange.tab = RequestInterchangeTab::Import;
+        self.refresh_request_import_preview(cx);
+        cx.notify();
+    }
+
+    fn request_import_details(&self, cx: &Context<Self>) -> String {
+        let source = self
+            .request_interchange
+            .import_editor
+            .read(cx)
+            .value(cx)
+            .to_string();
+        let Ok(mut bundle) = self.request_import_bundle(&source) else {
+            return String::new();
+        };
+        bundle.ensure_collection("Imported requests");
+        let mut details = format!(
+            "Save to {}: {}",
+            self.active_workspace_name(),
+            bundle
+                .collections
+                .iter()
+                .map(|c| format!("{} ({} requests)", c.name, c.requests.len()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        for warning in bundle.warnings {
+            details.push('\n');
+            details.push_str(&warning);
+        }
+        if !self.can_save_request_import() {
+            details.push_str(
+                "\nSaving requires collection and request creation access in a writable workspace.",
+            );
+        }
+        details
+    }
+
+    fn can_save_request_import(&self) -> bool {
+        !self.sending
+            && !self.workspace_switch_status.busy()
+            && self.can_create_collection_content()
+            && self.can_create_request_content()
+    }
+
+    fn save_request_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_save_request_import() {
+            return;
+        }
+        let source = self
+            .request_interchange
+            .import_editor
+            .read(cx)
+            .value(cx)
+            .to_string();
+        let result = self
+            .request_import_bundle(&source)
+            .and_then(|bundle| build_import_workspace(&self.workspace, bundle));
+        let candidate = match result {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                self.request_interchange.import_preview = ImportPreview::Error(error);
+                cx.notify();
+                return;
+            }
+        };
+        if !self.workspace_writable {
+            self.save_request_import_on_upstream(
+                candidate.collections[self.workspace.collections.len()..].to_vec(),
+                window,
+                cx,
+            );
+            return;
+        }
+        let count = candidate.collections[self.workspace.collections.len()..]
+            .iter()
+            .map(|c| c.requests.len())
+            .sum::<usize>();
+        let ids = candidate.collections[self.workspace.collections.len()..]
+            .iter()
+            .map(|c| c.id.clone())
+            .collect::<Vec<_>>();
+        match self.commit_workspace(candidate) {
+            Ok(()) => {
+                self.expanded_collection_ids.extend(ids);
+                self.finish_request_import_save(count, window, cx);
+            }
+            Err(error) => {
+                self.request_interchange.import_preview = ImportPreview::Error(error);
+                cx.notify();
+            }
+        }
+    }
+
+    fn finish_request_import_save(
+        &mut self,
+        count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.request_interchange.open = false;
+        self.request_interchange.loaded_import = None;
+        self.request_interchange.import_preview = ImportPreview::Empty;
+        self.request_interchange
+            .import_editor
+            .update(cx, |editor, cx| editor.set_value("", window, cx));
+        self.request_notice = Some(format!("Saved {count} imported requests to collections."));
+        self.refresh_variable_intelligence(cx);
+        cx.notify();
+    }
+
+    fn save_request_import_on_upstream(
+        &mut self,
+        collections: Vec<Collection>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = match self.active_upstream_workspace() {
+            Ok(target) => target,
+            Err(error) => {
+                self.fail_remote_workspace_write(error, cx);
+                return;
+            }
+        };
+        self.workspace_switch_generation = self.workspace_switch_generation.wrapping_add(1);
+        let generation = self.workspace_switch_generation;
+        self.workspace_switch_status = WorkspaceSwitchStatus::Loading;
+        self.request_interchange.open = false;
+        let vault = self.credential_vault.clone();
+        let client = self.upstream_client.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let task_target = target.clone();
+        let task = self.runtime.spawn(async move {
+            let mut saved = Vec::new();
+            let result: Result<(), String> = async {
+                let upstream_id = task_target.upstream_id.clone();
+                let credential = runtime
+                    .spawn_blocking(move || vault.load_upstream(&upstream_id))
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "Log in to this server again.".to_owned())?;
+                if credential.expires_at <= Utc::now() {
+                    return Err("Log in to this server again.".into());
+                }
+                for collection in collections {
+                    let created = create_upstream_collection(
+                        &client,
+                        &task_target.base_url,
+                        credential.bearer_token(),
+                        &task_target.workspace_id,
+                        &collection.name,
+                        None,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                    if created.workspace_id != task_target.workspace_id
+                        || created.parent_collection_id.is_some()
+                    {
+                        return Err("Server returned an unexpected collection location.".into());
+                    }
+                    saved.push(Collection {
+                        id: created.id.clone(),
+                        name: created.name,
+                        created_by: created.created_by.map(Into::into),
+                        folders: Vec::new(),
+                        requests: Vec::new(),
+                    });
+                    let current = saved.last_mut().unwrap();
+                    let mut folders = std::collections::HashMap::<String, String>::new();
+                    for folder in collection.folders {
+                        let parent = folder
+                            .parent_folder_id
+                            .as_ref()
+                            .map(|id| {
+                                folders
+                                    .get(id)
+                                    .cloned()
+                                    .ok_or_else(|| "Missing imported parent folder.".to_owned())
+                            })
+                            .transpose()?;
+                        let parent_id = parent.as_deref().unwrap_or(current.id.as_str());
+                        let created = create_upstream_collection(
+                            &client,
+                            &task_target.base_url,
+                            credential.bearer_token(),
+                            &task_target.workspace_id,
+                            &folder.name,
+                            Some(parent_id),
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                        if created.workspace_id != task_target.workspace_id
+                            || created.parent_collection_id.as_deref() != Some(parent_id)
+                        {
+                            return Err("Server returned an unexpected folder location.".into());
+                        }
+                        folders.insert(folder.id, created.id.clone());
+                        current.folders.push(CollectionFolder {
+                            id: created.id,
+                            name: created.name,
+                            created_by: created.created_by.map(Into::into),
+                            parent_folder_id: parent,
+                        });
+                    }
+                    for request in collection.requests {
+                        let folder_id = request
+                            .folder_id
+                            .as_ref()
+                            .map(|id| {
+                                folders
+                                    .get(id)
+                                    .cloned()
+                                    .ok_or_else(|| "Missing imported request folder.".to_owned())
+                            })
+                            .transpose()?;
+                        let destination = folder_id.as_deref().unwrap_or(current.id.as_str());
+                        let created = create_upstream_saved_request(
+                            &client,
+                            &task_target.base_url,
+                            credential.bearer_token(),
+                            &task_target.workspace_id,
+                            destination,
+                            &request.name,
+                            &request.definition,
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                        if created.collection_id != destination {
+                            return Err("Server returned an unexpected request location.".into());
+                        }
+                        current.requests.push(created.into_local(folder_id));
+                    }
+                }
+                Ok(())
+            }
+            .await;
+            (saved, result)
+        });
+        self.workspace_switch_abort_handle = Some(task.abort_handle());
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.workspace_switch_generation != generation {
+                    return;
+                }
+                this.workspace_switch_abort_handle = None;
+                let expected = WorkspaceProviderId::Upstream {
+                    upstream_id: target.upstream_id.clone(),
+                    workspace_id: target.workspace_id.clone(),
+                };
+                if this.workspace_providers.active_id() != &expected {
+                    return;
+                }
+                let (saved, outcome) = match result {
+                    Ok(value) => value,
+                    Err(error) => {
+                        this.fail_remote_workspace_write(
+                            format!("Import interrupted. Refresh the workspace before retrying: {error}"), cx,
+                        );
+                        return;
+                    }
+                };
+                let count = saved.iter().map(|collection| collection.requests.len()).sum::<usize>();
+                let mut candidate = this.workspace.clone();
+                this.expanded_collection_ids.extend(saved.iter().map(|collection| collection.id.clone()));
+                candidate.collections.extend(saved);
+                if let Err(error) = candidate.validate() {
+                    this.fail_remote_workspace_write(
+                        format!("Refresh the workspace to inspect the saved import: {error}"), cx,
+                    );
+                    return;
+                }
+                this.replace_workspace(candidate.clone());
+                this.workspace_providers.register(Arc::new(RemoteWorkspaceProvider::new(
+                    this.database_store.clone(), target.upstream_id, target.workspace_id, candidate,
+                )));
+                this.workspace_switch_status = WorkspaceSwitchStatus::Idle;
+                match outcome {
+                    Ok(()) => this.finish_request_import_save(count, window, cx),
+                    Err(error) => {
+                        let message = format!("Import stopped after saving {count} requests. Created collections remain saved; retrying creates new collections. {error}");
+                        this.request_interchange.open = true;
+                        this.request_interchange.import_preview = ImportPreview::Error(message.clone());
+                        this.fail_remote_workspace_write(message, cx);
+                    }
+                }
+            });
+        }).detach();
+    }
+
     fn refresh_request_import_preview(&mut self, cx: &mut Context<Self>) {
         let source = self
             .request_interchange
@@ -255,17 +588,24 @@ impl ApiTester {
         self.request_interchange.import_preview = if source.trim().is_empty() {
             ImportPreview::Empty
         } else {
-            match import_requests(&source) {
-                Ok(bundle) => ImportPreview::Ready {
-                    source_format: bundle.source_format,
-                    request_count: bundle.requests.len(),
-                },
+            match self.request_import_bundle(&source) {
+                Ok(bundle) => {
+                    let preview = ImportPreview::Ready {
+                        source_format: bundle.source_format.clone(),
+                        request_count: bundle.requests.len(),
+                    };
+                    self.request_interchange.loaded_import = Some((source, bundle));
+                    preview
+                }
                 Err(error) => ImportPreview::Error(error.to_string()),
             }
         };
     }
 
     fn paste_request_import_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace_switch_status.busy() {
+            return;
+        }
         let Some(source) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             self.request_interchange.import_preview =
                 ImportPreview::Error("The clipboard does not contain text.".to_owned());
@@ -285,7 +625,7 @@ impl ApiTester {
     }
 
     fn import_request_editor_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sending {
+        if self.sending || self.workspace_switch_status.busy() {
             return;
         }
         let source = self
@@ -294,7 +634,7 @@ impl ApiTester {
             .read(cx)
             .value(cx)
             .to_string();
-        match import_requests(&source) {
+        match self.request_import_bundle(&source) {
             Ok(bundle) => self.open_imported_requests(bundle, window, cx),
             Err(error) => {
                 self.request_interchange.import_preview = ImportPreview::Error(error.to_string());
@@ -309,11 +649,11 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.sending || paths.is_empty() {
+        if self.sending || self.workspace_switch_status.busy() || paths.is_empty() {
             return;
         }
         match import_request_files(paths) {
-            Ok(bundle) => self.open_imported_requests(bundle, window, cx),
+            Ok(bundle) => self.preview_imported_files(bundle, window, cx),
             Err(error) => {
                 self.request_interchange.import_preview = ImportPreview::Error(error.clone());
                 self.request_notice = Some(format!("Import failed: {error}"));
@@ -376,7 +716,7 @@ impl ApiTester {
     }
 
     fn render_request_import_panel(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (status, can_import, import_label) = match &self.request_interchange.import_preview {
+        let (status, can_import, _import_label) = match &self.request_interchange.import_preview {
             ImportPreview::Empty => (
                 h_flex()
                     .min_h(px(42.))
@@ -534,15 +874,24 @@ impl ApiTester {
                     )
                     .child(
                         Button::new("import-detected-requests")
-                            .label(import_label)
+                            .label("Open tabs")
                             .small()
-                            .primary()
-                            .disabled(!can_import || self.sending)
+                            .outline()
+                            .disabled(!can_import || self.sending || self.workspace_switch_status.busy())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.import_request_editor_source(window, cx);
                             })),
                     ),
             )
+            .child(
+                Button::new("import-and-save-requests")
+                    .debug_selector(|| "import-and-save-requests".to_owned())
+                    .label("Import and save")
+                    .primary()
+                    .disabled(!can_import || !self.can_save_request_import())
+                    .on_click(cx.listener(|this, _, window, cx| this.save_request_import(window, cx))),
+            )
+            .child(div().id("import-save-details").max_h(px(110.)).overflow_y_scroll().text_xs().text_color(cx.theme().muted_foreground).child(self.request_import_details(cx)))
             .into_any_element()
     }
 
@@ -666,7 +1015,7 @@ impl ApiTester {
             };
             let result = import_request_files(&paths);
             let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(bundle) => this.open_imported_requests(bundle, window, cx),
+                Ok(bundle) => this.preview_imported_files(bundle, window, cx),
                 Err(error) => {
                     this.request_interchange.import_preview = ImportPreview::Error(error.clone());
                     this.request_notice = Some(format!("Import failed: {error}"));
@@ -689,6 +1038,7 @@ impl ApiTester {
             return;
         }
         self.request_interchange.open = false;
+        self.request_interchange.loaded_import = None;
         self.request_interchange.import_preview = ImportPreview::Empty;
         self.request_interchange
             .import_editor
@@ -811,9 +1161,58 @@ impl ApiTester {
     }
 }
 
+fn build_import_workspace(
+    workspace: &Workspace,
+    mut bundle: ImportBundle,
+) -> Result<Workspace, String> {
+    bundle.ensure_collection("Imported requests");
+    let mut candidate = workspace.clone();
+    for collection in bundle.collections {
+        let id = candidate
+            .create_collection(collection.name)
+            .map_err(|e| e.to_string())?;
+        let mut folders = std::collections::HashMap::<Vec<String>, String>::new();
+        for path in collection
+            .folders
+            .iter()
+            .chain(collection.requests.iter().map(|(_, path)| path))
+        {
+            for length in 1..=path.len() {
+                let key = path[..length].to_vec();
+                if folders.contains_key(&key) {
+                    continue;
+                }
+                let parent = folders.get(&path[..length - 1]).map(String::as_str);
+                let folder_id = candidate
+                    .create_collection_folder(&id, parent, &path[length - 1])
+                    .map_err(|e| e.to_string())?;
+                folders.insert(key, folder_id);
+            }
+        }
+        for (index, path) in collection.requests {
+            let request = bundle
+                .requests
+                .get(index)
+                .ok_or_else(|| "Invalid imported request index".to_owned())?;
+            candidate
+                .create_saved_request_in_folder(
+                    &id,
+                    folders.get(&path).map(String::as_str),
+                    &request.name,
+                    request.template.clone(),
+                )
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    candidate.validate().map_err(|e| e.to_string())?;
+    Ok(candidate)
+}
+
 fn import_request_files(paths: &[PathBuf]) -> Result<ImportBundle, String> {
     let mut formats = Vec::new();
     let mut requests = Vec::new();
+    let mut collections = Vec::new();
+    let mut warnings = Vec::new();
     let mut total_bytes = 0_u64;
     for path in paths {
         let metadata =
@@ -830,10 +1229,26 @@ fn import_request_files(paths: &[PathBuf]) -> Result<ImportBundle, String> {
         }
         let source = std::fs::read_to_string(path)
             .map_err(|error| format!("{} is not readable UTF-8 text: {error}", path.display()))?;
-        let bundle =
+        let mut bundle =
             import_requests(&source).map_err(|error| format!("{}: {error}", path.display()))?;
         if !formats.contains(&bundle.source_format) {
-            formats.push(bundle.source_format);
+            formats.push(bundle.source_format.clone());
+        }
+        bundle.ensure_collection(
+            path.file_stem()
+                .and_then(|v| v.to_str())
+                .unwrap_or("Imported requests"),
+        );
+        for mut collection in bundle.collections {
+            for (index, _) in &mut collection.requests {
+                *index += requests.len();
+            }
+            collections.push(collection);
+        }
+        for warning in bundle.warnings {
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
         }
         requests.extend(bundle.requests);
         if requests.len() > 256 {
@@ -844,6 +1259,8 @@ fn import_request_files(paths: &[PathBuf]) -> Result<ImportBundle, String> {
         return Err("the selected files contain no requests".to_owned());
     }
     Ok(ImportBundle {
+        collections,
+        warnings,
         source_format: formats.join(" + "),
         requests,
     })
@@ -1047,5 +1464,92 @@ mod tests {
                 .to_string()
         });
         assert!(javascript_source.contains("await fetch"));
+    }
+    #[test]
+    fn importing_multiple_files_keeps_roots_and_request_indices() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first.json");
+        let second = directory.path().join("second.yaml");
+        std::fs::write(&first, r#"{"info":{"name":"Shop","schema":"https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},"item":[{"name":"Admin","item":[{"name":"Empty","item":[]},{"name":"List","request":"https://example.test/admin"}]}]}"#).unwrap();
+        std::fs::write(&second,"swagger: '2.0'\ninfo: {title: Pets}\nhost: example.test\npaths:\n  /pets/{id}:\n    get: {}\n").unwrap();
+        let bundle = import_request_files(&[first, second]).unwrap();
+        let original = Workspace::default();
+        let workspace = build_import_workspace(&original, bundle).unwrap();
+        assert!(original.collections.is_empty());
+        assert_eq!(workspace.collections.len(), 2);
+        let shop = &workspace.collections[0];
+        assert_eq!(shop.name, "Shop");
+        assert_eq!(shop.folders.len(), 2);
+        assert_eq!(
+            shop.folders[1].parent_folder_id.as_deref(),
+            Some(shop.folders[0].id.as_str())
+        );
+        assert_eq!(
+            shop.requests[0].folder_id.as_deref(),
+            Some(shop.folders[0].id.as_str())
+        );
+        assert_eq!(
+            workspace.collections[1].requests[0].definition.request.url,
+            "https://example.test/pets/{{id}}"
+        );
+    }
+
+    #[gpui::test]
+    fn file_preview_and_save_persist_without_opening_or_changing_tabs(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+        store.initialize().unwrap();
+        let mut app = None;
+        let store_for_app = store.clone();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            let bindings = shortcuts::capture_base_key_bindings(cx);
+            crate::theme::configure(cx);
+            let view = cx
+                .new(|cx| ApiTester::new_with_database_store(bindings, store_for_app, window, cx));
+            crate::register_app_action_handlers(&view, cx);
+            app = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app = app.unwrap();
+        cx.simulate_resize(size(px(1200.), px(800.)));
+        let file = directory.path().join("Users.yaml");
+        std::fs::write(&file,"openapi: 3.0.0\ninfo: {title: Users}\nservers: [{url: 'https://example.test'}]\npaths:\n  /users:\n    get: {}\n").unwrap();
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.url.update(cx, |input, cx| {
+                    input.set_value("https://keep.test/draft", window, cx)
+                });
+                let count = app.request_tabs.tabs().len();
+                app.import_request_paths(&[file], window, cx);
+                assert_eq!(app.request_tabs.tabs().len(), count);
+                assert!(app.request_interchange.open);
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("import-and-save-requests").is_some());
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                let count = app.request_tabs.tabs().len();
+                app.save_request_import(window, cx);
+                assert_eq!(app.request_tabs.tabs().len(), count);
+                assert_eq!(app.url.read(cx).value().as_ref(), "https://keep.test/draft");
+                assert!(!app.request_interchange.open);
+                assert_eq!(app.workspace.collections.last().unwrap().name, "Users");
+            })
+        });
+        assert_eq!(
+            store
+                .load_workspace()
+                .unwrap()
+                .collections
+                .last()
+                .unwrap()
+                .requests[0]
+                .definition
+                .request
+                .url,
+            "https://example.test/users"
+        );
     }
 }

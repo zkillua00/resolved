@@ -5,6 +5,8 @@
 //! generated command/snippet also carries a compact Resolved metadata comment,
 //! which makes exporting and re-importing lossless without affecting execution.
 
+mod collections;
+
 use std::fmt::Write as _;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -147,10 +149,32 @@ pub struct ImportedRequest {
     pub template: RequestTemplate,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct ImportBundle {
+    pub collections: Vec<ImportedCollection>,
+    pub warnings: Vec<String>,
     pub source_format: String,
     pub requests: Vec<ImportedRequest>,
+}
+
+/// Request indices refer to the flat list also used by Open tabs.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct ImportedCollection {
+    pub name: String,
+    pub folders: Vec<Vec<String>>,
+    pub requests: Vec<(usize, Vec<String>)>,
+}
+
+impl ImportBundle {
+    pub fn ensure_collection(&mut self, name: &str) {
+        if self.collections.is_empty() {
+            self.collections.push(ImportedCollection {
+                name: name.to_owned(),
+                requests: (0..self.requests.len()).map(|i| (i, Vec::new())).collect(),
+                ..Default::default()
+            });
+        }
+    }
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -221,6 +245,8 @@ pub fn import_requests(source: &str) -> Result<ImportBundle, InterchangeError> {
 
     if let Some(portable) = decode_metadata(source)? {
         return Ok(ImportBundle {
+            collections: Vec::new(),
+            warnings: Vec::new(),
             source_format: detect_source_label(source).to_owned(),
             requests: vec![ImportedRequest {
                 name: portable.name,
@@ -229,6 +255,9 @@ pub fn import_requests(source: &str) -> Result<ImportBundle, InterchangeError> {
         });
     }
 
+    if let Some(bundle) = collections::import_postman(source)? {
+        return Ok(bundle);
+    }
     if looks_like_openapi(source) {
         return import_openapi(source);
     }
@@ -263,6 +292,8 @@ fn one_request(
     request: ImportedRequest,
 ) -> Result<ImportBundle, InterchangeError> {
     Ok(ImportBundle {
+        collections: Vec::new(),
+        warnings: Vec::new(),
         source_format: source_format.to_owned(),
         requests: vec![request],
     })
@@ -1937,7 +1968,8 @@ fn export_kotlin_java_http_client(name: &str, template: &RequestTemplate) -> Str
 }
 
 fn looks_like_openapi(source: &str) -> bool {
-    document_has_key(source, "\"openapi\"", "openapi:")
+    (document_has_key(source, "\"openapi\"", "openapi:")
+        || document_has_key(source, "\"swagger\"", "swagger:"))
         && document_has_key(source, "\"paths\"", "paths:")
 }
 
@@ -2011,7 +2043,13 @@ fn resolve_local_reference<'a>(root: &'a Value, mut value: &'a Value) -> &'a Val
 }
 
 fn import_openapi(source: &str) -> Result<ImportBundle, InterchangeError> {
-    let root = parse_yaml_or_json(source, "OpenAPI document")?;
+    let original = parse_yaml_or_json(source, "OpenAPI document")?;
+    let swagger = original.get("swagger").and_then(Value::as_str) == Some("2.0");
+    let root = if swagger {
+        collections::swagger_to_openapi(&original)?
+    } else {
+        original
+    };
     let root_object = root
         .as_object()
         .ok_or_else(|| InterchangeError::Parse("OpenAPI document must be an object".to_owned()))?;
@@ -2030,6 +2068,15 @@ fn import_openapi(source: &str) -> Result<ImportBundle, InterchangeError> {
             InterchangeError::Parse("OpenAPI document has no paths object".to_owned())
         })?;
     let mut requests = Vec::new();
+    let mut collection = ImportedCollection {
+        name: root
+            .pointer("/info/title")
+            .and_then(Value::as_str)
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or("Imported API")
+            .to_owned(),
+        ..Default::default()
+    };
     for (path, path_item) in paths {
         let path_item = resolve_local_reference(&root, path_item);
         let Some(path_item) = path_item.as_object() else {
@@ -2041,6 +2088,11 @@ fn import_openapi(source: &str) -> Result<ImportBundle, InterchangeError> {
             let Some(operation) = path_item.get(method_name).and_then(Value::as_object) else {
                 continue;
             };
+            let folder = collections::operation_folder(operation, path);
+            if !folder.is_empty() && !collection.folders.contains(&folder) {
+                collection.folders.push(folder.clone());
+            }
+            collection.requests.push((requests.len(), folder));
             if let Some(template) = operation
                 .get("x-resolved-request")
                 .and_then(|value| serde_json::from_value::<RequestTemplate>(value.clone()).ok())
@@ -2053,10 +2105,18 @@ fn import_openapi(source: &str) -> Result<ImportBundle, InterchangeError> {
                 continue;
             }
 
+            let operation_server = operation
+                .get("servers")
+                .or_else(|| path_item.get("servers"))
+                .and_then(Value::as_array)
+                .and_then(|v| v.first())
+                .and_then(|v| v.get("url"))
+                .and_then(Value::as_str)
+                .unwrap_or(server);
             let mut request = RequestDraft::new(
                 method_name.to_ascii_uppercase(),
                 join_server_path(
-                    &openapi_import_template(server),
+                    &openapi_import_template(operation_server),
                     &openapi_import_template(path),
                 ),
             );
@@ -2068,7 +2128,8 @@ fn import_openapi(source: &str) -> Result<ImportBundle, InterchangeError> {
                 parameters.extend(values.iter());
             }
             let mut query = Vec::new();
-            for parameter in parameters {
+            let mut seen = std::collections::HashSet::new();
+            for parameter in parameters.into_iter().rev() {
                 let parameter = resolve_local_reference(&root, parameter);
                 let Some(parameter) = parameter.as_object() else {
                     continue;
@@ -2076,6 +2137,9 @@ fn import_openapi(source: &str) -> Result<ImportBundle, InterchangeError> {
                 let Some(name) = parameter.get("name").and_then(Value::as_str) else {
                     continue;
                 };
+                if !seen.insert((parameter.get("in").and_then(Value::as_str), name)) {
+                    continue;
+                }
                 let value = openapi_parameter_value(parameter, name);
                 match parameter.get("in").and_then(Value::as_str) {
                     Some("header") => request.headers.push(HeaderEntry::new(name, value)),
@@ -2083,7 +2147,14 @@ fn import_openapi(source: &str) -> Result<ImportBundle, InterchangeError> {
                     _ => {}
                 }
             }
-            append_query_parameters(&mut request.url, &query);
+            query.reverse();
+            request.headers.reverse();
+            request.query_params.extend(
+                query
+                    .into_iter()
+                    .map(|(key, value)| super::QueryParamEntry::new(key, value)),
+            );
+            request.url = super::url_with_query_params(&request.url, &request.query_params);
             if let Some(request_body) = operation.get("requestBody") {
                 import_openapi_body(&root, &mut request, request_body);
             }
@@ -2100,7 +2171,9 @@ fn import_openapi(source: &str) -> Result<ImportBundle, InterchangeError> {
         ));
     }
     Ok(ImportBundle {
-        source_format: "OpenAPI".to_owned(),
+        collections: vec![collection],
+        warnings: collections::spec_warnings(&root),
+        source_format: if swagger { "Swagger 2.0" } else { "OpenAPI" }.to_owned(),
         requests,
     })
 }
@@ -2118,6 +2191,7 @@ fn operation_name(operation: &Map<String, Value>, method: &str, path: &str) -> S
 fn openapi_parameter_value(parameter: &Map<String, Value>, name: &str) -> String {
     parameter
         .get("example")
+        .or_else(|| parameter.get("default"))
         .or_else(|| {
             parameter
                 .get("schema")
@@ -2243,6 +2317,8 @@ fn import_asyncapi(source: &str) -> Result<ImportBundle, InterchangeError> {
             .collect::<Vec<_>>();
         if !requests.is_empty() {
             return Ok(ImportBundle {
+                collections: Vec::new(),
+                warnings: Vec::new(),
                 source_format: "AsyncAPI".to_owned(),
                 requests,
             });
@@ -2403,6 +2479,8 @@ fn import_asyncapi(source: &str) -> Result<ImportBundle, InterchangeError> {
         ));
     }
     Ok(ImportBundle {
+        collections: Vec::new(),
+        warnings: Vec::new(),
         source_format: "AsyncAPI".to_owned(),
         requests,
     })
@@ -3072,6 +3150,8 @@ fn import_intellij_http(source: &str) -> Result<ImportBundle, InterchangeError> 
         ));
     }
     Ok(ImportBundle {
+        collections: Vec::new(),
+        warnings: Vec::new(),
         source_format: "IntelliJ HTTP Client".to_owned(),
         requests,
     })
