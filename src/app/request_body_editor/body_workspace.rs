@@ -72,7 +72,7 @@ impl ApiTester {
             .min_h_0()
             .gap_3()
             .child(self.render_body_mode_toolbar(cx))
-            .child(div().flex_1().min_h_0().child(content))
+            .child(request_workspace::request_content_container(content))
             .into_any_element()
     }
 }

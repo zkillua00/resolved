@@ -62,10 +62,9 @@ impl ApiTester {
                         cx.notify();
                     })),
             )
-            .child(
+            .child(request_workspace::request_content_container(
                 div()
-                    .flex_1()
-                    .min_h_0()
+                    .size_full()
                     .when(self.request_pane == RequestPane::Params, |this| {
                         this.child(self.render_query_params_editor(cx))
                     })
@@ -84,7 +83,19 @@ impl ApiTester {
                     .when(self.request_pane == RequestPane::PostResponse, |this| {
                         this.child(self.post_response_script.clone())
                     }),
-            )
+            ))
             .into_any_element()
     }
+}
+
+/// Give percentage-height tables and editors the remaining panel bounds without
+/// letting their intrinsic content size expand the flex item.
+pub(in crate::app) fn request_content_container(content: impl IntoElement) -> impl IntoElement {
+    div()
+        .relative()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .overflow_hidden()
+        .child(div().absolute().inset_0().child(content))
 }

@@ -870,10 +870,9 @@ impl ApiTester {
                         this.pane_set_request_pane(pane_id, RequestPane::from_index(*index), cx);
                     })),
             )
-            .child(
+            .child(request_workspace::request_content_container(
                 div()
-                    .flex_1()
-                    .min_h_0()
+                    .size_full()
                     .when(session.request_pane == RequestPane::Params, |this| {
                         this.child(self.render_pane_query_params_editor(session, pane_id, cx))
                     })
@@ -892,7 +891,7 @@ impl ApiTester {
                     .when(session.request_pane == RequestPane::PostResponse, |this| {
                         this.child(session.post_response_script.clone())
                     }),
-            )
+            ))
             .into_any_element()
     }
 
@@ -1395,7 +1394,7 @@ impl ApiTester {
             .min_h_0()
             .gap_3()
             .child(self.render_pane_body_mode_toolbar(session, pane_id, cx))
-            .child(div().flex_1().min_h_0().child(content))
+            .child(request_workspace::request_content_container(content))
             .into_any_element()
     }
 
