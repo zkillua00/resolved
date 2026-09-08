@@ -70,8 +70,13 @@ impl ApiTester {
         v_flex()
             .size_full()
             .min_h_0()
-            .gap_3()
-            .child(self.render_body_mode_toolbar(cx))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .px_3()
+                    .py_2()
+                    .child(self.render_body_mode_toolbar(cx)),
+            )
             .child(request_workspace::request_content_container(content))
             .into_any_element()
     }

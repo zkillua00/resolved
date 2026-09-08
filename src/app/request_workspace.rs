@@ -40,31 +40,39 @@ impl ApiTester {
         v_flex()
             .size_full()
             .min_h_0()
-            .gap_3()
-            .p_4()
             .bg(cx.api_surface())
-            .child(self.render_url_row(cx))
-            .when_some(status, |this, status| this.child(status))
             .child(
-                TabBar::new("request-tabs")
-                    .underline()
-                    .children([
-                        format!("Params ({query_param_count})"),
-                        format!("Headers ({header_count})"),
-                        "Body".to_owned(),
-                        "Pre-request".to_owned(),
-                        "Post-response".to_owned(),
-                        self.cookie_tab_label(),
-                    ])
-                    .selected_index(self.request_pane.index())
-                    .on_click(cx.listener(|this, index: &usize, _, cx| {
-                        this.request_pane = RequestPane::from_index(*index);
-                        cx.notify();
-                    })),
+                v_flex()
+                    .flex_shrink_0()
+                    .gap_3()
+                    .pt_4()
+                    .child(div().px_4().child(self.render_url_row(cx)))
+                    .when_some(status, |this, status| {
+                        this.child(div().px_4().child(status))
+                    })
+                    .child(
+                        TabBar::new("request-tabs")
+                            .underline()
+                            .px_4()
+                            .children([
+                                format!("Params ({query_param_count})"),
+                                format!("Headers ({header_count})"),
+                                "Body".to_owned(),
+                                "Pre-request".to_owned(),
+                                "Post-response".to_owned(),
+                                self.cookie_tab_label(),
+                            ])
+                            .selected_index(self.request_pane.index())
+                            .on_click(cx.listener(|this, index: &usize, _, cx| {
+                                this.request_pane = RequestPane::from_index(*index);
+                                cx.notify();
+                            })),
+                    ),
             )
             .child(request_workspace::request_content_container(
                 div()
                     .size_full()
+                    .pt_2()
                     .when(self.request_pane == RequestPane::Params, |this| {
                         this.child(self.render_query_params_editor(cx))
                     })

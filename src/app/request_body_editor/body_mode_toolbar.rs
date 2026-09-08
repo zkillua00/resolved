@@ -2,22 +2,21 @@ use super::super::*;
 
 impl ApiTester {
     pub(super) fn render_body_mode_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mode_buttons = BodyMode::all()
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, mode)| {
-                Button::new(("body-mode", index))
-                    .label(mode.label())
-                    .small()
-                    .ghost()
-                    .rounded(px(18.))
-                    .selected(self.body_mode == mode)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.select_body_mode(mode, window, cx);
-                    }))
-            })
-            .collect::<Vec<_>>();
+        let mode_switch = TabBar::new("body-mode")
+            .segmented()
+            .small()
+            .children(BodyMode::all().iter().map(|mode| mode.label()))
+            .selected_index(
+                BodyMode::all()
+                    .iter()
+                    .position(|mode| *mode == self.body_mode)
+                    .unwrap_or(0),
+            )
+            .on_click(cx.listener(move |this, index: &usize, window, cx| {
+                if let Some(&mode) = BodyMode::all().get(*index) {
+                    this.select_body_mode(mode, window, cx);
+                }
+            }));
 
         let selected_language = self.raw_body_language;
         let this = cx.entity().downgrade();
@@ -56,7 +55,7 @@ impl ApiTester {
                     .flex_wrap()
                     .justify_between()
                     .gap_2()
-                    .child(h_flex().flex_wrap().gap_1().children(mode_buttons))
+                    .child(mode_switch)
                     .when(self.body_mode == BodyMode::Raw, |this| {
                         this.child(language_selector)
                     }),

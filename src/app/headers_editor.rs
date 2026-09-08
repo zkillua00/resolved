@@ -16,9 +16,6 @@ impl ApiTester {
         v_flex()
             .size_full()
             .min_h_0()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.api_outline_variant())
             .overflow_hidden()
             .bg(cx.api_surface())
             .child(

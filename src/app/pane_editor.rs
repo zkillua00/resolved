@@ -79,6 +79,8 @@ impl PaneEditorState {
         let body = cx.new(|cx| {
             CodeEditor::new(
                 CodeEditorConfig::default()
+                    .framed(false)
+                    .embedded(true)
                     .language(CodeLanguage::Json)
                     .placeholder("Raw request body")
                     .rows(12)
@@ -95,6 +97,8 @@ impl PaneEditorState {
         let pre_request_script = cx.new(|cx| {
             CodeEditor::new(
                 CodeEditorConfig::default()
+                    .framed(false)
+                    .embedded(true)
                     .language(CodeLanguage::JavaScript)
                     .placeholder("api.request.headers.set(\"X-Token\", \"value\");")
                     .rows(12)
@@ -111,6 +115,8 @@ impl PaneEditorState {
         let post_response_script = cx.new(|cx| {
             CodeEditor::new(
                 CodeEditorConfig::default()
+                    .framed(false)
+                    .embedded(true)
                     .language(CodeLanguage::JavaScript)
                     .placeholder("api.test(\"status is 200\", () => api.assert(api.response.status === 200));")
                     .rows(12)
@@ -850,29 +856,43 @@ impl ApiTester {
         v_flex()
             .size_full()
             .min_h_0()
-            .gap_3()
-            .p_4()
             .bg(cx.api_surface())
-            .child(self.render_pane_url_row(session, pane_id, cx))
             .child(
-                TabBar::new(SharedString::from(format!("{key}-request-tabs")))
-                    .underline()
-                    .children([
-                        format!("Params ({query_param_count})"),
-                        format!("Headers ({header_count})"),
-                        "Body".to_owned(),
-                        "Pre-request".to_owned(),
-                        "Post-response".to_owned(),
-                        self.cookie_tab_label(),
-                    ])
-                    .selected_index(session.request_pane.index())
-                    .on_click(cx.listener(move |this, index: &usize, _, cx| {
-                        this.pane_set_request_pane(pane_id, RequestPane::from_index(*index), cx);
-                    })),
+                v_flex()
+                    .flex_shrink_0()
+                    .gap_3()
+                    .pt_4()
+                    .child(
+                        div()
+                            .px_4()
+                            .child(self.render_pane_url_row(session, pane_id, cx)),
+                    )
+                    .child(
+                        TabBar::new(SharedString::from(format!("{key}-request-tabs")))
+                            .underline()
+                            .px_4()
+                            .children([
+                                format!("Params ({query_param_count})"),
+                                format!("Headers ({header_count})"),
+                                "Body".to_owned(),
+                                "Pre-request".to_owned(),
+                                "Post-response".to_owned(),
+                                self.cookie_tab_label(),
+                            ])
+                            .selected_index(session.request_pane.index())
+                            .on_click(cx.listener(move |this, index: &usize, _, cx| {
+                                this.pane_set_request_pane(
+                                    pane_id,
+                                    RequestPane::from_index(*index),
+                                    cx,
+                                );
+                            })),
+                    ),
             )
             .child(request_workspace::request_content_container(
                 div()
                     .size_full()
+                    .pt_2()
                     .when(session.request_pane == RequestPane::Params, |this| {
                         this.child(self.render_pane_query_params_editor(session, pane_id, cx))
                     })
@@ -982,9 +1002,6 @@ impl ApiTester {
         let mut editor = v_flex()
             .size_full()
             .min_h_0()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.api_outline_variant())
             .overflow_hidden()
             .bg(cx.api_surface())
             .child(
@@ -1392,8 +1409,13 @@ impl ApiTester {
         v_flex()
             .size_full()
             .min_h_0()
-            .gap_3()
-            .child(self.render_pane_body_mode_toolbar(session, pane_id, cx))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .px_3()
+                    .py_2()
+                    .child(self.render_pane_body_mode_toolbar(session, pane_id, cx)),
+            )
             .child(request_workspace::request_content_container(content))
             .into_any_element()
     }
@@ -1404,24 +1426,23 @@ impl ApiTester {
         pane_id: PaneId,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mode_buttons = BodyMode::all()
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, mode)| {
-                Button::new(("pane-body-mode", index))
-                    .label(mode.label())
-                    .small()
-                    .ghost()
-                    .rounded(px(18.))
-                    .selected(session.body_mode == mode)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.pane_select_body_mode(pane_id, mode, cx);
-                    }))
-            })
-            .collect::<Vec<_>>();
-        let key = session.dom_key(pane_id);
+        let mode_switch = TabBar::new(SharedString::from(format!("pane-{}-body-mode", pane_id.0)))
+            .segmented()
+            .small()
+            .children(BodyMode::all().iter().map(|mode| mode.label()))
+            .selected_index(
+                BodyMode::all()
+                    .iter()
+                    .position(|mode| *mode == session.body_mode)
+                    .unwrap_or(0),
+            )
+            .on_click(cx.listener(move |this, index: &usize, _, cx| {
+                if let Some(&mode) = BodyMode::all().get(*index) {
+                    this.pane_select_body_mode(pane_id, mode, cx);
+                }
+            }));
 
+        let key = session.dom_key(pane_id);
         let selected_language = session.raw_body_language;
         let owner = cx.entity().downgrade();
         h_flex()
@@ -1429,7 +1450,7 @@ impl ApiTester {
             .flex_wrap()
             .justify_between()
             .gap_2()
-            .child(h_flex().flex_wrap().gap_1().children(mode_buttons))
+            .child(mode_switch)
             .when(session.body_mode == BodyMode::Raw, |this| {
                 this.child(
                     Button::new(SharedString::from(format!("{key}-raw-language")))

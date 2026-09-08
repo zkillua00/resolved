@@ -127,6 +127,8 @@ impl ApiTester {
         let body = cx.new(|cx| {
             CodeEditor::new(
                 CodeEditorConfig::default()
+                    .framed(false)
+                    .embedded(true)
                     .language(CodeLanguage::Json)
                     .placeholder("Raw request body · ⌘F to search")
                     .rows(12)
@@ -157,6 +159,8 @@ impl ApiTester {
             let diagnostic_intelligence = Rc::clone(&intelligence);
             CodeEditor::new(
                 CodeEditorConfig::default()
+                    .framed(false)
+                    .embedded(true)
                     .language(CodeLanguage::JavaScript)
                     .placeholder(
                         "api.request.headers.set(\"X-Token\", api.environment.get(\"token\"));",
@@ -195,6 +199,8 @@ impl ApiTester {
             let diagnostic_intelligence = Rc::clone(&intelligence);
             CodeEditor::new(
                 CodeEditorConfig::default()
+                    .framed(false)
+                    .embedded(true)
                     .language(CodeLanguage::JavaScript)
                     .placeholder(
                         "api.test(\"status is 200\", () => api.assert(api.response.status === 200));",

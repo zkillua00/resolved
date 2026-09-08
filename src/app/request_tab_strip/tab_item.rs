@@ -20,6 +20,8 @@ pub(super) fn render_request_tab(
         .group_id()
         .and_then(|group_id| app.request_tabs.group(group_id))
         .map(|group| request_tab_group_color(group.color(), cx));
+    let method = app.request_tab_method(tab, cx);
+    let color = method_color(&method, cx);
     let row_id = format!("open-request-tab-{}", tab_id.as_str());
 
     WorkspaceTabControl::new(
@@ -27,6 +29,7 @@ pub(super) fn render_request_tab(
         row_id,
         request_tab_label(app, tab, cx),
     )
+    .method(method, color)
     .pane_opt(pane_id)
     .dirty(dirty)
     .accent(accent)

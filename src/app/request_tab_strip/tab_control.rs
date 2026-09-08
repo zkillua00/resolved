@@ -6,6 +6,7 @@ pub(super) struct WorkspaceTabControl {
     row_id: SharedString,
     title: String,
     icon: Option<IconName>,
+    method: Option<(String, Hsla)>,
     dirty: bool,
     accent: Option<Hsla>,
     closable: bool,
@@ -26,6 +27,7 @@ impl WorkspaceTabControl {
             row_id: row_id.into(),
             title: title.into(),
             icon: None,
+            method: None,
             dirty: false,
             accent: None,
             pane_id: None,
@@ -43,6 +45,11 @@ impl WorkspaceTabControl {
 
     pub(super) fn icon(mut self, icon: IconName) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    pub(super) fn method(mut self, method: String, color: Hsla) -> Self {
+        self.method = Some((method, color));
         self
     }
 
@@ -93,6 +100,16 @@ impl WorkspaceTabControl {
         let drop_target = self.tab.clone();
         let drag = workspace_tab_drag(self.tab, self.title.clone());
         let display_title = compact_label(&self.title, 28);
+        let method_prefix = self.method.filter(|(method, _)| {
+            display_title
+                .strip_prefix(method.as_str())
+                .is_some_and(|rest| rest.starts_with(' '))
+        });
+        let display_name = method_prefix
+            .as_ref()
+            .map_or(display_title.clone(), |(method, _)| {
+                display_title[method.len() + 1..].to_owned()
+            });
         let tooltip = self.title;
 
         h_flex()
@@ -187,12 +204,16 @@ impl WorkspaceTabControl {
                     })
                     .when_some(self.icon, |this, icon| this.child(Icon::new(icon).xsmall()))
                     .child(
-                        div()
+                        h_flex()
                             .min_w_0()
                             .flex_1()
+                            .gap_1()
                             .overflow_hidden()
                             .whitespace_nowrap()
-                            .child(display_title),
+                            .when_some(method_prefix, |this, (method, color)| {
+                                this.child(div().flex_shrink_0().text_color(color).child(method))
+                            })
+                            .child(div().min_w_0().truncate().child(display_name)),
                     ),
             )
             .when(self.dirty, |this| {
