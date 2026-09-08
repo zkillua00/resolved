@@ -763,6 +763,8 @@ impl SavedTheme {
 pub struct ThemeSettings {
     /// Bundled starter themes are installed once, so deletion survives restart.
     pub bundled_themes_initialized: bool,
+    /// Latest installed catalog version; new releases add only new presets.
+    pub bundled_themes_version: u32,
     pub saved_themes: Vec<SavedTheme>,
     pub active_theme_id: Option<String>,
     pub source_path: Option<PathBuf>,

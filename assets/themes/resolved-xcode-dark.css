@@ -1,0 +1,103 @@
+/* Resolved Xcode Dark — Xcode-inspired palette supplied for Resolved.
+ * Inspiration: Apple Xcode (https://developer.apple.com/xcode/).
+ * Adapted to Resolved's native theme tokens; not an official Apple theme.
+ */
+:root {
+    --api-theme-name: "Resolved Xcode Dark";
+    --api-appearance: dark;
+
+    --api-surface: #1f1f24;
+    --api-surface-lowest: #17171b;
+    --api-surface-low: #25252b;
+    --api-surface-container: #2c2c32;
+    --api-surface-high: #34343b;
+    --api-surface-highest: #3d3d45;
+    --api-foreground: #ffffff;
+    --api-muted-foreground: #a8a8ad;
+    --api-outline: #44444c;
+
+    --api-primary: #0a84ff;
+    --api-primary-hover: #409cff;
+    --api-primary-active: #0071e3;
+    --api-primary-foreground: #ffffff;
+    --api-primary-text: #6cb6ff;
+    --api-selection: #0a4f8f;
+    --api-secondary-active: #3a3a42;
+    --api-secondary-foreground: #f2f2f7;
+
+    --api-danger: #ff453a;
+    --api-danger-hover: #ff6961;
+    --api-danger-active: #d9362e;
+    --api-danger-foreground: #ffffff;
+    --api-warning: #ffd60a;
+    --api-warning-hover: #ffe14a;
+    --api-warning-active: #d4b000;
+    --api-warning-foreground: #1c1c1e;
+    --api-success: #30d158;
+    --api-success-hover: #5dde78;
+    --api-success-active: #27ae49;
+    --api-success-foreground: #ffffff;
+    --api-info: #64d2ff;
+    --api-info-hover: #8cddff;
+    --api-info-active: #32b6e8;
+    --api-info-foreground: #111114;
+
+    --api-red: #ff7b72;
+    --api-red-light: #ffaaa3;
+    --api-green: #6bdfff;
+    --api-green-light: #a5ecff;
+    --api-blue: #6cb6ff;
+    --api-blue-light: #a5d2ff;
+    --api-yellow: #ffd60a;
+    --api-yellow-light: #ffe66d;
+    --api-magenta: #d2a8ff;
+    --api-magenta-light: #e2c5ff;
+    --api-cyan: #67d8ef;
+    --api-cyan-light: #a8ecf7;
+
+    --api-editor-background: #1f1f24;
+    --api-editor-gutter-background: var(--api-editor-background);
+    --api-editor-foreground: #ffffff;
+    --api-editor-active-line: #29292f;
+    --api-editor-line-number: #6c6c72;
+    --api-editor-active-line-number: #d1d1d6;
+
+    --api-syntax-property: #67d8ef;
+    --api-syntax-string: #fc6a5d;
+    --api-syntax-number: #d0bf69;
+    --api-syntax-boolean: #d2a8ff;
+    --api-syntax-keyword: #ff7ab2;
+    --api-syntax-comment: #7f8c98;
+    --api-syntax-punctuation: #ffffff;
+    --api-syntax-variable: #ffffff;
+    --api-syntax-type: #6bdfff;
+    --api-syntax-function: #67d8ef;
+}
+
+.app {
+    zoom: 100%;
+    font-family: ".SystemUIFont";
+    font-size: 16px;
+    margin: 0;
+    padding: 0;
+}
+
+.button {
+    border-radius: 6px;
+    width: auto;
+    min-width: auto;
+    height: auto;
+    margin: 0;
+    padding: auto;
+    gap: auto;
+    font-family: inherit;
+    font-size: inherit;
+}
+
+.editor {
+    font-family: inherit;
+    font-size: 0.875rem;
+    border-radius: 6px;
+    margin: 0;
+    padding: 0;
+}
