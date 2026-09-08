@@ -73,6 +73,16 @@ impl ApiTester {
                 div()
                     .size_full()
                     .pt_2()
+                    .bg(
+                        if matches!(
+                            self.request_pane,
+                            RequestPane::Params | RequestPane::Headers | RequestPane::Cookies
+                        ) {
+                            cx.api_surface_low()
+                        } else {
+                            cx.api_surface()
+                        },
+                    )
                     .when(self.request_pane == RequestPane::Params, |this| {
                         this.child(self.render_query_params_editor(cx))
                     })

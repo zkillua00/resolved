@@ -2,21 +2,46 @@ use super::super::*;
 
 impl ApiTester {
     pub(super) fn render_body_mode_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mode_switch = TabBar::new("body-mode")
-            .segmented()
-            .small()
-            .children(BodyMode::all().iter().map(|mode| mode.label()))
-            .selected_index(
+        let mode_switch = h_flex()
+            .flex_shrink_0()
+            .p(px(2.))
+            .rounded(px(6.))
+            .bg(cx.api_surface_container())
+            .children(
                 BodyMode::all()
                     .iter()
-                    .position(|mode| *mode == self.body_mode)
-                    .unwrap_or(0),
-            )
-            .on_click(cx.listener(move |this, index: &usize, window, cx| {
-                if let Some(&mode) = BodyMode::all().get(*index) {
-                    this.select_body_mode(mode, window, cx);
-                }
-            }));
+                    .copied()
+                    .enumerate()
+                    .map(|(index, mode)| {
+                        let selected = self.body_mode == mode;
+                        Button::new(("body-mode", index))
+                            .label(mode.label())
+                            .small()
+                            .ghost()
+                            .h(px(24.))
+                            .px(px(10.))
+                            .rounded(px(4.))
+                            .text_color(if selected {
+                                cx.theme().foreground
+                            } else {
+                                cx.theme().muted_foreground
+                            })
+                            .when(selected, |button| {
+                                button
+                                    .bg(if cx.api_surface().l < 0.5 {
+                                        cx.api_surface_highest()
+                                    } else {
+                                        cx.api_surface_lowest()
+                                    })
+                                    .border_1()
+                                    .border_color(cx.api_outline_variant())
+                                    .shadow_xs()
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.select_body_mode(mode, window, cx);
+                            }))
+                    }),
+            );
 
         let selected_language = self.raw_body_language;
         let this = cx.entity().downgrade();

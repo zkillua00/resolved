@@ -74,7 +74,7 @@ impl ApiTester {
                 div()
                     .flex_shrink_0()
                     .px_3()
-                    .py_2()
+                    .pb_2()
                     .child(self.render_body_mode_toolbar(cx)),
             )
             .child(request_workspace::request_content_container(content))

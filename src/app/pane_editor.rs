@@ -893,6 +893,16 @@ impl ApiTester {
                 div()
                     .size_full()
                     .pt_2()
+                    .bg(
+                        if matches!(
+                            session.request_pane,
+                            RequestPane::Params | RequestPane::Headers | RequestPane::Cookies
+                        ) {
+                            cx.api_surface_low()
+                        } else {
+                            cx.api_surface()
+                        },
+                    )
                     .when(session.request_pane == RequestPane::Params, |this| {
                         this.child(self.render_pane_query_params_editor(session, pane_id, cx))
                     })
@@ -1413,7 +1423,7 @@ impl ApiTester {
                 div()
                     .flex_shrink_0()
                     .px_3()
-                    .py_2()
+                    .pb_2()
                     .child(self.render_pane_body_mode_toolbar(session, pane_id, cx)),
             )
             .child(request_workspace::request_content_container(content))
@@ -1426,21 +1436,49 @@ impl ApiTester {
         pane_id: PaneId,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mode_switch = TabBar::new(SharedString::from(format!("pane-{}-body-mode", pane_id.0)))
-            .segmented()
-            .small()
-            .children(BodyMode::all().iter().map(|mode| mode.label()))
-            .selected_index(
+        let mode_switch = h_flex()
+            .flex_shrink_0()
+            .p(px(2.))
+            .rounded(px(6.))
+            .bg(cx.api_surface_container())
+            .children(
                 BodyMode::all()
                     .iter()
-                    .position(|mode| *mode == session.body_mode)
-                    .unwrap_or(0),
-            )
-            .on_click(cx.listener(move |this, index: &usize, _, cx| {
-                if let Some(&mode) = BodyMode::all().get(*index) {
-                    this.pane_select_body_mode(pane_id, mode, cx);
-                }
-            }));
+                    .copied()
+                    .enumerate()
+                    .map(|(index, mode)| {
+                        let selected = session.body_mode == mode;
+                        Button::new(SharedString::from(format!(
+                            "pane-{}-body-mode-{index}",
+                            pane_id.0
+                        )))
+                        .label(mode.label())
+                        .small()
+                        .ghost()
+                        .h(px(24.))
+                        .px(px(10.))
+                        .rounded(px(4.))
+                        .text_color(if selected {
+                            cx.theme().foreground
+                        } else {
+                            cx.theme().muted_foreground
+                        })
+                        .when(selected, |button| {
+                            button
+                                .bg(if cx.api_surface().l < 0.5 {
+                                    cx.api_surface_highest()
+                                } else {
+                                    cx.api_surface_lowest()
+                                })
+                                .border_1()
+                                .border_color(cx.api_outline_variant())
+                                .shadow_xs()
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.pane_select_body_mode(pane_id, mode, cx);
+                        }))
+                    }),
+            );
 
         let key = session.dom_key(pane_id);
         let selected_language = session.raw_body_language;
