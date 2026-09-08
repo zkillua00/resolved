@@ -4,3 +4,9 @@
 /vendor/typescript-service-6.0.2/
 .DS_Store
 *.log
+/vendor/tree-sitter-c-sharp-0.23.5/
+/vendor/tree-sitter-cpp-0.23.4/
+/vendor/tree-sitter-swift-0.7.3/
+/vendor/tree-sitter-kotlin-ng-1.1.0/
+/vendor/tree-sitter-scala-0.23.4/
+/vendor/tree-sitter-sequel-0.3.11/

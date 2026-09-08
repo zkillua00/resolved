@@ -66,7 +66,7 @@ for its contract and security boundary.
 ## Desktop builds
 
 Do not invoke Cargo directly. The checked-in wrappers prepare the pinned and
-locally patched GPUI dependencies plus the embedded TypeScript language service
+locally patched GPUI and Tree-sitter dependencies plus the embedded TypeScript language service
 before forwarding arguments to Cargo.
 
 On Linux and macOS:
@@ -93,7 +93,9 @@ Platform prerequisites and distribution commands are in the
 [building and packaging guide](building.md).
 
 The generated `vendor/gpui-0.2.2/`, `vendor/gpui-component-0.5.1/`, and
-`vendor/typescript-service-6.0.2/` trees are intentionally ignored. Change the
+`vendor/typescript-service-6.0.2/` trees, along with the prepared `vendor/tree-sitter-*/`
+grammars, are intentionally ignored. See [Tree-sitter table compaction](tree-sitter-size.md)
+for its size/performance tradeoff and verification commands. Change the
 matching files in `patches/` or preparation scripts instead of treating those
 generated trees as source.
 

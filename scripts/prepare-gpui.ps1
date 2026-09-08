@@ -40,6 +40,42 @@ $pinned = @(
             "$projectDir\patches\gpui-component-0.5.1-configurable-active-line.patch",
             "$projectDir\patches\gpui-component-0.5.1-switch-contrast.patch"
         )
+    },
+    @{
+        name = 'tree-sitter-c-sharp'
+        version = '0.23.5'
+        sha256 = 'c1aac67f1ad71de1d6d39708d34811081c26dfa495658de6c14c34200849357c'
+        patches = @("$projectDir\patches\tree-sitter-c-sharp-0.23.5-compact-tables.patch")
+    },
+    @{
+        name = 'tree-sitter-cpp'
+        version = '0.23.4'
+        sha256 = 'df2196ea9d47b4ab4a31b9297eaa5a5d19a0b121dceb9f118f6790ad0ab94743'
+        patches = @("$projectDir\patches\tree-sitter-cpp-0.23.4-compact-tables.patch")
+    },
+    @{
+        name = 'tree-sitter-swift'
+        version = '0.7.3'
+        sha256 = 'fe36052155b9dd69ca82b3b8f1b4ccfb2d867125ac1a4db1dd7331829242668c'
+        patches = @("$projectDir\patches\tree-sitter-swift-0.7.3-compact-tables.patch")
+    },
+    @{
+        name = 'tree-sitter-kotlin-ng'
+        version = '1.1.0'
+        sha256 = 'e800ebbda938acfbf224f4d2c34947a31994b1295ee6e819b65226c7b51b4450'
+        patches = @("$projectDir\patches\tree-sitter-kotlin-ng-1.1.0-compact-tables.patch")
+    },
+    @{
+        name = 'tree-sitter-scala'
+        version = '0.23.4'
+        sha256 = 'efde5e68b4736e9eac17bfa296c6f104a26bffab363b365eb898c40a63c15d2f'
+        patches = @("$projectDir\patches\tree-sitter-scala-0.23.4-compact-tables.patch")
+    },
+    @{
+        name = 'tree-sitter-sequel'
+        version = '0.3.11'
+        sha256 = '9d198ad3c319c02e43c21efa1ec796b837afcb96ffaef1a40c1978fbdcec7d17'
+        patches = @("$projectDir\patches\tree-sitter-sequel-0.3.11-compact-tables.patch")
     }
 )
 

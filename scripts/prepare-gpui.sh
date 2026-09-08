@@ -109,3 +109,40 @@ prepare_crate \
     "$project_dir/patches/gpui-component-0.5.1-completion-edge-placement.patch" \
     "$project_dir/patches/gpui-component-0.5.1-configurable-active-line.patch" \
     "$project_dir/patches/gpui-component-0.5.1-switch-contrast.patch"
+
+# Compact the largest grammar tables without changing language support.
+prepare_crate \
+    "tree-sitter-c-sharp" \
+    "0.23.5" \
+    "c1aac67f1ad71de1d6d39708d34811081c26dfa495658de6c14c34200849357c" \
+    "$project_dir/patches/tree-sitter-c-sharp-0.23.5-compact-tables.patch"
+
+prepare_crate \
+    "tree-sitter-cpp" \
+    "0.23.4" \
+    "df2196ea9d47b4ab4a31b9297eaa5a5d19a0b121dceb9f118f6790ad0ab94743" \
+    "$project_dir/patches/tree-sitter-cpp-0.23.4-compact-tables.patch"
+
+prepare_crate \
+    "tree-sitter-swift" \
+    "0.7.3" \
+    "fe36052155b9dd69ca82b3b8f1b4ccfb2d867125ac1a4db1dd7331829242668c" \
+    "$project_dir/patches/tree-sitter-swift-0.7.3-compact-tables.patch"
+
+prepare_crate \
+    "tree-sitter-kotlin-ng" \
+    "1.1.0" \
+    "e800ebbda938acfbf224f4d2c34947a31994b1295ee6e819b65226c7b51b4450" \
+    "$project_dir/patches/tree-sitter-kotlin-ng-1.1.0-compact-tables.patch"
+
+prepare_crate \
+    "tree-sitter-scala" \
+    "0.23.4" \
+    "efde5e68b4736e9eac17bfa296c6f104a26bffab363b365eb898c40a63c15d2f" \
+    "$project_dir/patches/tree-sitter-scala-0.23.4-compact-tables.patch"
+
+prepare_crate \
+    "tree-sitter-sequel" \
+    "0.3.11" \
+    "9d198ad3c319c02e43c21efa1ec796b837afcb96ffaef1a40c1978fbdcec7d17" \
+    "$project_dir/patches/tree-sitter-sequel-0.3.11-compact-tables.patch"
