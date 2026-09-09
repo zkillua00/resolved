@@ -84,11 +84,24 @@ function Get-FileSha256([string]$path) {
     (Get-FileHash -Path $path -Algorithm SHA256).Hash.ToLower()
 }
 
+function Get-RelativeChildPath([string]$root, [string]$path) {
+    # [IO.Path]::GetRelativePath is unavailable in Windows PowerShell 5.1's
+    # .NET Framework. Every path passed here comes from a recursive enumeration
+    # below $root, so removing the normalized root prefix is sufficient.
+    $rootPath = [IO.Path]::GetFullPath($root).TrimEnd([char[]]@('\', '/'))
+    $pathPath = [IO.Path]::GetFullPath($path)
+    $prefix = $rootPath + [IO.Path]::DirectorySeparatorChar
+    if (-not $pathPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "path is not below root: $pathPath"
+    }
+    $pathPath.Substring($prefix.Length)
+}
+
 function Get-PatchedTreeSha256([string]$root) {
     $lines = Get-ChildItem -Path $root -File -Recurse |
         Where-Object { $_.Name -ne '.api-tester-patch-sha256' } |
         ForEach-Object {
-            $relative = [IO.Path]::GetRelativePath($root, $_.FullName).Replace('\', '/')
+            $relative = (Get-RelativeChildPath $root $_.FullName).Replace('\', '/')
             "$(Get-FileSha256 $_.FullName)  ./$relative"
         } |
         Sort-Object
