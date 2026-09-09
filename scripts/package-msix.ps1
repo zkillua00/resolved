@@ -9,9 +9,9 @@
 #
 # Prerequisites: MakeAppx.exe + SignTool.exe (Windows SDK) and a self-signed
 # code-signing certificate whose subject CN matches the manifest Publisher.
-# The script creates the certificate in Cert:\CurrentUser\My on first use and
-# trusts it for the current user; installing the package machine-wide for all
-# users needs admin (Local Machine Trusted People).
+# -InstallCert creates a reusable signing certificate in Cert:\CurrentUser\My.
+# -Install trusts its public certificate in Local Machine Trusted People
+# (requesting administrator elevation once), then installs for the current user.
 #
 # Why MSIX: Windows denies package identity to bare executables, and several
 # capabilities Resolved relies on (app identity for WebView2 data folders,
@@ -36,7 +36,7 @@ if (-not (Test-Path $exePath)) {
     throw "missing $exePath - run 'scripts/cargo.ps1 build' first"
 }
 
-$identityName = 'nous.resolved'
+$identityName = 'dev.apiworkbench.resolved'
 $certificateSubject = 'CN=apiworkbench.dev'
 $publisher = $certificateSubject.Substring(3)
 $version = (& cargo metadata --no-deps --format-version 1 |
@@ -250,17 +250,37 @@ Remove-Item -Recurse -Force $stagingRoot
 Write-Host "Packaged $msixPath"
 
 if ($Install) {
-    # Make the certificate trusted for package validation. Add-AppxPackage
-    # refuses an untrusted signature; trusting CurrentUser\Root + Trust is
-    # sufficient for a per-user install (no admin needed).
-    $trustedRoot = Get-ChildItem Cert:\CurrentUser\Root |
+    # App Installer validates against the machine store even for per-user apps.
+    # Trust only the public signing certificate, without copying its private key.
+    $trustedCertificate = Get-ChildItem Cert:\LocalMachine\TrustedPeople |
         Where-Object { $_.Thumbprint -eq $cert.Thumbprint }
-    if (-not $trustedRoot) {
-        Write-Host 'Trusting the signing certificate for the current user...'
-        $store = New-Object System.Security.Cryptography.X509Certificates.X509Store('Root', 'CurrentUser')
-        $store.Open('ReadWrite')
-        $store.Add($cert)
-        $store.Close()
+    if (-not $trustedCertificate) {
+        Write-Host "Trusting signing certificate $($cert.Thumbprint) in Local Machine Trusted People..."
+        $publicCertificate = [Convert]::ToBase64String($cert.Export(
+            [System.Security.Cryptography.X509Certificates.X509ContentType]::Cert
+        ))
+        $trustCommand = @"
+`$ErrorActionPreference = 'Stop'
+try {
+    `$certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+        [Convert]::FromBase64String('$publicCertificate')
+    )
+    `$store = [System.Security.Cryptography.X509Certificates.X509Store]::new('TrustedPeople', 'LocalMachine')
+    try {
+        `$store.Open('ReadWrite')
+        `$store.Add(`$certificate)
+    } finally {
+        `$store.Close()
+    }
+} catch { exit 1 }
+"@
+        $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($trustCommand))
+        $trustProcess = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+            -Verb RunAs -WindowStyle Hidden -Wait -PassThru `
+            -ArgumentList @('-NoProfile', '-EncodedCommand', $encodedCommand)
+        if ($trustProcess.ExitCode -ne 0 -or -not (Test-Path "Cert:\LocalMachine\TrustedPeople\$($cert.Thumbprint)")) {
+            throw 'Signing certificate trust failed; administrator approval is required to install this self-signed MSIX.'
+        }
     }
     Write-Host 'Installing the package...'
     Add-AppxPackage -Path $msixPath `
@@ -273,7 +293,7 @@ if ($Install) {
     Write-Host 'or from the Start menu ("Resolved").'
 } else {
     Write-Host 'Install it with:'
-    Write-Host "  powershell -File scripts\package-msix.ps1 -Install"
-    Write-Host 'or: Add-AppxPackage -Path <Resolved.msix>'
+    Write-Host "  powershell -File scripts\package-msix.ps1 -Profile $Profile -Install"
+    Write-Host 'After trusting the certificate once, you can also open the MSIX directly.'
     Write-Host 'Launch from the Start menu ("Resolved").'
 }
