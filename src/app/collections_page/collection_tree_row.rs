@@ -20,6 +20,7 @@ impl ApiTester {
         let context_id = collection_id;
         let actions_this = cx.entity().downgrade();
         let context_this = actions_this.clone();
+        let can_create_request = !self.sending && self.can_create_request_content();
         let can_update = !self.sending && self.can_update_collection_content();
         let can_delete = !self.sending && self.can_delete_collection_content();
         let can_create_folder = !self.sending && self.can_create_collection_content();
@@ -139,15 +140,20 @@ impl ApiTester {
                         .xsmall()
                         .ghost()
                         .rounded_full()
-                        .disabled(!can_update && !can_delete && !can_create_folder)
-                        .dropdown_menu(move |menu, _, _| {
+                        .disabled(
+                            !can_update && !can_delete && !can_create_folder && !can_create_request,
+                        )
+                        .dropdown_menu(move |menu, window, cx| {
                             build_collection_actions_menu(
                                 menu,
                                 actions_this.clone(),
                                 actions_id.clone(),
                                 can_create_folder,
+                                can_create_request,
                                 can_update,
                                 can_delete,
+                                window,
+                                cx,
                             )
                         }),
                 )
@@ -175,14 +181,17 @@ impl ApiTester {
                     cx,
                 ))
             })
-            .context_menu(move |menu, _, _| {
+            .context_menu(move |menu, window, cx| {
                 build_collection_actions_menu(
                     menu,
                     context_this.clone(),
                     context_id.clone(),
                     can_create_folder,
+                    can_create_request,
                     can_update && !renaming,
                     can_delete,
+                    window,
+                    cx,
                 )
             });
 
@@ -200,9 +209,17 @@ fn build_collection_actions_menu(
     owner: gpui::WeakEntity<ApiTester>,
     collection_id: String,
     can_create_folder: bool,
+    can_create_request: bool,
     can_update: bool,
     can_delete: bool,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
+    let menu = if can_create_request {
+        new_request_menu(menu, owner.clone(), collection_id.clone(), None, window, cx).separator()
+    } else {
+        menu
+    };
     let new_folder_this = owner.clone();
     let new_folder_id = collection_id.clone();
     let rename_this = owner.clone();

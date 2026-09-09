@@ -615,6 +615,7 @@ mod tests {
         RequestTemplate {
             request: RequestDraft::new(method, url),
             scripts: Default::default(),
+            documentation: String::new(),
             websocket: None,
         }
     }

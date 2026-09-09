@@ -12,6 +12,7 @@ impl ApiTester {
         let settings = self.settings.editor.clone();
         let mut editors = vec![
             self.body.clone(),
+            self.documentation.clone(),
             self.pre_request_script.clone(),
             self.post_response_script.clone(),
             self.response_editor.clone(),

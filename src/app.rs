@@ -264,6 +264,7 @@ pub struct ApiTester {
     method: Entity<InputState>,
     url: Entity<InputState>,
     body: Entity<CodeEditor>,
+    documentation: Entity<CodeEditor>,
     pre_request_script: Entity<CodeEditor>,
     post_response_script: Entity<CodeEditor>,
     response_editor: Entity<CodeEditor>,

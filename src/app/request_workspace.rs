@@ -61,6 +61,7 @@ impl ApiTester {
                                 "Pre-request".to_owned(),
                                 "Post-response".to_owned(),
                                 self.cookie_tab_label(),
+                                "Documentation".to_owned(),
                             ])
                             .selected_index(self.request_pane.index())
                             .on_click(cx.listener(|this, index: &usize, _, cx| {
@@ -83,6 +84,9 @@ impl ApiTester {
                             cx.api_surface()
                         },
                     )
+                    .when(self.request_pane == RequestPane::Documentation, |this| {
+                        this.child(self.documentation.clone())
+                    })
                     .when(self.request_pane == RequestPane::Params, |this| {
                         this.child(self.render_query_params_editor(cx))
                     })

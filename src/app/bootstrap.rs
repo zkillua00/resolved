@@ -146,6 +146,19 @@ impl ApiTester {
             )
         });
         let pre_completion_catalog = Rc::clone(&script_variable_catalog);
+        let documentation = cx.new(|cx| {
+            CodeEditor::new(
+                CodeEditorConfig::default()
+                    .framed(false)
+                    .embedded(true)
+                    .language(CodeLanguage::Markdown)
+                    .placeholder("Document this request with Markdown")
+                    .rows(12)
+                    .soft_wrap(true),
+                window,
+                cx,
+            )
+        });
         let pre_request_script = cx.new(|cx| {
             let completion_catalog = Rc::clone(&pre_completion_catalog);
             let mut intelligence =
@@ -758,6 +771,12 @@ impl ApiTester {
                     this.format_raw_body(window, cx);
                 }
             });
+        let documentation_subscription =
+            cx.subscribe(&documentation, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.refresh_request_dirty_part(RequestDirtyPart::Documentation, cx);
+                }
+            });
         let pre_request_subscription =
             cx.subscribe(&pre_request_script, |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -922,6 +941,7 @@ impl ApiTester {
             method,
             url,
             body,
+            documentation,
             pre_request_script,
             post_response_script,
             response_editor,
@@ -1095,6 +1115,7 @@ impl ApiTester {
                 method_subscription,
                 body_subscription,
                 body_format_subscription,
+                documentation_subscription,
                 pre_request_subscription,
                 pre_request_format_subscription,
                 post_response_subscription,

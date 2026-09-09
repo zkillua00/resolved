@@ -14,6 +14,7 @@ pub(crate) enum RequestDirtyPart {
     BodyFields,
     PreScript,
     PostScript,
+    Documentation,
 }
 
 impl RequestDirtyPart {
@@ -142,6 +143,7 @@ mod tests {
             RequestDirtyPart::BodyFields,
             RequestDirtyPart::PreScript,
             RequestDirtyPart::PostScript,
+            RequestDirtyPart::Documentation,
         ];
         let combined = parts.iter().fold(0_u16, |bits, part| bits | part.mask());
 

@@ -34,7 +34,7 @@ use super::{
 #[cfg(test)]
 use super::request_tabs::RequestTabGroupColor;
 
-const CURRENT_SCHEMA_VERSION: i64 = 11;
+const CURRENT_SCHEMA_VERSION: i64 = 12;
 static NEXT_LOCAL_WORKSPACE_ID: AtomicU64 = AtomicU64::new(0);
 const LEGACY_HISTORY_FILE_VERSION: u32 = 1;
 const LEGACY_HISTORY_IMPORT_MARKER: &str = "history-json-v1";
@@ -401,6 +401,11 @@ ADD COLUMN query_params_json TEXT NOT NULL DEFAULT '[]';
 const MIGRATION_11: &str = r#"
 ALTER TABLE saved_requests
 ADD COLUMN websocket_json TEXT NOT NULL DEFAULT 'null';
+"#;
+
+const MIGRATION_12: &str = r#"
+ALTER TABLE saved_requests
+ADD COLUMN documentation TEXT NOT NULL DEFAULT '';
 "#;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1291,6 +1296,7 @@ fn migrate(connection: &mut Connection) -> Result<(), DatabaseError> {
             9 => transaction.execute_batch(MIGRATION_9)?,
             10 => transaction.execute_batch(MIGRATION_10)?,
             11 => transaction.execute_batch(MIGRATION_11)?,
+            12 => transaction.execute_batch(MIGRATION_12)?,
             _ => {
                 return Err(DatabaseError::UnsupportedSchemaVersion {
                     found: next,
@@ -1429,9 +1435,9 @@ fn save_workspace_tx(
                 "INSERT INTO saved_requests(
                     id, collection_id, folder_id, name, position, method, url, query_params_json, body,
                     body_mode, raw_body_language, pre_request, post_response, websocket_json,
-                    created_at, updated_at, version
+                    created_at, updated_at, version, documentation
                  ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 1
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 1, ?17
                  )
                  ON CONFLICT(id) DO UPDATE SET
                     collection_id = excluded.collection_id,
@@ -1447,6 +1453,7 @@ fn save_workspace_tx(
                     pre_request = excluded.pre_request,
                     post_response = excluded.post_response,
                     websocket_json = excluded.websocket_json,
+                    documentation = excluded.documentation,
                     created_at = excluded.created_at,
                     updated_at = excluded.updated_at,
                     version = saved_requests.version + 1",
@@ -1467,6 +1474,7 @@ fn save_workspace_tx(
                     websocket_json,
                     saved_request.created_at.timestamp_micros(),
                     saved_request.updated_at.timestamp_micros(),
+                    &saved_request.definition.documentation,
                 ],
             )?;
             sync_saved_request_headers(transaction, &saved_request.id, &request.headers, saved_at)?;
@@ -2064,7 +2072,7 @@ fn load_workspace_tx(
                 "SELECT
                     id, folder_id, name, method, url, query_params_json, body, body_mode,
                     raw_body_language, pre_request, post_response, websocket_json,
-                    created_at, updated_at
+                    created_at, updated_at, documentation
                  FROM saved_requests
                  WHERE collection_id = ?1
                  ORDER BY position ASC, id ASC",
@@ -2086,6 +2094,7 @@ fn load_workspace_tx(
                         row.get::<_, String>(11)?,
                         row.get::<_, i64>(12)?,
                         row.get::<_, i64>(13)?,
+                        row.get::<_, String>(14)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?
@@ -2107,6 +2116,7 @@ fn load_workspace_tx(
             websocket_json,
             created_at,
             updated_at,
+            documentation,
         ) in request_rows
         {
             let headers = load_headers(
@@ -2152,6 +2162,7 @@ fn load_workspace_tx(
                         post_response,
                     },
                     websocket: deserialize_websocket(&websocket_json)?,
+                    documentation,
                 },
                 created_at: datetime_from_micros(created_at, "saved request created_at")?,
                 updated_at: datetime_from_micros(updated_at, "saved request updated_at")?,
@@ -2902,6 +2913,7 @@ mod tests {
                                 "api.test('created', () => api.assert(api.response.status === 201));"
                                     .to_owned(),
                         },
+                        documentation: "# Request notes\nSaved **Markdown**.".to_owned(),
                         websocket: None,
                     },
                     created_at: timestamp(1_700_000_000_000_001),
@@ -3689,6 +3701,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!((saved_shared, history_shared), (1, 1));
+    }
+
+    #[test]
+    fn websocket_documentation_survives_save_update_and_reopen() {
+        let (_directory, store) = database();
+        let mut workspace = sample_workspace();
+        let definition = &mut workspace.collections[0].requests[0].definition;
+        *definition = RequestTemplate::websocket(Default::default());
+        definition.documentation = "# Socket\nMessage protocol".to_owned();
+        store.save_workspace(&workspace).unwrap();
+        assert_eq!(store.load_workspace().unwrap(), workspace);
+        workspace.collections[0].requests[0]
+            .definition
+            .documentation = "Updated notes".to_owned();
+        store.save_workspace(&workspace).unwrap();
+        assert_eq!(store.load_workspace().unwrap(), workspace);
     }
 
     #[test]

@@ -657,3 +657,47 @@ mod tests {
         );
     }
 }
+
+fn new_request_menu(
+    menu: PopupMenu,
+    owner: gpui::WeakEntity<ApiTester>,
+    collection_id: String,
+    folder_id: Option<String>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let create = move |websocket: bool, window: &mut Window, cx: &mut App| {
+        if let Some(owner) = owner.upgrade() {
+            owner.update(cx, |this, cx| {
+                if this.sending || !this.can_create_request_content() {
+                    return;
+                }
+                if websocket {
+                    this.open_blank_websocket_tab(window, cx);
+                } else {
+                    this.open_blank_request_tab(window, cx);
+                }
+                if let Some(folder_id) = folder_id.clone() {
+                    this.select_collection_folder(collection_id.clone(), folder_id, window, cx);
+                } else {
+                    this.select_collection(collection_id.clone(), window, cx);
+                }
+            });
+        }
+    };
+    let http = create.clone();
+    let websocket = create.clone();
+    menu.submenu("New request", window, cx, move |menu, _, _| {
+        let http = http.clone();
+        let websocket = websocket.clone();
+        menu.item(
+            PopupMenuItem::new("HTTP request")
+                .on_click(move |_, window, cx| http(false, window, cx)),
+        )
+        .item(
+            PopupMenuItem::new("WebSocket request")
+                .on_click(move |_, window, cx| websocket(true, window, cx)),
+        )
+    })
+    .submenu_default_action(move |_, window, cx| create(false, window, cx))
+}

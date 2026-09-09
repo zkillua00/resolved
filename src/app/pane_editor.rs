@@ -16,6 +16,7 @@ pub(in crate::app) struct PaneEditorState {
     method: Entity<InputState>,
     url: Entity<InputState>,
     body: Entity<CodeEditor>,
+    documentation: Entity<CodeEditor>,
     pre_request_script: Entity<CodeEditor>,
     post_response_script: Entity<CodeEditor>,
     response_editor: Entity<CodeEditor>,
@@ -94,6 +95,19 @@ impl PaneEditorState {
                 cx,
             )
         });
+        let documentation = cx.new(|cx| {
+            CodeEditor::new(
+                CodeEditorConfig::default()
+                    .framed(false)
+                    .embedded(true)
+                    .language(CodeLanguage::Markdown)
+                    .placeholder("Document this request with Markdown")
+                    .rows(12)
+                    .soft_wrap(true),
+                window,
+                cx,
+            )
+        });
         let pre_request_script = cx.new(|cx| {
             CodeEditor::new(
                 CodeEditorConfig::default()
@@ -148,6 +162,7 @@ impl PaneEditorState {
             method,
             url,
             body,
+            documentation,
             pre_request_script,
             post_response_script,
             response_editor,
@@ -328,6 +343,9 @@ impl PaneEditorState {
         window: &mut Window,
         cx: &mut Context<ApiTester>,
     ) {
+        self.documentation.update(cx, |editor, cx| {
+            editor.set_value(template.documentation.clone(), window, cx)
+        });
         self.body_mode = template.request.body_mode;
         self.raw_body_language = template.request.raw_body_language;
         self.method.update(cx, |state, cx| {
@@ -481,6 +499,7 @@ impl PaneEditorState {
                 pre_request: self.pre_request_script.read(cx).value(cx).to_string(),
                 post_response: self.post_response_script.read(cx).value(cx).to_string(),
             },
+            documentation: self.documentation.read(cx).value(cx).to_string(),
             websocket: None,
         }
     }
@@ -746,6 +765,7 @@ impl PaneEditorState {
     pub(in crate::app) fn code_editors(&self) -> Vec<Entity<CodeEditor>> {
         vec![
             self.body.clone(),
+            self.documentation.clone(),
             self.pre_request_script.clone(),
             self.post_response_script.clone(),
             self.response_editor.clone(),
@@ -878,6 +898,7 @@ impl ApiTester {
                                 "Pre-request".to_owned(),
                                 "Post-response".to_owned(),
                                 self.cookie_tab_label(),
+                                "Documentation".to_owned(),
                             ])
                             .selected_index(session.request_pane.index())
                             .on_click(cx.listener(move |this, index: &usize, _, cx| {
@@ -903,6 +924,9 @@ impl ApiTester {
                             cx.api_surface()
                         },
                     )
+                    .when(session.request_pane == RequestPane::Documentation, |this| {
+                        this.child(session.documentation.clone())
+                    })
                     .when(session.request_pane == RequestPane::Params, |this| {
                         this.child(self.render_pane_query_params_editor(session, pane_id, cx))
                     })
@@ -2501,6 +2525,7 @@ mod tests {
                 pre_request: "api.log('pre');".to_owned(),
                 post_response: "api.log('post');".to_owned(),
             },
+            documentation: "# Split pane notes".to_owned(),
             websocket: None,
         }
     }
@@ -2516,6 +2541,63 @@ mod tests {
             body: br#"{"ok":true}"#.to_vec().into(),
             duration: Duration::from_millis(42),
         }
+    }
+
+    #[gpui::test]
+    fn documentation_survives_http_and_websocket_tab_switches(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("create temporary database directory");
+        let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+        store.initialize().expect("initialize test database");
+
+        let mut app = None;
+        let store_for_app = store.clone();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            let base_key_bindings = shortcuts::capture_base_key_bindings(cx);
+            crate::theme::configure(cx);
+            let view = cx.new(|cx| {
+                ApiTester::new_with_database_store(base_key_bindings, store_for_app, window, cx)
+            });
+            crate::register_app_action_handlers(&view, cx);
+            app = Some(view.clone());
+            gpui_component::Root::new(view, window, cx)
+        });
+        let app = app.expect("capture app entity");
+
+        let (http, websocket) = cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.open_blank_request_tab(window, cx);
+                let http = app.request_tabs.active_tab_id().clone();
+                app.documentation.update(cx, |editor, cx| {
+                    editor.set_value("# HTTP notes", window, cx)
+                });
+                app.open_blank_websocket_tab(window, cx);
+                let websocket = app.request_tabs.active_tab_id().clone();
+                assert!(app.documentation.read(cx).value(cx).is_empty());
+                app.documentation.update(cx, |editor, cx| {
+                    editor.set_value("# Socket notes", window, cx)
+                });
+                (http, websocket)
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.activate_request_tab(http, window, cx);
+                assert_eq!(
+                    app.documentation.read(cx).value(cx).as_ref(),
+                    "# HTTP notes"
+                );
+                app.request_pane = RequestPane::Documentation;
+                app.render_request_panel(cx);
+                app.activate_request_tab(websocket, window, cx);
+                assert_eq!(
+                    app.documentation.read(cx).value(cx).as_ref(),
+                    "# Socket notes"
+                );
+                assert_eq!(app.request_template(cx).documentation, "# Socket notes");
+            });
+        });
     }
 
     #[gpui::test]

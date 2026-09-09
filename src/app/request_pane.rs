@@ -6,6 +6,7 @@ pub(super) enum RequestPane {
     PreRequest,
     PostResponse,
     Cookies,
+    Documentation,
 }
 
 impl RequestPane {
@@ -17,6 +18,7 @@ impl RequestPane {
             Self::PreRequest => 3,
             Self::PostResponse => 4,
             Self::Cookies => 5,
+            Self::Documentation => 6,
         }
     }
 
@@ -27,6 +29,7 @@ impl RequestPane {
             3 => Self::PreRequest,
             4 => Self::PostResponse,
             5 => Self::Cookies,
+            6 => Self::Documentation,
             _ => Self::Params,
         }
     }

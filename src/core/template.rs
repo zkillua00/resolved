@@ -17,6 +17,8 @@ pub(crate) const REDACTED_VALUE: &str = "[REDACTED]";
 /// separate [`ResolvedRequest`] immediately before the network request starts.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RequestTemplate {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub documentation: String,
     #[serde(default)]
     pub request: RequestDraft,
     #[serde(default)]
@@ -30,6 +32,7 @@ impl RequestTemplate {
         Self {
             request,
             scripts: RequestScripts::default(),
+            documentation: String::new(),
             websocket: None,
         }
     }
@@ -939,5 +942,24 @@ mod tests {
         }"#;
         let template: RequestTemplate = serde_json::from_str(json).unwrap();
         assert_eq!(template.scripts, RequestScripts::default());
+    }
+}
+
+#[cfg(test)]
+mod documentation_tests {
+    use super::*;
+
+    #[test]
+    fn documentation_is_optional_and_round_trips_for_both_protocols() {
+        let legacy: RequestTemplate = serde_json::from_str("{}").unwrap();
+        assert!(legacy.documentation.is_empty());
+        for mut template in [legacy, RequestTemplate::websocket(Default::default())] {
+            template.documentation = "# Notes\nUnicode: café".to_owned();
+            let json = serde_json::to_string(&template).unwrap();
+            assert_eq!(
+                serde_json::from_str::<RequestTemplate>(&json).unwrap(),
+                template
+            );
+        }
     }
 }

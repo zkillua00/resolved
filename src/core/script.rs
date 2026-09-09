@@ -2773,6 +2773,7 @@ throw new Error("rotated=a%20b/c");
                 super::super::template::RequestTemplate {
                     request: RequestDraft::new("POST", "https://a.test/login"),
                     scripts: Default::default(),
+                    documentation: String::new(),
                     websocket: None,
                 },
             )
@@ -2785,6 +2786,7 @@ throw new Error("rotated=a%20b/c");
                 super::super::template::RequestTemplate {
                     request: RequestDraft::new("POST", "https://p.test/login"),
                     scripts: Default::default(),
+                    documentation: String::new(),
                     websocket: None,
                 },
             )

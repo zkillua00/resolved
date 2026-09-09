@@ -522,6 +522,7 @@ mod tests {
                 pre_request: pre.to_owned(),
                 post_response: post.to_owned(),
             },
+            documentation: String::new(),
             websocket: None,
         }
     }
@@ -610,6 +611,7 @@ mod tests {
                 pre_request: "api.requests.execute(Auth.Refresh);".to_owned(),
                 post_response: String::new(),
             },
+            documentation: String::new(),
             websocket: None,
         };
         let me_id = workspace

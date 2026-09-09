@@ -563,7 +563,10 @@ impl ApiTester {
 
     pub(super) fn request_template(&self, cx: &App) -> RequestTemplate {
         if self.request_tabs.active().template().is_websocket() {
-            return RequestTemplate::websocket(self.websocket_workspace.document.clone());
+            let mut template =
+                RequestTemplate::websocket(self.websocket_workspace.document.clone());
+            template.documentation = self.documentation.read(cx).value(cx).to_string();
+            return template;
         }
         RequestTemplate {
             request: self.draft(cx),
@@ -571,6 +574,7 @@ impl ApiTester {
                 pre_request: self.pre_request_script.read(cx).value(cx).to_string(),
                 post_response: self.post_response_script.read(cx).value(cx).to_string(),
             },
+            documentation: self.documentation.read(cx).value(cx).to_string(),
             websocket: None,
         }
     }
@@ -607,6 +611,7 @@ impl ApiTester {
             RequestDirtyPart::BodyFields,
             RequestDirtyPart::PreScript,
             RequestDirtyPart::PostScript,
+            RequestDirtyPart::Documentation,
         ] {
             let dirty = self.request_part_is_dirty(part, cx);
             self.request_dirty.set(part, dirty);
@@ -650,6 +655,9 @@ impl ApiTester {
             RequestDirtyPart::PreScript => {
                 let input = self.pre_request_script.read(cx).input_state();
                 !input_text_equals(&input, baseline.scripts.pre_request.as_str(), cx)
+            }
+            RequestDirtyPart::Documentation => {
+                self.documentation.read(cx).value(cx).as_ref() != baseline.documentation
             }
             RequestDirtyPart::PostScript => {
                 let input = self.post_response_script.read(cx).input_state();
@@ -803,10 +811,13 @@ impl ApiTester {
     ) {
         self.request_dirty.begin_hydration();
         let RequestTemplate {
+            documentation,
             request,
             scripts,
             websocket,
         } = template;
+        self.documentation
+            .update(cx, |editor, cx| editor.set_value(documentation, window, cx));
         if let Some(document) = websocket {
             self.load_websocket_document(document, window, cx);
         } else {

@@ -11,6 +11,7 @@ enum WebSocketSection {
     Console,
     Replays,
     Automation,
+    Documentation,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2031,18 +2032,26 @@ impl ApiTester {
                 div().px_4().pt_1().child(
                     TabBar::new("websocket-sections")
                         .underline()
-                        .children(["Console", "Messages", "Replays", "Automation"])
+                        .children([
+                            "Console",
+                            "Messages",
+                            "Replays",
+                            "Automation",
+                            "Documentation",
+                        ])
                         .selected_index(match self.websocket_workspace.section {
                             WebSocketSection::Console => 0,
                             WebSocketSection::Messages => 1,
                             WebSocketSection::Replays => 2,
                             WebSocketSection::Automation => 3,
+                            WebSocketSection::Documentation => 4,
                         })
                         .on_click(cx.listener(|this, index: &usize, _, cx| {
                             this.websocket_workspace.section = match index {
                                 1 => WebSocketSection::Messages,
                                 2 => WebSocketSection::Replays,
                                 3 => WebSocketSection::Automation,
+                                4 => WebSocketSection::Documentation,
                                 _ => WebSocketSection::Console,
                             };
                             cx.notify();
@@ -2051,6 +2060,9 @@ impl ApiTester {
             )
             .child(div().flex_1().min_h_0().overflow_hidden().child(
                 match self.websocket_workspace.section {
+                    WebSocketSection::Documentation => {
+                        self.documentation.clone().into_any_element()
+                    }
                     WebSocketSection::Console => self.render_websocket_console(cx),
                     WebSocketSection::Messages => self.render_websocket_messages(cx),
                     WebSocketSection::Replays => self.render_websocket_replays(cx),

@@ -1,4 +1,5 @@
 use super::super::*;
+use super::new_request_menu;
 use super::{CollectionFolderMoveTargets, CollectionFolderRowState};
 use crate::app::drag_drop::{CollectionTreeDrag, CollectionTreeDropTarget, DropPlacement};
 
@@ -48,6 +49,7 @@ impl ApiTester {
         let finish_rename_id: SharedString = format!("finish-folder-rename-{folder_id}").into();
         let actions_id: SharedString = format!("collection-folder-actions-{folder_id}").into();
         let row_inset = px(8. + (depth as f32 * 14.));
+        let can_create_request = !self.sending && self.can_create_request_content();
         let can_update = !self.sending && self.can_update_collection_content();
         let can_delete = !self.sending && self.can_delete_collection_content();
         let can_create_subfolder = !self.sending && self.can_create_collection_content();
@@ -184,7 +186,12 @@ impl ApiTester {
                                 .rounded_full()
                                 .invisible()
                                 .group_hover(row_group, |style| style.visible())
-                                .disabled(!can_update && !can_delete && !can_create_subfolder)
+                                .disabled(
+                                    !can_update
+                                        && !can_delete
+                                        && !can_create_subfolder
+                                        && !can_create_request,
+                                )
                                 .dropdown_menu(move |menu, window, cx| {
                                     build_folder_actions_menu(
                                         menu,
@@ -194,6 +201,7 @@ impl ApiTester {
                                         actions_parent_id.clone(),
                                         actions_move_targets.clone(),
                                         can_create_subfolder,
+                                        can_create_request,
                                         can_update,
                                         can_delete,
                                         window,
@@ -234,6 +242,7 @@ impl ApiTester {
                             context_parent_id.clone(),
                             context_move_targets.clone(),
                             can_create_subfolder,
+                            can_create_request,
                             can_update && !renaming,
                             can_delete,
                             window,
@@ -255,11 +264,25 @@ fn build_folder_actions_menu(
     current_parent_id: Option<String>,
     move_targets: CollectionFolderMoveTargets,
     can_create_subfolder: bool,
+    can_create_request: bool,
     can_update: bool,
     can_delete: bool,
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
+    let menu = if can_create_request {
+        new_request_menu(
+            menu,
+            owner.clone(),
+            collection_id.clone(),
+            Some(folder_id.clone()),
+            window,
+            cx,
+        )
+        .separator()
+    } else {
+        menu
+    };
     let new_this = owner.clone();
     let new_collection_id = collection_id.clone();
     let new_parent_id = folder_id.clone();

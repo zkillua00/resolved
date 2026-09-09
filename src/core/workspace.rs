@@ -1601,6 +1601,7 @@ mod tests {
                 pre_request: "request.headers.test = 'one';".to_owned(),
                 post_response: "assert(response.status === 200);".to_owned(),
             },
+            documentation: String::new(),
             websocket: None,
         }
     }
