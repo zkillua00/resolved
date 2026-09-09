@@ -203,6 +203,8 @@ impl WebSocketWorkspaceState {
             let diagnostics = intelligence.clone();
             CodeEditor::new(
                 CodeEditorConfig::default()
+                    .framed(false)
+                    .embedded(true)
                     .language(CodeLanguage::JavaScript)
                     .placeholder("if (ws.event.eventType === 'message') ws.send({ ack: true });")
                     .rows(16)
