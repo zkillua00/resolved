@@ -473,6 +473,7 @@ const PRELUDE: &str = r#"
       tests,
       chainedRequests: scheduledRequests,
       websocketSends: globalThis.__WS_FINISH ? globalThis.__WS_FINISH().sends : [],
+      websocketReconnect: globalThis.__WS_FINISH ? globalThis.__WS_FINISH().reconnect : null,
     };
     },
     configurable: false,
@@ -873,6 +874,8 @@ struct EngineHeader {
 struct EngineOutput {
     #[serde(default)]
     websocket_sends: Vec<String>,
+    #[serde(default)]
+    websocket_reconnect: Option<super::websocket::WebSocketReconnectOptions>,
     request: RequestDraft,
     environment_mutations: Vec<EnvironmentMutation>,
     #[serde(default)]
@@ -921,6 +924,13 @@ pub fn execute_websocket_script(
         Some((modules, event)),
     )
     .map_err(|e| e.to_string())?;
+    if let Some(options) = &run.output.websocket_reconnect
+        && let Some(url) = &options.url
+        && !url::Url::parse(url)
+            .is_ok_and(|url| matches!(url.scheme(), "ws" | "wss") && url.host_str().is_some())
+    {
+        return Err("Reconnect url must be an absolute ws:// or wss:// URL".into());
+    }
     let mut mutations = run.output.environment_mutations.clone();
     extend_redactor_with_secret_mutations(&mut redactor, scope, &mutations);
     if !run.output.chained_requests.is_empty() {
@@ -946,6 +956,7 @@ pub fn execute_websocket_script(
     }));
     Ok(super::websocket::WebSocketAutomationOutput {
         sends: run.output.websocket_sends,
+        reconnect: run.output.websocket_reconnect,
         logs,
         environment_mutations: mutations,
     })
@@ -1526,7 +1537,7 @@ fn run_engine(
         ctx.eval::<(), _>(
             concat!(
                 "globalThis.__API_TESTER_SETTLED = { done: false, rejected: false, reason: undefined };\n",
-                "globalThis.__API_TESTER_MAIN.then(\n",
+                "(globalThis.__WS_DISPATCH ? globalThis.__API_TESTER_MAIN.then(() => globalThis.__WS_DISPATCH()) : globalThis.__API_TESTER_MAIN).then(\n",
                 "  function(value) { globalThis.__API_TESTER_SETTLED.done = true; globalThis.__API_TESTER_SETTLED.value = value; },\n",
                 "  function(reason) {\n",
                 "    globalThis.__API_TESTER_SETTLED.done = true;\n",
@@ -3134,6 +3145,7 @@ api.environment.set("seven", String(value));
         let output = execute_websocket_script(
             r#"
             import { login } from './login.js';
+            on(eventTypes.message, async (ws, event) => {
             await login();
             api.request.headers.set('X-Event', 'seen');
             api.test('event has no HTTP response', () => api.assert(api.response === null));
@@ -3141,6 +3153,7 @@ api.environment.set("seven", String(value));
             api.environment.set('seen', ws.event.data);
             ws.sendJson({ token: api.environment.get('token') });
             api.requests.execute(Payments.Login);
+            });
         "#,
             &modules,
             &super::super::websocket::WebSocketAutomationEvent::text("hello"),
@@ -3188,7 +3201,7 @@ api.environment.set("seven", String(value));
         assert!(!output.logs.join(" ").contains("private-value"));
         let chainer = |_: &[ChainedRequest]| vec![Err("login failed".into())];
         let error = execute_websocket_script(
-            "await api.execute(ChatAdmin.Login); ws.send('unreachable');",
+            "on(eventTypes.open, async ws => { await api.execute(ChatAdmin.Login); ws.send('unreachable'); });",
             &BTreeMap::new(),
             &event,
             &request(),

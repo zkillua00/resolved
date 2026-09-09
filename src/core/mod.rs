@@ -120,7 +120,7 @@ pub use websocket::{
     WebSocketCommand, WebSocketMessageTemplate, WebSocketReplay, WebSocketReplayDirection,
     WebSocketReplayFrame, WebSocketSavedMessage, WebSocketSignal, WebSocketWorkspace,
     binary_preview, compare_replay_frames,
-    render_message_template, run_upstream_websocket_connection, run_websocket_connection,
+    render_message_template, run_upstream_websocket_session, run_websocket_session,
     template_variable_names, validate_automation_module_name,
 };
 pub use workspace::{

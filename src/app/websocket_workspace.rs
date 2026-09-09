@@ -207,7 +207,7 @@ impl WebSocketWorkspaceState {
                     .framed(false)
                     .embedded(true)
                     .language(CodeLanguage::JavaScript)
-                    .placeholder("if (ws.event.eventType === 'message') ws.send({ ack: true });")
+                    .placeholder("on(eventTypes.message, (ws, event) => ws.send({ ack: true }));")
                     .rows(16)
                     .soft_wrap(false)
                     .line_numbers(true)
@@ -697,7 +697,7 @@ impl ApiTester {
         let task = self.runtime.spawn(async move {
             let result = match upstream_target {
                 None => {
-                    run_websocket_connection(
+                    run_websocket_session(
                         &url,
                         &headers,
                         command_receiver,
@@ -737,7 +737,7 @@ impl ApiTester {
                     .await
                     {
                         Ok(RequestExecutionMode::Local) => {
-                            run_websocket_connection(
+                            run_websocket_session(
                                 &url,
                                 &headers,
                                 command_receiver,
@@ -746,7 +746,7 @@ impl ApiTester {
                             .await
                         }
                         Ok(RequestExecutionMode::Server) => {
-                            run_upstream_websocket_connection(
+                            run_upstream_websocket_session(
                                 &target.base_url,
                                 credential.bearer_token(),
                                 &target.workspace_id,
@@ -790,6 +790,17 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) {
         match signal {
+            WebSocketSignal::Reconnecting(options) => {
+                if options.clear_console {
+                    self.clear_websocket_timeline();
+                }
+                self.websocket_workspace.status = WebSocketConnectionStatus::Connecting;
+                self.websocket_workspace.notice = None;
+                self.push_websocket_timeline(
+                    WebSocketTimelineDirection::System, "reconnect",
+                    format!("Reconnecting in {} ms", options.delay_ms),
+                );
+            }
             WebSocketSignal::Connected => {
                 self.websocket_workspace.status = WebSocketConnectionStatus::Connected;
                 self.push_websocket_timeline(
@@ -818,6 +829,8 @@ impl ApiTester {
                     event_type: "message".to_owned(),
                     data: None,
                     binary_base64: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                    reason: None,
+                    error: None,
                 };
                 self.run_websocket_automation(event, window, cx);
             }
@@ -833,18 +846,20 @@ impl ApiTester {
             ),
             WebSocketSignal::Closed(reason) => {
                 self.websocket_workspace.status = WebSocketConnectionStatus::Disconnected;
-                self.websocket_workspace.command_sender = None;
+                let event = WebSocketAutomationEvent::closed(reason.clone(), None);
                 self.push_websocket_timeline(
                     WebSocketTimelineDirection::System,
                     "close",
                     reason.unwrap_or_else(|| "Connection closed".to_owned()),
                 );
+                self.run_websocket_automation(event, window, cx);
             }
             WebSocketSignal::Failed(error) => {
                 self.websocket_workspace.status = WebSocketConnectionStatus::Disconnected;
-                self.websocket_workspace.command_sender = None;
                 self.websocket_workspace.notice = Some(error.clone());
+                let event = WebSocketAutomationEvent::closed(None, Some(error.clone()));
                 self.push_websocket_timeline(WebSocketTimelineDirection::System, "error", error);
+                self.run_websocket_automation(event, window, cx);
             }
         }
         cx.notify();
@@ -875,6 +890,7 @@ impl ApiTester {
         let source = self.websocket_workspace.document.automation_source.clone();
         let modules = self.websocket_workspace.document.automation_modules.clone();
         let generation = self.websocket_workspace.generation;
+        let config = (source.clone(), modules.clone());
         let task = self.runtime.spawn_blocking(move || {
             crate::core::execute_websocket_script(
                 &source,
@@ -892,6 +908,8 @@ impl ApiTester {
                 if this.websocket_workspace.generation != generation
                     || this.websocket_replay_running()
                     || !this.websocket_workspace.document.automation_enabled
+                    || this.websocket_workspace.document.automation_source != config.0
+                    || this.websocket_workspace.document.automation_modules != config.1
                 {
                     return;
                 }
@@ -919,6 +937,11 @@ impl ApiTester {
                         }
                         for payload in output.sends {
                             this.send_websocket_payload(payload, false, cx);
+                        }
+                        if let Some(options) = output.reconnect
+                            && let Some(sender) = &this.websocket_workspace.command_sender
+                        {
+                            let _ = sender.send(WebSocketCommand::Reconnect(options));
                         }
                     }
                     Ok(Err(error)) => this.push_websocket_timeline(
@@ -1080,10 +1103,10 @@ impl ApiTester {
         };
         self.push_websocket_timeline(direction, kind, payload);
         match event.kind {
+            "reconnect" => self.websocket_workspace.status = WebSocketConnectionStatus::Connecting,
             "open" => self.websocket_workspace.status = WebSocketConnectionStatus::Connected,
             "close" | "error" => {
                 self.websocket_workspace.status = WebSocketConnectionStatus::Disconnected;
-                self.websocket_workspace.command_sender = None;
             }
             _ => {}
         }
@@ -1103,7 +1126,7 @@ impl ApiTester {
         self.websocket_workspace.mcp_connection_id = None;
     }
 
-    fn clear_websocket_timeline(&mut self) {
+    pub(super) fn clear_websocket_timeline(&mut self) {
         self.websocket_workspace.recorded_session.clear();
         self.websocket_workspace.recorded_at = None;
         self.websocket_workspace.timeline.clear();
@@ -1146,6 +1169,11 @@ impl ApiTester {
     }
 
     fn send_resolved_websocket_payload(&mut self, payload: String, cx: &mut Context<Self>) {
+        if self.websocket_workspace.status != WebSocketConnectionStatus::Connected {
+            self.websocket_workspace.notice = Some("Connect before sending a message.".to_owned());
+            cx.notify();
+            return;
+        }
         if self.websocket_replay_running() {
             self.websocket_workspace.notice =
                 Some("Stop playback before sending another message.".into());
@@ -2037,13 +2065,19 @@ impl ApiTester {
                     )
                     .child(
                         Button::new("websocket-connect")
-                            .label(if connected { "Disconnect" } else { "Connect" })
+                            .label(match self.websocket_workspace.status {
+                                WebSocketConnectionStatus::Connected => "Disconnect",
+                                WebSocketConnectionStatus::Connecting => "Cancel",
+                                WebSocketConnectionStatus::Disconnected => "Connect",
+                            })
                             .primary()
                             .on_click(cx.listener(|this, _, window, cx| {
-                                if this.websocket_workspace.status
-                                    == WebSocketConnectionStatus::Connected
-                                {
-                                    this.stop_websocket();
+                                if this.websocket_workspace.status != WebSocketConnectionStatus::Disconnected {
+                                    if this.websocket_workspace.mcp_connection_id.is_some() {
+                                        this.stop_mcp_websocket();
+                                    } else {
+                                        this.stop_websocket();
+                                    }
                                     cx.notify();
                                 } else {
                                     this.connect_websocket(window, cx);
@@ -3959,6 +3993,7 @@ fn websocket_library_item_matches(name: &str, payload: &str, query: &str) -> boo
 fn websocket_timeline_kind_label(kind: &'static str) -> &'static str {
     match kind {
         "open" => "Open",
+        "reconnect" => "Reconnect",
         "text" => "Text",
         "binary" => "Binary",
         "ping" => "Ping",

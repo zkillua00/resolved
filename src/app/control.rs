@@ -3313,7 +3313,7 @@ impl ApiTester {
         let task = self.runtime.spawn(async move {
             let result = match upstream_target {
                 None => {
-                    run_websocket_connection(
+                    run_websocket_session(
                         &url,
                         &headers,
                         command_receiver,
@@ -3356,7 +3356,7 @@ impl ApiTester {
                     .await
                     {
                         Ok(RequestExecutionMode::Local) => {
-                            run_websocket_connection(
+                            run_websocket_session(
                                 &url,
                                 &headers,
                                 command_receiver,
@@ -3365,7 +3365,7 @@ impl ApiTester {
                             .await
                         }
                         Ok(RequestExecutionMode::Server) => {
-                            run_upstream_websocket_connection(
+                            run_upstream_websocket_session(
                                 &target.base_url,
                                 credential.bearer_token(),
                                 &target.workspace_id,
@@ -3424,7 +3424,11 @@ impl ApiTester {
                         binary_base64: Some(
                             base64::engine::general_purpose::STANDARD.encode(bytes),
                         ),
+                        reason: None,
+                        error: None,
                     }),
+                    WebSocketSignal::Closed(reason) => Some(WebSocketAutomationEvent::closed(reason.clone(), None)),
+                    WebSocketSignal::Failed(error) => Some(WebSocketAutomationEvent::closed(None, Some(error.clone()))),
                     _ => None,
                 };
                 if automation_events
@@ -3520,6 +3524,9 @@ impl ApiTester {
                                     );
                                 }
                             }
+                        }
+                        if let Some(options) = output.reconnect {
+                            let _ = automation_commands.send(WebSocketCommand::Reconnect(options));
                         }
                     }
                     Ok(Err(error)) => {
@@ -3727,7 +3734,7 @@ impl ApiTester {
                     WebSocketCommand::SendBinary(bytes) => {
                         connection.push_binary_event("sent", "binary", bytes)
                     }
-                    WebSocketCommand::Close => unreachable!(),
+                    WebSocketCommand::Close | WebSocketCommand::Reconnect(_) => unreachable!(),
                 }
                 connection.events.last().cloned()
             };
@@ -3884,10 +3891,13 @@ impl ApiTester {
         let params: Params = decode(params)?;
         let (state, mirrored) = {
             let connection = self.control_websocket_mut(params.connection_id)?;
+            connection.automation_paused.store(true, std::sync::atomic::Ordering::SeqCst);
             if matches!(
                 connection.status,
                 ControlWebSocketStatus::Disconnected | ControlWebSocketStatus::Failed
             ) {
+                let _ = connection.sender.send(WebSocketCommand::Close);
+                connection.abort_handle.abort();
                 return Ok(json!({ "closed": false, "state": connection.status.as_str() }));
             }
             if connection.status == ControlWebSocketStatus::Connecting {
@@ -3933,6 +3943,18 @@ impl ApiTester {
         connection_id: u64,
         incoming: ControlWebSocketIncoming,
     ) {
+        if matches!(&incoming, ControlWebSocketIncoming::Wire(WebSocketSignal::Reconnecting(_)))
+            && self.mcp_websocket.as_ref().is_some_and(|connection| {
+                connection.automation_paused.load(std::sync::atomic::Ordering::SeqCst)
+            })
+        {
+            return;
+        }
+        if matches!(&incoming, ControlWebSocketIncoming::Wire(WebSocketSignal::Reconnecting(options)) if options.clear_console)
+            && self.websocket_workspace.mcp_connection_id == Some(connection_id)
+        {
+            self.clear_websocket_timeline();
+        }
         let mirrored = {
             let Some(connection) = self.mcp_websocket.as_mut() else {
                 return;
@@ -3941,6 +3963,12 @@ impl ApiTester {
                 return;
             }
             match incoming {
+                ControlWebSocketIncoming::Wire(WebSocketSignal::Reconnecting(options)) => {
+                    connection.status = ControlWebSocketStatus::Connecting;
+                    connection.notice = None;
+                    if options.clear_console { connection.events.clear(); }
+                    connection.push_event("system", "reconnect", Some(format!("Reconnecting in {} ms", options.delay_ms)));
+                }
                 ControlWebSocketIncoming::EnvironmentMutations(..) => return,
                 ControlWebSocketIncoming::Wire(WebSocketSignal::Connected) => {
                     connection.status = ControlWebSocketStatus::Connected;

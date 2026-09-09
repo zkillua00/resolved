@@ -4,7 +4,7 @@
 //! records reusable intent (messages, templates, automation and replays), while
 //! the UI owns the ephemeral connection and wire timeline.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use futures::{SinkExt as _, StreamExt as _};
 use serde::{Deserialize, Serialize};
@@ -129,10 +129,12 @@ pub enum WebSocketCommand {
     #[allow(dead_code)]
     SendBinary(Vec<u8>),
     Close,
+    Reconnect(WebSocketReconnectOptions),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WebSocketSignal {
+    Reconnecting(WebSocketReconnectOptions),
     Connected,
     Text(String),
     Binary(Vec<u8>),
@@ -168,14 +170,28 @@ pub struct WebSocketAutomationEvent {
     pub event_type: String,
     pub data: Option<String>,
     pub binary_base64: Option<String>,
+    pub reason: Option<String>,
+    pub error: Option<String>,
 }
 
 impl WebSocketAutomationEvent {
+    pub fn closed(reason: Option<String>, error: Option<String>) -> Self {
+        Self {
+            event_type: "close".into(),
+            data: None,
+            binary_base64: None,
+            reason,
+            error,
+        }
+    }
+
     pub fn opened() -> Self {
         Self {
             event_type: "open".to_owned(),
             data: None,
             binary_base64: None,
+            reason: None,
+            error: None,
         }
     }
 
@@ -184,6 +200,8 @@ impl WebSocketAutomationEvent {
             event_type: "message".to_owned(),
             data: Some(data.into()),
             binary_base64: None,
+            reason: None,
+            error: None,
         }
     }
 }
@@ -197,6 +215,19 @@ pub struct WebSocketAutomationOutput {
     pub environment_mutations: Vec<super::script::EnvironmentMutation>,
     #[serde(default)]
     pub logs: Vec<String>,
+    #[serde(default)]
+    pub reconnect: Option<WebSocketReconnectOptions>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WebSocketReconnectOptions {
+    #[serde(default)]
+    pub clear_console: bool,
+    #[serde(default)]
+    pub delay_ms: u64,
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -340,20 +371,188 @@ pub(super) const AUTOMATION_PRELUDE: &str = r#"
 (() => {
   "use strict";
   const sends = [];
+  const handlers = [];
+  let reconnect = null;
 
   const environment = Object.freeze(api.environment.toObject());
   const event = Object.freeze(Object.assign(Object.create(null), globalThis.__WS_EVENT));
   const stringify = value => typeof value === "string" ? value : JSON.stringify(value);
+  const send = value => {
+    if (event.eventType === "close") throw new Error("Cannot send during a close event; send from an open handler after reconnecting");
+    sends.push(value);
+  };
   globalThis.ws = Object.freeze({
     event,
     environment,
-    send(value) { sends.push(stringify(value)); },
-    sendJson(value) { sends.push(JSON.stringify(value)); },
+    send(value) { send(stringify(value)); },
+    sendJson(value) { send(JSON.stringify(value)); },
+    reconnect(options = {}) {
+      if (event.eventType !== "close") throw new Error("ws.reconnect() is only available in close events");
+      if (options === null || typeof options !== "object" || Array.isArray(options)) {
+        throw new TypeError("ws.reconnect() expects an options object");
+      }
+      for (const key of Object.keys(options)) {
+        if (!["clearConsole", "delayMs", "url"].includes(key)) throw new TypeError("Unknown reconnect option: " + key);
+      }
+      const { clearConsole = false, delayMs = 1000, url = null } = options;
+      if (typeof clearConsole !== "boolean") throw new TypeError("clearConsole must be a boolean");
+      if (!Number.isSafeInteger(delayMs) || delayMs < 0 || delayMs > 86400000) {
+        throw new TypeError("delayMs must be an integer between 0 and 86400000");
+      }
+      if (url !== null && (typeof url !== "string" || !/^wss?:\/\//.test(url))) {
+        throw new TypeError("url must be an absolute ws:// or wss:// URL");
+      }
+      reconnect = { clearConsole, delayMs, url };
+    },
     log: console.log,
   });
-  globalThis.__WS_FINISH = () => ({ sends });
+  globalThis.eventTypes = Object.freeze({
+    open: (ws, event) => event.eventType === "open",
+    message: (ws, event) => event.eventType === "message",
+    close: (ws, event) => event.eventType === "close",
+  });
+  globalThis.on = (condition, handler) => {
+    if (typeof condition !== "function" || typeof handler !== "function") {
+      throw new TypeError("on(condition, handler) requires two functions");
+    }
+    handlers.push([condition, handler]);
+  };
+  globalThis.__WS_DISPATCH = async () => {
+    for (const [condition, handler] of handlers) {
+      if (await condition(ws, event)) await handler(ws, event);
+    }
+  };
+  globalThis.__WS_FINISH = () => ({ sends, reconnect });
 })();
 "#;
+
+pub async fn run_websocket_session(
+    url: &str,
+    headers: &[HeaderEntry],
+    commands: UnboundedReceiver<WebSocketCommand>,
+    signals: UnboundedSender<WebSocketSignal>,
+) -> Result<(), WebSocketConnectError> {
+    run_reconnecting_session(url, headers, commands, signals, None).await;
+    Ok(())
+}
+
+pub async fn run_upstream_websocket_session(
+    base_url: &url::Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    url: &str,
+    headers: &[HeaderEntry],
+    commands: UnboundedReceiver<WebSocketCommand>,
+    signals: UnboundedSender<WebSocketSignal>,
+) -> Result<(), WebSocketConnectError> {
+    run_reconnecting_session(
+        url,
+        headers,
+        commands,
+        signals,
+        Some((
+            base_url.clone(),
+            bearer_token.to_owned(),
+            workspace_id.to_owned(),
+        )),
+    )
+    .await;
+    Ok(())
+}
+
+type ConnectionFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WebSocketConnectError>> + Send>>;
+
+// Keep the session command channel alive after transport closure. Dropping this
+// future cancels both the current transport and any pending reconnect delay.
+async fn run_reconnecting_session(
+    url: &str,
+    headers: &[HeaderEntry],
+    mut commands: UnboundedReceiver<WebSocketCommand>,
+    signals: UnboundedSender<WebSocketSignal>,
+    upstream: Option<(url::Url, String, String)>,
+) {
+    let mut current_url = url.to_owned();
+    let (wire_sender, mut wire_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let connect = |url: String| {
+        let headers = headers.to_vec();
+        let upstream = upstream.clone();
+        let signals = wire_sender.clone();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let future: ConnectionFuture = Box::pin(async move {
+            match upstream {
+                Some((base, token, workspace)) => {
+                    run_upstream_websocket_connection(
+                        &base, &token, &workspace, &url, &headers, receiver, signals,
+                    )
+                    .await
+                }
+                None => run_websocket_connection(&url, &headers, receiver, signals).await,
+            }
+        });
+        (sender, future)
+    };
+    let (mut sender, mut connection) = connect(current_url.clone());
+    let mut running = true;
+    let mut deadline = None;
+    loop {
+        tokio::select! {
+            command = commands.recv() => match command {
+                None => return,
+                Some(WebSocketCommand::Close) => {
+                    let _ = sender.send(WebSocketCommand::Close);
+                    if running {
+                        let _ = tokio::time::timeout(Duration::from_secs(1), &mut connection).await;
+                    }
+                    let mut closed = false;
+                    while let Ok(signal) = wire_receiver.try_recv() {
+                        closed |= matches!(signal, WebSocketSignal::Closed(_) | WebSocketSignal::Failed(_));
+                        let _ = signals.send(signal);
+                    }
+                    if !closed { let _ = signals.send(WebSocketSignal::Closed(None)); }
+                    return;
+                }
+                Some(WebSocketCommand::Reconnect(options)) => {
+                    let next_url = options.url.as_deref().unwrap_or(&current_url);
+                    if !url::Url::parse(next_url).is_ok_and(|url| matches!(url.scheme(), "ws" | "wss") && url.host_str().is_some())
+                        || options.delay_ms > 86_400_000
+                    {
+                        let _ = signals.send(WebSocketSignal::Failed("Invalid reconnect URL or delay".into()));
+                        continue;
+                    }
+                    current_url = next_url.to_owned();
+                    // Replace (and drop) the old transport before starting the delay.
+                    (sender, connection) = connect(current_url.clone());
+                    running = false;
+                    while wire_receiver.try_recv().is_ok() {}
+                    deadline = Some(tokio::time::Instant::now() + Duration::from_millis(options.delay_ms));
+                    if signals.send(WebSocketSignal::Reconnecting(options)).is_err() { return; }
+                }
+                Some(command) => { if running { let _ = sender.send(command); } }
+            },
+            result = &mut connection, if running => {
+                running = false;
+                if let Err(error) = result {
+                    let _ = signals.send(WebSocketSignal::Failed(error.to_string()));
+                }
+            }
+            signal = wire_receiver.recv() => {
+                if let Some(signal) = signal {
+                    if signals.send(signal).is_err() { return; }
+                }
+            }
+            _ = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                deadline = None;
+                running = true;
+            }
+        }
+    }
+}
 
 pub async fn run_websocket_connection(
     url: &str,
@@ -529,6 +728,7 @@ async fn drive_websocket_connection<S>(
                     WebSocketCommand::SendText(text) => Message::Text(text.into()),
                     WebSocketCommand::SendBinary(bytes) => Message::Binary(bytes.into()),
                     WebSocketCommand::Close => Message::Close(None),
+                    WebSocketCommand::Reconnect(_) => return,
                 };
                 if let Err(error) = writer.send(message).await {
                     let _ = signals.send(WebSocketSignal::Failed(error.to_string()));
@@ -574,6 +774,7 @@ pub fn binary_preview(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
+    use std::time::Instant;
 
     use tokio::net::TcpListener;
     use tokio_tungstenite::{
@@ -648,6 +849,215 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("specific failure"), "{error}");
         assert!(execute_websocket_automation("while (true) {}", &event, &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn automation_handlers_filter_events_and_await_in_registration_order() {
+        let modules = BTreeMap::from([(
+            "handlers.js".into(),
+            r#"
+            on(eventTypes.open, async (ws, event) => {
+                await Promise.resolve();
+                ws.send(event.eventType);
+            });
+            on(eventTypes.message, (ws, event) => ws.send(event.binaryBase64 ?? event.data));
+        "#
+            .into(),
+        )]);
+        let source = r#"
+            import './handlers.js';
+            let ready = false;
+            on(async (api, event) => {
+                if (api !== ws || event !== ws.event) throw new Error('wrong arguments');
+                return await Promise.resolve(eventTypes.message(api, event));
+            }, async (ws, event) => {
+                await Promise.resolve();
+                ready = true;
+                ws.send('first');
+            });
+            on(() => ready, ws => ws.send('second'));
+            on(() => false, () => { throw new Error('must not run'); });
+        "#;
+        for (event, expected) in [
+            (WebSocketAutomationEvent::opened(), vec!["open"]),
+            (
+                WebSocketAutomationEvent::text("hello"),
+                vec!["hello", "first", "second"],
+            ),
+            (
+                WebSocketAutomationEvent {
+                    event_type: "message".into(),
+                    data: None,
+                    binary_base64: Some("AA==".into()),
+                    reason: None,
+                    error: None,
+                },
+                vec!["AA==", "first", "second"],
+            ),
+        ] {
+            let output = execute_websocket_automation_with_modules(
+                source,
+                &modules,
+                &event,
+                &BTreeMap::new(),
+            )
+            .unwrap();
+            assert_eq!(output.sends, expected);
+        }
+    }
+
+    #[test]
+    fn automation_handler_errors_fail_execution() {
+        for source in [
+            "on(null, () => {});",
+            "on(eventTypes.open, null);",
+            "on(() => { throw new Error('predicate failure'); }, () => {});",
+            "on(async () => { await Promise.resolve(); throw new Error('predicate failure'); }, () => {});",
+            "on(eventTypes.open, async ws => { ws.send('discard'); await Promise.resolve(); throw new Error('handler failure'); });",
+        ] {
+            let error = execute_websocket_automation(
+                source,
+                &WebSocketAutomationEvent::opened(),
+                &BTreeMap::new(),
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("requires two functions") || error.contains("failure"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn automation_close_can_schedule_reconnection() {
+        let output = execute_websocket_automation(
+            r#"on(eventTypes.close, async (ws, event) => {
+                ws.log(event.reason, event.error);
+                await Promise.resolve();
+                ws.reconnect();
+                ws.reconnect({ clearConsole: true, delayMs: 25, url: 'wss://other.example/socket' });
+            });"#,
+            &WebSocketAutomationEvent::closed(Some("1000 finished".into()), None),
+            &BTreeMap::new(),
+        ).unwrap();
+        assert_eq!(output.logs, vec!["1000 finished null"]);
+        assert_eq!(
+            output.reconnect,
+            Some(WebSocketReconnectOptions {
+                clear_console: true,
+                delay_ms: 25,
+                url: Some("wss://other.example/socket".into()),
+            })
+        );
+        let output = execute_websocket_automation(
+            "on(eventTypes.close, ws => ws.reconnect());",
+            &WebSocketAutomationEvent::closed(None, Some("reset".into())),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(output.reconnect.unwrap().delay_ms, 1000);
+        for source in [
+            "ws.reconnect({ delayMs: -1 });",
+            "ws.reconnect({ delayMs: 1.5 });",
+            "ws.reconnect({ delayMs: 86400001 });",
+            "ws.reconnect({ clearConsole: 'yes' });",
+            "ws.reconnect({ url: 'https://example.com' });",
+            "ws.reconnect({ url: 'ws://' });",
+            "ws.reconnect({ typo: true });",
+            "ws.reconnect(null);",
+            "ws.reconnect(); throw new Error('discard reconnect');",
+        ] {
+            assert!(
+                execute_websocket_automation(
+                    source,
+                    &WebSocketAutomationEvent::closed(None, None),
+                    &BTreeMap::new()
+                )
+                .is_err(),
+                "{source}"
+            );
+        }
+        assert!(
+            execute_websocket_automation(
+                "ws.reconnect();",
+                &WebSocketAutomationEvent::opened(),
+                &BTreeMap::new()
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn session_reconnects_after_close_with_url_override_and_can_cancel_delay() {
+        let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let second = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first_url = format!("ws://{}/first", first.local_addr().unwrap());
+        let second_url = format!("ws://{}/second", second.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = first.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            socket.close(None).await.unwrap();
+            let (stream, _) = second.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            socket
+                .send(Message::Text("reconnected".into()))
+                .await
+                .unwrap();
+            socket.close(None).await.unwrap();
+        });
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (signals, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let client = tokio::spawn(async move {
+            run_websocket_session(&first_url, &[], receiver, signals)
+                .await
+                .unwrap();
+        });
+        let test = async {
+            assert_eq!(events.recv().await, Some(WebSocketSignal::Connected));
+            assert!(matches!(
+                events.recv().await,
+                Some(WebSocketSignal::Closed(_))
+            ));
+            let options = WebSocketReconnectOptions {
+                clear_console: true,
+                delay_ms: 30,
+                url: Some(second_url),
+            };
+            let started = Instant::now();
+            sender
+                .send(WebSocketCommand::Reconnect(options.clone()))
+                .unwrap();
+            assert_eq!(
+                events.recv().await,
+                Some(WebSocketSignal::Reconnecting(options))
+            );
+            assert_eq!(events.recv().await, Some(WebSocketSignal::Connected));
+            assert!(started.elapsed() >= Duration::from_millis(30));
+            assert_eq!(
+                events.recv().await,
+                Some(WebSocketSignal::Text("reconnected".into()))
+            );
+            assert!(matches!(
+                events.recv().await,
+                Some(WebSocketSignal::Closed(_))
+            ));
+            sender
+                .send(WebSocketCommand::Reconnect(WebSocketReconnectOptions {
+                    delay_ms: 60000,
+                    ..Default::default()
+                }))
+                .unwrap();
+            assert!(matches!(
+                events.recv().await,
+                Some(WebSocketSignal::Reconnecting(_))
+            ));
+            sender.send(WebSocketCommand::Close).unwrap();
+            client.await.unwrap();
+            server.await.unwrap();
+        };
+        tokio::time::timeout(Duration::from_secs(5), test)
+            .await
+            .unwrap();
     }
 
     #[test]
