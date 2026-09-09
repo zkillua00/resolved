@@ -82,7 +82,7 @@ use crate::{
         list_upstream_workspaces, login_upstream, move_upstream_collection,
         move_upstream_saved_request, normalize_upstream_url,
         put_upstream_environment_variable_value, query_params_from_url, render_message_template,
-        resolve_request, run_upstream_websocket_connection, run_websocket_connection,
+        resolve_request, run_upstream_websocket_session, run_websocket_session,
         save_upstream_environment, send_request_for_upstream_workspace, spawn_request,
         template_variable_names, update_request_execution_settings, update_upstream_collection,
         update_upstream_environment, update_upstream_environment_variable,

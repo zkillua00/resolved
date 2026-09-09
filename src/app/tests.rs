@@ -1111,6 +1111,15 @@ fn mcp_websocket_connection_exposes_frames_and_runs_automation(cx: &mut gpui::Te
                         .expect("read WebSocket message");
                     socket.send(message).await.unwrap();
                 }
+                socket.close(None).await.unwrap();
+                let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                    .await.unwrap().unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                    .await.unwrap().unwrap().unwrap();
+                socket.send(message).await.unwrap();
+                // Keep the reconnected socket open until the test disconnects.
+                let _ = tokio::time::timeout(Duration::from_secs(5), socket.next()).await;
             });
     });
 
@@ -1212,7 +1221,7 @@ fn mcp_websocket_connection_exposes_frames_and_runs_automation(cx: &mut gpui::Te
 
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
-            app.websocket_workspace.document.automation_modules.insert("events.js".into(), "export function run() { if (ws.event.data === 'manual') ws.send('updated automation'); }".into());
+            app.websocket_workspace.document.automation_modules.insert("events.js".into(), "export function run() { if (ws.event.data === 'manual') ws.send('updated automation'); on(eventTypes.open, ws => ws.send('reconnected')); on(eventTypes.close, ws => ws.reconnect({ delayMs: 10 })); }".into());
             app.websocket_workspace.automation.update(cx, |editor, cx| editor.set_value("import { run } from './events.js'; run();", window, cx));
             app.sync_active_websocket_document(cx);
         });
@@ -1288,6 +1297,27 @@ fn mcp_websocket_connection_exposes_frames_and_runs_automation(cx: &mut gpui::Te
         updated_received,
         "module edits must apply without reconnecting"
     );
+    let mut reconnected = false;
+    for _ in 0..200 {
+        std::thread::sleep(Duration::from_millis(10));
+        cx.run_until_parked();
+        reconnected = cx.update(|_, cx| {
+            let events = app.read(cx).control_get_websocket_events(
+                serde_json::json!({ "connection_id": connection_id }),
+            ).unwrap();
+            events["events"].as_array().unwrap().iter().any(|event| {
+                event["direction"] == "received" && event["payload"] == "reconnected"
+            })
+        });
+        if reconnected { break; }
+    }
+    assert!(reconnected, "close automation should reconnect using the same MCP connection ID");
+    let disconnected = cx.update(|window, cx| {
+        app.update(cx, |app, cx| app.handle_window_control_call(
+            "disconnect_websocket", serde_json::json!({ "connection_id": connection_id }), window, cx,
+        ))
+    });
+    assert!(disconnected.ok, "{:?}", disconnected.error);
     server.join().unwrap();
 }
 
