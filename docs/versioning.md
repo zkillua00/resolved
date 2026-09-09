@@ -114,8 +114,14 @@ distribution. The `.tar.xz` archives bundle application libraries and WebKit
 helpers using the same pinned `linuxdeploy` release and architecture checksums
 as `linux/Dockerfile`. Extract the archive and run its `resolved` launcher;
 compatible host libraries, X11/XWayland and Vulkan are still required.
-Windows ARM64, AppImage, the collaboration
-server, and the optional MCP adapter are not included in these desktop releases.
+Windows ARM64, AppImage, and the collaboration
+server are not included in these releases.
+
+Each target also tests and builds `resolved-mcp`, checks its stdio initialization
+and ping responses, and packages a standalone adapter archive named
+`resolved-mcp-<version>-<platform>-<arch>` (ZIP on macOS/Windows, `.tar.xz` on
+Linux). These downloads include the license and MCP setup guide, and are covered
+by the release checksum file. Adapter failures block publication of the release.
 
 Nightly download names and the app's reported version use
 `MAJOR.MINOR.PATCH.<12-character-commit-hash>` (for example,

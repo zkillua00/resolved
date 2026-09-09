@@ -1,4 +1,4 @@
-name: Build desktop release
+name: Build desktop and MCP release
 on:
   workflow_call:
     inputs:
@@ -158,6 +158,28 @@ jobs:
           if ((Get-AuthenticodeSignature "dist/$base.msix").Status -eq 'NotSigned') {
             throw 'MSIX was not signed'
           }
+      - name: Test and build MCP adapter (macOS/Linux)
+        if: runner.os != 'Windows'
+        run: |
+          scripts/cargo.sh test --locked --bin resolved-mcp
+          scripts/cargo.sh build --release --locked --bin resolved-mcp
+      - name: Test and build MCP adapter (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & ./scripts/cargo.ps1 test --locked --bin resolved-mcp
+          if ($LASTEXITCODE -ne 0) { throw 'MCP adapter tests failed' }
+          & ./scripts/cargo.ps1 build --release --locked --bin resolved-mcp
+          if ($LASTEXITCODE -ne 0) { throw 'MCP adapter build failed' }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify and package standalone MCP adapter
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+        shell: bash
+        run: python scripts/package-mcp.py "$PLATFORM" "$ARCH" "$RESOLVED_BUILD_VERSION"
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.platform }}-${{ matrix.arch }}
@@ -197,6 +219,8 @@ jobs:
           macOS: Apple Silicon and Intel application archives, ad-hoc signed (not notarized).
           Windows: x64 MSIX with a per-build self-signed public certificate. Import the matching .cer into Local Machine / Trusted People before installing. Windows may require the WebView2 Evergreen Runtime.
           Linux: ARM64 and x64 Debian/RPM packages and tar.xz archives built on Ubuntu 24.04. Install packages with a package manager, or extract an archive and run its resolved launcher. Archives bundle application libraries and WebKit helpers; compatible host libraries, X11/XWayland and Vulkan are still required.
+
+          MCP: Standalone resolved-mcp archives for all five targets. Extract the adapter and configure your MCP client with its absolute path (resolved-mcp.exe on Windows). Run the matching Resolved desktop with Settings -> MCP enabled.
 
           Verify downloads against SHA256SUMS.txt.
           EOF

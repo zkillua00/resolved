@@ -16,7 +16,11 @@ rules; it forwards typed operations to the running app.
 
 ## Quick start
 
-1. Build the standalone adapter:
+1. Download the matching `resolved-mcp-<version>-<platform>-<arch>` archive
+   from [GitHub Releases](https://github.com/zkillua00/resolved/releases) and
+   extract it to a permanent location. Use the same release as your desktop app.
+   macOS and Windows downloads are ZIP files; Linux downloads are `.tar.xz`.
+   Alternatively, build the adapter from source:
 
    ```sh
    ./scripts/cargo.sh build --release --bin resolved-mcp
@@ -30,7 +34,7 @@ rules; it forwards typed operations to the running app.
    {
      "mcpServers": {
        "resolved": {
-         "command": "/absolute/path/to/api_tester/target/release/resolved-mcp"
+         "command": "/absolute/path/to/resolved-mcp"
        }
      }
    }
@@ -39,7 +43,8 @@ rules; it forwards typed operations to the running app.
 The exact outer configuration key varies by MCP client. The adapter itself
 needs no arguments or environment variables. It discovers the running Resolved
 instance through a descriptor in the application's per-user data directory.
-The adapter is currently built separately and is not bundled into
+On Windows, use the extracted `resolved-mcp.exe`; it runs outside the MSIX.
+The adapter is released as a separate download and is not bundled into
 `Resolved.app`, the Windows MSIX, or Linux packages.
 
 Resolved must be running with MCP enabled. Otherwise `tools/list` is empty and
