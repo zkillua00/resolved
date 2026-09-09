@@ -1219,7 +1219,7 @@ mod tests {
                 .await
                 .unwrap();
             assert!(items.iter().any(|item| item.label == "sendJson"));
-            let source = "import { ack } from './lib/helpers.js'; ws.sendJson(await Promise.resolve(ack(7))); console.log('sent');";
+            let source = "import { ack } from './lib/helpers.js'; on(eventTypes.open, async (ws, event) => { ws.sendJson(await Promise.resolve(ack(7))); console.log(event.eventType); }); on(async (ws, event) => eventTypes.message(ws, event), (ws, event) => ws.log(event.data));";
             let diagnostics = configured
                 .diagnostics(
                     TypeScriptDocumentKind::WebSocketAutomation,

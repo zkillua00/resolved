@@ -357,7 +357,11 @@ pub fn execute_websocket_automation_with_modules(
             .catch(&ctx)
             .map_err(|error| error.to_string())?;
         let output = ctx
-            .eval::<rquickjs::Value<'_>, _>("__WS_FINISH()")
+            .eval::<rquickjs::Promise<'_>, _>("__WS_FINISH()")
+            .catch(&ctx)
+            .map_err(|error| error.to_string())?
+            .finish::<rquickjs::Value<'_>>()
+            .catch(&ctx)
             .map_err(|error| error.to_string())?;
         rquickjs_serde::from_value_strict(output).map_err(|error| error.to_string())
     })
@@ -368,6 +372,7 @@ const AUTOMATION_PRELUDE: &str = r#"
   "use strict";
   const sends = [];
   const logs = [];
+  const handlers = [];
   const environment = Object.freeze(Object.assign(Object.create(null), globalThis.__WS_ENV));
   const event = Object.freeze(Object.assign(Object.create(null), globalThis.__WS_EVENT));
   const stringify = value => typeof value === "string" ? value : JSON.stringify(value);
@@ -381,7 +386,22 @@ const AUTOMATION_PRELUDE: &str = r#"
   globalThis.console = Object.freeze({
     log: ws.log, info: ws.log, warn: ws.log, error: ws.log, debug: ws.log,
   });
-  globalThis.__WS_FINISH = () => ({ sends, logs });
+  globalThis.eventTypes = Object.freeze({
+    open: (ws, event) => event.eventType === "open",
+    message: (ws, event) => event.eventType === "message",
+  });
+  globalThis.on = (condition, handler) => {
+    if (typeof condition !== "function" || typeof handler !== "function") {
+      throw new TypeError("on(condition, handler) requires two functions");
+    }
+    handlers.push([condition, handler]);
+  };
+  globalThis.__WS_FINISH = async () => {
+    for (const [condition, handler] of handlers) {
+      if (await condition(ws, event)) await handler(ws, event);
+    }
+    return { sends, logs };
+  };
 })();
 "#;
 
@@ -678,6 +698,81 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("specific failure"), "{error}");
         assert!(execute_websocket_automation("while (true) {}", &event, &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn automation_handlers_filter_events_and_await_in_registration_order() {
+        let modules = BTreeMap::from([(
+            "handlers.js".into(),
+            r#"
+            on(eventTypes.open, async (ws, event) => {
+                await Promise.resolve();
+                ws.send(event.eventType);
+            });
+            on(eventTypes.message, (ws, event) => ws.send(event.binaryBase64 ?? event.data));
+        "#
+            .into(),
+        )]);
+        let source = r#"
+            import './handlers.js';
+            let ready = false;
+            on(async (api, event) => {
+                if (api !== ws || event !== ws.event) throw new Error('wrong arguments');
+                return await Promise.resolve(eventTypes.message(api, event));
+            }, async (ws, event) => {
+                await Promise.resolve();
+                ready = true;
+                ws.send('first');
+            });
+            on(() => ready, ws => ws.send('second'));
+            on(() => false, () => { throw new Error('must not run'); });
+        "#;
+        for (event, expected) in [
+            (WebSocketAutomationEvent::opened(), vec!["open"]),
+            (
+                WebSocketAutomationEvent::text("hello"),
+                vec!["hello", "first", "second"],
+            ),
+            (
+                WebSocketAutomationEvent {
+                    event_type: "message".into(),
+                    data: None,
+                    binary_base64: Some("AA==".into()),
+                },
+                vec!["AA==", "first", "second"],
+            ),
+        ] {
+            let output = execute_websocket_automation_with_modules(
+                source,
+                &modules,
+                &event,
+                &BTreeMap::new(),
+            )
+            .unwrap();
+            assert_eq!(output.sends, expected);
+        }
+    }
+
+    #[test]
+    fn automation_handler_errors_fail_execution() {
+        for source in [
+            "on(null, () => {});",
+            "on(eventTypes.open, null);",
+            "on(() => { throw new Error('predicate failure'); }, () => {});",
+            "on(async () => { await Promise.resolve(); throw new Error('predicate failure'); }, () => {});",
+            "on(eventTypes.open, async ws => { ws.send('discard'); await Promise.resolve(); throw new Error('handler failure'); });",
+        ] {
+            let error = execute_websocket_automation(
+                source,
+                &WebSocketAutomationEvent::opened(),
+                &BTreeMap::new(),
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("requires two functions") || error.contains("failure"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
