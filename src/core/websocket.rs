@@ -4,16 +4,9 @@
 //! records reusable intent (messages, templates, automation and replays), while
 //! the UI owns the ephemeral connection and wire timeline.
 
-use std::{
-    collections::BTreeMap,
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeMap, time::Duration};
 
 use futures::{SinkExt as _, StreamExt as _};
-use rquickjs::{
-    CatchResultExt as _, Context as JsContext, Module, Runtime as JsRuntime,
-    loader::{BuiltinLoader, BuiltinResolver},
-};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -31,9 +24,6 @@ use super::{HeaderEntry, RawBodyLanguage};
 
 pub const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_WEBSOCKET_TIMELINE_ENTRIES: usize = 2_000;
-const AUTOMATION_MEMORY_BYTES: usize = 16 * 1024 * 1024;
-const AUTOMATION_STACK_BYTES: usize = 256 * 1024;
-const AUTOMATION_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
@@ -222,6 +212,8 @@ pub struct WebSocketAutomationOutput {
     #[serde(default)]
     pub sends: Vec<String>,
     #[serde(default)]
+    pub environment_mutations: Vec<super::script::EnvironmentMutation>,
+    #[serde(default)]
     pub logs: Vec<String>,
     #[serde(default)]
     pub reconnect: Option<WebSocketReconnectOptions>,
@@ -336,12 +328,31 @@ pub fn validate_automation_module_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 pub fn execute_websocket_automation_with_modules(
     source: &str,
     modules: &BTreeMap<String, String>,
     event: &WebSocketAutomationEvent,
     environment: &BTreeMap<String, String>,
 ) -> Result<WebSocketAutomationOutput, String> {
+    super::script::execute_websocket_script(
+        source,
+        modules,
+        event,
+        &super::RequestDraft::default(),
+        &super::script::ScriptScope {
+            environment: super::script::ScriptEnvironment::new(environment.clone()),
+            ..Default::default()
+        },
+        &Default::default(),
+        None,
+    )
+}
+
+pub(super) fn validate_automation_sources(
+    source: &str,
+    modules: &BTreeMap<String, String>,
+) -> Result<(), String> {
     if modules.len() > 64
         || source
             .len()
@@ -350,71 +361,20 @@ pub fn execute_websocket_automation_with_modules(
     {
         return Err("Automation supports up to 64 modules and 1 MiB of source.".into());
     }
-    let mut resolver = BuiltinResolver::default();
-    let mut loader = BuiltinLoader::default();
-    for (name, source) in modules {
+    for name in modules.keys() {
         validate_automation_module_name(name)?;
-        let path = name.clone();
-        resolver.add_module(path.clone());
-        loader.add_module(path, source.as_bytes().to_vec());
     }
-    if source.trim().is_empty() {
-        return Ok(WebSocketAutomationOutput::default());
-    }
-    let runtime = JsRuntime::new().map_err(|error| error.to_string())?;
-    runtime.set_loader(resolver, loader);
-    runtime.set_memory_limit(AUTOMATION_MEMORY_BYTES);
-    runtime.set_max_stack_size(AUTOMATION_STACK_BYTES);
-    let deadline = Instant::now() + AUTOMATION_TIMEOUT;
-    runtime.set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
-    let context = JsContext::full(&runtime).map_err(|error| error.to_string())?;
-    context.with(|ctx| {
-        let event =
-            rquickjs_serde::to_value(ctx.clone(), event).map_err(|error| error.to_string())?;
-        let environment = rquickjs_serde::to_value(ctx.clone(), environment)
-            .map_err(|error| error.to_string())?;
-        ctx.globals()
-            .set("__WS_EVENT", event)
-            .map_err(|error| error.to_string())?;
-        ctx.globals()
-            .set("__WS_ENV", environment)
-            .map_err(|error| error.to_string())?;
-        ctx.eval::<(), _>(AUTOMATION_PRELUDE)
-            .map_err(|error| error.to_string())?;
-        Module::evaluate(ctx.clone(), "automation.js", source)
-            .catch(&ctx)
-            .map_err(|error| error.to_string())?
-            .finish::<()>()
-            .catch(&ctx)
-            .map_err(|error| error.to_string())?;
-        let output = ctx
-            .eval::<rquickjs::Promise<'_>, _>("__WS_FINISH()")
-            .catch(&ctx)
-            .map_err(|error| error.to_string())?
-            .finish::<rquickjs::Value<'_>>()
-            .catch(&ctx)
-            .map_err(|error| error.to_string())?;
-        let output: WebSocketAutomationOutput =
-            rquickjs_serde::from_value_strict(output).map_err(|error| error.to_string())?;
-        if let Some(options) = &output.reconnect
-            && let Some(url) = &options.url
-            && !url::Url::parse(url)
-                .is_ok_and(|url| matches!(url.scheme(), "ws" | "wss") && url.host_str().is_some())
-        {
-            return Err("Reconnect url must be an absolute ws:// or wss:// URL".into());
-        }
-        Ok(output)
-    })
+    Ok(())
 }
 
-const AUTOMATION_PRELUDE: &str = r#"
+pub(super) const AUTOMATION_PRELUDE: &str = r#"
 (() => {
   "use strict";
   const sends = [];
-  const logs = [];
   const handlers = [];
   let reconnect = null;
-  const environment = Object.freeze(Object.assign(Object.create(null), globalThis.__WS_ENV));
+
+  const environment = Object.freeze(api.environment.toObject());
   const event = Object.freeze(Object.assign(Object.create(null), globalThis.__WS_EVENT));
   const stringify = value => typeof value === "string" ? value : JSON.stringify(value);
   const send = value => {
@@ -444,10 +404,7 @@ const AUTOMATION_PRELUDE: &str = r#"
       }
       reconnect = { clearConsole, delayMs, url };
     },
-    log(...values) { logs.push(values.map(stringify).join(" ")); },
-  });
-  globalThis.console = Object.freeze({
-    log: ws.log, info: ws.log, warn: ws.log, error: ws.log, debug: ws.log,
+    log: console.log,
   });
   globalThis.eventTypes = Object.freeze({
     open: (ws, event) => event.eventType === "open",
@@ -460,12 +417,12 @@ const AUTOMATION_PRELUDE: &str = r#"
     }
     handlers.push([condition, handler]);
   };
-  globalThis.__WS_FINISH = async () => {
+  globalThis.__WS_DISPATCH = async () => {
     for (const [condition, handler] of handlers) {
       if (await condition(ws, event)) await handler(ws, event);
     }
-    return { sends, logs, reconnect };
   };
+  globalThis.__WS_FINISH = () => ({ sends, reconnect });
 })();
 "#;
 
@@ -817,6 +774,7 @@ pub fn binary_preview(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
+    use std::time::Instant;
 
     use tokio::net::TcpListener;
     use tokio_tungstenite::{

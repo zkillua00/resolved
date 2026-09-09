@@ -61,7 +61,7 @@ const PRELUDE: &str = r#"
   "use strict";
 
   const input = globalThis.__API_TESTER_INPUT;
-  const mutableRequest = input.phase === "pre";
+  const mutableRequest = input.phase !== "post";
   const environmentValues = Object.assign(Object.create(null), input.environment);
   const collectionValues = Object.assign(Object.create(null), input.collectionVariables);
   const environmentMutations = [];
@@ -415,9 +415,10 @@ const PRELUDE: &str = r#"
     environment,
     variables,
     requests: requestsApi,
+    execute: requestsApi.execute,
     console: scriptConsole,
   };
-  if (input.phase === "post") {
+  if (input.phase !== "pre") {
     api.test = test;
     api.assert = assert;
   }
@@ -471,6 +472,8 @@ const PRELUDE: &str = r#"
       logs,
       tests,
       chainedRequests: scheduledRequests,
+      websocketSends: globalThis.__WS_FINISH ? globalThis.__WS_FINISH().sends : [],
+      websocketReconnect: globalThis.__WS_FINISH ? globalThis.__WS_FINISH().reconnect : null,
     };
     },
     configurable: false,
@@ -869,6 +872,10 @@ struct EngineHeader {
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EngineOutput {
+    #[serde(default)]
+    websocket_sends: Vec<String>,
+    #[serde(default)]
+    websocket_reconnect: Option<super::websocket::WebSocketReconnectOptions>,
     request: RequestDraft,
     environment_mutations: Vec<EnvironmentMutation>,
     #[serde(default)]
@@ -880,6 +887,79 @@ struct EngineOutput {
 struct EngineRun {
     output: EngineOutput,
     duration: Duration,
+}
+
+/// Execute WebSocket modules with the shared Resolved API and chain driver.
+pub fn execute_websocket_script(
+    source: &str,
+    modules: &BTreeMap<String, String>,
+    event: &super::websocket::WebSocketAutomationEvent,
+    request: &RequestDraft,
+    scope: &ScriptScope,
+    namespace: &RequestNamespaceCatalog,
+    chainer: Option<&dyn InlineChainer>,
+) -> Result<super::websocket::WebSocketAutomationOutput, String> {
+    super::websocket::validate_automation_sources(source, modules)?;
+    let refs = namespace.runtime_specs();
+    let mut redactor = scope.redactor();
+    let run = run_engine(
+        source,
+        ScriptPhase::PostResponse,
+        EngineInput {
+            phase: "websocket",
+            request,
+            response: None,
+            environment: scope.environment.values(),
+            collection_variables: &scope.collection_variables,
+            request_references: &refs,
+            max_log_entries: MAX_SCRIPT_LOG_ENTRIES,
+            max_log_bytes: MAX_SCRIPT_LOG_BYTES,
+        },
+        &ScriptCancellation::new(),
+        chainer,
+        scope.script_timeout,
+        &redactor,
+        &scope.environment.secret_names,
+        None,
+        Some((modules, event)),
+    )
+    .map_err(|e| e.to_string())?;
+    if let Some(options) = &run.output.websocket_reconnect
+        && let Some(url) = &options.url
+        && !url::Url::parse(url)
+            .is_ok_and(|url| matches!(url.scheme(), "ws" | "wss") && url.host_str().is_some())
+    {
+        return Err("Reconnect url must be an absolute ws:// or wss:// URL".into());
+    }
+    let mut mutations = run.output.environment_mutations.clone();
+    extend_redactor_with_secret_mutations(&mut redactor, scope, &mutations);
+    if !run.output.chained_requests.is_empty() {
+        let chainer =
+            chainer.ok_or("Saved request execution is unavailable in this automation context")?;
+        for outcome in chainer.run(&run.output.chained_requests) {
+            let outcome = outcome.map_err(|error| redactor.scrub(error))?;
+            mutations.extend(outcome.environment_mutations);
+        }
+    }
+    extend_redactor_with_secret_mutations(&mut redactor, scope, &mutations);
+    let report = report_from_run(ScriptPhase::PostResponse, &run, false, &redactor);
+    let mut logs: Vec<String> = report.logs.into_iter().map(|log| log.message).collect();
+    logs.extend(report.tests.into_iter().map(|test| {
+        format!(
+            "{}: {}{}",
+            if test.passed { "PASS" } else { "FAIL" },
+            test.name,
+            test.message
+                .map(|message| format!(" — {message}"))
+                .unwrap_or_default()
+        )
+    }));
+    Ok(super::websocket::WebSocketAutomationOutput {
+        sends: run.output.websocket_sends,
+        reconnect: run.output.websocket_reconnect,
+        logs,
+        environment_mutations: mutations,
+    })
 }
 
 fn execute_pre_request_inner(
@@ -921,6 +1001,7 @@ fn execute_pre_request_inner(
         scope.script_timeout,
         &redactor,
         &scope.environment.secret_names,
+        None,
         None,
     )?;
     extend_redactor_with_secret_mutations(&mut redactor, scope, &run.output.environment_mutations);
@@ -1035,6 +1116,7 @@ fn execute_post_response_inner(
         &redactor,
         &scope.environment.secret_names,
         console_session,
+        None,
     )?;
     extend_redactor_with_secret_mutations(&mut redactor, scope, &run.output.environment_mutations);
     let report = report_from_run(phase, &run, truncated, &redactor);
@@ -1259,6 +1341,10 @@ fn run_engine(
     redactor: &SecretRedactor,
     secret_names: &BTreeSet<String>,
     mut console_session: Option<&mut Option<ScriptConsoleSession>>,
+    websocket: Option<(
+        &BTreeMap<String, String>,
+        &super::websocket::WebSocketAutomationEvent,
+    )>,
 ) -> Result<EngineRun, ScriptError> {
     if cancellation.is_cancelled() {
         return Err(simple_error(
@@ -1302,6 +1388,15 @@ fn run_engine(
 
         (runtime, context)
     };
+    if let Some((modules, _)) = websocket {
+        let mut resolver = rquickjs::loader::BuiltinResolver::default();
+        let mut loader = rquickjs::loader::BuiltinLoader::default();
+        for (name, source) in modules {
+            resolver.add_module(name.clone());
+            loader.add_module(name.clone(), source.as_bytes().to_vec());
+        }
+        runtime.set_loader(resolver, loader);
+    }
     runtime.set_memory_limit(SCRIPT_MEMORY_LIMIT_BYTES);
     runtime.set_max_stack_size(SCRIPT_STACK_LIMIT_BYTES);
     runtime.set_interrupt_handler(Some(Box::new(move || {
@@ -1358,6 +1453,11 @@ fn run_engine(
             )
         })?;
 
+        if let Some((_, event)) = websocket {
+            let event = rquickjs_serde::to_value(ctx.clone(), event).map_err(|e| simple_error(phase, ScriptErrorKind::Engine, e.to_string(), redactor))?;
+            ctx.globals().set("__WS_EVENT", event).map_err(|e| simple_error(phase, ScriptErrorKind::Engine, e.to_string(), redactor))?;
+            ctx.eval::<(), _>(super::websocket::AUTOMATION_PRELUDE).map_err(|e| simple_error(phase, ScriptErrorKind::Engine, e.to_string(), redactor))?;
+        }
         let mut options = EvalOptions::default();
         options.global = true;
         options.strict = true;
@@ -1367,7 +1467,11 @@ fn run_engine(
         options.promise = true;
         options.filename = Some(phase.filename().to_owned());
         let main: Value<'_> =
-            match ctx.eval_with_options::<Value<'_>, _>(source, options).catch(&ctx) {
+            match (if websocket.is_some() {
+                rquickjs::Module::evaluate(ctx.clone(), "automation.js", source).map(|p| p.into_value())
+            } else {
+                ctx.eval_with_options::<Value<'_>, _>(source, options)
+            }).catch(&ctx) {
                 Ok(main) => main,
                 Err(caught) => {
                     let duration = started.elapsed();
@@ -1433,7 +1537,7 @@ fn run_engine(
         ctx.eval::<(), _>(
             concat!(
                 "globalThis.__API_TESTER_SETTLED = { done: false, rejected: false, reason: undefined };\n",
-                "globalThis.__API_TESTER_MAIN.then(\n",
+                "(globalThis.__WS_DISPATCH ? globalThis.__API_TESTER_MAIN.then(() => globalThis.__WS_DISPATCH()) : globalThis.__API_TESTER_MAIN).then(\n",
                 "  function(value) { globalThis.__API_TESTER_SETTLED.done = true; globalThis.__API_TESTER_SETTLED.value = value; },\n",
                 "  function(reason) {\n",
                 "    globalThis.__API_TESTER_SETTLED.done = true;\n",
@@ -3010,6 +3114,103 @@ api.environment.set("seven", String(value));
                 value: "7".to_owned(),
             }]
         );
+    }
+
+    #[test]
+    fn websocket_modules_share_resolved_apis_and_execute_saved_requests() {
+        let (_, catalog) = chaining_workspace();
+        let calls = std::sync::Mutex::new(Vec::new());
+        let chainer = |requests: &[ChainedRequest]| {
+            calls
+                .lock()
+                .unwrap()
+                .extend(requests.iter().map(|request| request.path.clone()));
+            requests
+                .iter()
+                .map(|_| {
+                    Ok(crate::core::ChainRun {
+                        environment_mutations: vec![EnvironmentMutation::Set {
+                            key: "token".into(),
+                            value: "fresh".into(),
+                        }],
+                        ..Default::default()
+                    })
+                })
+                .collect()
+        };
+        let modules = BTreeMap::from([(
+            "login.js".into(),
+            "export async function login() { await api.execute(ChatAdmin.Login); }".into(),
+        )]);
+        let output = execute_websocket_script(
+            r#"
+            import { login } from './login.js';
+            on(eventTypes.message, async (ws, event) => {
+            await login();
+            api.request.headers.set('X-Event', 'seen');
+            api.test('event has no HTTP response', () => api.assert(api.response === null));
+            api.test('token updated', () => api.assert(api.environment.get('token') === 'fresh'));
+            api.environment.set('seen', ws.event.data);
+            ws.sendJson({ token: api.environment.get('token') });
+            api.requests.execute(Payments.Login);
+            });
+        "#,
+            &modules,
+            &super::super::websocket::WebSocketAutomationEvent::text("hello"),
+            &request(),
+            &ScriptScope::default(),
+            &catalog,
+            Some(&chainer),
+        )
+        .unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["ChatAdmin.Login", "Payments.Login"]
+        );
+        assert_eq!(output.sends, vec![r#"{"token":"fresh"}"#]);
+        assert_eq!(
+            output.logs,
+            vec!["PASS: event has no HTTP response", "PASS: token updated"]
+        );
+        assert!(
+            output
+                .environment_mutations
+                .contains(&EnvironmentMutation::Set {
+                    key: "seen".into(),
+                    value: "hello".into()
+                })
+        );
+    }
+
+    #[test]
+    fn websocket_modules_redact_secrets_and_propagate_chain_failures() {
+        let (_, catalog) = chaining_workspace();
+        let mut scope = ScriptScope::default();
+        scope.environment.insert_secret("secret", "private-value");
+        let event = super::super::websocket::WebSocketAutomationEvent::opened();
+        let output = execute_websocket_script(
+            "ws.log(api.environment.get('secret'));",
+            &BTreeMap::new(),
+            &event,
+            &request(),
+            &scope,
+            &catalog,
+            None,
+        )
+        .unwrap();
+        assert!(!output.logs.join(" ").contains("private-value"));
+        let chainer = |_: &[ChainedRequest]| vec![Err("login failed".into())];
+        let error = execute_websocket_script(
+            "on(eventTypes.open, async ws => { await api.execute(ChatAdmin.Login); ws.send('unreachable'); });",
+            &BTreeMap::new(),
+            &event,
+            &request(),
+            &scope,
+            &catalog,
+            Some(&chainer),
+        )
+        .unwrap_err();
+        assert!(error.contains("login failed"), "{error}");
     }
 
     #[test]

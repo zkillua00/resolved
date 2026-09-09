@@ -875,28 +875,36 @@ impl ApiTester {
         {
             return;
         }
-        let environment = self
-            .workspace
-            .active_environment()
-            .map(|environment| {
-                environment
-                    .variables
-                    .iter()
-                    .filter(|variable| variable.enabled)
-                    .map(|variable| (variable.key.clone(), variable.value.clone()))
-                    .collect::<BTreeMap<_, _>>()
-            })
-            .unwrap_or_default();
+        let environment_id = self.workspace.active_environment_id.clone();
+        let mut scope = Self::script_scope(self.workspace.active_environment());
+        scope.script_timeout = self.settings.script.timeout();
+        let namespace = self.request_namespace.clone();
+        let chainer = self
+            .build_inline_chainer(&environment_id)
+            .for_websocket_event();
+        let request = RequestDraft {
+            url: self.websocket_workspace.document.url.clone(),
+            headers: self.websocket_workspace.document.headers.clone(),
+            ..Default::default()
+        };
         let source = self.websocket_workspace.document.automation_source.clone();
         let modules = self.websocket_workspace.document.automation_modules.clone();
         let generation = self.websocket_workspace.generation;
         let config = (source.clone(), modules.clone());
         let task = self.runtime.spawn_blocking(move || {
-            execute_websocket_automation_with_modules(&source, &modules, &event, &environment)
+            crate::core::execute_websocket_script(
+                &source,
+                &modules,
+                &event,
+                &request,
+                &scope,
+                &namespace,
+                Some(&chainer),
+            )
         });
         cx.spawn_in(window, async move |this, cx| {
             let output = task.await;
-            let _ = this.update_in(cx, |this, _, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 if this.websocket_workspace.generation != generation
                     || this.websocket_replay_running()
                     || !this.websocket_workspace.document.automation_enabled
@@ -907,6 +915,19 @@ impl ApiTester {
                 }
                 match output {
                     Ok(Ok(output)) => {
+                        if let Err(error) = this.apply_environment_mutations(
+                            environment_id.as_deref(),
+                            &output.environment_mutations,
+                            window,
+                            cx,
+                        ) {
+                            this.push_websocket_timeline(
+                                WebSocketTimelineDirection::System,
+                                "script error",
+                                error,
+                            );
+                            return;
+                        }
                         for log in output.logs {
                             this.push_websocket_timeline(
                                 WebSocketTimelineDirection::System,
@@ -4141,7 +4162,7 @@ mod tests {
                     document.automation_modules["helpers.js"],
                     "export const value = 'from module';"
                 );
-                let output = execute_websocket_automation_with_modules(
+                let output = crate::core::execute_websocket_automation_with_modules(
                     &document.automation_source,
                     &document.automation_modules,
                     &WebSocketAutomationEvent::opened(),
