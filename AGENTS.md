@@ -1,6 +1,6 @@
 # AGENTS.md — Resolved (api_tester)
 
-A native **macOS API workbench** ("Know exactly what you sent.") with two independent
+A native **macOS API workbench** with two independent
 codebases in one repo:
 
 - **`src/`** — the Rust desktop client (`api-tester` crate, edition 2024, Apache-2.0).

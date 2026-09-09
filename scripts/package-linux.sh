@@ -121,7 +121,7 @@ Architecture: $deb_architecture
 Maintainer: Resolved contributors
 Depends: libc6, libfontconfig1, libgcc-s1, libgtk-3-0, libvulkan1, libwebkit2gtk-4.1-0, libx11-6, libxcb1, libxkbcommon0, libxkbcommon-x11-0
 Description: Native API workbench
- Know exactly what you sent. Resolved keeps request intent, wire state,
+Resolved keeps request intent, wire state,
  and responses explicit.
 EOF
 
@@ -145,7 +145,7 @@ BuildArch: $rpm_architecture
 AutoReqProv: yes
 
 %description
-Know exactly what you sent. Resolved keeps request intent, wire state, and
+Resolved keeps request intent, wire state, and
 responses explicit.
 
 %prep

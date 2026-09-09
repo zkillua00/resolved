@@ -83,9 +83,6 @@ verb. Use the landing-page slogan with its comma and final period. Keep one
 slogan per lockup; do not stack both beneath the wordmark. The landing page may
 use Explore, Automate, and Resolve as separate feature sections farther down.
 
-The previous lines “Know exactly what you sent.” and “From request to evidence.”
-are retired. Their emphasis on precision remains a product principle.
-
 ## Visual identity
 
 ### Wordmark
