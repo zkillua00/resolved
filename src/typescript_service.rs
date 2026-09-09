@@ -1208,11 +1208,37 @@ mod tests {
                 imports.iter().any(|item| item.label.contains("helpers")),
                 "{imports:?}"
             );
-            let source = "ws.";
+            let source = "api.";
             let items = configured
                 .completion_items(
                     TypeScriptDocumentKind::WebSocketAutomation,
                     3,
+                    source.into(),
+                    source.len(),
+                )
+                .await
+                .unwrap();
+            for name in [
+                "execute",
+                "requests",
+                "environment",
+                "request",
+                "test",
+                "assert",
+            ] {
+                assert!(
+                    items.iter().any(|item| item.label == name),
+                    "missing {name}: {items:?}"
+                );
+            }
+            let diagnostics = configured.diagnostics(TypeScriptDocumentKind::WebSocketAutomation, 4,
+                "api.request.headers.set('X-Test', 'yes'); api.test('ok', () => api.assert(api.response === null)); api.environment.set('key', 'value');".into()).await.unwrap();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let source = "ws.";
+            let items = configured
+                .completion_items(
+                    TypeScriptDocumentKind::WebSocketAutomation,
+                    5,
                     source.into(),
                     source.len(),
                 )
@@ -1223,7 +1249,7 @@ mod tests {
             let diagnostics = configured
                 .diagnostics(
                     TypeScriptDocumentKind::WebSocketAutomation,
-                    4,
+                    6,
                     source.into(),
                 )
                 .await
@@ -1233,7 +1259,7 @@ mod tests {
             let diagnostics = configured
                 .diagnostics(
                     TypeScriptDocumentKind::WebSocketAutomation,
-                    5,
+                    7,
                     source.into(),
                 )
                 .await
@@ -1249,12 +1275,16 @@ mod tests {
                     .iter()
                     .any(|item| item.message.contains("nonexistent"))
             );
-            assert!(diagnostics.iter().any(|item| item.message.contains("api")));
+            assert!(
+                !diagnostics
+                    .iter()
+                    .any(|item| item.message.contains("Cannot find name 'api'"))
+            );
             let source = "import { ack } from './lib/helpers.js'; ack(2);";
             let hover = configured
                 .hover(
                     TypeScriptDocumentKind::WebSocketAutomation,
-                    6,
+                    8,
                     source.into(),
                     source.rfind("ack").unwrap(),
                 )
@@ -1269,7 +1299,7 @@ mod tests {
                 configured
                     .diagnostics(
                         TypeScriptDocumentKind::WebSocketAutomation,
-                        7,
+                        9,
                         source.into()
                     )
                     .await
@@ -1281,7 +1311,7 @@ mod tests {
             let diagnostics = configured
                 .diagnostics(
                     TypeScriptDocumentKind::WebSocketAutomation,
-                    8,
+                    10,
                     source.into(),
                 )
                 .await

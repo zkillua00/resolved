@@ -58,7 +58,7 @@ pub use script::{
     PostResponseResult, PreRequestResult, ScriptCancellation, ScriptConsoleSession,
     ScriptDiagnostic, ScriptEnvironment, ScriptError, ScriptErrorKind, ScriptLog, ScriptLogLevel,
     ScriptPhase, ScriptReport, ScriptScope, execute_post_response_console_session,
-    execute_post_response_with_chain, execute_pre_request_with_chain,
+    execute_post_response_with_chain, execute_pre_request_with_chain, execute_websocket_script,
 };
 #[allow(unused_imports)]
 pub use secure_store::{CredentialVault, CredentialVaultError, UpstreamCredential};
@@ -119,7 +119,7 @@ pub use websocket::{
     MAX_WEBSOCKET_MESSAGE_BYTES, MAX_WEBSOCKET_TIMELINE_ENTRIES, WebSocketAutomationEvent,
     WebSocketCommand, WebSocketMessageTemplate, WebSocketReplay, WebSocketReplayDirection,
     WebSocketReplayFrame, WebSocketSavedMessage, WebSocketSignal, WebSocketWorkspace,
-    binary_preview, compare_replay_frames, execute_websocket_automation_with_modules,
+    binary_preview, compare_replay_frames,
     render_message_template, run_upstream_websocket_connection, run_websocket_connection,
     template_variable_names, validate_automation_module_name,
 };
@@ -141,3 +141,6 @@ pub use workspace_provider::{
 pub(crate) trait DbStringEnum: Sized {
     fn from_db_str(value: &str) -> Option<Self>;
 }
+
+#[cfg(test)]
+pub use websocket::execute_websocket_automation_with_modules;

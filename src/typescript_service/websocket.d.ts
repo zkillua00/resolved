@@ -19,11 +19,6 @@ declare const ws: {
   log(...values: unknown[]): void;
 };
 
-/** Write messages to the WebSocket console. */
-declare const console: {
-  log(...values: unknown[]): void;
-  info(...values: unknown[]): void;
-  warn(...values: unknown[]): void;
-  error(...values: unknown[]): void;
-  debug(...values: unknown[]): void;
-};
+/** Shared scripting API. Request edits affect only this event's snapshot. */
+declare const api: Resolved.PreRequestApi & Pick<Resolved.PostResponseApi, "test" | "assert">;
+declare const console: Resolved.ScriptConsole;

@@ -155,6 +155,7 @@ declare namespace Resolved {
   }
 
   interface BaseApi {
+    readonly execute: RequestReferences["execute"];
     readonly environment: Environment;
     readonly variables: Variables;
     readonly requests: RequestReferences;

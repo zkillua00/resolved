@@ -58,7 +58,7 @@
     const files = new Map(libraryEntries);
     const versions = new Map();
 
-    if (!websocket) files.set("/resolved-runtime.d.ts", runtimeDeclarations);
+    files.set("/resolved-runtime.d.ts", runtimeDeclarations);
     for (const [fileName, declarations] of declarationEntries) {
       files.set(fileName, declarations);
     }
@@ -66,7 +66,7 @@
     // Dynamic request-reference namespace (from the active workspace's
     // collection tree). Empty until Resolved pushes declarations; it is only
     // populated for the script/plain-snippet projects, never the generators.
-    files.set("/request-namespace.d.ts", websocket ? "" : requestNamespaceDeclarations);
+    files.set("/request-namespace.d.ts", requestNamespaceDeclarations);
     for (const fileName of files.keys()) {
       versions.set(fileName, "0");
     }
@@ -227,6 +227,7 @@
   // projects. The version bump makes the language service revalidate on the
   // next diagnostics/completion request. Generators stay untouched.
   const requestNamespaceProjectKeys = [
+    "websocket-automation",
     "script-pre",
     "script-post",
     "plain-snippet-pre",

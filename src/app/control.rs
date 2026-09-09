@@ -63,6 +63,7 @@ enum ControlWebSocketIncoming {
     SentText(String),
     ScriptLog(String),
     ScriptError(String),
+    EnvironmentMutations(Option<String>, Vec<EnvironmentMutation>),
 }
 
 #[derive(Clone)]
@@ -3396,17 +3397,16 @@ impl ApiTester {
         }));
         let task_automation = automation.clone();
         let automation_environment = self.workspace.active_environment().cloned();
-        let automation_values = automation_environment
-            .as_ref()
-            .map(|environment| {
-                environment
-                    .variables
-                    .iter()
-                    .filter(|variable| variable.enabled)
-                    .map(|variable| (variable.key.clone(), variable.value.clone()))
-                    .collect::<std::collections::BTreeMap<_, _>>()
-            })
-            .unwrap_or_default();
+        let environment_id = self.workspace.active_environment_id.clone();
+        let mut automation_scope = Self::script_scope(automation_environment.as_ref());
+        automation_scope.script_timeout = self.settings.script.timeout();
+        let automation_namespace = self.request_namespace.clone();
+        let mut automation_chainer = self.build_inline_chainer(&environment_id);
+        let automation_request = RequestDraft {
+            url: document.url.clone(),
+            headers: document.headers.clone(),
+            ..Default::default()
+        };
         let automation_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let task_automation_paused = automation_paused.clone();
         let automation_commands = command_sender.clone();
@@ -3447,13 +3447,19 @@ impl ApiTester {
                 };
                 let source = config.source.clone();
                 let modules = config.modules.clone();
-                let values = automation_values.clone();
+                let scope = automation_scope.clone();
+                let namespace = automation_namespace.clone();
+                let chainer = automation_chainer.for_websocket_event();
+                let request = automation_request.clone();
                 let output = tokio::task::spawn_blocking(move || {
-                    execute_websocket_automation_with_modules(
+                    crate::core::execute_websocket_script(
                         &source,
                         &modules,
                         &automation_event,
-                        &values,
+                        &request,
+                        &scope,
+                        &namespace,
+                        Some(&chainer),
                     )
                 })
                 .await;
@@ -3467,6 +3473,24 @@ impl ApiTester {
                 }
                 match output {
                     Ok(Ok(output)) => {
+                        let automation_environment = match automation_chainer
+                            .apply_websocket_environment_mutations(&output.environment_mutations)
+                        {
+                            Ok(environment) => environment,
+                            Err(error) => {
+                                let _ = automation_events
+                                    .send(ControlWebSocketIncoming::ScriptError(error));
+                                continue;
+                            }
+                        };
+                        automation_scope
+                            .environment
+                            .apply_mutations(&output.environment_mutations);
+                        let _ =
+                            automation_events.send(ControlWebSocketIncoming::EnvironmentMutations(
+                                environment_id.clone(),
+                                output.environment_mutations,
+                            ));
                         for log in output.logs {
                             let _ =
                                 automation_events.send(ControlWebSocketIncoming::ScriptLog(log));
@@ -3528,6 +3552,37 @@ impl ApiTester {
                 let Some(this) = weak_this.upgrade() else {
                     break;
                 };
+                if let ControlWebSocketIncoming::EnvironmentMutations(environment_id, mutations) =
+                    &event
+                {
+                    let _ = cx.update(|cx| {
+                        if let Some(handle) =
+                            cx.active_window().or_else(|| cx.windows().first().copied())
+                        {
+                            let _ =
+                                handle.update(cx, |_, window, cx| {
+                                    this.update(cx, |this, cx| {
+                                        if this.mcp_websocket.as_ref().is_some_and(|connection| {
+                                            connection.id == connection_id
+                                        }) {
+                                            if let Err(error) = this.apply_environment_mutations(
+                                                environment_id.as_deref(),
+                                                mutations,
+                                                window,
+                                                cx,
+                                            ) {
+                                                this.handle_control_websocket_event(
+                                                    connection_id,
+                                                    ControlWebSocketIncoming::ScriptError(error),
+                                                );
+                                            }
+                                        }
+                                    })
+                                });
+                        }
+                    });
+                    continue;
+                }
                 let _ = this.update(cx, |this, cx| {
                     this.handle_control_websocket_event(connection_id, event);
                     cx.notify();
@@ -3886,6 +3941,7 @@ impl ApiTester {
                 return;
             }
             match incoming {
+                ControlWebSocketIncoming::EnvironmentMutations(..) => return,
                 ControlWebSocketIncoming::Wire(WebSocketSignal::Connected) => {
                     connection.status = ControlWebSocketStatus::Connected;
                     connection.notice = None;

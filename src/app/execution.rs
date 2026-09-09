@@ -1275,6 +1275,7 @@ impl ApiTester {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct InlineChainRunner {
     workspace: crate::core::Workspace,
     namespace: crate::core::RequestNamespaceCatalog,
@@ -1288,6 +1289,27 @@ pub(super) struct InlineChainRunner {
     runtime: std::sync::Arc<tokio::runtime::Runtime>,
     target: Option<(String, String, reqwest::Url)>,
     limits: crate::core::ChainLimits,
+}
+
+impl InlineChainRunner {
+    pub(super) fn apply_websocket_environment_mutations(
+        &mut self,
+        mutations: &[EnvironmentMutation],
+    ) -> Result<Option<Environment>, String> {
+        let Some(id) = self.environment_id.as_deref() else {
+            return Ok(None);
+        };
+        crate::core::apply_environment_mutations_to_workspace(&mut self.workspace, id, mutations)?;
+        Ok(self.workspace.environment(id).cloned())
+    }
+
+    /// Each WebSocket event owns an independent chain budget and cancellation.
+    pub(super) fn for_websocket_event(&self) -> Self {
+        let mut runner = self.clone();
+        runner.budget = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        runner.chain_cancellation = ScriptCancellation::new();
+        runner
+    }
 }
 
 impl crate::core::InlineChainer for InlineChainRunner {
