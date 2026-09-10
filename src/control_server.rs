@@ -16,8 +16,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc as tokio_mpsc;
 
+#[cfg(not(unix))]
+use std::net::TcpStream as ControlStream;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream as ControlStream;
+
 pub const CONTROL_PROTOCOL_VERSION: u32 = 1;
 const CONTROL_DESCRIPTOR_NAME: &str = "resolved-control.json";
+const CONTROL_IO_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(unix)]
 const CONTROL_SOCKET_NAME: &str = "resolved-control.sock";
 
@@ -133,11 +139,11 @@ impl ControlServer {
                     while !listener_stopping.load(Ordering::Relaxed) {
                         match listener.accept() {
                             Ok((stream, _)) => {
-                                let sender = sender.clone();
-                                let token = listener_token.clone();
-                                let _ = thread::Builder::new()
-                                    .name("resolved-control-client".to_owned())
-                                    .spawn(move || handle_connection(stream, &token, sender));
+                                if let Err(error) = spawn_connection(
+                                    stream, listener_token.clone(), sender.clone(),
+                                ) {
+                                    tracing::warn!(%error, "could not start local control connection");
+                                }
                             }
                             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                                 thread::sleep(Duration::from_millis(25));
@@ -186,11 +192,11 @@ impl ControlServer {
                     while !listener_stopping.load(Ordering::Relaxed) {
                         match listener.accept() {
                             Ok((stream, _)) => {
-                                let sender = sender.clone();
-                                let token = listener_token.clone();
-                                let _ = thread::Builder::new()
-                                    .name("resolved-control-client".to_owned())
-                                    .spawn(move || handle_connection(stream, &token, sender));
+                                if let Err(error) = spawn_connection(
+                                    stream, listener_token.clone(), sender.clone(),
+                                ) {
+                                    tracing::warn!(%error, "could not start local control connection");
+                                }
                             }
                             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                                 thread::sleep(Duration::from_millis(25));
@@ -257,6 +263,23 @@ fn write_descriptor(
     serde_json::to_writer(&mut file, descriptor).map_err(io::Error::other)?;
     file.write_all(b"\n")?;
     file.flush()
+}
+
+fn spawn_connection(
+    stream: ControlStream,
+    token: String,
+    sender: tokio_mpsc::UnboundedSender<ControlCall>,
+) -> io::Result<()> {
+    // Accepted sockets can inherit the listener's nonblocking mode (e.g. macOS).
+    // Only accept is polled: each worker reads a complete frame synchronously.
+    // Configure both transports before handing the stream to that worker.
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(CONTROL_IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_IO_TIMEOUT))?;
+    thread::Builder::new()
+        .name("resolved-control-client".to_owned())
+        .spawn(move || handle_connection(stream, &token, sender))
+        .map(|_| ())
 }
 
 fn handle_connection<S>(
@@ -326,6 +349,117 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delayed_chunked_request_below_limit_reaches_the_app_channel() {
+        let directory = tempfile::tempdir().unwrap();
+        let (_server, receiver) = ControlServer::start(directory.path()).unwrap();
+        let descriptor: Value = serde_json::from_slice(
+            &fs::read(directory.path().join(CONTROL_DESCRIPTOR_NAME)).unwrap(),
+        )
+        .unwrap();
+        let stream = ControlStream::connect(descriptor["endpoint"].as_str().unwrap()).unwrap();
+        assert_delayed_chunked_request(stream, receiver, descriptor["token"].as_str().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_resets_nonblocking_mode_and_sets_io_timeouts() {
+        let (client, server) = ControlStream::pair().unwrap();
+        // Force the inherited state even on systems whose accept returns a
+        // blocking socket, so this regression is also detectable on Linux.
+        server.set_nonblocking(true).unwrap();
+        let socket_options = server.try_clone().unwrap();
+        let (sender, receiver) = tokio_mpsc::unbounded_channel();
+        spawn_connection(server, "test-token".to_owned(), sender).unwrap();
+        assert_eq!(
+            socket_options.read_timeout().unwrap(),
+            Some(CONTROL_IO_TIMEOUT)
+        );
+        assert_eq!(
+            socket_options.write_timeout().unwrap(),
+            Some(CONTROL_IO_TIMEOUT)
+        );
+        drop(socket_options);
+        assert_delayed_chunked_request(client, receiver, "test-token");
+    }
+
+    fn assert_delayed_chunked_request(
+        mut stream: ControlStream,
+        mut receiver: tokio_mpsc::UnboundedReceiver<ControlCall>,
+        token: &str,
+    ) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let params = serde_json::json!({ "replay": "x".repeat(45 * 1024) });
+        let request = serde_json::to_vec(&serde_json::json!({
+            "token": token,
+            "method": "replay",
+            "params": params,
+        }))
+        .unwrap();
+        assert!(request.len() < 1024 * 1024);
+        // Give the polling listener time to accept before the first byte arrives.
+        thread::sleep(Duration::from_millis(100));
+        for chunk in request.chunks(512) {
+            stream
+                .write_all(chunk)
+                .expect("connection must survive gaps between chunks");
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            receiver.try_recv().is_err(),
+            "dispatch requires the newline"
+        );
+        stream.write_all(b"\n").unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let call = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+                .await
+                .expect("complete request dispatched")
+                .expect("server remains available")
+        });
+        assert_eq!(call.method, "replay");
+        assert_eq!(call.params, params);
+        call.respond(ControlResponse::success(
+            serde_json::json!({ "received": true }),
+        ));
+        let mut response = String::new();
+        BufReader::new(stream).read_line(&mut response).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&response).unwrap()["result"]["received"],
+            true
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "request is dispatched exactly once"
+        );
+    }
+
+    #[test]
+    fn incomplete_and_oversized_frames_are_rejected_before_dispatch() {
+        let valid = serde_json::json!({
+            "token": "test-token",
+            "method": "status",
+            "params": {},
+        })
+        .to_string();
+        for frame in [valid.into_bytes(), vec![b' '; 1024 * 1024 + 1]] {
+            let (sender, mut receiver) = tokio_mpsc::unbounded_channel();
+            let error =
+                read_request(&mut io::Cursor::new(frame), "test-token", sender).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains("at most 1 MiB"));
+            assert!(receiver.try_recv().is_err());
+        }
+    }
 
     #[cfg(unix)]
     #[test]
