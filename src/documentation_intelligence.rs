@@ -83,9 +83,22 @@ struct Index {
 }
 
 fn warning(source: &str, range: Range<usize>, message: impl Into<String>) -> Diagnostic {
+    diagnostic(source, range, message, DiagnosticSeverity::WARNING)
+}
+
+fn information(source: &str, range: Range<usize>, message: impl Into<String>) -> Diagnostic {
+    diagnostic(source, range, message, DiagnosticSeverity::INFORMATION)
+}
+
+fn diagnostic(
+    source: &str,
+    range: Range<usize>,
+    message: impl Into<String>,
+    severity: DiagnosticSeverity,
+) -> Diagnostic {
     Diagnostic {
         range: source_range(source, range.start, range.end),
-        severity: Some(DiagnosticSeverity::WARNING),
+        severity: Some(severity),
         source: Some("request-documentation".into()),
         message: message.into(),
         ..Default::default()
@@ -442,7 +455,7 @@ impl DocumentationIntelligence {
                 if !reference.complete {
                     diagnostics.push(warning(source, reference.range.clone(), "Close this resource reference with )."));
                 } else if !self.resources.borrow().0.contains_key(reference.expression(source)) {
-                    diagnostics.push(warning(source, reference.range.clone(), "Resource not found in the current workspace or active environment. Use a literal path from autocomplete."));
+                    diagnostics.push(information(source, reference.range.clone(), "Resource is not currently available in this workspace or active environment. This reference remains text until it resolves."));
                 }
             }
             for annotation in &index.annotations {
@@ -451,18 +464,14 @@ impl DocumentationIntelligence {
                     kind => Some(targets.contains(kind, &annotation.name)),
                 };
                 if found == Some(false) {
-                    diagnostics.push(warning(
+                    diagnostics.push(information(
                         source,
                         annotation.range.clone(),
-                        format!("No matching {:?} field named '{}'. Update this reference if the field was renamed or removed.", annotation.kind, annotation.name),
-                    ));
-                } else if found.is_none() {
-                    diagnostics.push(warning(
-                        source,
-                        annotation.range.clone(),
-                        "Unable to resolve this body path: select the matching JSON/XML body mode and fix any body syntax errors.",
+                        "Not present in the current request. This annotation can document an optional or generated field.",
                     ));
                 }
+                // An unavailable or malformed body is uncertainty, not an
+                // authoring mistake. Keep annotations without per-path notices.
                 if index.annotations.iter().filter(|other| {
                     other.kind == annotation.kind
                         && other.kind.key(&other.name) == annotation.kind.key(&annotation.name)
@@ -913,14 +922,13 @@ mod tests {
         let source = "@body(XML) /request/user/@id User identifier.";
         assert!(intelligence.diagnostics(source).is_empty());
         assert!(
-            intelligence.diagnostics("@body /request JSON is still the default.")[0]
-                .message
-                .starts_with("Unable to resolve")
+            intelligence
+                .diagnostics("@body /request JSON is still the default.")
+                .is_empty()
         );
-        assert!(
-            intelligence.diagnostics("@body(XML) /request/absent Missing.")[0]
-                .message
-                .starts_with("No matching")
+        assert_eq!(
+            intelligence.diagnostics("@body(XML) /request/absent Missing.")[0].severity,
+            Some(DiagnosticSeverity::INFORMATION)
         );
     }
 
@@ -980,33 +988,131 @@ mod tests {
     }
 
     #[test]
-    fn malformed_bodies_never_claim_paths_are_missing_and_cache_tracks_mode() {
+    fn unresolved_bodies_are_quiet_and_cache_tracks_mode() {
         let intelligence = intelligence();
         let source = "@body /absent Description.";
         assert!(intelligence.replace_body(Some(BodyMode::Json), "{}"));
         assert!(!intelligence.replace_body(Some(BodyMode::Json), "{}"));
         assert!(intelligence.body_source_matches("{}"));
-        assert!(
-            intelligence.diagnostics(source)[0]
-                .message
-                .starts_with("No matching")
+        assert_eq!(
+            intelligence.diagnostics(source)[0].severity,
+            Some(DiagnosticSeverity::INFORMATION)
         );
         assert!(intelligence.replace_body(Some(BodyMode::Json), "{"));
         assert!(!intelligence.body_source_matches("{}"));
-        assert!(
-            intelligence.diagnostics(source)[0]
-                .message
-                .starts_with("Unable to resolve")
-        );
+        assert!(intelligence.diagnostics(source).is_empty());
         intelligence.replace_body(Some(BodyMode::Xml), "<root>");
         assert!(
-            intelligence.diagnostics("@body(XML) /root/absent Description.")[0]
-                .message
-                .starts_with("Unable to resolve")
+            intelligence
+                .diagnostics("@body(XML) /root/absent Description.")
+                .is_empty()
         );
         intelligence.replace_body(None, "{}");
         assert!(!intelligence.body_source_matches("{}"));
+        assert!(intelligence.diagnostics(source).is_empty());
         assert!(intelligence.completion_items("@body ", 6).is_empty());
+    }
+
+    #[test]
+    fn valid_absent_targets_are_informational_and_resolve_when_fields_appear() {
+        let intelligence = intelligence();
+        intelligence.replace_body(Some(BodyMode::Json), "{}");
+        let source = "@param query.optional Optional parameter.\n@header X-Optional Optional header.\n@body /filter Valid JSON filter.";
+        let diagnostics = intelligence.diagnostics(source);
+        assert_eq!(diagnostics.len(), 3);
+        assert!(diagnostics.iter().all(|diagnostic| {
+            diagnostic.severity == Some(DiagnosticSeverity::INFORMATION)
+                && diagnostic
+                    .message
+                    .starts_with("Not present in the current request.")
+        }));
+        assert_eq!(
+            intelligence
+                .explanation(source, TargetKind::Body(BodyMode::Json), "/filter")
+                .as_deref(),
+            Some("Valid JSON filter.")
+        );
+        assert!(
+            intelligence
+                .completion_items("@body /filter", 13)
+                .is_empty()
+        );
+        assert!(intelligence.body_explanations(source, 0).is_empty());
+
+        intelligence.replace_targets(Targets::new(
+            ["optional".to_owned()].into_iter(),
+            ["X-Optional".to_owned()].into_iter(),
+        ));
+        let body = r#"{"filter":{}}"#;
+        intelligence.replace_body(Some(BodyMode::Json), body);
+        assert!(intelligence.diagnostics(source).is_empty());
+        assert_eq!(
+            intelligence.body_explanations(source, body.find("filter").unwrap()),
+            ["Valid JSON filter."]
+        );
+        // Best effort never changes the matching rules or guesses a nearby path.
+        intelligence.replace_body(Some(BodyMode::Json), r#"{"filters":{}}"#);
+        assert!(intelligence.body_explanations(source, 2).is_empty());
+        assert_eq!(intelligence.diagnostics(source).len(), 1);
+    }
+
+    #[test]
+    fn authoring_mistakes_remain_warnings_even_when_body_resolution_is_unavailable() {
+        let intelligence = intelligence();
+        for source in [
+            "@param optional Missing query scope.",
+            "@header",
+            "@body filter Missing leading slash.",
+            "@body /filter",
+            "@body(YAML) /filter Unsupported mode.",
+            "@body /bad~2path Invalid pointer escape.",
+            "@body(XML) /root/* Unsupported selector.",
+            "See @Ref(unfinished",
+        ] {
+            let diagnostics = intelligence.diagnostics(source);
+            assert_eq!(diagnostics.len(), 1, "{source}");
+            assert_eq!(
+                diagnostics[0].severity,
+                Some(DiagnosticSeverity::WARNING),
+                "{source}"
+            );
+        }
+        let source = "@body /filter First.\n@body(JSON) /filter Second.";
+        let diagnostics = intelligence.diagnostics(source);
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics.iter().all(|diagnostic| {
+            diagnostic.severity == Some(DiagnosticSeverity::WARNING)
+                && diagnostic.message.starts_with("Multiple explanations")
+        }));
+        assert!(
+            intelligence
+                .explanation(source, TargetKind::Body(BodyMode::Json), "/filter")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unresolved_resources_are_informational_until_the_catalog_resolves_them() {
+        let intelligence = intelligence();
+        let source = "See @Ref(Backend.Auth.Login)";
+        let diagnostics = intelligence.diagnostics(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].severity,
+            Some(DiagnosticSeverity::INFORMATION)
+        );
+        let references = intelligence.references(source);
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].expression(source), "Backend.Auth.Login");
+        *intelligence.resources.borrow_mut() = ReferenceCatalog::from_workspace(
+            &crate::documentation_references::tests::workspace_fixture(),
+        );
+        assert!(intelligence.diagnostics(source).is_empty());
+        intelligence.resources.borrow_mut().0.clear();
+        assert_eq!(
+            intelligence.diagnostics(source)[0].severity,
+            Some(DiagnosticSeverity::INFORMATION)
+        );
     }
 
     #[test]

@@ -112,7 +112,8 @@ prepare_crate \
     "$project_dir/patches/gpui-component-0.5.1-submenu-default-action.patch" \
     "$project_dir/patches/gpui-component-0.5.1-multiline-placeholder-runs.patch" \
     "$project_dir/patches/gpui-component-0.5.1-inline-action-cursor-hitbox.patch" \
-    "$project_dir/patches/gpui-component-0.5.1-idempotent-semantic-highlights.patch"
+    "$project_dir/patches/gpui-component-0.5.1-idempotent-semantic-highlights.patch" \
+    "$project_dir/patches/gpui-component-0.5.1-custom-hover-renderer.patch"
 
 # Compact the largest grammar tables without changing language support.
 prepare_crate \

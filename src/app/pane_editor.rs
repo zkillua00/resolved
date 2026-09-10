@@ -79,8 +79,11 @@ impl PaneEditorState {
             }
         });
         let (documentation, documentation_intelligence) = documentation::new_editor(window, cx);
-        let body_hover =
-            documentation::body_hover_provider(documentation_intelligence.clone(), &documentation);
+        let body_hover = documentation::body_hover_provider(
+            documentation_intelligence.clone(),
+            &documentation,
+            cx.entity().downgrade(),
+        );
         let body = cx.new(|cx| {
             CodeEditor::new(
                 CodeEditorConfig::default()

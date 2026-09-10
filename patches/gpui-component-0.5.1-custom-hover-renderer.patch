@@ -1,0 +1,101 @@
+diff --git a/src/input/lsp/hover.rs b/src/input/lsp/hover.rs
+--- a/src/input/lsp/hover.rs
++++ b/src/input/lsp/hover.rs
+@@ -21,6 +21,18 @@ pub trait HoverProvider {
+         _window: &mut Window,
+         _cx: &mut App,
+     ) -> Task<Result<Option<lsp_types::Hover>>>;
++
++    /// Optionally render hover content instead of the default Markdown.
++    ///
++    /// Called on the provider that supplied this hover, inside the standard popover.
++    fn render_hover(
++        &self,
++        _hover: &lsp_types::Hover,
++        _window: &mut Window,
++        _cx: &mut App,
++    ) -> Option<gpui::AnyElement> {
++        None
++    }
+ }
+ 
+ impl InputState {
+@@ -68,11 +80,19 @@ impl InputState {
+                         let end = editor.text.position_to_offset(&range.end);
+                         symbol_range = start..end;
+                     }
+-                    let hover_popover =
+-                        HoverPopover::new(cx.entity(), symbol_range, offset, &hover, cx);
++                    let hover_popover = HoverPopover::new(
++                        cx.entity(),
++                        symbol_range,
++                        offset,
++                        &hover,
++                        provider,
++                        cx,
++                    );
+                     editor.hover_popover = Some(hover_popover);
++                    cx.notify();
+                 }
+                 None => {
+                     editor.hover_popover = None;
++                    cx.notify();
+                 }
+             });
+diff --git a/src/input/popovers/hover_popover.rs b/src/input/popovers/hover_popover.rs
+--- a/src/input/popovers/hover_popover.rs
++++ b/src/input/popovers/hover_popover.rs
+@@ -9,7 +9,7 @@ use gpui::{
+ };
+ 
+ use crate::{
+-    input::{popovers::render_markdown, InputState},
++    input::{lsp::HoverProvider, popovers::render_markdown, InputState},
+     StyledExt,
+ };
+ 
+@@ -20,6 +20,8 @@ pub struct HoverPopover {
+     /// Original caret-style offset reported by GPUI mouse hit-testing.
+     trigger_offset: usize,
+     pub(crate) hover: Rc<lsp_types::Hover>,
++    /// Keep content rendering paired with the provider that returned the hover.
++    provider: Rc<dyn HoverProvider>,
+ }
+ 
+ impl HoverPopover {
+@@ -28,6 +30,7 @@ impl HoverPopover {
+         symbol_range: Range<usize>,
+         trigger_offset: usize,
+         hover: &lsp_types::Hover,
++        provider: Rc<dyn HoverProvider>,
+         cx: &mut App,
+     ) -> Entity<Self> {
+         let hover = Rc::new(hover.clone());
+@@ -37,6 +40,7 @@ impl HoverPopover {
+             symbol_range,
+             trigger_offset,
+             hover,
++            provider,
+         })
+     }
+ 
+@@ -71,12 +75,18 @@ impl Render for HoverPopover {
+                 .join("\n\n"),
+             lsp_types::HoverContents::Markup(markup) => markup.value,
+         };
++        let provider = self.provider.clone();
++        let hover = self.hover.clone();
+ 
+         Popover::new(
+             "hover-popover",
+             self.editor.clone(),
+             self.symbol_range.clone(),
+-            move |window, cx| render_markdown("message", contents.clone(), window, cx),
++            move |window, cx| {
++                provider.render_hover(&hover, window, cx).unwrap_or_else(|| {
++                    render_markdown("message", contents.clone(), window, cx).into_any_element()
++                })
++            },
+         )
+         .into_any_element()
+     }

@@ -124,8 +124,11 @@ impl ApiTester {
             )
         });
         let (documentation, documentation_intelligence) = documentation::new_editor(window, cx);
-        let body_hover =
-            documentation::body_hover_provider(documentation_intelligence.clone(), &documentation);
+        let body_hover = documentation::body_hover_provider(
+            documentation_intelligence.clone(),
+            &documentation,
+            cx.entity().downgrade(),
+        );
         let body_completion_catalog = Rc::clone(&template_variable_catalog);
         let body = cx.new(|cx| {
             CodeEditor::new(

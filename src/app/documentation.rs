@@ -239,16 +239,19 @@ fn documentation_body_mode(
 pub(super) fn body_hover_provider(
     intelligence: Rc<DocumentationIntelligence>,
     documentation: &Entity<CodeEditor>,
+    owner: WeakEntity<ApiTester>,
 ) -> Rc<dyn gpui_component::input::HoverProvider> {
     Rc::new(BodyHoverProvider {
         intelligence,
         documentation: documentation.downgrade(),
+        owner,
     })
 }
 
 struct BodyHoverProvider {
     intelligence: Rc<DocumentationIntelligence>,
     documentation: WeakEntity<CodeEditor>,
+    owner: WeakEntity<ApiTester>,
 }
 
 impl gpui_component::input::HoverProvider for BodyHoverProvider {
@@ -279,6 +282,18 @@ impl gpui_component::input::HoverProvider for BodyHoverProvider {
             range: None,
         })))
     }
+
+    fn render_hover(
+        &self,
+        hover: &lsp_types::Hover,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Option<gpui::AnyElement> {
+        let lsp_types::HoverContents::Markup(markup) = &hover.contents else {
+            return None;
+        };
+        Some(explanation_content(&markup.value, self.owner.clone(), cx))
+    }
 }
 
 pub(super) fn explanation(
@@ -303,56 +318,61 @@ fn reference_link_style(cx: &App) -> gpui::HighlightStyle {
     }
 }
 
+/// One renderer for body, query, and header explanations. Resolved references
+/// capture resource IDs; activation revalidates them before navigation.
+fn explanation_content(
+    description: &str,
+    owner: WeakEntity<ApiTester>,
+    cx: &App,
+) -> gpui::AnyElement {
+    let catalog = owner
+        .upgrade()
+        .map(|owner| ReferenceCatalog::from_workspace(&owner.read(cx).workspace))
+        .unwrap_or_default();
+    let text = Rc::new(crate::documentation_references::ReferenceText::new(
+        description,
+        &catalog,
+    ));
+    let ranges = text
+        .links
+        .iter()
+        .map(|(range, _, _)| range.clone())
+        .collect::<Vec<_>>();
+    let styled = gpui::StyledText::new(text.text.clone()).with_highlights(
+        ranges
+            .iter()
+            .cloned()
+            .map(|range| (range, reference_link_style(cx))),
+    );
+    div()
+        .debug_selector(|| "documentation-explanation-hover".to_owned())
+        .max_w(px(480.))
+        .child(
+            gpui::InteractiveText::new("documentation-explanation-text", styled).on_click(
+                ranges,
+                move |index, window, cx| {
+                    if let Some(owner) = owner.upgrade() {
+                        let (_, expression, resource) = &text.links[index];
+                        owner.update(cx, |this, cx| {
+                            this.open_documentation_reference(expression, resource, window, cx);
+                        });
+                    }
+                },
+            ),
+        )
+        .into_any_element()
+}
+
 /// Use with `hoverable_tooltip`, so links remain reachable after leaving the field.
-/// Resolve once when opening the hover; navigation revalidates the captured IDs.
 pub(super) fn explanation_tooltip(
     description: String,
     owner: WeakEntity<ApiTester>,
 ) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView {
     move |window, cx| {
-        let catalog = owner
-            .upgrade()
-            .map(|owner| ReferenceCatalog::from_workspace(&owner.read(cx).workspace))
-            .unwrap_or_default();
-        let text = Rc::new(crate::documentation_references::ReferenceText::new(
-            &description,
-            &catalog,
-        ));
+        let description = description.clone();
         let owner = owner.clone();
-        Tooltip::element(move |_, cx| {
-            let ranges = text
-                .links
-                .iter()
-                .map(|(range, _, _)| range.clone())
-                .collect::<Vec<_>>();
-            let styled = gpui::StyledText::new(text.text.clone()).with_highlights(
-                ranges
-                    .iter()
-                    .cloned()
-                    .map(|range| (range, reference_link_style(cx))),
-            );
-            let text = text.clone();
-            let owner = owner.clone();
-            div()
-                .debug_selector(|| "documentation-explanation-hover".to_owned())
-                .max_w(px(480.))
-                .child(
-                    gpui::InteractiveText::new("documentation-explanation-text", styled).on_click(
-                        ranges,
-                        move |index, window, cx| {
-                            if let Some(owner) = owner.upgrade() {
-                                let (_, expression, resource) = &text.links[index];
-                                owner.update(cx, |this, cx| {
-                                    this.open_documentation_reference(
-                                        expression, resource, window, cx,
-                                    );
-                                });
-                            }
-                        },
-                    ),
-                )
-        })
-        .build(window, cx)
+        Tooltip::element(move |_, cx| explanation_content(&description, owner.clone(), cx))
+            .build(window, cx)
     }
 }
 
@@ -414,6 +434,91 @@ pub(super) mod tests {
             panic!("documentation hover uses Markdown");
         };
         Some(markup.value)
+    }
+
+    #[gpui::test]
+    fn body_documentation_hover_links_navigate_without_executing(cx: &mut TestAppContext) {
+        assert_body_hover_link(
+            cx,
+            RawBodyLanguage::Json,
+            r#"{"session_id":"example"}"#,
+            "@body /session_id @Ref([\"AI Chat Admin\"].Auth.Login)",
+        );
+    }
+
+    #[gpui::test]
+    fn xml_body_documentation_hover_links_navigate_without_executing(cx: &mut TestAppContext) {
+        assert_body_hover_link(
+            cx,
+            RawBodyLanguage::Xml,
+            "<session_id/>",
+            "@body(XML) /session_id @Ref([\"AI Chat Admin\"].Auth.Login)",
+        );
+    }
+
+    fn assert_body_hover_link(
+        cx: &mut TestAppContext,
+        language: RawBodyLanguage,
+        source: &'static str,
+        annotation: &'static str,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+        store.initialize().unwrap();
+        let mut app = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            crate::theme::configure(cx);
+            let bindings = shortcuts::capture_base_key_bindings(cx);
+            let view = cx.new(|cx| ApiTester::new_with_database_store(bindings, store, window, cx));
+            let body = view.update(cx, |app, cx| {
+                app.workspace = crate::documentation_references::tests::workspace_fixture();
+                // Exercise bracket-quoted resource names, as in session annotations.
+                app.workspace.collections[0].name = "AI Chat Admin".to_owned();
+                app.raw_body_language = language;
+                app.body
+                    .update(cx, |editor, cx| editor.set_value(source, window, cx));
+                app.documentation
+                    .update(cx, |editor, cx| editor.set_value(annotation, window, cx));
+                app.render_request_panel(cx);
+                app.body.clone()
+            });
+            app = Some(view);
+            // Display the actual installed body editor, not a stand-in tooltip.
+            Root::new(body, window, cx)
+        });
+        let app = app.unwrap();
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_resize(size(px(800.), px(300.)));
+        cx.run_until_parked();
+        // The first line's session_id key follows the line-number gutter.
+        cx.simulate_mouse_move(gpui::point(px(80.), px(10.)), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        cx.run_until_parked();
+        let hover = cx
+            .debug_bounds("documentation-explanation-hover")
+            .expect("body hover uses the shared reference renderer");
+        let link_point = hover.origin + gpui::point(px(10.), hover.size.height / 2.);
+        cx.simulate_mouse_move(link_point, None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("documentation-explanation-hover").is_some(),
+            "body hover stays open while moving onto its link"
+        );
+        cx.simulate_click(link_point, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert_eq!(
+                app.read(cx).request_template(cx).request.url,
+                "https://example.test/login?secret=never-expose-url"
+            );
+            assert!(!app.read(cx).sending);
+        });
     }
 
     #[test]
@@ -480,6 +585,17 @@ pub(super) mod tests {
                 let input = app.documentation.read(cx).input_state();
                 assert!(!input.read(cx).diagnostics().unwrap().is_empty());
 
+                // Losing the ability to resolve the body clears the previous
+                // absent-field notice without changing the annotation.
+                app.body
+                    .update(cx, |editor, cx| editor.set_value("{", window, cx));
+                app.render_request_panel(cx);
+                assert!(input.read(cx).diagnostics().unwrap().is_empty());
+                assert_eq!(
+                    app.documentation.read(cx).value(cx).as_ref(),
+                    "@body(JSON) /name Updated name."
+                );
+
                 app.raw_body_language = RawBodyLanguage::Xml;
                 app.body.update(cx, |editor, cx| {
                     editor.set_value("<request><user id=\"7\"/></request>", window, cx)
@@ -496,6 +612,7 @@ pub(super) mod tests {
                 app.body_mode = BodyMode::None;
                 app.render_request_panel(cx);
                 assert!(body_hover(&app.body, 16, window, cx).is_none());
+                assert!(input.read(cx).diagnostics().unwrap().is_empty());
                 app.body_mode = BodyMode::Raw;
                 app.render_request_panel(cx);
                 assert!(body_hover(&app.body, 16, window, cx).is_some());
