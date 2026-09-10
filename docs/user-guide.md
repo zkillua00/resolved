@@ -49,6 +49,36 @@ in that field are not migrated; annotations are now the only explanation source.
 Body-field and environment-variable annotations, rendered reference pages, and
 automatic rename updates are not part of this first version.
 
+### Resource references
+
+Use case-sensitive `@Ref(...)` inline in Markdown prose to link to another
+Resolved resource:
+
+```markdown
+First open @Ref(Backend.Auth.Login).
+Credentials are configured in @Ref(api.environment["var_name"]).
+```
+
+Type inside `@Ref(` to autocomplete real saved-request paths and active-environment
+variable names. A request path follows the collection/folder/request namespace;
+names that need quoting use bracket notation, for example
+`@Ref(Backend.Auth["Refresh token"])`. Navigation supports saved HTTP and WebSocket
+requests; it never sends or connects them.
+
+Resolved references display an **Open …** action below their line in the editor.
+If a line contains multiple links, the action opens a chooser. Environment links
+open the active environment's editor and focus/scroll to the variable's key,
+without changing the active environment or revealing its value in documentation.
+Existing unsaved-environment guards still apply.
+
+References are literal paths, not JavaScript expressions. Missing, renamed, or
+ambiguous resources receive diagnostics and no Open action. Links are resolved
+against the current workspace and active environment and revalidated when opened.
+Disabled variables can be linked; duplicate variable names are ambiguous.
+Code examples, HTML, and existing Markdown links are not interpreted as resource
+references. No automatic rename rewriting or cross-workspace lookup is performed.
+Currently the supported resource types are saved requests and environment variables.
+
 ## Self-hosted servers
 
 The Login control in the navigation rail connects directly to a self-hosted

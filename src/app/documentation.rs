@@ -1,5 +1,6 @@
 use super::*;
 use crate::documentation_intelligence::{DocumentationIntelligence, TargetKind, Targets};
+use crate::documentation_references::{ReferenceActions, ReferenceCatalog, Resource};
 
 pub(super) fn new_editor(
     window: &mut Window,
@@ -24,7 +25,120 @@ pub(super) fn new_editor(
             cx,
         )
     });
+    let links = intelligence.clone();
+    // Detached subscriptions still end when this editor is dropped, including
+    // secondary-pane sessions. The closure does not retain the editor entity.
+    cx.subscribe_in(
+        &editor,
+        window,
+        move |this, editor, event: &CodeEditorEvent, window, cx| {
+            let CodeEditorEvent::InlineActionRequested { id } = event else {
+                return;
+            };
+            let source = editor.read(cx).value(cx);
+            let target = {
+                let actions = links.reference_actions.borrow();
+                if actions.source != source.as_ref() {
+                    return;
+                }
+                actions.targets.get(id).cloned()
+            };
+            if let Some(targets) = target {
+                if let [(expression, target)] = targets.as_slice() {
+                    this.open_documentation_reference(expression, target, window, cx);
+                } else {
+                    let owner = cx.entity().downgrade();
+                    window.open_dialog(cx, move |dialog, _, _| {
+                        dialog.title("Open reference").child(
+                            v_flex().gap_2().children(targets.iter().enumerate().map(
+                                |(index, (expression, target))| {
+                                    let owner = owner.clone();
+                                    let expression = expression.clone();
+                                    let target = target.clone();
+                                    Button::new(("documentation-reference-choice", index))
+                                        .label(expression.clone())
+                                        .on_click(move |_, window, cx| {
+                                            window.close_dialog(cx);
+                                            if let Some(owner) = owner.upgrade() {
+                                                owner.update(cx, |this, cx| {
+                                                    this.open_documentation_reference(
+                                                        &expression,
+                                                        &target,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                });
+                                            }
+                                        })
+                                },
+                            )),
+                        )
+                    });
+                }
+            }
+        },
+    )
+    .detach();
+    cx.subscribe(&editor, |_, _, event: &InputEvent, cx| {
+        if matches!(event, InputEvent::Change) {
+            cx.notify();
+        }
+    })
+    .detach();
     (editor, intelligence)
+}
+
+impl ApiTester {
+    fn open_documentation_reference(
+        &mut self,
+        expression: &str,
+        expected: &Resource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Revalidate on activation: a remote update or workspace/environment
+        // switch may have happened since this link was rendered.
+        if ReferenceCatalog::from_workspace(&self.workspace)
+            .0
+            .get(expression)
+            != Some(expected)
+        {
+            self.workspace_warning =
+                Some("This documentation reference is no longer available.".into());
+            cx.notify();
+            return;
+        }
+        match expected {
+            Resource::Request { request_id } => {
+                if let Some((collection, _)) = self.workspace.saved_request(request_id) {
+                    self.open_saved_request_tab(
+                        collection.id.clone(),
+                        request_id.clone(),
+                        window,
+                        cx,
+                    );
+                }
+            }
+            Resource::EnvironmentVariable {
+                environment_id,
+                variable_id,
+            } => {
+                self.activate_request_workspace(SidebarTab::Environments, window, cx);
+                self.select_environment(environment_id.clone(), window, cx);
+                if self.selected_environment_id.as_ref() == Some(environment_id) {
+                    if let Some((index, row)) = self
+                        .environment_variables
+                        .iter()
+                        .enumerate()
+                        .find(|(_, row)| &row.id == variable_id)
+                    {
+                        self.environment_variable_scroll.scroll_to_item(index);
+                        row.key.read(cx).focus_handle(cx).focus(window);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Refresh names at the request-surface boundary, covering URL edits, row edits,
@@ -34,6 +148,7 @@ pub(super) fn refresh_targets(
     editor: &Entity<CodeEditor>,
     query: &[QueryParamRow],
     headers: &[HeaderRow],
+    workspace: &Workspace,
     cx: &mut App,
 ) {
     let targets = Targets::new(
@@ -42,9 +157,49 @@ pub(super) fn refresh_targets(
             .iter()
             .map(|row| row.name.read(cx).value().trim().to_owned()),
     );
-    if intelligence.replace_targets(targets) {
+    let resources = ReferenceCatalog::from_workspace(workspace);
+    let resources_changed = *intelligence.resources.borrow() != resources;
+    *intelligence.resources.borrow_mut() = resources;
+    if intelligence.replace_targets(targets) || resources_changed {
         editor.update(cx, |editor, cx| editor.refresh_diagnostics(cx));
     }
+    let source = editor.read(cx).value(cx).to_string();
+    let mut snapshot = ReferenceActions {
+        source: source.clone(),
+        ..Default::default()
+    };
+    for reference in intelligence
+        .references(&source)
+        .into_iter()
+        .filter(|reference| reference.complete)
+    {
+        let expression = reference.expression(&source);
+        if let Some(resource) = intelligence.resources.borrow().0.get(expression) {
+            let row =
+                crate::editor_util::source_position(&source, reference.range.start).line as usize;
+            snapshot
+                .targets
+                .entry(row)
+                .or_default()
+                .push((expression.to_owned(), resource.clone()));
+        }
+    }
+    let actions = snapshot
+        .targets
+        .iter()
+        .map(|(&row, targets)| InputInlineAction {
+            id: row,
+            row,
+            label: if let [(expression, _)] = targets.as_slice() {
+                format!("Open {expression}").into()
+            } else {
+                format!("Open {} references…", targets.len()).into()
+            },
+            placement: InputInlineActionPlacement::After,
+        })
+        .collect();
+    *intelligence.reference_actions.borrow_mut() = snapshot;
+    editor.update(cx, |editor, cx| editor.set_inline_actions(actions, cx));
 }
 
 pub(super) fn explanation(
@@ -84,4 +239,161 @@ pub(super) fn description_cell(
                 .truncate()
                 .child(description.unwrap_or_else(|| "—".to_owned())),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, px, size};
+
+    #[gpui::test]
+    fn documentation_links_navigate_without_executing_and_reject_stale_targets(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+        store.initialize().unwrap();
+        let mut app = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            crate::theme::configure(cx);
+            let bindings = shortcuts::capture_base_key_bindings(cx);
+            let view = cx.new(|cx| ApiTester::new_with_database_store(bindings, store, window, cx));
+            app = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app = app.unwrap();
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_resize(size(px(1200.), px(800.)));
+        let source = "See @Ref(Backend.Auth.Login)\nUses @Ref(api.environment[\"var_name\"])";
+        let input = cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.workspace = crate::documentation_references::tests::workspace_fixture();
+                app.selected_environment_id = None;
+                app.request_pane = RequestPane::Documentation;
+                app.documentation
+                    .update(cx, |editor, cx| editor.set_value(source, window, cx));
+                app.render_request_panel(cx);
+                assert_eq!(
+                    app.documentation_intelligence
+                        .reference_actions
+                        .borrow()
+                        .targets
+                        .len(),
+                    2
+                );
+                let input = app.documentation.read(cx).input_state();
+                assert_eq!(input.read(cx).diagnostics().unwrap().len(), 0);
+                cx.notify();
+                input
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            app.read(cx)
+                .documentation
+                .clone()
+                .update(cx, |editor, cx| editor.set_value("See ", window, cx));
+            input.update(cx, |input, cx| {
+                input.set_cursor_position(lsp_types::Position::new(0, 4), window, cx);
+                input.focus_handle(cx).focus(window);
+            });
+        });
+        cx.simulate_input("@Ref(Backend.Auth.Lo");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("tab");
+        assert_eq!(
+            cx.read(|cx| input.read(cx).value().to_string()),
+            "See @Ref(Backend.Auth.Login)"
+        );
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.documentation
+                    .update(cx, |editor, cx| editor.set_value(source, window, cx));
+                app.render_request_panel(cx);
+            })
+        });
+        cx.run_until_parked();
+        let bounds = cx
+            .debug_bounds("request-documentation-editor")
+            .expect("documentation visible");
+        let line_height = cx.read(|cx| cx.api_theme().classes.editor.font_size * (20. / 13.));
+        cx.simulate_click(
+            bounds.origin + gpui::point(px(100.), line_height * 1.5),
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                assert_eq!(
+                    app.request_template(cx).request.url,
+                    "https://example.test/login?secret=never-expose-url"
+                );
+                assert!(!app.sending, "a reference only opens a request");
+                app.request_pane = RequestPane::Documentation;
+                app.documentation
+                    .update(cx, |editor, cx| editor.set_value(source, window, cx));
+                app.render_request_panel(cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| input.update(cx, |_, cx| cx.emit(InputEvent::InlineAction { id: 1 })));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                assert_eq!(
+                    app.selected_environment_id,
+                    app.workspace.active_environment_id
+                );
+                assert_eq!(app.sidebar_tab, SidebarTab::Environments);
+                let variable = app
+                    .environment_variables
+                    .iter()
+                    .find(|row| row.key.read(cx).value().as_ref() == "var_name")
+                    .unwrap();
+                assert!(variable.key.read(cx).focus_handle(cx).is_focused(window));
+                assert!(!app.sending);
+                // A rendered link must not redirect to a different active environment.
+                let stale = app
+                    .documentation_intelligence
+                    .reference_actions
+                    .borrow()
+                    .targets[&1][0]
+                    .clone();
+                app.workspace.set_active_environment(None).unwrap();
+                app.open_documentation_reference(&stale.0, &stale.1, window, cx);
+                assert!(
+                    app.workspace_warning
+                        .as_deref()
+                        .unwrap()
+                        .contains("no longer available")
+                );
+                // Same-line links share a chooser rather than hiding all but the first.
+                app.workspace = crate::documentation_references::tests::workspace_fixture();
+                app.documentation.update(cx, |editor, cx| {
+                    editor.set_value(
+                        "@Ref(Backend.Auth.Login) and @Ref(api.environment[\"var_name\"])",
+                        window,
+                        cx,
+                    )
+                });
+                app.render_request_panel(cx);
+                assert_eq!(
+                    app.documentation_intelligence
+                        .reference_actions
+                        .borrow()
+                        .targets[&0]
+                        .len(),
+                    2
+                );
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| input.update(cx, |_, cx| cx.emit(InputEvent::InlineAction { id: 0 })));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(window.has_active_dialog(cx));
+            window.close_dialog(cx);
+        });
+    }
 }

@@ -1987,6 +1987,7 @@ impl ApiTester {
             &self.documentation,
             &self.query_params,
             &self.headers,
+            &self.workspace,
             cx,
         );
         let connected = self.websocket_workspace.status == WebSocketConnectionStatus::Connected;

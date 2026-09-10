@@ -1,0 +1,62 @@
+diff --git a/src/input/element.rs b/src/input/element.rs
+--- a/src/input/element.rs
++++ b/src/input/element.rs
+@@ -980,6 +980,7 @@ pub(super) struct PrepaintState {
+     search_match_paths: Vec<(Path<Pixels>, bool)>,
+     document_color_paths: Vec<(Path<Pixels>, Hsla)>,
+     hover_definition_hitbox: Option<Hitbox>,
++    inline_action_cursor_hitbox: Option<Hitbox>,
+     indent_guides_path: Option<Path<Pixels>>,
+     bounds: Bounds<Pixels>,
+     // Inline completion rendering data
+@@ -1123,6 +1124,12 @@ impl Element for TextElement {
+         let text = state.text.clone();
+         let is_empty = text.len() == 0;
+         let placeholder = self.placeholder.clone();
++        // InputState already routes action clicks using the painted action
++        // rectangles. This hitbox only supplies the cursor and must be
++        // registered during prepaint, never during paint.
++        let inline_action_cursor_hitbox = (!state.inline_actions.is_empty()).then(|| {
++            window.insert_hitbox(bounds, HitboxBehavior::Normal)
++        });
+ 
+         let mut bounds = bounds;
+ 
+@@ -1504,6 +1511,7 @@ impl Element for TextElement {
+             search_match_paths,
+             hover_highlight_path,
+             hover_definition_hitbox,
++            inline_action_cursor_hitbox,
+             document_color_paths,
+             indent_guides_path,
+             ghost_first_line,
+@@ -1668,9 +1676,11 @@ impl Element for TextElement {
+                     window,
+                     cx,
+                 );
+-                let hitbox = window.insert_hitbox(action_bounds, HitboxBehavior::Normal);
+-                if hitbox.is_hovered(window) {
+-                    window.set_cursor_style(gpui::CursorStyle::PointingHand, &hitbox);
++                if action_bounds.contains(&window.mouse_position())
++                    && let Some(hitbox) = prepaint.inline_action_cursor_hitbox.as_ref()
++                    && hitbox.is_hovered(window)
++                {
++                    window.set_cursor_style(gpui::CursorStyle::PointingHand, hitbox);
+                 }
+                 prepaint
+                     .last_layout
+@@ -1702,9 +1712,11 @@ impl Element for TextElement {
+                     window,
+                     cx,
+                 );
+-                let hitbox = window.insert_hitbox(action_bounds, HitboxBehavior::Normal);
+-                if hitbox.is_hovered(window) {
+-                    window.set_cursor_style(gpui::CursorStyle::PointingHand, &hitbox);
++                if action_bounds.contains(&window.mouse_position())
++                    && let Some(hitbox) = prepaint.inline_action_cursor_hitbox.as_ref()
++                    && hitbox.is_hovered(window)
++                {
++                    window.set_cursor_style(gpui::CursorStyle::PointingHand, hitbox);
+                 }
+                 prepaint
+                     .last_layout

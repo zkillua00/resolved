@@ -110,7 +110,8 @@ prepare_crate \
     "$project_dir/patches/gpui-component-0.5.1-configurable-active-line.patch" \
     "$project_dir/patches/gpui-component-0.5.1-switch-contrast.patch" \
     "$project_dir/patches/gpui-component-0.5.1-submenu-default-action.patch" \
-    "$project_dir/patches/gpui-component-0.5.1-multiline-placeholder-runs.patch"
+    "$project_dir/patches/gpui-component-0.5.1-multiline-placeholder-runs.patch" \
+    "$project_dir/patches/gpui-component-0.5.1-inline-action-cursor-hitbox.patch"
 
 # Compact the largest grammar tables without changing language support.
 prepare_crate \

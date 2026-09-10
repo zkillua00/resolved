@@ -415,6 +415,7 @@ pub struct ApiTester {
     saved_request_name: Entity<InputState>,
     environment_name: Entity<InputState>,
     environment_variables: Vec<EnvironmentVariableRow>,
+    environment_variable_scroll: ScrollHandle,
     next_variable_row_id: usize,
     pending_delete: Option<PendingDelete>,
     script_variable_catalog: Rc<RefCell<ScriptVariableCatalog>>,

@@ -13,6 +13,7 @@ use lsp_types::{
 };
 use markdown::mdast::Node;
 
+use crate::documentation_references::{Reference, ReferenceActions, ReferenceCatalog, references};
 use crate::editor_util::{clipped_char_boundary, source_range};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +75,7 @@ struct Index {
     lines: Vec<Range<usize>>,
     annotations: Vec<Annotation>,
     diagnostics: Vec<Diagnostic>,
+    references: Vec<Reference>,
 }
 
 fn warning(source: &str, range: Range<usize>, message: impl Into<String>) -> Diagnostic {
@@ -153,6 +155,7 @@ fn encode_name(name: &str) -> String {
 fn parse(source: &str) -> Index {
     let mut index = Index {
         lines: annotation_lines(source),
+        references: references(source),
         ..Default::default()
     };
     for range in index.lines.clone() {
@@ -213,6 +216,8 @@ fn parse(source: &str) -> Index {
 pub struct DocumentationIntelligence {
     targets: RefCell<Targets>,
     parsed: RefCell<(String, Index)>,
+    pub resources: RefCell<ReferenceCatalog>,
+    pub reference_actions: RefCell<ReferenceActions>,
 }
 
 impl DocumentationIntelligence {
@@ -251,10 +256,21 @@ impl DocumentationIntelligence {
         })
     }
 
+    pub fn references(&self, source: &str) -> Vec<Reference> {
+        self.with_index(source, |index| index.references.clone())
+    }
+
     pub fn diagnostics(&self, source: &str) -> Vec<Diagnostic> {
         self.with_index(source, |index| {
             let targets = self.targets.borrow();
             let mut diagnostics = index.diagnostics.clone();
+            for reference in &index.references {
+                if !reference.complete {
+                    diagnostics.push(warning(source, reference.range.clone(), "Close this resource reference with )."));
+                } else if !self.resources.borrow().0.contains_key(reference.expression(source)) {
+                    diagnostics.push(warning(source, reference.range.clone(), "Resource not found in the current workspace or active environment. Use a literal path from autocomplete."));
+                }
+            }
             for annotation in &index.annotations {
                 if !targets.contains(annotation.kind, &annotation.name) {
                     diagnostics.push(warning(
@@ -279,6 +295,35 @@ impl DocumentationIntelligence {
 
     fn completion_items(&self, source: &str, offset: usize) -> Vec<CompletionItem> {
         let offset = clipped_char_boundary(source, offset);
+        if let Some(reference) = self.references(source).into_iter().find(|reference| {
+            reference.expression_range.start <= offset && offset <= reference.expression_range.end
+        }) {
+            let prefix = source[reference.expression_range.start..offset].trim_start();
+            return self
+                .resources
+                .borrow()
+                .0
+                .keys()
+                .filter(|expression| expression.starts_with(prefix))
+                .map(|expression| CompletionItem {
+                    label: expression.clone(),
+                    kind: Some(CompletionItemKind::REFERENCE),
+                    detail: Some("Open a Resolved resource; never executes a request".into()),
+                    text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                        range: source_range(
+                            source,
+                            reference.expression_range.start,
+                            reference.expression_range.end,
+                        ),
+                        new_text: format!(
+                            "{expression}{}",
+                            if reference.complete { "" } else { ")" }
+                        ),
+                    })),
+                    ..Default::default()
+                })
+                .collect();
+        }
         let Some(line_range) = self.with_index(source, |index| {
             index
                 .lines
@@ -296,7 +341,11 @@ impl DocumentationIntelligence {
                 line_range.start,
                 line_range.start + tag_end,
                 before,
-                vec!["@param query.".to_owned(), "@header ".to_owned()],
+                vec![
+                    "@param query.".to_owned(),
+                    "@header ".to_owned(),
+                    "@Ref(".to_owned(),
+                ],
             )
         } else {
             let (kind, scope) = match &line[..tag_end] {
@@ -517,9 +566,41 @@ mod tests {
                 .completion_items(source, source.len())
                 .is_empty()
         );
-        assert_eq!(intelligence.completion_items("@", 1).len(), 2);
+        assert_eq!(intelligence.completion_items("@", 1).len(), 3);
         assert_eq!(intelligence.completion_items("@header ", 8).len(), 2);
         assert_eq!(intelligence.completion_items("@param query.", 13).len(), 3);
+    }
+
+    #[test]
+    fn resource_completion_and_diagnostics_are_literal_and_workspace_scoped() {
+        let intelligence = intelligence();
+        *intelligence.resources.borrow_mut() = ReferenceCatalog::from_workspace(
+            &crate::documentation_references::tests::workspace_fixture(),
+        );
+        let source = "First use @Ref(Backend.Auth.Lo)";
+        let items = intelligence.completion_items(source, source.len() - 1);
+        assert_eq!(items.len(), 1);
+        let Some(CompletionTextEdit::Edit(edit)) = &items[0].text_edit else {
+            panic!("edit");
+        };
+        assert_eq!(edit.new_text, "Backend.Auth.Login");
+        let source = "Uses @Ref(api.environment[\"var";
+        let items = intelligence.completion_items(source, source.len());
+        assert_eq!(items.len(), 1);
+        let Some(CompletionTextEdit::Edit(edit)) = &items[0].text_edit else {
+            panic!("edit");
+        };
+        assert_eq!(edit.new_text, "api.environment[\"var_name\"])");
+        let source = "@Ref(Backend.Auth.Login)\n@Ref(api.environment[\"var_name\"])";
+        assert!(intelligence.diagnostics(source).is_empty());
+        *intelligence.resources.borrow_mut() = ReferenceCatalog::default();
+        assert_eq!(intelligence.diagnostics(source).len(), 2);
+        assert_eq!(
+            intelligence
+                .diagnostics("@Ref(api.environment[compute()])")
+                .len(),
+            1
+        );
     }
 
     #[test]

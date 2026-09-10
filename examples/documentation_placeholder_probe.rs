@@ -13,7 +13,7 @@ use gpui::{
 };
 use gpui_component::{
     Root,
-    input::{Input, InputState},
+    input::{Input, InputInlineAction, InputInlineActionPlacement, InputState},
 };
 
 const DOCUMENTATION_PLACEHOLDER: &str = "Markdown notes\n\n@param query.limit Maximum records per page.\n@header Authorization Token obtained from Login.\n\nType @ at the start of a line to reference a field.";
@@ -70,6 +70,7 @@ fn main() {
             for (placeholder, value) in [
                 (DOCUMENTATION_PLACEHOLDER, ""),
                 (DOCUMENTATION_PLACEHOLDER, "@header Authorization Token."),
+                (DOCUMENTATION_PLACEHOLDER, "@Ref(Backend.Auth.Login)"),
                 (DOCUMENTATION_PLACEHOLDER, ""),
                 ("\nRésumé 🔎\n\n@param query.标签 Unicode.\n", ""),
                 ("\r\nRésumé 🔎\r\n\r\n@param query.标签 Unicode.\r\n", ""),
@@ -83,6 +84,19 @@ fn main() {
                             probe.editor.update(cx, |editor, cx| {
                                 editor.set_placeholder(placeholder, window, cx);
                                 editor.set_value(value, window, cx);
+                                editor.set_inline_actions(
+                                    if value.starts_with("@Ref(") {
+                                        vec![InputInlineAction {
+                                            id: 0,
+                                            row: 0,
+                                            label: "Open Backend.Auth.Login".into(),
+                                            placement: InputInlineActionPlacement::After,
+                                        }]
+                                    } else {
+                                        Vec::new()
+                                    },
+                                    cx,
+                                );
                             });
                             probe.show_documentation = true;
                             probe.rendered = false;

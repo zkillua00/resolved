@@ -7,6 +7,7 @@ impl ApiTester {
             &self.documentation,
             &self.query_params,
             &self.headers,
+            &self.workspace,
             cx,
         );
         let header_count = self.request_header_count(cx);
@@ -92,7 +93,12 @@ impl ApiTester {
                         },
                     )
                     .when(self.request_pane == RequestPane::Documentation, |this| {
-                        this.child(self.documentation.clone())
+                        this.child(
+                            div()
+                                .debug_selector(|| "request-documentation-editor".to_owned())
+                                .size_full()
+                                .child(self.documentation.clone()),
+                        )
                     })
                     .when(self.request_pane == RequestPane::Params, |this| {
                         this.child(self.render_query_params_editor(cx))

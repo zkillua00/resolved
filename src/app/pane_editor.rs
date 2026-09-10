@@ -832,6 +832,7 @@ impl ApiTester {
             &session.documentation,
             &session.query_params,
             &session.headers,
+            &self.workspace,
             cx,
         );
         let header_count = session

@@ -245,6 +245,16 @@ pub struct RequestNamespaceCatalog {
 impl RequestNamespaceCatalog {
     /// Builds a catalog from a [`Workspace`] snapshot, in collection order.
     pub fn from_workspace(workspace: &Workspace) -> Self {
+        Self::build(workspace, false)
+    }
+
+    /// Navigation shares script path/ambiguity rules, but can open WebSocket
+    /// documents too. This catalog is not used for script execution.
+    pub fn for_navigation(workspace: &Workspace) -> Self {
+        Self::build(workspace, true)
+    }
+
+    fn build(workspace: &Workspace, include_websockets: bool) -> Self {
         let mut catalog = Self::default();
         let mut root_names: BTreeMap<String, usize> = BTreeMap::new();
 
@@ -258,7 +268,7 @@ impl RequestNamespaceCatalog {
                 continue;
             }
 
-            let root = build_collection_namespace(collection, &mut catalog.notices);
+            let root = build_collection_namespace(collection, &mut catalog.notices, include_websockets);
 
             if let Some(&first_index) = root_names.get(&collection.name) {
                 catalog.notices.push(format!(
@@ -414,6 +424,7 @@ fn emit_members(buffer: &mut String, node: &RequestNamespaceNode, indent: usize)
 fn build_collection_namespace(
     collection: &Collection,
     notices: &mut Vec<String>,
+    include_websockets: bool,
 ) -> RequestNamespaceNode {
     let mut children = Vec::new();
     let mut folders = collection
@@ -426,14 +437,14 @@ fn build_collection_namespace(
 
     for folder in folders {
         children.push(build_folder_namespace(
-            collection, folder, &base_path, notices,
+            collection, folder, &base_path, notices, include_websockets,
         ));
     }
 
     let mut requests = collection
         .requests
         .iter()
-        .filter(|request| request.folder_id.is_none() && !request.definition.is_websocket())
+        .filter(|request| request.folder_id.is_none() && (include_websockets || !request.definition.is_websocket()))
         .collect::<Vec<_>>();
     requests.sort_by(|a, b| a.name.cmp(&b.name));
     for request in requests {
@@ -456,6 +467,7 @@ fn build_folder_namespace(
     folder: &CollectionFolder,
     path: &[String],
     notices: &mut Vec<String>,
+    include_websockets: bool,
 ) -> RequestNamespaceNode {
     let mut own_path = path.to_vec();
     own_path.push(folder.name.clone());
@@ -470,7 +482,7 @@ fn build_folder_namespace(
     child_folders.sort_by(|a, b| a.name.cmp(&b.name));
     for child in child_folders {
         children.push(build_folder_namespace(
-            collection, child, &own_path, notices,
+            collection, child, &own_path, notices, include_websockets,
         ));
     }
 
@@ -479,7 +491,7 @@ fn build_folder_namespace(
         .iter()
         .filter(|request| {
             request.folder_id.as_deref() == Some(folder.id.as_str())
-                && !request.definition.is_websocket()
+                && (include_websockets || !request.definition.is_websocket())
         })
         .collect::<Vec<_>>();
     requests.sort_by(|a, b| a.name.cmp(&b.name));

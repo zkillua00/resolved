@@ -89,6 +89,7 @@ impl ApiTester {
             .child(
                 v_flex()
                     .id("environment-variable-scroll")
+                    .track_scroll(&self.environment_variable_scroll)
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()

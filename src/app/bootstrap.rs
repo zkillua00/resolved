@@ -1083,6 +1083,7 @@ impl ApiTester {
             saved_request_name,
             environment_name,
             environment_variables,
+            environment_variable_scroll: ScrollHandle::default(),
             next_variable_row_id: 0,
             pending_delete: None,
             script_variable_catalog,
