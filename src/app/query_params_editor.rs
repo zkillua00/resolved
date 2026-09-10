@@ -42,27 +42,7 @@ impl ApiTester {
                             ),
                     ),
             )
-            .child(
-                h_flex()
-                    .h(px(34.))
-                    .w_full()
-                    .flex_shrink_0()
-                    .bg(cx.api_surface_low())
-                    .text_xs()
-                    .font_semibold()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(div().w(px(44.)).child(""))
-                    .child(query_param_heading("KEY", cx))
-                    .child(query_param_heading("VALUE", cx))
-                    .child(query_param_heading("DESCRIPTION", cx))
-                    .child(
-                        div()
-                            .w(px(44.))
-                            .h_full()
-                            .border_l_1()
-                            .border_color(cx.api_outline_variant()),
-                    ),
-            )
+            .child(query_param_columns(cx))
             .child(
                 v_flex()
                     .id("query-param-rows")
@@ -136,6 +116,7 @@ impl ApiTester {
             )
             .child(
                 query_param_input_cell(&row.key, cx)
+                    .debug_selector(|| "query-param-key-cell".to_owned())
                     .id(("query-param-key-description", id))
                     .when_some(description.clone(), |this, description| {
                         this.hoverable_tooltip(documentation::explanation_tooltip(
@@ -144,7 +125,10 @@ impl ApiTester {
                         ))
                     }),
             )
-            .child(query_param_input_cell(&row.value, cx))
+            .child(
+                query_param_input_cell(&row.value, cx)
+                    .debug_selector(|| "query-param-value-cell".to_owned()),
+            )
             .child(documentation::description_cell(
                 format!("query-description-{id}").into(),
                 description,
@@ -175,31 +159,55 @@ impl ApiTester {
     }
 }
 
-fn query_param_heading(label: &'static str, cx: &App) -> impl IntoElement {
+pub(super) fn query_param_columns(cx: &App) -> impl IntoElement {
+    h_flex()
+        .h(px(34.))
+        .w_full()
+        .flex_shrink_0()
+        .bg(cx.api_surface_low())
+        .text_xs()
+        .font_semibold()
+        .text_color(cx.theme().muted_foreground)
+        .child(div().w(px(44.)).flex_shrink_0())
+        .child(query_param_heading("KEY", cx))
+        .child(query_param_heading("VALUE", cx))
+        .child(query_param_heading("DESCRIPTION", cx))
+        .child(
+            div()
+                .w(px(44.))
+                .h_full()
+                .flex_shrink_0()
+                .border_l_1()
+                .border_color(cx.api_outline_variant()),
+        )
+}
+
+/// Flex distributes the content width before padding. Keep padding on children
+/// so headings, inputs, and descriptions use identical column geometry.
+pub(super) fn query_param_cell(cx: &App) -> gpui::Div {
     div()
         .flex_1()
         .min_w_0()
         .h_full()
-        .px_3()
         .border_l_1()
         .border_color(cx.api_outline_variant())
         .flex()
         .items_center()
-        .child(label)
+        .overflow_hidden()
 }
 
-fn query_param_input_cell(input: &Entity<InputState>, cx: &App) -> gpui::Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .h_full()
-        .border_l_1()
-        .border_color(cx.api_outline_variant())
-        .child(
-            Input::new(input)
-                .appearance(false)
-                .small()
-                .size_full()
-                .px_3(),
-        )
+fn query_param_heading(label: &'static str, cx: &App) -> impl IntoElement {
+    query_param_cell(cx)
+        .debug_selector(move || format!("query-param-heading-{label}"))
+        .child(div().px_3().truncate().child(label))
+}
+
+pub(super) fn query_param_input_cell(input: &Entity<InputState>, cx: &App) -> gpui::Div {
+    query_param_cell(cx).child(
+        Input::new(input)
+            .appearance(false)
+            .small()
+            .size_full()
+            .px_3(),
+    )
 }

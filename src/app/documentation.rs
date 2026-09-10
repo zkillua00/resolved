@@ -385,23 +385,18 @@ pub(super) fn description_cell(
     let tooltip = description
         .clone()
         .unwrap_or_else(|| "Add an @param query.<name> explanation in Documentation.".to_owned());
-    div()
+    query_params_editor::query_param_cell(cx)
         .id(id)
-        .flex_1()
-        .min_w_0()
-        .h_full()
-        .px_3()
-        .border_l_1()
-        .border_color(cx.api_outline_variant())
-        .flex()
-        .items_center()
+        .debug_selector(|| "query-param-description-cell".to_owned())
         .text_xs()
         .text_color(cx.theme().muted_foreground)
         .hoverable_tooltip(explanation_tooltip(tooltip, cx.entity().downgrade()))
         .child(
-            div()
-                .truncate()
-                .child(description.unwrap_or_else(|| "—".to_owned())),
+            div().w_full().min_w_0().px_3().child(
+                div()
+                    .truncate()
+                    .child(description.unwrap_or_else(|| "—".to_owned())),
+            ),
         )
 }
 

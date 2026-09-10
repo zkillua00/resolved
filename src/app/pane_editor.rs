@@ -1079,19 +1079,7 @@ impl ApiTester {
                     && (!input_text_is_blank(&row.key, cx) || !input_text_is_blank(&row.value, cx))
             })
             .count();
-        let columns = h_flex()
-            .h(px(34.))
-            .w_full()
-            .flex_shrink_0()
-            .bg(cx.api_surface_low())
-            .text_xs()
-            .font_semibold()
-            .text_color(cx.theme().muted_foreground)
-            .child(div().w(px(44.)))
-            .child(pane_query_param_heading("KEY", cx))
-            .child(pane_query_param_heading("VALUE", cx))
-            .child(pane_query_param_heading("DESCRIPTION", cx))
-            .child(div().w(px(44.)));
+        let columns = query_params_editor::query_param_columns(cx);
         let rows =
             session
                 .query_params
@@ -1117,6 +1105,7 @@ impl ApiTester {
                             div()
                                 .w(px(44.))
                                 .h_full()
+                                .flex_shrink_0()
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -1136,8 +1125,11 @@ impl ApiTester {
                                 ),
                         )
                         .child(
-                            pane_query_param_input(&row.key, cx)
-                                .id(SharedString::from(format!("{key}-query-key-description-{id}")))
+                            query_params_editor::query_param_input_cell(&row.key, cx)
+                                .debug_selector(|| "query-param-key-cell".to_owned())
+                                .id(SharedString::from(format!(
+                                    "{key}-query-key-description-{id}"
+                                )))
                                 .when_some(description.clone(), |this, description| {
                                     this.hoverable_tooltip(documentation::explanation_tooltip(
                                         description,
@@ -1145,7 +1137,10 @@ impl ApiTester {
                                     ))
                                 }),
                         )
-                        .child(pane_query_param_input(&row.value, cx))
+                        .child(
+                            query_params_editor::query_param_input_cell(&row.value, cx)
+                                .debug_selector(|| "query-param-value-cell".to_owned()),
+                        )
                         .child(documentation::description_cell(
                             format!("{key}-query-description-{id}").into(),
                             description,
@@ -1155,6 +1150,9 @@ impl ApiTester {
                             div()
                                 .w(px(44.))
                                 .h_full()
+                                .flex_shrink_0()
+                                .border_l_1()
+                                .border_color(cx.api_outline_variant())
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -1918,35 +1916,6 @@ impl ApiTester {
     }
 }
 
-fn pane_query_param_heading(label: &'static str, cx: &App) -> impl IntoElement {
-    div()
-        .flex_1()
-        .min_w_0()
-        .h_full()
-        .px_3()
-        .border_l_1()
-        .border_color(cx.api_outline_variant())
-        .flex()
-        .items_center()
-        .child(label)
-}
-
-fn pane_query_param_input(input: &Entity<InputState>, cx: &App) -> gpui::Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .h_full()
-        .border_l_1()
-        .border_color(cx.api_outline_variant())
-        .child(
-            Input::new(input)
-                .appearance(false)
-                .small()
-                .size_full()
-                .px_3(),
-        )
-}
-
 fn status_color(status: u16, cx: &App) -> Hsla {
     match status {
         200..=299 => cx.theme().success,
@@ -2510,6 +2479,139 @@ mod tests {
     use super::*;
     use gpui::{TestAppContext, px, size};
     use std::time::Duration;
+
+    struct QueryTableTestView {
+        app: Entity<ApiTester>,
+        secondary: Option<PaneId>,
+    }
+
+    impl Render for QueryTableTestView {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.app.update(cx, |app, cx| match self.secondary {
+                Some(pane_id) => app.render_pane_query_params_editor(
+                    app.pane_editors.get(&pane_id).unwrap(),
+                    pane_id,
+                    cx,
+                ),
+                None => app.render_query_params_editor(cx),
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn query_param_columns_align_in_primary_and_secondary_tables(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+        store.initialize().unwrap();
+        let mut handles = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            crate::theme::configure(cx);
+            let bindings = shortcuts::capture_base_key_bindings(cx);
+            let app = cx.new(|cx| ApiTester::new_with_database_store(bindings, store, window, cx));
+            let pane_id = app.update(cx, |app, cx| {
+                let primary = app.panes.panes()[0].id();
+                let secondary = app
+                    .panes
+                    .split_off_pane(primary, SplitDirection::Vertical, true)
+                    .unwrap();
+                let session = PaneEditorState::new(
+                    secondary,
+                    app.request_tabs.active_tab_id().clone(),
+                    window,
+                    cx,
+                );
+                app.pane_editors.insert(secondary, session);
+                secondary
+            });
+            let table = cx.new(|_| QueryTableTestView {
+                app: app.clone(),
+                secondary: None,
+            });
+            handles = Some((app, table.clone(), pane_id));
+            Root::new(table, window, cx)
+        });
+        let (app, table, pane_id) = handles.unwrap();
+        // The many-row case also exercises the scrolling body beneath a fixed header.
+        for (populated, count) in [(false, 1), (true, 12)] {
+            cx.update(|window, cx| {
+                app.update(cx, |app, cx| {
+                    app.query_params.clear();
+                    let key = if populated { "filter" } else { "" };
+                    let value = if populated {
+                        "long query value ".repeat(30)
+                    } else {
+                        String::new()
+                    };
+                    let markdown = if populated {
+                        format!("@param query.filter {}", "Long explanation ".repeat(30))
+                    } else {
+                        String::new()
+                    };
+                    app.documentation.update(cx, |editor, cx| {
+                        editor.set_value(markdown.clone(), window, cx)
+                    });
+                    for index in 0..count {
+                        app.push_query_param_row(key, value.clone(), index % 2 == 0, window, cx);
+                    }
+                    let session = app.pane_editors.get_mut(&pane_id).unwrap();
+                    session.query_params.clear();
+                    session
+                        .documentation
+                        .update(cx, |editor, cx| editor.set_value(markdown, window, cx));
+                    for index in 0..count {
+                        session.push_query_param_row(
+                            pane_id,
+                            key,
+                            value.clone(),
+                            index % 2 == 0,
+                            window,
+                            cx,
+                        );
+                    }
+                });
+            });
+            for secondary in [None, Some(pane_id)] {
+                cx.update(|_, cx| {
+                    table.update(cx, |table, cx| {
+                        table.secondary = secondary;
+                        cx.notify();
+                    })
+                });
+                for width in [1064., 480., 320.] {
+                    cx.simulate_resize(size(px(width), px(260.)));
+                    cx.run_until_parked();
+                    let mut previous_width = None;
+                    for (heading, row) in [
+                        ("query-param-heading-KEY", "query-param-key-cell"),
+                        ("query-param-heading-VALUE", "query-param-value-cell"),
+                        (
+                            "query-param-heading-DESCRIPTION",
+                            "query-param-description-cell",
+                        ),
+                    ] {
+                        let header = cx.debug_bounds(heading).expect("header laid out");
+                        let cell = cx.debug_bounds(row).expect("row laid out");
+                        assert!(
+                            (header.left() - cell.left()).abs() <= px(1.),
+                            "{heading} left edge differs at width {width}, secondary={secondary:?}, populated={populated}: {header:?} vs {cell:?}"
+                        );
+                        assert!(
+                            (header.right() - cell.right()).abs() <= px(1.),
+                            "{heading} right edge differs at width {width}: {header:?} vs {cell:?}"
+                        );
+                        if let Some(previous) = previous_width {
+                            assert!(
+                                (header.size.width - previous).abs() <= px(1.),
+                                "columns must be equal width"
+                            );
+                        }
+                        previous_width = Some(header.size.width);
+                    }
+                }
+            }
+        }
+    }
 
     #[gpui::test]
     fn body_documentation_is_scoped_to_each_pane_session(cx: &mut TestAppContext) {
