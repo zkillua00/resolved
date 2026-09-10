@@ -7,6 +7,7 @@ impl ApiTester {
             &self.documentation,
             &self.query_params,
             &self.headers,
+            Some((self.body_mode, self.raw_body_language, &self.body)),
             &self.workspace,
             cx,
         );

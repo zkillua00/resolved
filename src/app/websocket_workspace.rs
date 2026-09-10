@@ -1987,6 +1987,7 @@ impl ApiTester {
             &self.documentation,
             &self.query_params,
             &self.headers,
+            None,
             &self.workspace,
             cx,
         );

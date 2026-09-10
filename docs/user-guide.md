@@ -10,7 +10,7 @@ see the [README](../README.md). For builds and packaging, see
 
 Write explanations in the request's **Documentation** tab. Start a line with `@`
 to autocomplete an annotation, then complete a name from the request's current
-query parameters or headers:
+query parameters, headers, or JSON/XML request body:
 
 ```markdown
 # Search users
@@ -30,8 +30,8 @@ are not copied into request fields.
 - Annotations must start at column zero in an ordinary, top-level Markdown
   paragraph. Code blocks (including unfinished fences), inline code, lists,
   blockquotes, and HTML examples are not interpreted as annotations.
-- An explanation occupies the rest of its line. Hovers display its text with
-  resolved `@Ref(...)` references as clickable resource names. Move onto the
+- An explanation occupies the rest of its line. Query/header hovers display its
+  text with resolved `@Ref(...)` references as clickable resource names. Move onto the
   hover to click a link; missing references remain literal and non-clickable.
   Use ordinary Markdown elsewhere for longer notes.
 - Query names are case-sensitive; header names are case-insensitive. Repeated
@@ -48,8 +48,47 @@ are not copied into request fields.
 
 This alpha replaces the old editable query-description field. Existing values
 in that field are not migrated; annotations are now the only explanation source.
-Body-field and environment-variable annotations, rendered reference pages, and
-automatic rename updates are not part of this first version.
+Environment-variable annotations, rendered reference pages, and automatic rename
+updates are not supported.
+
+### JSON and XML body fields
+
+Select **Raw** body mode and the **JSON** or **XML** language, then document
+fields in the Documentation tab:
+
+```markdown
+@body /user/name Display name.
+@body(JSON) /items/0/sku SKU of the first item.
+@body "/user/display name" A key containing whitespace.
+@body(XML) /request/user/name Display name.
+@body(XML) /request/user/@id Unique user identifier.
+```
+
+- `@body` always means JSON. Explicit modes are case-insensitive (`JSON`, `json`);
+  paths remain case-sensitive. The mode must match the selected body language.
+- JSON uses JSON Pointer: `/` separates keys, arrays use zero-based indices,
+  `~1` represents a literal `/`, and `~0` represents a literal `~` in a key.
+  Use `@body "" Explanation.` for the whole JSON value, and `/` for an empty key.
+- XML uses absolute element paths and a final `/@attribute` for attributes.
+  Unindexed paths describe all matching repeated elements. Names use the literal
+  namespace prefix written in the body, for example `/soap:Envelope/soap:Body`.
+  This is not a full XPath engine: predicates, wildcards, and descendant selectors
+  are unsupported. Dots remain literal parts of XML names.
+- Autocomplete suggests paths from the current body without exposing field values.
+  Hover over JSON keys/values or XML opening tag/attribute names to read their
+  explanations. Body hovers render Markdown; `@Ref(...)` navigation remains in
+  the Documentation editor. Duplicate explanations have no winner.
+- Resolution uses the literal body currently shown in the editor, not substituted
+  environment variables or a previous response. Editing the body refreshes targets;
+  documentation never changes the outgoing request.
+- Missing paths are diagnosed only when the body can be completely understood.
+  An incomplete or invalid body, or an incompatible body mode, instead reports
+  that the path cannot be resolved. Confidently discovered fields may still be
+  suggested while editing.
+
+Body annotations are request-local and work independently in split panes.
+Form and multipart bodies are planned for v2; YAML and CSV for v3. Custom parsers
+and schema-dependent binary formats are not supported.
 
 ### Resource references
 
@@ -73,7 +112,7 @@ open the active environment's editor and focus/scroll to the variable's key,
 without changing the active environment or revealing its value in documentation.
 Existing unsaved-environment guards still apply.
 
-The editor highlights annotation tags (`@param`, `@header`), their field names,
+The editor highlights annotation tags (`@param`, `@header`, `@body`), their field names,
 and reference syntax over the normal Markdown highlighting. Resolved reference
 paths use an underlined link color; unresolved paths keep their diagnostics.
 Explanation prose retains normal Markdown highlighting. These overlays and

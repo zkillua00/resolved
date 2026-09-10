@@ -78,6 +78,9 @@ impl PaneEditorState {
                 this.pane_sync_query_params_from_url(pane_id, window, cx);
             }
         });
+        let (documentation, documentation_intelligence) = documentation::new_editor(window, cx);
+        let body_hover =
+            documentation::body_hover_provider(documentation_intelligence.clone(), &documentation);
         let body = cx.new(|cx| {
             CodeEditor::new(
                 CodeEditorConfig::default()
@@ -91,12 +94,20 @@ impl PaneEditorState {
                     .context_menu_builder(snippet_context_menu_builder(
                         snippet_menu_owner.clone(),
                         SnippetMenuSurface::RequestBody,
-                    )),
+                    ))
+                    .hover_provider(body_hover),
                 window,
                 cx,
             )
         });
-        let (documentation, documentation_intelligence) = documentation::new_editor(window, cx);
+        // Body intelligence is refreshed at the request-panel boundary, so a
+        // secondary editor change must invalidate that parent surface as well.
+        cx.subscribe(&body, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
         let pre_request_script = cx.new(|cx| {
             CodeEditor::new(
                 CodeEditorConfig::default()
@@ -832,6 +843,7 @@ impl ApiTester {
             &session.documentation,
             &session.query_params,
             &session.headers,
+            Some((session.body_mode, session.raw_body_language, &session.body)),
             &self.workspace,
             cx,
         );
@@ -2495,6 +2507,77 @@ mod tests {
     use super::*;
     use gpui::{TestAppContext, px, size};
     use std::time::Duration;
+
+    #[gpui::test]
+    fn body_documentation_is_scoped_to_each_pane_session(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+        store.initialize().unwrap();
+        let mut app = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            crate::theme::configure(cx);
+            let bindings = shortcuts::capture_base_key_bindings(cx);
+            let view = cx.new(|cx| ApiTester::new_with_database_store(bindings, store, window, cx));
+            app = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app = app.unwrap();
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                let primary_id = app.panes.panes()[0].id();
+                let secondary_id = app
+                    .panes
+                    .split_off_pane(primary_id, SplitDirection::Vertical, true)
+                    .expect("split primary pane");
+                let tab_id = app.request_tabs.active_tab_id().clone();
+                let session = PaneEditorState::new(secondary_id, tab_id, window, cx);
+                let source = r#"{"name":"{{name}}"}"#;
+                app.body
+                    .update(cx, |editor, cx| editor.set_value(source, window, cx));
+                session
+                    .body
+                    .update(cx, |editor, cx| editor.set_value(source, window, cx));
+                app.documentation.update(cx, |editor, cx| {
+                    editor.set_value("@body /name Primary name.", window, cx)
+                });
+                session.documentation.update(cx, |editor, cx| {
+                    editor.set_value("@body /name Secondary name.", window, cx)
+                });
+                app.pane_editors.insert(secondary_id, session);
+                app.render_request_panel(cx);
+                app.render_pane_request_panel(secondary_id, cx);
+                let offset = source.find("{{").unwrap();
+                let session = app.pane_editors.get(&secondary_id).unwrap();
+                assert_eq!(
+                    documentation::tests::body_hover(&app.body, offset, window, cx).as_deref(),
+                    Some("Primary name."),
+                );
+                assert_eq!(
+                    documentation::tests::body_hover(&session.body, offset, window, cx).as_deref(),
+                    Some("Secondary name."),
+                );
+                session.body.update(cx, |editor, cx| {
+                    editor.set_value(r#"{"other":"value"}"#, window, cx)
+                });
+                assert!(
+                    documentation::tests::body_hover(&session.body, offset, window, cx).is_none()
+                );
+                app.render_pane_request_panel(secondary_id, cx);
+                let session = app.pane_editors.get(&secondary_id).unwrap();
+                assert!(
+                    session
+                        .documentation_intelligence
+                        .body_explanations("@body /name Secondary name.", offset)
+                        .is_empty()
+                );
+                assert_eq!(
+                    documentation::tests::body_hover(&app.body, offset, window, cx).as_deref(),
+                    Some("Primary name."),
+                );
+            });
+        });
+    }
 
     fn template_with_content() -> RequestTemplate {
         RequestTemplate {

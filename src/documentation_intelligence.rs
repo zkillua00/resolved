@@ -13,6 +13,7 @@ use lsp_types::{
 };
 use markdown::mdast::Node;
 
+use crate::documentation_body::{BodyMode, BodyTargets, valid_path};
 use crate::documentation_references::{Reference, ReferenceActions, ReferenceCatalog, references};
 use crate::editor_util::{clipped_char_boundary, source_range};
 
@@ -20,12 +21,13 @@ use crate::editor_util::{clipped_char_boundary, source_range};
 pub enum TargetKind {
     Query,
     Header,
+    Body(BodyMode),
 }
 
 impl TargetKind {
     fn key(self, name: &str) -> String {
         match self {
-            Self::Query => name.to_owned(),
+            Self::Query | Self::Body(_) => name.to_owned(),
             Self::Header => name.to_ascii_lowercase(),
         }
     }
@@ -54,6 +56,7 @@ impl Targets {
         match kind {
             TargetKind::Query => &self.query,
             TargetKind::Header => &self.headers,
+            TargetKind::Body(_) => unreachable!("body targets are resolved by format adapters"),
         }
     }
 
@@ -143,13 +146,38 @@ fn name_token(text: &str) -> Option<(String, usize)> {
 }
 
 fn encode_name(name: &str) -> String {
-    if name
-        .chars()
-        .any(|c| c.is_whitespace() || matches!(c, '"' | '\\' | '`'))
+    if name.is_empty()
+        || name
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '"' | '\\' | '`'))
     {
         serde_json::to_string(name).expect("serialize a string")
     } else {
         name.to_owned()
+    }
+}
+
+/// Keep tag recognition identical for parsing and completion.
+fn annotation_tag(tag: &str) -> Result<Option<(TargetKind, &'static str)>, &'static str> {
+    match tag {
+        "@param" => Ok(Some((TargetKind::Query, "query."))),
+        "@header" => Ok(Some((TargetKind::Header, ""))),
+        "@body" => Ok(Some((TargetKind::Body(BodyMode::Json), ""))),
+        _ if tag.starts_with("@body(") => {
+            match tag
+                .strip_prefix("@body(")
+                .and_then(|mode| mode.strip_suffix(')'))
+            {
+                Some(mode) if mode.eq_ignore_ascii_case("JSON") => {
+                    Ok(Some((TargetKind::Body(BodyMode::Json), "")))
+                }
+                Some(mode) if mode.eq_ignore_ascii_case("XML") => {
+                    Ok(Some((TargetKind::Body(BodyMode::Xml), "")))
+                }
+                _ => Err("Expected @body(JSON) or @body(XML); @body defaults to JSON."),
+            }
+        }
+        _ => Ok(None),
     }
 }
 
@@ -159,18 +187,31 @@ fn parse(source: &str) -> Index {
         references: references(source),
         ..Default::default()
     };
+    let mut literal_targets = Vec::new();
     for range in index.lines.clone() {
         let line = &source[range.clone()];
         let tag_end = line.find(char::is_whitespace).unwrap_or(line.len());
-        let (kind, prefix) = match &line[..tag_end] {
-            "@param" => (TargetKind::Query, "query."),
-            "@header" => (TargetKind::Header, ""),
-            _ => continue,
+        let (kind, prefix) = match annotation_tag(&line[..tag_end]) {
+            Ok(Some(tag)) => tag,
+            Ok(None) => continue,
+            Err(message) => {
+                index
+                    .annotation_tokens
+                    .push((range.start..range.start + tag_end, true));
+                index.diagnostics.push(warning(source, range, message));
+                continue;
+            }
         };
         index
             .annotation_tokens
             .push((range.start..range.start + tag_end, true));
         let target = line[tag_end..].trim_start();
+        // Names are literal, even if they contain @Ref(...). Reserve incomplete
+        // quoted tokens too, so reference completion cannot steal path editing.
+        let token = target.strip_prefix(prefix).unwrap_or(target);
+        let token_end =
+            range.end - token.len() + name_token(token).map_or(token.len(), |(_, length)| length);
+        literal_targets.push(range.end - target.len()..token_end);
         let Some(text) = target.strip_prefix(prefix) else {
             index.diagnostics.push(warning(
                 source,
@@ -188,7 +229,8 @@ fn parse(source: &str) -> Index {
             continue;
         };
         let remainder = &text[length..];
-        if name.is_empty() || (!remainder.is_empty() && !remainder.starts_with(char::is_whitespace))
+        if (name.is_empty() && !matches!(kind, TargetKind::Body(BodyMode::Json)))
+            || (!remainder.is_empty() && !remainder.starts_with(char::is_whitespace))
         {
             index
                 .diagnostics
@@ -200,6 +242,19 @@ fn parse(source: &str) -> Index {
         index
             .annotation_tokens
             .push((target_start..target_end, false));
+        if let TargetKind::Body(mode) = kind {
+            if !valid_path(mode, &name) {
+                index.diagnostics.push(warning(
+                    source,
+                    target_start..target_end,
+                    match mode {
+                        BodyMode::Json => "Expected a JSON Pointer: /user/name, /items/0, or \"\" for the root. Escape ~ as ~0 and / as ~1.",
+                        BodyMode::Xml => "Expected an absolute XML element path, optionally ending in /@attribute. Selectors and wildcards are not supported.",
+                    },
+                ));
+                continue;
+            }
+        }
         let explanation = remainder.trim().to_owned();
         if explanation.is_empty() {
             index.diagnostics.push(warning(
@@ -215,7 +270,19 @@ fn parse(source: &str) -> Index {
             range: range.start..target_end,
         });
     }
+    index.references.retain(|reference| {
+        !literal_targets
+            .iter()
+            .any(|range| range.contains(&reference.range.start))
+    });
     index
+}
+
+#[derive(Default)]
+struct BodySnapshot {
+    mode: Option<BodyMode>,
+    source: String,
+    targets: BodyTargets,
 }
 
 /// Each editor owns a separate handle, including secondary workspace panes.
@@ -223,6 +290,7 @@ fn parse(source: &str) -> Index {
 #[derive(Default)]
 pub struct DocumentationIntelligence {
     targets: RefCell<Targets>,
+    body: RefCell<BodySnapshot>,
     parsed: RefCell<(String, Index)>,
     pub resources: RefCell<ReferenceCatalog>,
     pub reference_actions: RefCell<ReferenceActions>,
@@ -240,6 +308,57 @@ impl DocumentationIntelligence {
         }
         *current = targets;
         true
+    }
+
+    /// Parse only when the literal editor buffer or selected body mode changes.
+    pub fn replace_body(&self, mode: Option<BodyMode>, source: &str) -> bool {
+        let mut body = self.body.borrow_mut();
+        let source = if mode.is_some() { source } else { "" };
+        if body.mode == mode && body.source == source {
+            return false;
+        }
+        *body = BodySnapshot {
+            mode,
+            source: source.to_owned(),
+            targets: mode
+                .map(|mode| BodyTargets::parse(mode, source))
+                .unwrap_or_default(),
+        };
+        true
+    }
+
+    pub fn body_source_matches(&self, source: &str) -> bool {
+        let body = self.body.borrow();
+        body.mode.is_some() && body.source == source
+    }
+
+    /// Prefer the innermost field at the hover location, even if it has no
+    /// explanation. A parent's annotation must not masquerade as its child's.
+    pub fn body_explanations(&self, source: &str, offset: usize) -> Vec<String> {
+        let body = self.body.borrow();
+        let Some(mode) = body.mode else {
+            return Vec::new();
+        };
+        let matches: Vec<_> = body
+            .targets
+            .names(mode)
+            .iter()
+            .filter_map(|path| {
+                body.targets
+                    .ranges(mode, path)
+                    .iter()
+                    .filter(|range| range.contains(&offset))
+                    .map(|range| range.len())
+                    .min()
+                    .map(|length| (path, length))
+            })
+            .collect();
+        let shortest = matches.iter().map(|(_, length)| *length).min();
+        matches
+            .into_iter()
+            .filter(|(_, length)| Some(*length) == shortest)
+            .filter_map(|(path, _)| self.explanation(source, TargetKind::Body(mode), path))
+            .collect()
     }
 
     fn with_index<T>(&self, source: &str, read: impl FnOnce(&Index) -> T) -> T {
@@ -327,11 +446,21 @@ impl DocumentationIntelligence {
                 }
             }
             for annotation in &index.annotations {
-                if !targets.contains(annotation.kind, &annotation.name) {
+                let found = match annotation.kind {
+                    TargetKind::Body(mode) => self.body.borrow().targets.contains(mode, &annotation.name),
+                    kind => Some(targets.contains(kind, &annotation.name)),
+                };
+                if found == Some(false) {
                     diagnostics.push(warning(
                         source,
                         annotation.range.clone(),
                         format!("No matching {:?} field named '{}'. Update this reference if the field was renamed or removed.", annotation.kind, annotation.name),
+                    ));
+                } else if found.is_none() {
+                    diagnostics.push(warning(
+                        source,
+                        annotation.range.clone(),
+                        "Unable to resolve this body path: select the matching JSON/XML body mode and fix any body syntax errors.",
                     ));
                 }
                 if index.annotations.iter().filter(|other| {
@@ -399,14 +528,15 @@ impl DocumentationIntelligence {
                 vec![
                     "@param query.".to_owned(),
                     "@header ".to_owned(),
+                    "@body ".to_owned(),
+                    "@body(JSON) ".to_owned(),
+                    "@body(XML) ".to_owned(),
                     "@Ref(".to_owned(),
                 ],
             )
         } else {
-            let (kind, scope) = match &line[..tag_end] {
-                "@param" => (TargetKind::Query, "query."),
-                "@header" => (TargetKind::Header, ""),
-                _ => return Vec::new(),
+            let Ok(Some((kind, scope))) = annotation_tag(&line[..tag_end]) else {
+                return Vec::new();
             };
             let rest = line[tag_end..].trim_start();
             let start = line_range.end - rest.len();
@@ -423,13 +553,23 @@ impl DocumentationIntelligence {
             if offset > end {
                 return Vec::new();
             }
-            let candidates = self
-                .targets
-                .borrow()
-                .names(kind)
-                .iter()
-                .map(|name| format!("{scope}{}", encode_name(name)))
-                .collect();
+            let encode = |names: &BTreeSet<String>| {
+                names
+                    .iter()
+                    .map(|name| {
+                        let name = if token.starts_with('"') {
+                            serde_json::to_string(name).expect("serialize a string")
+                        } else {
+                            encode_name(name)
+                        };
+                        format!("{scope}{name}")
+                    })
+                    .collect()
+            };
+            let candidates = match kind {
+                TargetKind::Body(mode) => encode(self.body.borrow().targets.names(mode)),
+                kind => encode(self.targets.borrow().names(kind)),
+            };
             (start, end, &source[start..offset], candidates)
         };
         candidates
@@ -690,7 +830,7 @@ mod tests {
                 .completion_items(source, source.len())
                 .is_empty()
         );
-        assert_eq!(intelligence.completion_items("@", 1).len(), 3);
+        assert_eq!(intelligence.completion_items("@", 1).len(), 6);
         assert_eq!(intelligence.completion_items("@header ", 8).len(), 2);
         assert_eq!(intelligence.completion_items("@param query.", 13).len(), 3);
     }
@@ -752,5 +892,213 @@ mod tests {
         assert_eq!(intelligence.diagnostics(source).len(), 1);
         let other_pane = DocumentationIntelligence::shared();
         assert_eq!(other_pane.explanation("", TargetKind::Query, "limit"), None);
+    }
+
+    #[test]
+    fn body_modes_resolve_default_json_and_xml_attributes() {
+        let intelligence = intelligence();
+        intelligence.replace_body(Some(BodyMode::Json), r#"{"user":{"name":"Ada"}}"#);
+        let source = "@body /user/name Display name.\n@body(JSON) /user User object.";
+        assert!(intelligence.diagnostics(source).is_empty());
+        assert_eq!(
+            intelligence
+                .explanation(source, TargetKind::Body(BodyMode::Json), "/user/name")
+                .as_deref(),
+            Some("Display name.")
+        );
+        intelligence.replace_body(
+            Some(BodyMode::Xml),
+            "<request><user id=\"42\"/><user id=\"43\"/></request>",
+        );
+        let source = "@body(XML) /request/user/@id User identifier.";
+        assert!(intelligence.diagnostics(source).is_empty());
+        assert!(
+            intelligence.diagnostics("@body /request JSON is still the default.")[0]
+                .message
+                .starts_with("Unable to resolve")
+        );
+        assert!(
+            intelligence.diagnostics("@body(XML) /request/absent Missing.")[0]
+                .message
+                .starts_with("No matching")
+        );
+    }
+
+    #[test]
+    fn body_paths_quoting_duplicates_and_invalid_modes_are_explicit() {
+        let intelligence = intelligence();
+        intelligence.replace_body(
+            Some(BodyMode::Json),
+            r#"{"display name":"Ada","a/b":1,"~":2}"#,
+        );
+        let source = "@body \"/display name\" Display name.\n@body /a~1b Slash key.\n@body /~0 Tilde key.\n@body \"\" Whole body.";
+        assert!(intelligence.diagnostics(source).is_empty());
+        let duplicate = "@body /a~1b First.\n@body(json) /a~1b Second.";
+        assert_eq!(intelligence.diagnostics(duplicate).len(), 2);
+        assert_eq!(
+            intelligence.explanation(duplicate, TargetKind::Body(BodyMode::Json), "/a~1b"),
+            None
+        );
+        for source in [
+            "@body(YAML) /user Unsupported.",
+            "@body(XML /user Incomplete mode.",
+            "@body() /user Missing mode.",
+            "@body user Relative pointer.",
+            "@body /bad~2escape Invalid escape.",
+            "@body(XML) /user/* No wildcards.",
+            "@body(XML) /user[1] No selectors.",
+        ] {
+            assert_eq!(intelligence.diagnostics(source).len(), 1, "{source}");
+            assert!(parse(source).annotations.is_empty(), "{source}");
+        }
+    }
+
+    #[test]
+    fn body_completion_replaces_only_path_and_preserves_quoted_unicode() {
+        let intelligence = intelligence();
+        intelligence.replace_body(
+            Some(BodyMode::Json),
+            r#"{"user":{"name":"Ada"},"标签 空格":true}"#,
+        );
+        let source = "@body(JSON) /user/na Keep this explanation.";
+        let items = intelligence.completion_items(source, "@body(JSON) /user/n".len());
+        assert_eq!(items.len(), 1);
+        let Some(CompletionTextEdit::Edit(edit)) = &items[0].text_edit else {
+            panic!("edit")
+        };
+        assert_eq!(edit.new_text, "/user/name");
+        assert_eq!(edit.range, source_range(source, 12, 20));
+        assert!(
+            intelligence
+                .completion_items(source, source.len())
+                .is_empty()
+        );
+        let items = intelligence.completion_items("@body ", 6);
+        assert!(items.iter().any(|item| item.label == "\"/标签 空格\""));
+        assert!(items.iter().any(|item| item.label == "\"\""));
+        assert!(intelligence.completion_items("@body(XML) ", 11).is_empty());
+    }
+
+    #[test]
+    fn malformed_bodies_never_claim_paths_are_missing_and_cache_tracks_mode() {
+        let intelligence = intelligence();
+        let source = "@body /absent Description.";
+        assert!(intelligence.replace_body(Some(BodyMode::Json), "{}"));
+        assert!(!intelligence.replace_body(Some(BodyMode::Json), "{}"));
+        assert!(intelligence.body_source_matches("{}"));
+        assert!(
+            intelligence.diagnostics(source)[0]
+                .message
+                .starts_with("No matching")
+        );
+        assert!(intelligence.replace_body(Some(BodyMode::Json), "{"));
+        assert!(!intelligence.body_source_matches("{}"));
+        assert!(
+            intelligence.diagnostics(source)[0]
+                .message
+                .starts_with("Unable to resolve")
+        );
+        intelligence.replace_body(Some(BodyMode::Xml), "<root>");
+        assert!(
+            intelligence.diagnostics("@body(XML) /root/absent Description.")[0]
+                .message
+                .starts_with("Unable to resolve")
+        );
+        intelligence.replace_body(None, "{}");
+        assert!(!intelligence.body_source_matches("{}"));
+        assert!(intelligence.completion_items("@body ", 6).is_empty());
+    }
+
+    #[test]
+    fn body_hovers_choose_innermost_field_and_never_use_duplicate_explanations() {
+        let intelligence = intelligence();
+        let body = r#"{"user":{"name":"Ada","age":42}}"#;
+        intelligence.replace_body(Some(BodyMode::Json), body);
+        let source = "@body /user User object.\n@body /user/name Display name.";
+        assert_eq!(
+            intelligence.body_explanations(source, body.find("name").unwrap()),
+            ["Display name."]
+        );
+        assert_eq!(
+            intelligence.body_explanations(source, body.find("Ada").unwrap()),
+            ["Display name."]
+        );
+        assert!(
+            intelligence
+                .body_explanations(source, body.find("age").unwrap())
+                .is_empty()
+        );
+        let duplicate = format!("{source}\n@body(JSON) /user/name Conflicting.");
+        assert!(
+            intelligence
+                .body_explanations(&duplicate, body.find("name").unwrap())
+                .is_empty()
+        );
+        let body = "<root><item id=\"1\"/><item id=\"2\"/></root>";
+        intelligence.replace_body(Some(BodyMode::Xml), body);
+        for (offset, _) in body.match_indices("id=") {
+            assert_eq!(
+                intelligence.body_explanations("@body(XML) /root/item/@id Identifier.", offset),
+                ["Identifier."]
+            );
+        }
+    }
+
+    #[test]
+    fn body_annotations_share_markdown_exclusions_and_semantic_highlights() {
+        let intelligence = intelligence();
+        let style = HighlightStyle::default();
+        for source in [
+            "```md\n@body /missing Example.\n```",
+            "> @body(XML) /root Example.",
+            "- @body /missing Example.",
+            "\\@body /missing Example.",
+            "`@body /missing Example.`",
+        ] {
+            assert!(intelligence.diagnostics(source).is_empty(), "{source}");
+            assert!(parse(source).annotations.is_empty(), "{source}");
+            assert!(
+                intelligence
+                    .completion_items(source, source.find("@body").unwrap() + 5)
+                    .is_empty()
+            );
+        }
+        let source = "@body(XML) /root/@id **Identifier.**";
+        let spans = intelligence.semantic_highlights(source, style, style, style);
+        assert_eq!(
+            spans,
+            [
+                (source_range(source, 0, 10), style),
+                (source_range(source, 11, 20), style),
+            ]
+        );
+    }
+
+    #[test]
+    fn annotation_targets_are_literal_even_when_they_contain_resource_syntax() {
+        let intelligence = intelligence();
+        intelligence.replace_body(Some(BodyMode::Json), r#"{"@Ref(missing)":1}"#);
+        *intelligence.resources.borrow_mut() = ReferenceCatalog::from_workspace(
+            &crate::documentation_references::tests::workspace_fixture(),
+        );
+        for path in ["/@Ref(missing)", "\"/@Ref(missing)\""] {
+            let source = format!("@body {path} Literal key. See @Ref(Backend.Auth.Login)");
+            assert!(intelligence.diagnostics(&source).is_empty(), "{source}");
+            let refs = intelligence.references(&source);
+            assert_eq!(refs.len(), 1);
+            assert_eq!(refs[0].expression(&source), "Backend.Auth.Login");
+            let items = intelligence.completion_items(&source, source.find("missing").unwrap());
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].label, path);
+        }
+        // The same lexical rule applies to headers and query parameters, and
+        // remains in effect while a quoted target is still being typed.
+        for source in [
+            "@header @Ref(missing) Literal header.",
+            "@param query.\"@Ref(missing)\" Literal parameter.",
+            "@body \"/@Ref(missing",
+        ] {
+            assert!(intelligence.references(source).is_empty(), "{source}");
+        }
     }
 }

@@ -123,6 +123,9 @@ impl ApiTester {
                 "https://httpbin.org/get",
             )
         });
+        let (documentation, documentation_intelligence) = documentation::new_editor(window, cx);
+        let body_hover =
+            documentation::body_hover_provider(documentation_intelligence.clone(), &documentation);
         let body_completion_catalog = Rc::clone(&template_variable_catalog);
         let body = cx.new(|cx| {
             CodeEditor::new(
@@ -140,13 +143,13 @@ impl ApiTester {
                     ))
                     .completion_provider(Rc::new(TemplateCompletionProvider::new(
                         body_completion_catalog,
-                    ))),
+                    )))
+                    .hover_provider(body_hover),
                 window,
                 cx,
             )
         });
         let pre_completion_catalog = Rc::clone(&script_variable_catalog);
-        let (documentation, documentation_intelligence) = documentation::new_editor(window, cx);
         let pre_request_script = cx.new(|cx| {
             let completion_catalog = Rc::clone(&pre_completion_catalog);
             let mut intelligence =

@@ -14,7 +14,7 @@ pub(super) fn new_editor(
                 .framed(false)
                 .embedded(true)
                 .language(CodeLanguage::Markdown)
-                .placeholder("Markdown notes\n\n@param query.limit Maximum records per page.\n@header Authorization Token obtained from Login.\n\nType @ at the start of a line to reference a field.")
+                .placeholder("Markdown notes\n\n@param query.limit Maximum records per page.\n@header Authorization Token obtained from Login.\n@body /user/name Display name (JSON).\n@body(XML) /request/user/@id User identifier.\n\nType @ at the start of a line to reference a field.")
                 .rows(12)
                 .soft_wrap(true)
                 .completion_provider(intelligence.clone())
@@ -148,6 +148,7 @@ pub(super) fn refresh_targets(
     editor: &Entity<CodeEditor>,
     query: &[QueryParamRow],
     headers: &[HeaderRow],
+    body: Option<(BodyMode, RawBodyLanguage, &Entity<CodeEditor>)>,
     workspace: &Workspace,
     cx: &mut App,
 ) {
@@ -160,7 +161,14 @@ pub(super) fn refresh_targets(
     let resources = ReferenceCatalog::from_workspace(workspace);
     let resources_changed = *intelligence.resources.borrow() != resources;
     *intelligence.resources.borrow_mut() = resources;
-    if intelligence.replace_targets(targets) || resources_changed {
+    let body_changed = match body {
+        Some((mode, language, body)) => intelligence.replace_body(
+            documentation_body_mode(mode, language),
+            body.read(cx).value(cx).as_ref(),
+        ),
+        None => intelligence.replace_body(None, ""),
+    };
+    if intelligence.replace_targets(targets) || resources_changed || body_changed {
         editor.update(cx, |editor, cx| editor.refresh_diagnostics(cx));
     }
     let source = editor.read(cx).value(cx).to_string();
@@ -210,6 +218,67 @@ pub(super) fn refresh_targets(
     editor.read(cx).input_state().update(cx, |input, cx| {
         input.set_semantic_highlights(highlights, cx);
     });
+}
+
+fn documentation_body_mode(
+    mode: BodyMode,
+    language: RawBodyLanguage,
+) -> Option<crate::documentation_body::BodyMode> {
+    if mode != BodyMode::Raw {
+        return None;
+    }
+    match language {
+        RawBodyLanguage::Json => Some(crate::documentation_body::BodyMode::Json),
+        RawBodyLanguage::Xml => Some(crate::documentation_body::BodyMode::Xml),
+        _ => None,
+    }
+}
+
+/// The body owns this provider; keep the documentation editor weak so closing a
+/// pane releases its session. Always read current Markdown at hover time.
+pub(super) fn body_hover_provider(
+    intelligence: Rc<DocumentationIntelligence>,
+    documentation: &Entity<CodeEditor>,
+) -> Rc<dyn gpui_component::input::HoverProvider> {
+    Rc::new(BodyHoverProvider {
+        intelligence,
+        documentation: documentation.downgrade(),
+    })
+}
+
+struct BodyHoverProvider {
+    intelligence: Rc<DocumentationIntelligence>,
+    documentation: WeakEntity<CodeEditor>,
+}
+
+impl gpui_component::input::HoverProvider for BodyHoverProvider {
+    fn hover(
+        &self,
+        text: &gpui_component::input::Rope,
+        offset: usize,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Option<lsp_types::Hover>>> {
+        let source = text.to_string();
+        // Body edits can arrive before the request-surface refresh. Never
+        // interpret a new offset using the previous body's field ranges.
+        if !self.intelligence.body_source_matches(&source) {
+            return Task::ready(Ok(None));
+        }
+        let Some(documentation) = self.documentation.upgrade() else {
+            return Task::ready(Ok(None));
+        };
+        let explanations = self
+            .intelligence
+            .body_explanations(documentation.read(cx).value(cx).as_ref(), offset);
+        Task::ready(Ok((!explanations.is_empty()).then(|| lsp_types::Hover {
+            contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
+                kind: lsp_types::MarkupKind::Markdown,
+                value: explanations.join("\n\n---\n\n"),
+            }),
+            range: None,
+        })))
+    }
 }
 
 pub(super) fn explanation(
@@ -317,9 +386,124 @@ pub(super) fn description_cell(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use gpui::{TestAppContext, px, size};
+
+    pub(in crate::app) fn body_hover(
+        body: &Entity<CodeEditor>,
+        offset: usize,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<String> {
+        use futures::FutureExt as _;
+        let input = body.read(cx).input_state();
+        let provider = input
+            .read(cx)
+            .lsp
+            .hover_provider
+            .clone()
+            .expect("body hover provider");
+        let source = gpui_component::input::Rope::from(body.read(cx).value(cx).as_ref());
+        let hover = provider
+            .hover(&source, offset, window, cx)
+            .now_or_never()
+            .expect("local documentation hover is synchronous")
+            .expect("hover succeeds")?;
+        let lsp_types::HoverContents::Markup(markup) = hover.contents else {
+            panic!("documentation hover uses Markdown");
+        };
+        Some(markup.value)
+    }
+
+    #[test]
+    fn body_documentation_is_only_enabled_for_raw_json_and_xml() {
+        for &mode in BodyMode::all() {
+            for &language in RawBodyLanguage::all() {
+                assert_eq!(
+                    documentation_body_mode(mode, language).is_some(),
+                    mode == BodyMode::Raw
+                        && matches!(language, RawBodyLanguage::Json | RawBodyLanguage::Xml),
+                );
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn body_documentation_refreshes_from_live_editors_and_rejects_stale_offsets(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+        store.initialize().unwrap();
+        let mut app = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            crate::theme::configure(cx);
+            let bindings = shortcuts::capture_base_key_bindings(cx);
+            let view = cx.new(|cx| ApiTester::new_with_database_store(bindings, store, window, cx));
+            app = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app = app.unwrap();
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                let source = r#"{"name":"{{display_name}}"}"#;
+                app.body
+                    .update(cx, |editor, cx| editor.set_value(source, window, cx));
+                app.documentation.update(cx, |editor, cx| {
+                    editor.set_value("@body /name Display name.", window, cx)
+                });
+                app.render_request_panel(cx);
+                let offset = source.find("{{").unwrap();
+                assert!(app.documentation_intelligence.body_source_matches(source));
+                assert_eq!(
+                    body_hover(&app.body, offset, window, cx).as_deref(),
+                    Some("Display name.")
+                );
+
+                // Documentation changes do not need another request render.
+                app.documentation.update(cx, |editor, cx| {
+                    editor.set_value("@body(JSON) /name Updated name.", window, cx)
+                });
+                assert_eq!(
+                    body_hover(&app.body, offset, window, cx).as_deref(),
+                    Some("Updated name.")
+                );
+
+                app.body.update(cx, |editor, cx| {
+                    editor.set_value(r#"{"other":"new"}"#, window, cx)
+                });
+                assert!(body_hover(&app.body, offset, window, cx).is_none());
+                app.render_request_panel(cx);
+                assert!(body_hover(&app.body, 11, window, cx).is_none());
+                let input = app.documentation.read(cx).input_state();
+                assert!(!input.read(cx).diagnostics().unwrap().is_empty());
+
+                app.raw_body_language = RawBodyLanguage::Xml;
+                app.body.update(cx, |editor, cx| {
+                    editor.set_value("<request><user id=\"7\"/></request>", window, cx)
+                });
+                app.documentation.update(cx, |editor, cx| {
+                    editor.set_value("@body(XML) /request/user/@id User identifier.", window, cx)
+                });
+                app.render_request_panel(cx);
+                assert_eq!(
+                    body_hover(&app.body, 16, window, cx).as_deref(),
+                    Some("User identifier.")
+                );
+
+                app.body_mode = BodyMode::None;
+                app.render_request_panel(cx);
+                assert!(body_hover(&app.body, 16, window, cx).is_none());
+                app.body_mode = BodyMode::Raw;
+                app.render_request_panel(cx);
+                assert!(body_hover(&app.body, 16, window, cx).is_some());
+                app.render_websocket_workspace(cx);
+                assert!(body_hover(&app.body, 16, window, cx).is_none());
+            });
+        });
+    }
 
     #[gpui::test]
     fn documentation_links_navigate_without_executing_and_reject_stale_targets(
