@@ -41,7 +41,8 @@ $pinned = @(
             "$projectDir\patches\gpui-component-0.5.1-switch-contrast.patch",
             "$projectDir\patches\gpui-component-0.5.1-submenu-default-action.patch",
             "$projectDir\patches\gpui-component-0.5.1-multiline-placeholder-runs.patch",
-            "$projectDir\patches\gpui-component-0.5.1-inline-action-cursor-hitbox.patch"
+            "$projectDir\patches\gpui-component-0.5.1-inline-action-cursor-hitbox.patch",
+            "$projectDir\patches\gpui-component-0.5.1-idempotent-semantic-highlights.patch"
         )
     },
     @{

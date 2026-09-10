@@ -138,7 +138,10 @@ impl ApiTester {
                 query_param_input_cell(&row.key, cx)
                     .id(("query-param-key-description", id))
                     .when_some(description.clone(), |this, description| {
-                        this.tooltip(move |window, cx| Tooltip::new(description.clone()).build(window, cx))
+                        this.hoverable_tooltip(documentation::explanation_tooltip(
+                            description,
+                            cx.entity().downgrade(),
+                        ))
                     }),
             )
             .child(query_param_input_cell(&row.value, cx))

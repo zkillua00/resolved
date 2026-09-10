@@ -30,7 +30,9 @@ are not copied into request fields.
 - Annotations must start at column zero in an ordinary, top-level Markdown
   paragraph. Code blocks (including unfinished fences), inline code, lists,
   blockquotes, and HTML examples are not interpreted as annotations.
-- An explanation occupies the rest of its line and is displayed as plain text.
+- An explanation occupies the rest of its line. Hovers display its text with
+  resolved `@Ref(...)` references as clickable resource names. Move onto the
+  hover to click a link; missing references remain literal and non-clickable.
   Use ordinary Markdown elsewhere for longer notes.
 - Query names are case-sensitive; header names are case-insensitive. Repeated
   rows with the same name share an explanation. Disabled rows can be documented.
@@ -70,6 +72,12 @@ If a line contains multiple links, the action opens a chooser. Environment links
 open the active environment's editor and focus/scroll to the variable's key,
 without changing the active environment or revealing its value in documentation.
 Existing unsaved-environment guards still apply.
+
+The editor highlights annotation tags (`@param`, `@header`), their field names,
+and reference syntax over the normal Markdown highlighting. Resolved reference
+paths use an underlined link color; unresolved paths keep their diagnostics.
+Explanation prose retains normal Markdown highlighting. These overlays and
+clickable explanation hovers also apply in split panes.
 
 References are literal paths, not JavaScript expressions. Missing, renamed, or
 ambiguous resources receive diagnostics and no Open action. Links are resolved

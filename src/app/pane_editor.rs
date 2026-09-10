@@ -1124,7 +1124,10 @@ impl ApiTester {
                             pane_query_param_input(&row.key, cx)
                                 .id(SharedString::from(format!("{key}-query-key-description-{id}")))
                                 .when_some(description.clone(), |this, description| {
-                                    this.tooltip(move |window, cx| Tooltip::new(description.clone()).build(window, cx))
+                                    this.hoverable_tooltip(documentation::explanation_tooltip(
+                                        description,
+                                        cx.entity().downgrade(),
+                                    ))
                                 }),
                         )
                         .child(pane_query_param_input(&row.value, cx))
@@ -1401,7 +1404,10 @@ impl ApiTester {
                 .id(SharedString::from(format!("{key}-header-description-{id}")))
                 .size_full()
                 .when_some(description, |this, description| {
-                    this.tooltip(move |window, cx| Tooltip::new(description.clone()).build(window, cx))
+                    this.hoverable_tooltip(documentation::explanation_tooltip(
+                        description,
+                        cx.entity().downgrade(),
+                    ))
                 })
                 .child(Input::new(&row.name).appearance(false).small().size_full().px_3()),
             Input::new(&row.value)

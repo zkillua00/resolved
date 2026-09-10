@@ -77,8 +77,12 @@ impl ApiTester {
             .child(
                 div()
                     .id(("header-name-template-source", id))
+                    .debug_selector(|| "header-explanation-source".to_owned())
                     .when_some(description, |this, description| {
-                        this.tooltip(move |window, cx| Tooltip::new(description.clone()).build(window, cx))
+                        this.hoverable_tooltip(documentation::explanation_tooltip(
+                            description,
+                            cx.entity().downgrade(),
+                        ))
                     })
                     .flex_1()
                     .min_w_0()

@@ -25,6 +25,43 @@ pub struct ReferenceActions {
     pub targets: BTreeMap<usize, Vec<(String, Resource)>>,
 }
 
+/// Display-only projection. Byte ranges refer to the projected text, not Markdown.
+/// Unknown and incomplete references remain literal rather than looking actionable.
+pub struct ReferenceText {
+    pub text: String,
+    pub links: Vec<(Range<usize>, String, Resource)>,
+}
+
+impl ReferenceText {
+    pub fn new(source: &str, catalog: &ReferenceCatalog) -> Self {
+        let mut result = Self {
+            text: String::new(),
+            links: Vec::new(),
+        };
+        let mut cursor = 0;
+        for reference in references(source)
+            .into_iter()
+            .filter(|reference| reference.complete)
+        {
+            let expression = reference.expression(source);
+            let Some(resource) = catalog.0.get(expression) else {
+                continue;
+            };
+            result.text.push_str(&source[cursor..reference.range.start]);
+            let start = result.text.len();
+            result.text.push_str(expression);
+            result.links.push((
+                start..result.text.len(),
+                expression.to_owned(),
+                resource.clone(),
+            ));
+            cursor = reference.range.end;
+        }
+        result.text.push_str(&source[cursor..]);
+        result
+    }
+}
+
 impl ReferenceCatalog {
     pub fn from_workspace(workspace: &Workspace) -> Self {
         fn visit(node: &RequestNamespaceNode, path: String, catalog: &mut ReferenceCatalog) {
@@ -189,6 +226,29 @@ pub fn references(source: &str) -> Vec<Reference> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn hover_text_projects_only_resolved_links_with_display_byte_ranges() {
+        let catalog = ReferenceCatalog::from_workspace(&workspace_fixture());
+        // Non-ASCII text before a link detects accidental character/byte offset mixing.
+        let source = "令牌 @Ref(Backend.Auth.Login), @Ref(api.environment[\"var_name\"]). \
+            `@Ref(Backend.Auth.Login)` @Ref(Missing) @Ref(incomplete";
+        let projected = ReferenceText::new(source, &catalog);
+        assert_eq!(
+            projected.text,
+            "令牌 Backend.Auth.Login, api.environment[\"var_name\"]. \
+            `@Ref(Backend.Auth.Login)` @Ref(Missing) @Ref(incomplete"
+        );
+        assert_eq!(projected.links.len(), 2);
+        for (range, expression, resource) in &projected.links {
+            assert_eq!(&projected.text[range.clone()], expression);
+            assert_eq!(catalog.0.get(expression), Some(resource));
+        }
+        assert!(!projected.text.contains("never-expose"));
+        let empty = ReferenceText::new(source, &ReferenceCatalog::default());
+        assert_eq!(empty.text, source);
+        assert!(empty.links.is_empty());
+    }
 
     pub(crate) fn workspace_fixture() -> Workspace {
         let mut workspace = Workspace::default();

@@ -200,6 +200,16 @@ pub(super) fn refresh_targets(
         .collect();
     *intelligence.reference_actions.borrow_mut() = snapshot;
     editor.update(cx, |editor, cx| editor.set_inline_actions(actions, cx));
+    let syntax = &cx.theme().highlight_theme;
+    let highlights = intelligence.semantic_highlights(
+        &source,
+        syntax.style("keyword").unwrap_or_default(),
+        syntax.style("variable").unwrap_or_default(),
+        reference_link_style(cx),
+    );
+    editor.read(cx).input_state().update(cx, |input, cx| {
+        input.set_semantic_highlights(highlights, cx);
+    });
 }
 
 pub(super) fn explanation(
@@ -212,11 +222,76 @@ pub(super) fn explanation(
     intelligence.explanation(editor.read(cx).value(cx).as_ref(), kind, name)
 }
 
+fn reference_link_style(cx: &App) -> gpui::HighlightStyle {
+    gpui::HighlightStyle {
+        color: Some(cx.api_primary_lavender()),
+        underline: Some(gpui::UnderlineStyle {
+            thickness: px(1.),
+            color: Some(cx.api_primary_lavender()),
+            wavy: false,
+        }),
+        ..Default::default()
+    }
+}
+
+/// Use with `hoverable_tooltip`, so links remain reachable after leaving the field.
+/// Resolve once when opening the hover; navigation revalidates the captured IDs.
+pub(super) fn explanation_tooltip(
+    description: String,
+    owner: WeakEntity<ApiTester>,
+) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView {
+    move |window, cx| {
+        let catalog = owner
+            .upgrade()
+            .map(|owner| ReferenceCatalog::from_workspace(&owner.read(cx).workspace))
+            .unwrap_or_default();
+        let text = Rc::new(crate::documentation_references::ReferenceText::new(
+            &description,
+            &catalog,
+        ));
+        let owner = owner.clone();
+        Tooltip::element(move |_, cx| {
+            let ranges = text
+                .links
+                .iter()
+                .map(|(range, _, _)| range.clone())
+                .collect::<Vec<_>>();
+            let styled = gpui::StyledText::new(text.text.clone()).with_highlights(
+                ranges
+                    .iter()
+                    .cloned()
+                    .map(|range| (range, reference_link_style(cx))),
+            );
+            let text = text.clone();
+            let owner = owner.clone();
+            div()
+                .debug_selector(|| "documentation-explanation-hover".to_owned())
+                .max_w(px(480.))
+                .child(
+                    gpui::InteractiveText::new("documentation-explanation-text", styled).on_click(
+                        ranges,
+                        move |index, window, cx| {
+                            if let Some(owner) = owner.upgrade() {
+                                let (_, expression, resource) = &text.links[index];
+                                owner.update(cx, |this, cx| {
+                                    this.open_documentation_reference(
+                                        expression, resource, window, cx,
+                                    );
+                                });
+                            }
+                        },
+                    ),
+                )
+        })
+        .build(window, cx)
+    }
+}
+
 /// A read-only projection: no second input buffer or persisted description.
 pub(super) fn description_cell(
     id: SharedString,
     description: Option<String>,
-    cx: &App,
+    cx: &Context<ApiTester>,
 ) -> impl IntoElement {
     let tooltip = description
         .clone()
@@ -233,7 +308,7 @@ pub(super) fn description_cell(
         .items_center()
         .text_xs()
         .text_color(cx.theme().muted_foreground)
-        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .hoverable_tooltip(explanation_tooltip(tooltip, cx.entity().downgrade()))
         .child(
             div()
                 .truncate()
@@ -394,6 +469,55 @@ mod tests {
         cx.update(|window, cx| {
             assert!(window.has_active_dialog(cx));
             window.close_dialog(cx);
+        });
+
+        // Exercise the actual header hover, including moving into it and clicking
+        // a projected link rather than invoking navigation directly.
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.activate_request_workspace(SidebarTab::Collections, window, cx);
+                app.open_blank_request_tab(window, cx);
+                assert_ne!(
+                    app.request_template(cx).request.url,
+                    "https://example.test/login?secret=never-expose-url"
+                );
+                app.request_pane = RequestPane::Headers;
+                app.headers.clear();
+                app.push_header_row("X-CSRF", "", true, false, window, cx);
+                app.documentation.update(cx, |editor, cx| {
+                    editor.set_value("@header X-CSRF @Ref(Backend.Auth.Login)", window, cx)
+                });
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds("header-explanation-source").unwrap();
+        cx.simulate_mouse_move(bounds.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        cx.run_until_parked();
+        let hover = cx
+            .debug_bounds("documentation-explanation-hover")
+            .expect("hover visible");
+        let link_point = hover.origin + gpui::point(px(10.), hover.size.height / 2.);
+        cx.simulate_mouse_move(link_point, None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("documentation-explanation-hover").is_some(),
+            "hover stays open over its link"
+        );
+        cx.simulate_click(link_point, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert_eq!(
+                app.read(cx).request_template(cx).request.url,
+                "https://example.test/login?secret=never-expose-url"
+            );
+            assert!(!app.read(cx).sending);
         });
     }
 }

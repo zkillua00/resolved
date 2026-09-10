@@ -105,8 +105,8 @@ target/debug/examples/documentation_placeholder_probe
 
 It opens a disposable window, switches to an empty Markdown editor, and checks
 multiline placeholders, Unicode, blank lines, CRLF, and populated-to-empty
-transitions, as well as reference-link inline actions. It exits automatically
-and never opens the application database.
+transitions, as well as semantic annotation highlights and reference-link inline
+actions. It exits automatically and never opens the application database.
 Before the multiline-placeholder fix this reproduces the Documentation-tab
 abort: full-placeholder text runs were passed when shaping individual lines.
 The fix clips runs to each line's byte range in the shared input renderer.

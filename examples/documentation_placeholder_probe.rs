@@ -12,9 +12,12 @@ use gpui::{
     Render, Styled as _, Window, WindowBounds, WindowOptions, div, px, size,
 };
 use gpui_component::{
-    Root,
+    ActiveTheme as _, Root,
     input::{Input, InputInlineAction, InputInlineActionPlacement, InputState},
 };
+
+#[path = "../src/editor_util.rs"]
+mod editor_util;
 
 const DOCUMENTATION_PLACEHOLDER: &str = "Markdown notes\n\n@param query.limit Maximum records per page.\n@header Authorization Token obtained from Login.\n\nType @ at the start of a line to reference a field.";
 
@@ -71,6 +74,10 @@ fn main() {
                 (DOCUMENTATION_PLACEHOLDER, ""),
                 (DOCUMENTATION_PLACEHOLDER, "@header Authorization Token."),
                 (DOCUMENTATION_PLACEHOLDER, "@Ref(Backend.Auth.Login)"),
+                (
+                    DOCUMENTATION_PLACEHOLDER,
+                    "@param query.标签 **Unicode** @Ref(Backend.Auth.Login)",
+                ),
                 (DOCUMENTATION_PLACEHOLDER, ""),
                 ("\nRésumé 🔎\n\n@param query.标签 Unicode.\n", ""),
                 ("\r\nRésumé 🔎\r\n\r\n@param query.标签 Unicode.\r\n", ""),
@@ -84,8 +91,45 @@ fn main() {
                             probe.editor.update(cx, |editor, cx| {
                                 editor.set_placeholder(placeholder, window, cx);
                                 editor.set_value(value, window, cx);
+                                // Representative semantic overlays exercise native
+                                // shaping alongside Markdown and non-ASCII text.
+                                let syntax = &cx.theme().highlight_theme;
+                                let overlays = [
+                                    ("@header", syntax.style("keyword").unwrap_or_default()),
+                                    ("@param", syntax.style("keyword").unwrap_or_default()),
+                                    ("query.标签", syntax.style("variable").unwrap_or_default()),
+                                    ("@Ref(", syntax.style("keyword").unwrap_or_default()),
+                                    (
+                                        "Backend.Auth.Login",
+                                        gpui::HighlightStyle {
+                                            color: Some(cx.theme().primary),
+                                            underline: Some(gpui::UnderlineStyle {
+                                                thickness: px(1.),
+                                                color: Some(cx.theme().primary),
+                                                wavy: false,
+                                            }),
+                                            ..Default::default()
+                                        },
+                                    ),
+                                ]
+                                .into_iter()
+                                .filter_map(|(token, style)| {
+                                    value.find(token).map(|start| {
+                                        (
+                                            editor_util::source_range(
+                                                value,
+                                                start,
+                                                start + token.len(),
+                                            ),
+                                            style,
+                                        )
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+                                editor.set_semantic_highlights(overlays.clone(), cx);
+                                editor.set_semantic_highlights(overlays, cx);
                                 editor.set_inline_actions(
-                                    if value.starts_with("@Ref(") {
+                                    if value.contains("@Ref(") {
                                         vec![InputInlineAction {
                                             id: 0,
                                             row: 0,
@@ -115,7 +159,9 @@ fn main() {
                     })
                     .expect("check native render");
             }
-            eprintln!("PASS: native Documentation placeholder transitions");
+            eprintln!(
+                "PASS: native Documentation placeholders, semantic highlights and inline actions"
+            );
             cx.update(|cx| cx.quit()).expect("quit native probe");
         })
         .detach();

@@ -1,0 +1,27 @@
+diff --git a/src/input/state.rs b/src/input/state.rs
+--- a/src/input/state.rs
++++ b/src/input/state.rs
+@@ -867,7 +867,7 @@ impl InputState {
+         highlights: Vec<(lsp_types::Range, HighlightStyle)>,
+         cx: &mut Context<Self>,
+     ) {
+-        self.semantic_highlights = highlights
++        let highlights = highlights
+             .into_iter()
+             .filter_map(|(range, style)| {
+                 let start = self.text.position_to_offset(&range.start);
+@@ -875,7 +875,13 @@ impl InputState {
+                 let end = self.text.position_to_offset(&range.end);
+                 (start < end).then_some((start..end, style))
+             })
+-            .collect();
++            .collect::<Vec<_>>();
++        // Semantic overlays may be refreshed at a render boundary. Unchanged
++        // styles must not schedule another frame indefinitely.
++        if self.semantic_highlights == highlights {
++            return;
++        }
++        self.semantic_highlights = highlights;
+         cx.notify();
+     }
+ 

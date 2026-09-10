@@ -5,7 +5,7 @@
 use std::{cell::RefCell, collections::BTreeSet, ops::Range, rc::Rc};
 
 use anyhow::Result;
-use gpui::{Context, Task, Window};
+use gpui::{Context, HighlightStyle, Task, Window};
 use gpui_component::input::{CompletionProvider, InputState, Rope};
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit,
@@ -76,6 +76,7 @@ struct Index {
     annotations: Vec<Annotation>,
     diagnostics: Vec<Diagnostic>,
     references: Vec<Reference>,
+    annotation_tokens: Vec<(Range<usize>, bool)>,
 }
 
 fn warning(source: &str, range: Range<usize>, message: impl Into<String>) -> Diagnostic {
@@ -166,6 +167,9 @@ fn parse(source: &str) -> Index {
             "@header" => (TargetKind::Header, ""),
             _ => continue,
         };
+        index
+            .annotation_tokens
+            .push((range.start..range.start + tag_end, true));
         let target = line[tag_end..].trim_start();
         let Some(text) = target.strip_prefix(prefix) else {
             index.diagnostics.push(warning(
@@ -192,6 +196,10 @@ fn parse(source: &str) -> Index {
             continue;
         }
         let target_end = range.end - remainder.len();
+        let target_start = range.end - target.len();
+        index
+            .annotation_tokens
+            .push((target_start..target_end, false));
         let explanation = remainder.trim().to_owned();
         if explanation.is_empty() {
             index.diagnostics.push(warning(
@@ -258,6 +266,53 @@ impl DocumentationIntelligence {
 
     pub fn references(&self, source: &str) -> Vec<Reference> {
         self.with_index(source, |index| index.references.clone())
+    }
+
+    /// Overlay only structural tokens; explanation prose retains Markdown styles.
+    /// The same parsed ranges drive diagnostics and navigation, including exclusions
+    /// for escaped markers and code examples.
+    pub fn semantic_highlights(
+        &self,
+        source: &str,
+        annotation: HighlightStyle,
+        target: HighlightStyle,
+        link: HighlightStyle,
+    ) -> Vec<(lsp_types::Range, HighlightStyle)> {
+        self.with_index(source, |index| {
+            let mut spans = index
+                .annotation_tokens
+                .iter()
+                .map(|(range, is_tag)| (range.clone(), if *is_tag { annotation } else { target }))
+                .collect::<Vec<_>>();
+            let resources = self.resources.borrow();
+            for reference in &index.references {
+                spans.push((
+                    reference.range.start..reference.expression_range.start,
+                    annotation,
+                ));
+                if !reference.expression_range.is_empty() {
+                    let style = if reference.complete
+                        && resources.0.contains_key(reference.expression(source))
+                    {
+                        link
+                    } else {
+                        target
+                    };
+                    spans.push((reference.expression_range.clone(), style));
+                }
+                if reference.complete {
+                    spans.push((
+                        reference.expression_range.end..reference.range.end,
+                        annotation,
+                    ));
+                }
+            }
+            spans.sort_by_key(|(range, _)| range.start);
+            spans
+                .into_iter()
+                .map(|(range, style)| (source_range(source, range.start, range.end), style))
+                .collect()
+        })
     }
 
     pub fn diagnostics(&self, source: &str) -> Vec<Diagnostic> {
@@ -433,6 +488,75 @@ impl CompletionProvider for DocumentationIntelligence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn semantic_overlay_colors_structure_and_preserves_markdown_prose() {
+        let intelligence = intelligence();
+        *intelligence.resources.borrow_mut() = ReferenceCatalog::from_workspace(
+            &crate::documentation_references::tests::workspace_fixture(),
+        );
+        let tag = HighlightStyle {
+            color: Some(gpui::rgb(0xff0000).into()),
+            ..Default::default()
+        };
+        let target = HighlightStyle {
+            color: Some(gpui::rgb(0x00ff00).into()),
+            ..Default::default()
+        };
+        let link = HighlightStyle {
+            color: Some(gpui::rgb(0x0000ff).into()),
+            ..Default::default()
+        };
+        let source =
+            "@param query.标签 **解释** @Ref(Backend.Auth.Login)\n@header \"X Trace\" `token`";
+        let spans = intelligence.semantic_highlights(source, tag, target, link);
+        let expected = [
+            ("@param", tag),
+            ("query.标签", target),
+            ("@Ref(", tag),
+            ("Backend.Auth.Login", link),
+            (")", tag),
+            ("@header", tag),
+            ("\"X Trace\"", target),
+        ]
+        .map(|(token, style)| {
+            let start = source.find(token).unwrap();
+            (source_range(source, start, start + token.len()), style)
+        });
+        assert_eq!(spans, expected);
+        intelligence.resources.borrow_mut().0.clear();
+        let missing = intelligence.semantic_highlights(source, tag, target, link);
+        assert_eq!(
+            missing[3].1, target,
+            "missing resources must not look like links"
+        );
+        assert!(
+            intelligence
+                .semantic_highlights("", tag, target, link)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn semantic_overlay_ignores_examples_and_handles_incomplete_references() {
+        let intelligence = intelligence();
+        let style = HighlightStyle::default();
+        let examples = "```md\n@header Authorization @Ref(Backend.Auth.Login)\n```\n\n\
+            `@param query.limit` and `@Ref(Backend.Auth.Login)`\n\n\
+            \\@header Authorization example\n\n\\@Ref(Backend.Auth.Login)";
+        assert!(
+            intelligence
+                .semantic_highlights(examples, style, style, style)
+                .is_empty()
+        );
+        let source = "@header\n\nSee @Ref(未知";
+        let spans = intelligence.semantic_highlights(source, style, style, style);
+        assert_eq!(
+            spans.len(),
+            3,
+            "incomplete tag/reference still receives syntax color"
+        );
+    }
 
     fn intelligence() -> Rc<DocumentationIntelligence> {
         let intelligence = DocumentationIntelligence::shared();
