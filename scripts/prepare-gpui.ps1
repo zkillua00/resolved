@@ -39,7 +39,8 @@ $pinned = @(
             "$projectDir\patches\gpui-component-0.5.1-completion-edge-placement.patch",
             "$projectDir\patches\gpui-component-0.5.1-configurable-active-line.patch",
             "$projectDir\patches\gpui-component-0.5.1-switch-contrast.patch",
-            "$projectDir\patches\gpui-component-0.5.1-submenu-default-action.patch"
+            "$projectDir\patches\gpui-component-0.5.1-submenu-default-action.patch",
+            "$projectDir\patches\gpui-component-0.5.1-multiline-placeholder-runs.patch"
         )
     },
     @{

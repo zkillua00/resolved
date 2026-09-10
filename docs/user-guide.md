@@ -6,6 +6,49 @@ storage behavior. For an overview and quick start,
 see the [README](../README.md). For builds and packaging, see
 [Building and packaging](building.md).
 
+## Request documentation annotations
+
+Write explanations in the request's **Documentation** tab. Start a line with `@`
+to autocomplete an annotation, then complete a name from the request's current
+query parameters or headers:
+
+```markdown
+# Search users
+
+Returns users visible to the current account.
+
+@param query.limit Maximum records per page.
+@param query.cursor Cursor returned by the previous response.
+@header Authorization Bearer token obtained from Login.
+```
+
+Query explanations appear in the read-only **Description** column and on hover
+over the parameter name. Header explanations appear on hover over the header
+name. Edit the annotation in Documentation to change either view; explanations
+are not copied into request fields.
+
+- Annotations must start at column zero in an ordinary, top-level Markdown
+  paragraph. Code blocks (including unfinished fences), inline code, lists,
+  blockquotes, and HTML examples are not interpreted as annotations.
+- An explanation occupies the rest of its line and is displayed as plain text.
+  Use ordinary Markdown elsewhere for longer notes.
+- Query names are case-sensitive; header names are case-insensitive. Repeated
+  rows with the same name share an explanation. Disabled rows can be documented.
+- Use JSON quotes for names containing whitespace or quotes, for example
+  `@param query."filter name" How this filter is used.` Autocomplete inserts the
+  appropriate quoting.
+- Missing targets, malformed annotations, missing explanations, and duplicate
+  explanations receive editor diagnostics. Duplicate annotations do not choose
+  a winning explanation. Renames are not rewritten automatically: update the
+  reference when a target is renamed or removed.
+- References are request-local, including in split panes. Completion exposes
+  names only, never request header or parameter values.
+
+This alpha replaces the old editable query-description field. Existing values
+in that field are not migrated; annotations are now the only explanation source.
+Body-field and environment-variable annotations, rendered reference pages, and
+automatic rename updates are not part of this first version.
+
 ## Self-hosted servers
 
 The Login control in the navigation rail connects directly to a self-hosted

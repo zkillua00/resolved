@@ -392,7 +392,6 @@ fn redact_request_with_known_secrets(
             } else {
                 redact_secret_values(&param.value, known_secrets)
             };
-            param.description = redact_secret_values(&param.description, known_secrets);
             param
         })
         .collect();
@@ -626,7 +625,6 @@ mod tests {
                     enabled: false,
                     key: "note".to_owned(),
                     value: "rotated secret".to_owned(),
-                    description: "header-token".to_owned(),
                 },
             ],
             body: r#"{"token":"literal-body","nested":{"password":"body-pass"},"echo":"rotated secret"}"#
@@ -658,7 +656,6 @@ mod tests {
         assert_eq!(entry.request.headers[0].value, REDACTED_VALUE);
         assert_eq!(entry.request.query_params[0].value, REDACTED_VALUE);
         assert_eq!(entry.request.query_params[1].value, REDACTED_VALUE);
-        assert_eq!(entry.request.query_params[1].description, REDACTED_VALUE);
         assert!(entry.request.body.contains(REDACTED_VALUE));
     }
 

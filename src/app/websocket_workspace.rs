@@ -1982,6 +1982,13 @@ impl ApiTester {
     }
 
     pub(super) fn render_websocket_workspace(&self, cx: &mut Context<Self>) -> AnyElement {
+        documentation::refresh_targets(
+            &self.documentation_intelligence,
+            &self.documentation,
+            &self.query_params,
+            &self.headers,
+            cx,
+        );
         let connected = self.websocket_workspace.status == WebSocketConnectionStatus::Connected;
         let status = match self.websocket_workspace.status {
             WebSocketConnectionStatus::Disconnected => "Disconnected",

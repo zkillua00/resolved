@@ -12,6 +12,13 @@ pub(in crate::app) struct HeaderRow {
 impl ApiTester {
     pub(super) fn render_header_row(&self, row: &HeaderRow, cx: &mut Context<Self>) -> AnyElement {
         let id = row.id;
+        let description = documentation::explanation(
+            &self.documentation_intelligence,
+            &self.documentation,
+            crate::documentation_intelligence::TargetKind::Header,
+            row.name.read(cx).value().trim(),
+            cx,
+        );
         let action_this = cx.entity().downgrade();
         let context_this = action_this.clone();
         let row_context_enabled = Rc::new(RefCell::new(true));
@@ -70,6 +77,9 @@ impl ApiTester {
             .child(
                 div()
                     .id(("header-name-template-source", id))
+                    .when_some(description, |this, description| {
+                        this.tooltip(move |window, cx| Tooltip::new(description.clone()).build(window, cx))
+                    })
                     .flex_1()
                     .min_w_0()
                     .h_full()

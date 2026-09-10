@@ -17,6 +17,7 @@ pub(in crate::app) struct PaneEditorState {
     url: Entity<InputState>,
     body: Entity<CodeEditor>,
     documentation: Entity<CodeEditor>,
+    documentation_intelligence: Rc<crate::documentation_intelligence::DocumentationIntelligence>,
     pre_request_script: Entity<CodeEditor>,
     post_response_script: Entity<CodeEditor>,
     response_editor: Entity<CodeEditor>,
@@ -95,19 +96,7 @@ impl PaneEditorState {
                 cx,
             )
         });
-        let documentation = cx.new(|cx| {
-            CodeEditor::new(
-                CodeEditorConfig::default()
-                    .framed(false)
-                    .embedded(true)
-                    .language(CodeLanguage::Markdown)
-                    .placeholder("Document this request with Markdown")
-                    .rows(12)
-                    .soft_wrap(true),
-                window,
-                cx,
-            )
-        });
+        let (documentation, documentation_intelligence) = documentation::new_editor(window, cx);
         let pre_request_script = cx.new(|cx| {
             CodeEditor::new(
                 CodeEditorConfig::default()
@@ -163,6 +152,7 @@ impl PaneEditorState {
             url,
             body,
             documentation,
+            documentation_intelligence,
             pre_request_script,
             post_response_script,
             response_editor,
@@ -217,7 +207,6 @@ impl PaneEditorState {
         pane_id: PaneId,
         key: impl Into<SharedString>,
         value: impl Into<SharedString>,
-        description: impl Into<SharedString>,
         enabled: bool,
         window: &mut Window,
         cx: &mut Context<ApiTester>,
@@ -234,11 +223,6 @@ impl PaneEditorState {
                 .placeholder("Value")
                 .default_value(value.into())
         });
-        let description_state = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Description")
-                .default_value(description.into())
-        });
         let key_subscription =
             cx.subscribe_in(&key_state, window, move |this, _, event, window, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -251,23 +235,12 @@ impl PaneEditorState {
                     this.pane_sync_url_from_query_params(pane_id, window, cx);
                 }
             });
-        let description_subscription =
-            cx.subscribe(&description_state, |_, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    cx.notify();
-                }
-            });
         self.query_params.push(QueryParamRow {
             id,
             key: key_state,
             value: value_state,
-            description: description_state,
             enabled,
-            _subscriptions: vec![
-                key_subscription,
-                value_subscription,
-                description_subscription,
-            ],
+            _subscriptions: vec![key_subscription, value_subscription],
         });
     }
 
@@ -375,14 +348,13 @@ impl PaneEditorState {
                 pane_id,
                 param.key,
                 param.value,
-                param.description,
                 param.enabled,
                 window,
                 cx,
             );
         }
         if self.query_params.is_empty() {
-            self.push_query_param_row(pane_id, "", "", "", true, window, cx);
+            self.push_query_param_row(pane_id, "", "", true, window, cx);
         }
 
         self.headers.clear();
@@ -510,16 +482,13 @@ impl PaneEditorState {
             .filter_map(|row| {
                 let key = row.key.read(cx).value().to_string();
                 let value = row.value.read(cx).value().to_string();
-                let description = row.description.read(cx).value().to_string();
-                if key.trim().is_empty() && value.trim().is_empty() && description.trim().is_empty()
-                {
+                if key.trim().is_empty() && value.trim().is_empty() {
                     return None;
                 }
                 Some(QueryParamEntry {
                     enabled: row.enabled,
                     key,
                     value,
-                    description,
                 })
             })
             .collect()
@@ -858,6 +827,13 @@ impl ApiTester {
         let Some(session) = self.pane_editors.get(&pane_id) else {
             return self.render_secondary_placeholder(pane_id);
         };
+        documentation::refresh_targets(
+            &session.documentation_intelligence,
+            &session.documentation,
+            &session.query_params,
+            &session.headers,
+            cx,
+        );
         let header_count = session
             .headers
             .iter()
@@ -1106,6 +1082,13 @@ impl ApiTester {
                 .iter()
                 .map(|row| {
                     let id = row.id;
+                    let description = documentation::explanation(
+                        &session.documentation_intelligence,
+                        &session.documentation,
+                        crate::documentation_intelligence::TargetKind::Query,
+                        row.key.read(cx).value().as_ref(),
+                        cx,
+                    );
                     h_flex()
                         .id(SharedString::from(format!("{key}-query-param-{id}")))
                         .w_full()
@@ -1136,9 +1119,19 @@ impl ApiTester {
                                     )),
                                 ),
                         )
-                        .child(pane_query_param_input(&row.key, cx))
+                        .child(
+                            pane_query_param_input(&row.key, cx)
+                                .id(SharedString::from(format!("{key}-query-key-description-{id}")))
+                                .when_some(description.clone(), |this, description| {
+                                    this.tooltip(move |window, cx| Tooltip::new(description.clone()).build(window, cx))
+                                }),
+                        )
                         .child(pane_query_param_input(&row.value, cx))
-                        .child(pane_query_param_input(&row.description, cx))
+                        .child(documentation::description_cell(
+                            format!("{key}-query-description-{id}").into(),
+                            description,
+                            cx,
+                        ))
                         .child(
                             div()
                                 .w(px(44.))
@@ -1365,6 +1358,13 @@ impl ApiTester {
     ) -> AnyElement {
         let id = row.id;
         let key = session.dom_key(pane_id);
+        let description = documentation::explanation(
+            &session.documentation_intelligence,
+            &session.documentation,
+            crate::documentation_intelligence::TargetKind::Header,
+            row.name.read(cx).value().trim(),
+            cx,
+        );
 
         let middle = div()
             .id(SharedString::from(format!("{key}-header-shared-cell-{id}")))
@@ -1396,11 +1396,13 @@ impl ApiTester {
             SharedString::from(format!("{key}-header-delete-{id}")),
             "Delete header",
             Some(middle.into_any_element()),
-            Input::new(&row.name)
-                .appearance(false)
-                .small()
+            div()
+                .id(SharedString::from(format!("{key}-header-description-{id}")))
                 .size_full()
-                .px_3(),
+                .when_some(description, |this, description| {
+                    this.tooltip(move |window, cx| Tooltip::new(description.clone()).build(window, cx))
+                })
+                .child(Input::new(&row.name).appearance(false).small().size_full().px_3()),
             Input::new(&row.value)
                 .appearance(false)
                 .small()
@@ -1907,7 +1909,7 @@ fn pane_query_param_heading(label: &'static str, cx: &App) -> impl IntoElement {
         .child(label)
 }
 
-fn pane_query_param_input(input: &Entity<InputState>, cx: &App) -> impl IntoElement {
+fn pane_query_param_input(input: &Entity<InputState>, cx: &App) -> gpui::Div {
     div()
         .flex_1()
         .min_w_0()
@@ -2185,7 +2187,7 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) {
         if let Some(session) = self.pane_editor_mut(pane_id) {
-            session.push_query_param_row(pane_id, "", "", "", true, window, cx);
+            session.push_query_param_row(pane_id, "", "", true, window, cx);
         }
         cx.notify();
     }
@@ -2200,7 +2202,7 @@ impl ApiTester {
         if let Some(session) = self.pane_editor_mut(pane_id) {
             session.query_params.retain(|row| row.id != row_id);
             if session.query_params.is_empty() {
-                session.push_query_param_row(pane_id, "", "", "", true, window, cx);
+                session.push_query_param_row(pane_id, "", "", true, window, cx);
             }
         }
         self.pane_sync_url_from_query_params(pane_id, window, cx);
@@ -2251,7 +2253,7 @@ impl ApiTester {
             return;
         };
         let url = session.url.read(cx).value().to_string();
-        let mut existing = session.normalized_query_params(cx);
+        let existing = session.normalized_query_params(cx);
         let incoming_params = query_params_from_url(&url);
         let current = existing
             .iter()
@@ -2266,15 +2268,7 @@ impl ApiTester {
             return;
         }
 
-        let mut reconciled = Vec::with_capacity(incoming_params.len() + existing.len());
-        for mut param in incoming_params {
-            if let Some(index) = existing.iter().position(|candidate| {
-                candidate.enabled && candidate.key == param.key && candidate.value == param.value
-            }) {
-                param.description = existing.remove(index).description;
-            }
-            reconciled.push(param);
-        }
+        let mut reconciled = incoming_params;
         reconciled.extend(existing.into_iter().filter(|param| !param.enabled));
 
         let Some(session) = self.pane_editors.get_mut(&pane_id) else {
@@ -2286,14 +2280,13 @@ impl ApiTester {
                 pane_id,
                 param.key,
                 param.value,
-                param.description,
                 param.enabled,
                 window,
                 cx,
             );
         }
         if session.query_params.is_empty() {
-            session.push_query_param_row(pane_id, "", "", "", true, window, cx);
+            session.push_query_param_row(pane_id, "", "", true, window, cx);
         }
         cx.notify();
     }
@@ -2525,7 +2518,7 @@ mod tests {
                 pre_request: "api.log('pre');".to_owned(),
                 post_response: "api.log('post');".to_owned(),
             },
-            documentation: "# Split pane notes".to_owned(),
+            documentation: "# Split pane notes\n\n@header X-Trace Secondary tracing explanation.".to_owned(),
             websocket: None,
         }
     }
@@ -2772,6 +2765,33 @@ mod tests {
                     .pane_editors
                     .get(&secondary_id)
                     .expect("secondary pane must own a request editor session");
+                assert_eq!(
+                    documentation::explanation(
+                        &session.documentation_intelligence,
+                        &session.documentation,
+                        crate::documentation_intelligence::TargetKind::Header,
+                        "x-trace",
+                        cx,
+                    ).as_deref(),
+                    Some("Secondary tracing explanation."),
+                );
+                assert_eq!(
+                    documentation::explanation(
+                        &app.documentation_intelligence,
+                        &app.documentation,
+                        crate::documentation_intelligence::TargetKind::Header,
+                        "x-trace",
+                        cx,
+                    ),
+                    None,
+                    "secondary explanations must not leak into the primary request",
+                );
+                assert!(
+                    session.documentation_intelligence.diagnostics(
+                        session.documentation.read(cx).value(cx).as_ref(),
+                    ).is_empty(),
+                    "secondary diagnostics must resolve against secondary header names",
+                );
                 assert_eq!(session.active_tab_id.as_ref(), Some(&second));
                 assert_eq!(
                     session.response.as_ref().map(|response| response.status),

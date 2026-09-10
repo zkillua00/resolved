@@ -2880,7 +2880,6 @@ mod tests {
                                     enabled: false,
                                     key: "debug".to_owned(),
                                     value: "true".to_owned(),
-                                    description: "Enable while investigating".to_owned(),
                                 },
                             ],
                             headers: vec![
@@ -2913,7 +2912,7 @@ mod tests {
                                 "api.test('created', () => api.assert(api.response.status === 201));"
                                     .to_owned(),
                         },
-                        documentation: "# Request notes\nSaved **Markdown**.".to_owned(),
+                        documentation: "# Request notes\nSaved **Markdown**.\n\n@param query.debug Enable while investigating.\n@header X-Debug Debug mode.".to_owned(),
                         websocket: None,
                     },
                     created_at: timestamp(1_700_000_000_000_001),

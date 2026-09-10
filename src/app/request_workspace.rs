@@ -2,6 +2,13 @@ use super::*;
 
 impl ApiTester {
     pub(super) fn render_request_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        documentation::refresh_targets(
+            &self.documentation_intelligence,
+            &self.documentation,
+            &self.query_params,
+            &self.headers,
+            cx,
+        );
         let header_count = self.request_header_count(cx);
         let query_param_count = self.request_query_param_count(cx);
         let status = if let Some(notice) = self.request_notice.clone() {

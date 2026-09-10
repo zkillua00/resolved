@@ -15,7 +15,6 @@ impl ApiTester {
         &mut self,
         key: impl Into<SharedString>,
         value: impl Into<SharedString>,
-        description: impl Into<SharedString>,
         enabled: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -27,11 +26,6 @@ impl ApiTester {
         let value_catalog = Rc::clone(&self.template_variable_catalog);
         let value_state =
             cx.new(|cx| template_input_state(window, cx, value_catalog, "Value", value));
-        let description_state = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Description")
-                .default_value(description.into())
-        });
 
         let key_template_input = key_state.clone();
         let key_subscription =
@@ -57,20 +51,6 @@ impl ApiTester {
                     this.schedule_template_input_refresh(&value_template_input, cx);
                     this.sync_url_from_query_params(window, cx);
                 }
-                if matches!(event, InputEvent::PressEnter { .. })
-                    && let Some(row) = this.query_params.iter().find(|row| row.id == id)
-                {
-                    row.description.read(cx).focus_handle(cx).focus(window);
-                }
-            },
-        );
-        let description_subscription = cx.subscribe_in(
-            &description_state,
-            window,
-            move |this, _, event, window, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.refresh_request_dirty_part(RequestDirtyPart::Params, cx);
-                }
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     this.focus_next_query_param_row(id, window, cx);
                 }
@@ -82,13 +62,8 @@ impl ApiTester {
             id,
             key: key_state,
             value: value_state,
-            description: description_state,
             enabled,
-            _subscriptions: vec![
-                key_subscription,
-                value_subscription,
-                description_subscription,
-            ],
+            _subscriptions: vec![key_subscription, value_subscription],
         });
         self.refresh_request_dirty_part(RequestDirtyPart::Params, cx);
     }
@@ -103,7 +78,7 @@ impl ApiTester {
             return;
         };
         if index + 1 == self.query_params.len() {
-            self.push_query_param_row("", "", "", true, window, cx);
+            self.push_query_param_row("", "", true, window, cx);
         }
         if let Some(input) = self.query_params.get(index + 1).map(|row| row.key.clone()) {
             input.read(cx).focus_handle(cx).focus(window);
@@ -132,7 +107,7 @@ impl ApiTester {
     ) {
         self.query_params.retain(|row| row.id != row_id);
         if self.query_params.is_empty() {
-            self.push_query_param_row("", "", "", true, window, cx);
+            self.push_query_param_row("", "", true, window, cx);
         }
         self.sync_url_from_query_params(window, cx);
         cx.notify();
@@ -145,7 +120,7 @@ impl ApiTester {
     ) {
         let url = self.url.read(cx).value().to_string();
         let parsed = query_params_from_url(&url);
-        let mut existing = self.normalized_query_params(cx);
+        let existing = self.normalized_query_params(cx);
         let current = existing
             .iter()
             .filter(|param| param.enabled)
@@ -159,15 +134,7 @@ impl ApiTester {
             return;
         }
 
-        let mut reconciled = Vec::with_capacity(parsed.len() + existing.len());
-        for mut param in parsed {
-            if let Some(index) = existing.iter().position(|candidate| {
-                candidate.enabled && candidate.key == param.key && candidate.value == param.value
-            }) {
-                param.description = existing.remove(index).description;
-            }
-            reconciled.push(param);
-        }
+        let mut reconciled = parsed;
         reconciled.extend(existing.into_iter().filter(|param| !param.enabled));
 
         self.query_params.clear();
@@ -175,14 +142,13 @@ impl ApiTester {
             self.push_query_param_row(
                 param.key,
                 param.value,
-                param.description,
                 param.enabled,
                 window,
                 cx,
             );
         }
         if self.query_params.is_empty() {
-            self.push_query_param_row("", "", "", true, window, cx);
+            self.push_query_param_row("", "", true, window, cx);
         }
         self.refresh_request_dirty_part(RequestDirtyPart::Params, cx);
         cx.notify();
@@ -209,16 +175,13 @@ impl ApiTester {
             .filter_map(|row| {
                 let key = row.key.read(cx).value().to_string();
                 let value = row.value.read(cx).value().to_string();
-                let description = row.description.read(cx).value().to_string();
-                if key.trim().is_empty() && value.trim().is_empty() && description.trim().is_empty()
-                {
+                if key.trim().is_empty() && value.trim().is_empty() {
                     return None;
                 }
                 Some(QueryParamEntry {
                     enabled: row.enabled,
                     key,
                     value,
-                    description,
                 })
             })
             .collect()
@@ -853,14 +816,13 @@ impl ApiTester {
             self.push_query_param_row(
                 param.key,
                 param.value,
-                param.description,
                 param.enabled,
                 window,
                 cx,
             );
         }
         if self.query_params.is_empty() {
-            self.push_query_param_row("", "", "", true, window, cx);
+            self.push_query_param_row("", "", true, window, cx);
         }
 
         self.headers.clear();

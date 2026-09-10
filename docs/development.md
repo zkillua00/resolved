@@ -92,6 +92,24 @@ development certificate once with `scripts\package-msix.ps1 -InstallCert`.
 Platform prerequisites and distribution commands are in the
 [building and packaging guide](building.md).
 
+### Native editor regression probe
+
+GPUI's simulated test platform does not exercise macOS's native text shaping.
+For empty-editor rendering changes, also run the native placeholder probe from
+a graphical desktop session:
+
+```sh
+./scripts/cargo.sh build --example documentation_placeholder_probe
+target/debug/examples/documentation_placeholder_probe
+```
+
+It opens a disposable window, switches to an empty Markdown editor, and checks
+multiline placeholders, Unicode, blank lines, CRLF, and populated-to-empty
+transitions. It exits automatically and never opens the application database.
+Before the multiline-placeholder fix this reproduces the Documentation-tab
+abort: full-placeholder text runs were passed when shaping individual lines.
+The fix clips runs to each line's byte range in the shared input renderer.
+
 The generated `vendor/gpui-0.2.2/`, `vendor/gpui-component-0.5.1/`, and
 `vendor/typescript-service-6.0.2/` trees, along with the prepared `vendor/tree-sitter-*/`
 grammars, are intentionally ignored. See [Tree-sitter table compaction](tree-sitter-size.md)

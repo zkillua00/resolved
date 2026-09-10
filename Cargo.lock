@@ -127,6 +127,7 @@ dependencies = [
  "gtk",
  "libc",
  "lsp-types",
+ "markdown",
  "memchr",
  "reqwest",
  "ring",

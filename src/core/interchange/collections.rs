@@ -203,20 +203,18 @@ fn postman_request(
     let method = text(value, "method");
     let mut request = RequestDraft::new(if method.is_empty() { "GET" } else { &method }, url);
     if let Some(query) = url_value.get("query").and_then(Value::as_array) {
+        if query.iter().any(|row| row.get("description").is_some_and(|value| !value.is_null())) {
+            warn(
+                bundle,
+                "Postman query descriptions are not imported. Author explanations with @param annotations in Documentation.",
+            );
+        }
         request.query_params = query
             .iter()
             .map(|row| QueryParamEntry {
                 enabled: row.get("disabled").and_then(Value::as_bool) != Some(true),
                 key: text(row, "key"),
                 value: text(row, "value"),
-                description: row
-                    .get("description")
-                    .and_then(|v| {
-                        v.as_str()
-                            .or_else(|| v.get("content").and_then(Value::as_str))
-                    })
-                    .unwrap_or("")
-                    .into(),
             })
             .collect();
         request.url = url_with_query_params(&request.url, &request.query_params);
@@ -582,6 +580,22 @@ mod tests {
         assert!(!request.headers[0].enabled);
         assert_eq!(request.headers[1].value, "Bearer {{token}}");
         assert_eq!(request.body, "{\"name\":\"Ada\"}");
+    }
+
+    #[test]
+    fn postman_warns_when_separate_query_descriptions_are_omitted() {
+        let source = collection(json!([{
+            "name": "Search",
+            "request": {
+                "url": {
+                    "raw": "https://example.test?limit=25",
+                    "query": [{"key": "limit", "value": "25", "description": "Page size"}]
+                }
+            }
+        }]));
+        let bundle = import_requests(&source).unwrap();
+        assert!(bundle.warnings.iter().any(|warning| warning.contains("query descriptions")));
+        assert_eq!(bundle.requests[0].template.request.query_params[0], QueryParamEntry::new("limit", "25"));
     }
 
     #[test]

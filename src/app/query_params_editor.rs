@@ -4,7 +4,6 @@ pub(in crate::app) struct QueryParamRow {
     pub(in crate::app) id: usize,
     pub(in crate::app) key: Entity<InputState>,
     pub(in crate::app) value: Entity<InputState>,
-    pub(in crate::app) description: Entity<InputState>,
     pub(in crate::app) enabled: bool,
     pub(in crate::app) _subscriptions: Vec<Subscription>,
 }
@@ -85,7 +84,7 @@ impl ApiTester {
                                     .small()
                                     .ghost()
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.push_query_param_row("", "", "", true, window, cx);
+                                        this.push_query_param_row("", "", true, window, cx);
                                         if let Some(input) =
                                             this.query_params.last().map(|row| row.key.clone())
                                         {
@@ -101,6 +100,13 @@ impl ApiTester {
 
     fn render_query_param_row(&self, row: &QueryParamRow, cx: &mut Context<Self>) -> AnyElement {
         let id = row.id;
+        let description = documentation::explanation(
+            &self.documentation_intelligence,
+            &self.documentation,
+            crate::documentation_intelligence::TargetKind::Query,
+            row.key.read(cx).value().as_ref(),
+            cx,
+        );
         h_flex()
             .id(("query-param-row", id))
             .w_full()
@@ -128,9 +134,19 @@ impl ApiTester {
                             })),
                     ),
             )
-            .child(query_param_input_cell(&row.key, cx))
+            .child(
+                query_param_input_cell(&row.key, cx)
+                    .id(("query-param-key-description", id))
+                    .when_some(description.clone(), |this, description| {
+                        this.tooltip(move |window, cx| Tooltip::new(description.clone()).build(window, cx))
+                    }),
+            )
             .child(query_param_input_cell(&row.value, cx))
-            .child(query_param_input_cell(&row.description, cx))
+            .child(documentation::description_cell(
+                format!("query-description-{id}").into(),
+                description,
+                cx,
+            ))
             .child(
                 div()
                     .w(px(44.))
@@ -169,7 +185,7 @@ fn query_param_heading(label: &'static str, cx: &App) -> impl IntoElement {
         .child(label)
 }
 
-fn query_param_input_cell(input: &Entity<InputState>, cx: &App) -> impl IntoElement {
+fn query_param_input_cell(input: &Entity<InputState>, cx: &App) -> gpui::Div {
     div()
         .flex_1()
         .min_w_0()

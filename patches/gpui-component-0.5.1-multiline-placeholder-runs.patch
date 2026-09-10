@@ -1,0 +1,26 @@
+diff --git a/src/input/element.rs b/src/input/element.rs
+--- a/src/input/element.rs
++++ b/src/input/element.rs
+@@ -813,15 +813,21 @@ impl TextElement {
+ 
+         // Empty to use placeholder, the placeholder is not in the text_wrapper map.
+         if state.text.len() == 0 {
++            let mut offset = 0;
+             return display_text
+                 .to_string()
+                 .split("\n")
+                 .map(|line| {
++                    // Runs describe the entire placeholder, but the platform
++                    // shaper receives one line. Clip to that line's byte range,
++                    // including zero runs for empty lines, just as for body text.
++                    let line_runs = runs_for_range(runs, offset, &(0..line.len()));
++                    offset += line.len() + 1;
+                     let shaped_line = window
+                         .text_system()
+-                        .shape_line(line.to_string().into(), font_size, &runs, None)
++                        .shape_line(line.to_string().into(), font_size, &line_runs, None)
+                         .with_tab_width(tab_width);
+                     LineLayout::new().lines(smallvec::smallvec![shaped_line])
+                 })
+                 .collect();
+         }

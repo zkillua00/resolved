@@ -146,19 +146,7 @@ impl ApiTester {
             )
         });
         let pre_completion_catalog = Rc::clone(&script_variable_catalog);
-        let documentation = cx.new(|cx| {
-            CodeEditor::new(
-                CodeEditorConfig::default()
-                    .framed(false)
-                    .embedded(true)
-                    .language(CodeLanguage::Markdown)
-                    .placeholder("Document this request with Markdown")
-                    .rows(12)
-                    .soft_wrap(true),
-                window,
-                cx,
-            )
-        });
+        let (documentation, documentation_intelligence) = documentation::new_editor(window, cx);
         let pre_request_script = cx.new(|cx| {
             let completion_catalog = Rc::clone(&pre_completion_catalog);
             let mut intelligence =
@@ -775,6 +763,7 @@ impl ApiTester {
             cx.subscribe(&documentation, |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.refresh_request_dirty_part(RequestDirtyPart::Documentation, cx);
+                    cx.notify();
                 }
             });
         let pre_request_subscription =
@@ -942,6 +931,7 @@ impl ApiTester {
             url,
             body,
             documentation,
+            documentation_intelligence,
             pre_request_script,
             post_response_script,
             response_editor,
@@ -1146,7 +1136,7 @@ impl ApiTester {
         };
         this.apply_code_editor_settings(window, cx);
         this.refresh_websocket_composer_inline_actions(cx);
-        this.push_query_param_row("", "", "", true, window, cx);
+        this.push_query_param_row("", "", true, window, cx);
         this.push_header_row("", "", true, true, window, cx);
         this.refresh_variable_intelligence(cx);
         this.loaded_request_baseline = this.request_template(cx);

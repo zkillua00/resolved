@@ -27,7 +27,10 @@ Variable placeholders remain editable. Postman collection and URL variable value
 must be added to a Resolved environment. Postman scripts are not executed or
 translated to Resolved's scripting API. API-spec authentication and unsupported
 Postman authentication require manual configuration; the preview shows these
-limitations. References to external documents are not fetched.
+limitations. Postman query descriptions are not imported into the former
+description field; the preview warns when they are omitted. Author field
+explanations with [documentation annotations](user-guide.md#request-documentation-annotations).
+References to external documents are not fetched.
 
 Local saving commits the imported collection tree in one database write. Server
 saving requires collection and request creation permissions. Server writes are

@@ -1501,7 +1501,7 @@ fn params_editor_stays_in_sync_with_the_request_url(cx: &mut gpui::TestAppContex
     });
     cx.run_until_parked();
 
-    let (page_id, page_value, page_description) = cx.update(|_, cx| {
+    let (page_id, page_value) = cx.update(|_, cx| {
         let app = app.read(cx);
         assert_eq!(app.request_pane, RequestPane::Params);
         assert_eq!(app.request_query_param_count(cx), 2);
@@ -1513,14 +1513,14 @@ fn params_editor_stays_in_sync_with_the_request_url(cx: &mut gpui::TestAppContex
         (
             app.query_params[1].id,
             app.query_params[1].value.clone(),
-            app.query_params[1].description.clone(),
         )
     });
 
     cx.update(|window, cx| {
         page_value.update(cx, |input, cx| input.set_value("3", window, cx));
-        page_description.update(cx, |input, cx| {
-            input.set_value("Pagination cursor", window, cx)
+        let documentation = app.read(cx).documentation.clone();
+        documentation.update(cx, |editor, cx| {
+            editor.set_value("@param query.page Pagination cursor", window, cx)
         });
     });
     cx.run_until_parked();
@@ -1530,8 +1530,12 @@ fn params_editor_stays_in_sync_with_the_request_url(cx: &mut gpui::TestAppContex
             "https://example.test/search?q=hello+world&page=3#results"
         );
         assert_eq!(
-            app.read(cx).draft(cx).query_params[1].description,
-            "Pagination cursor"
+            app.read(cx).documentation_intelligence.explanation(
+                app.read(cx).documentation.read(cx).value(cx).as_ref(),
+                crate::documentation_intelligence::TargetKind::Query,
+                "page",
+            ).as_deref(),
+            Some("Pagination cursor")
         );
     });
 
@@ -1549,8 +1553,82 @@ fn params_editor_stays_in_sync_with_the_request_url(cx: &mut gpui::TestAppContex
         );
         assert!(!app.draft(cx).query_params[1].enabled);
         assert_eq!(
-            app.draft(cx).query_params[1].description,
-            "Pagination cursor"
+            app.documentation_intelligence.explanation(
+                app.documentation.read(cx).value(cx).as_ref(),
+                crate::documentation_intelligence::TargetKind::Query,
+                "page",
+            ).as_deref(),
+            Some("Pagination cursor")
         );
     });
+
+    // Use the real documentation editor's completion menu, not just its provider.
+    let documentation_input = cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.request_pane = RequestPane::Documentation;
+            app.documentation.update(cx, |editor, cx| editor.set_value("", window, cx));
+            let input = app.documentation.read(cx).input_state();
+            input.read(cx).focus_handle(cx).focus(window);
+            cx.notify();
+            input
+        })
+    });
+    cx.run_until_parked();
+    cx.simulate_input("@param query.pa");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("tab");
+    assert_eq!(
+        cx.read(|cx| documentation_input.read(cx).value().to_string()),
+        "@param query.page",
+    );
+    cx.simulate_input(" Pagination cursor");
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        let app = app.read(cx);
+        assert_eq!(
+            app.documentation_intelligence.explanation(
+                app.documentation.read(cx).value(cx).as_ref(),
+                crate::documentation_intelligence::TargetKind::Query,
+                "page",
+            ).as_deref(),
+            Some("Pagination cursor"),
+        );
+    });
+
+    // A name change must invalidate diagnostics without editing the Markdown.
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.query_params[1].key.update(cx, |input, cx| {
+                input.set_value("cursor", window, cx);
+            });
+            app.render_request_panel(cx);
+            assert_eq!(documentation_input.read(cx).diagnostics().unwrap().len(), 1);
+            app.query_params[1].key.update(cx, |input, cx| {
+                input.set_value("page", window, cx);
+            });
+            app.render_request_panel(cx);
+            assert_eq!(documentation_input.read(cx).diagnostics().unwrap().len(), 0);
+        });
+    });
+
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.push_header_row("X-Trace", "not-for-completion", true, true, window, cx);
+            app.documentation.update(cx, |editor, cx| {
+                editor.set_value("@header ", window, cx);
+            });
+            documentation_input.update(cx, |input, cx| {
+                input.set_cursor_position(lsp_types::Position::new(0, 8), window, cx);
+            });
+            app.render_request_panel(cx);
+        });
+    });
+    cx.simulate_input("X-T");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("tab");
+    assert_eq!(
+        cx.read(|cx| documentation_input.read(cx).value().to_string()),
+        "@header x-trace",
+        "header completion uses names, never values",
+    );
 }

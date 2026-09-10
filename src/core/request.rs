@@ -52,8 +52,8 @@ impl HeaderEntry {
 /// One persisted query-parameter row.
 ///
 /// The request URL remains the wire-format source of truth. These rows retain
-/// the structured editor state that cannot be represented in a URL, such as a
-/// disabled parameter or its description.
+/// disabled parameters that cannot be represented in a URL. Explanations live
+/// in the request template's Markdown documentation, not in a second field.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QueryParamEntry {
     #[serde(default = "enabled_by_default")]
@@ -62,8 +62,6 @@ pub struct QueryParamEntry {
     pub key: String,
     #[serde(default)]
     pub value: String,
-    #[serde(default)]
-    pub description: String,
 }
 
 impl QueryParamEntry {
@@ -72,7 +70,6 @@ impl QueryParamEntry {
             enabled: true,
             key: key.into(),
             value: value.into(),
-            description: String::new(),
         }
     }
 }
@@ -1130,7 +1127,6 @@ mod tests {
     fn disabled_query_params_stay_in_editor_state_but_not_in_url() {
         let mut disabled = QueryParamEntry::new("secret", "not-sent");
         disabled.enabled = false;
-        disabled.description = "Retain for later".to_owned();
         let params = vec![QueryParamEntry::new("page", "2"), disabled.clone()];
 
         assert_eq!(
@@ -1140,6 +1136,15 @@ mod tests {
         let encoded = serde_json::to_string(&params).unwrap();
         let decoded: Vec<QueryParamEntry> = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded[1], disabled);
+    }
+
+    #[test]
+    fn query_rows_no_longer_persist_separate_explanations() {
+        let row: QueryParamEntry = serde_json::from_str(
+            r#"{"key":"limit","value":"25","description":"Old alpha description"}"#,
+        ).unwrap();
+        assert_eq!(row, QueryParamEntry::new("limit", "25"));
+        assert!(serde_json::to_value(row).unwrap().get("description").is_none());
     }
 
     #[test]

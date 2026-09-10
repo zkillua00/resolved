@@ -112,6 +112,7 @@ mod collections_actions;
 mod collections_page;
 mod control;
 mod cookies;
+mod documentation;
 mod drag_drop;
 mod editor_settings;
 mod environment_browser;
@@ -265,6 +266,7 @@ pub struct ApiTester {
     url: Entity<InputState>,
     body: Entity<CodeEditor>,
     documentation: Entity<CodeEditor>,
+    documentation_intelligence: Rc<crate::documentation_intelligence::DocumentationIntelligence>,
     pre_request_script: Entity<CodeEditor>,
     post_response_script: Entity<CodeEditor>,
     response_editor: Entity<CodeEditor>,

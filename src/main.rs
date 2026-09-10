@@ -15,6 +15,7 @@ mod control_server;
 mod control_tools;
 mod core;
 mod debug_overlay;
+mod documentation_intelligence;
 mod editor_util;
 mod instance_guard;
 mod platform;
