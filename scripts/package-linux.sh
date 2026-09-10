@@ -121,8 +121,7 @@ Architecture: $deb_architecture
 Maintainer: Resolved contributors
 Depends: libc6, libfontconfig1, libgcc-s1, libgtk-3-0, libvulkan1, libwebkit2gtk-4.1-0, libx11-6, libxcb1, libxkbcommon0, libxkbcommon-x11-0
 Description: Native API workbench
-Resolved keeps request intent, wire state,
- and responses explicit.
+ Resolved keeps request intent, wire state, and responses explicit.
 EOF
 
     deb_output="$project_dir/target/$binary_dir/Resolved-$version-linux-$deb_architecture.deb"
