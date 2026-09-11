@@ -68,6 +68,20 @@ fields in the Documentation tab:
 @body(XML) /request/user/@id Unique user identifier.
 ```
 
+- To share one explanation across alternative JSON or XML paths, separate full
+  paths with a standalone `|`, with whitespace on both sides:
+
+  ```markdown
+  @body /user/name | /profile/name Display name.
+  @body(JSON) "/user/display name" | "/profile/display name" Display name.
+  @body(XML) /request/user/@id | /request/account/@id Unique identifier.
+  ```
+
+  The explanation applies to every listed path that exists, not just the first
+  match. Write each alternative as a complete path; `/user/name | email` is not
+  shorthand for `/user/email`. Each path may be JSON-quoted. A `|` inside a
+  quoted path or without surrounding whitespace is literal, not a separator.
+  Alternatives are supported only for body annotations, not query or header names.
 - `@body` always means JSON. Explicit modes are case-insensitive (`JSON`, `json`);
   paths remain case-sensitive. The mode must match the selected body language.
 - JSON uses JSON Pointer: `/` separates keys, arrays use zero-based indices,
@@ -82,12 +96,18 @@ fields in the Documentation tab:
   Hover over JSON keys/values or XML opening tag/attribute names to read their
   explanations, including clickable resolved `@Ref(...)` references. Unresolved
   references remain literal text. Duplicate explanations have no winner.
+  Alternatives do not bypass this rule: paths shared by separate annotations
+  conflict, even when their other alternatives differ.
 - Resolution uses the literal body currently shown in the editor, not substituted
   environment variables or a previous response. Editing the body refreshes targets;
   documentation never changes the outgoing request.
+  Paths do not traverse JSON or XML encoded inside string values; document the
+  containing string instead.
 - Absent paths receive informational notices only when the body can be completely
-  understood. When an incomplete or invalid body, or an incompatible body mode,
-  prevents resolution, annotations remain valid without per-path notices.
+  understood. An annotation with alternatives receives a missing-target notice
+  only when none of its paths exist. When an incomplete or invalid body, or an
+  incompatible body mode, prevents resolution, annotations remain valid without
+  per-path notices.
   Confidently discovered fields may still be suggested while editing.
 
 Body annotations are request-local and work independently in split panes.
