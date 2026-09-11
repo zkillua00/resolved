@@ -305,8 +305,8 @@ environment normally, but does not change the saved request or its revision.
 Response bodies are returned as UTF-8 when valid and otherwise as base64. Set
 `max_body_bytes` up to 524288 to bound the MCP response; `size_bytes`,
 `body_included_bytes`, and `body_truncated` make truncation explicit. The
-application's normal 64 MiB response buffering limit still applies before this
-smaller MCP projection.
+request's [effective response-buffering limit](execution-limits.md) applies before
+this smaller MCP projection; its default is 64 MiB.
 
 For large JSON responses, `query_http_response` applies an RFC 6901 JSON Pointer
 inside Resolved and returns only the selected value. An optional `projection`

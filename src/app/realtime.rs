@@ -101,6 +101,7 @@ impl ApiTester {
                                 cx,
                             );
                             this.refresh_server_management_realtime(&upstream_id, window, cx);
+                            this.refresh_execution_limits_realtime(&upstream_id, window, cx);
                             this.queue_realtime_refresh(&upstream_id, None, window, cx);
                             cx.notify();
                         }
@@ -111,6 +112,13 @@ impl ApiTester {
                         RealtimeSignal::Change(change) => {
                             this.realtime_status = RealtimeConnectionStatus::Connected;
                             this.handle_realtime_activity_change(&upstream_id, &change, window, cx);
+                            if matches!(
+                                change.resource.as_str(),
+                                "request_execution_limits" | "workspace" | "collection"
+                            ) || change.is_identity_change()
+                            {
+                                this.refresh_execution_limits_realtime(&upstream_id, window, cx);
+                            }
                             if change.is_shared_history_change() {
                                 this.handle_realtime_shared_history_change(
                                     &upstream_id,

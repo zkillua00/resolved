@@ -1,15 +1,20 @@
 package requestproxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"resolved-server/internal/auth"
+	"resolved-server/internal/executionlimits"
 	"resolved-server/internal/httpkit"
 	"resolved-server/internal/identity"
 	"resolved-server/internal/problem"
@@ -19,24 +24,26 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/adaptor"
 	gorillaWebsocket "github.com/gorilla/websocket"
+	"github.com/valyala/fasthttp"
 )
 
 type Handler struct {
 	service        *Service
-	websocketSlots chan struct{}
+	slotsMu        sync.Mutex
+	websocketSlots map[string]int64
 }
 
 const (
-	maxWebSocketExecutions      = 500
-	maxWebSocketDescriptorBytes = 1024 * 1024
-	maxWebSocketMessageBytes    = 16 * 1024 * 1024
+	maxWebSocketMessageBytes = 16 * 1024 * 1024
 )
 
 type websocketExecutionContextKey struct{}
 
 type websocketExecutionContext struct {
-	actor       workspaces.Actor
-	workspaceID string
+	actor        workspaces.Actor
+	workspaceID  string
+	collectionID string
+	snapshot     executionlimits.Snapshot
 }
 
 type websocketOpenResponse struct {
@@ -46,11 +53,12 @@ type websocketOpenResponse struct {
 }
 
 type ExecuteRequest struct {
+	CollectionID string         `json:"collection_id,omitempty"`
 	UseCookieJar bool           `json:"use_cookie_jar"`
 	WorkspaceID  string         `json:"-" validate:"required"`
 	Method       string         `json:"method" validate:"required,max=64"`
-	URL          string         `json:"url" validate:"required,max=16384"`
-	Headers      []Header       `json:"headers" validate:"max=256"`
+	URL          string         `json:"url" validate:"required"`
+	Headers      []Header       `json:"headers"`
 	Body         proxybody.Body `json:"body"`
 }
 
@@ -73,13 +81,54 @@ type AddAllowlistEntryPayload AddAllowlistEntryRequest
 func NewHandler(service *Service) *Handler {
 	return &Handler{
 		service:        service,
-		websocketSlots: make(chan struct{}, maxWebSocketExecutions),
+		websocketSlots: make(map[string]int64),
 	}
 }
 
 func (request *ExecuteRequest) BindFiber(c fiber.Ctx) error {
 	request.WorkspaceID = c.Params("workspace_id")
-	return c.Bind().Body(request)
+	snapshot, ok := c.Context().Value(executionSnapshotKey{}).(executionSnapshot)
+	if !ok {
+		return fiber.ErrInternalServerError
+	}
+	var reader io.Reader = c.Request().BodyStream()
+	if reader == nil {
+		reader = bytes.NewReader(c.Request().Body())
+	}
+	body, tooLarge, err := readLimited(reader, snapshot.snapshot.Effective["http.envelope_bytes"])
+	if err != nil {
+		return err
+	}
+	if tooLarge {
+		return fiber.NewError(fiber.StatusRequestEntityTooLarge, "execution envelope exceeds http.envelope_bytes")
+	}
+	// Preserve Fiber's supported Content-Encoding behavior without allowing
+	// decompression to bypass the effective envelope budget. Bound both the wire
+	// bytes above and the decoded JSON bytes here.
+	c.Request().SetBodyRaw(body)
+	bound := snapshot.snapshot.Effective["http.envelope_bytes"]
+	maxDecoded := 0
+	if !bound.Unlimited {
+		maxDecoded = int(bound.Value)
+	}
+	body, err = c.Request().BodyUncompressedWithLimit(maxDecoded)
+	if errors.Is(err, fasthttp.ErrBodyTooLarge) {
+		return fiber.NewError(fiber.StatusRequestEntityTooLarge, "decoded execution envelope exceeds http.envelope_bytes")
+	}
+	if errors.Is(err, fasthttp.ErrContentEncodingUnsupported) {
+		return fiber.ErrUnsupportedMediaType
+	}
+	if err != nil {
+		return fiber.ErrBadRequest
+	}
+	if err := json.Unmarshal(body, request); err != nil {
+		return fiber.ErrBadRequest
+	}
+	if request.CollectionID != "" && request.CollectionID != snapshot.collectionID {
+		return invalidField("collection_id", "must match the query scope")
+	}
+	request.CollectionID = snapshot.collectionID
+	return nil
 }
 
 func (request *ExecuteRequest) ToPayload(*httpkit.ProcessingContext) (ExecutePayload, error) {
@@ -121,10 +170,16 @@ func (h *Handler) PolicyController() fiber.Handler {
 		httpkit.EmptyRequest,
 	](
 		func(c fiber.Ctx, _ httpkit.EmptyPayload) httpkit.Response[Policy] {
-			policy, err := h.service.Policy(c.Context())
+			snapshot, err := h.service.resolveLimits(c.Context(), actorFromContext(c), c.Query("workspace_id"), c.Query("collection_id"))
 			if err != nil {
 				return httpkit.NewErrorResponse[Policy](err)
 			}
+			ctx := context.WithValue(c.Context(), executionSnapshotKey{}, executionSnapshot{c.Query("workspace_id"), c.Query("collection_id"), snapshot})
+			policy, err := h.service.Policy(ctx)
+			if err != nil {
+				return httpkit.NewErrorResponse[Policy](err)
+			}
+			policy.Limits = snapshot.Effective
 			return httpkit.NewSuccessResponse(fiber.StatusOK, policy)
 		},
 	)
@@ -171,7 +226,7 @@ func (h *Handler) UpdateSettingsController() fiber.Handler {
 }
 
 func (h *Handler) ExecuteController() fiber.Handler {
-	return httpkit.WithProcessedPayload[
+	handler := httpkit.WithProcessedPayload[
 		ExecuteResult,
 		ExecutePayload,
 		ExecuteRequest,
@@ -183,6 +238,7 @@ func (h *Handler) ExecuteController() fiber.Handler {
 				payload.WorkspaceID,
 				ExecuteInput{
 					UseCookieJar: payload.UseCookieJar,
+					CollectionID: payload.CollectionID,
 					Method:       payload.Method,
 					URL:          payload.URL,
 					Headers:      payload.Headers,
@@ -195,38 +251,81 @@ func (h *Handler) ExecuteController() fiber.Handler {
 			return httpkit.NewSuccessResponse(fiber.StatusOK, result)
 		},
 	)
-}
-
-func (h *Handler) WebSocketController() fiber.Handler {
-	handler := adaptor.HTTPHandlerWithContext(http.HandlerFunc(h.handleWebSocket))
 	return func(c fiber.Ctx) error {
-		select {
-		case h.websocketSlots <- struct{}{}:
-			defer func() { <-h.websocketSlots }()
-		default:
-			return fiber.ErrTooManyRequests
+		workspaceID, collectionID := c.Params("workspace_id"), c.Query("collection_id")
+		snapshot, err := h.service.resolveLimits(c.Context(), actorFromContext(c), workspaceID, collectionID)
+		if err != nil {
+			return err
 		}
-		ctx := context.WithValue(c.Context(), websocketExecutionContextKey{}, websocketExecutionContext{
-			actor:       actorFromContext(c),
-			workspaceID: c.Params("workspace_id"),
-		})
-		c.SetContext(ctx)
+		c.SetContext(context.WithValue(c.Context(), executionSnapshotKey{}, executionSnapshot{workspaceID, collectionID, snapshot}))
 		return handler(c)
 	}
 }
 
+func (h *Handler) WebSocketController() fiber.Handler {
+	return func(c fiber.Ctx) error {
+		workspaceID, collectionID := c.Params("workspace_id"), c.Query("collection_id")
+		snapshot, err := h.service.resolveLimits(c.Context(), actorFromContext(c), workspaceID, collectionID)
+		if err != nil {
+			return err
+		}
+		release, admitted := h.admitWebSocket(workspaceID+"\x00"+collectionID, snapshot.Effective["websocket.concurrent_sessions"])
+		if !admitted {
+			return fiber.ErrTooManyRequests
+		}
+		// The adaptor returns to Fiber as soon as Upgrade hijacks the socket;
+		// the net/http handler continues in another goroutine. That handler owns
+		// the permit for the entire connection, not just the upgrade call.
+		var handedOff atomic.Bool
+		defer func() {
+			if !handedOff.Load() {
+				release()
+			}
+		}()
+		c.SetContext(context.WithValue(c.Context(), executionSnapshotKey{}, executionSnapshot{workspaceID, collectionID, snapshot}))
+		ctx := context.WithValue(c.Context(), websocketExecutionContextKey{}, websocketExecutionContext{
+			actor:        actorFromContext(c),
+			workspaceID:  workspaceID,
+			collectionID: collectionID,
+			snapshot:     snapshot,
+		})
+		c.SetContext(ctx)
+		return adaptor.HTTPHandlerWithContext(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handedOff.Store(true)
+			defer release()
+			h.handleWebSocket(w, r)
+		}))(c)
+	}
+}
+
 func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	fiberContext, contextOK := adaptor.LocalContextFromHTTPRequest(r)
+	if !contextOK {
+		fiberContext = r.Context()
+	}
+	route, ok := fiberContext.Value(websocketExecutionContextKey{}).(websocketExecutionContext)
+	if !ok {
+		http.Error(w, "execution context unavailable", http.StatusInternalServerError)
+		return
+	}
 	outer, err := (&gorillaWebsocket.Upgrader{
-		HandshakeTimeout: 5 * time.Second,
+		HandshakeTimeout: limitDuration(route.snapshot.Effective["websocket.handshake_timeout_ms"]),
 		CheckOrigin:      func(*http.Request) bool { return true },
 	}).Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
 	defer outer.Close()
-	outer.SetReadLimit(maxWebSocketDescriptorBytes)
+	setWebSocketReadLimit(outer, route.snapshot.Effective["websocket.opening_bytes"])
+	if duration := limitDuration(route.snapshot.Effective["websocket.handshake_timeout_ms"]); duration != 0 {
+		_ = outer.SetReadDeadline(time.Now().Add(duration))
+	}
 
 	messageType, payload, err := outer.ReadMessage()
+	_ = outer.SetReadDeadline(time.Time{})
+	if exceeds(route.snapshot.Effective["websocket.opening_bytes"], int64(len(payload))) {
+		return
+	}
 	if err != nil || messageType != gorillaWebsocket.TextMessage {
 		_ = outer.WriteJSON(websocketOpenResponse{Type: "error", Message: "the first frame must be a WebSocket execution descriptor"})
 		return
@@ -236,15 +335,11 @@ func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		_ = outer.WriteJSON(websocketOpenResponse{Type: "error", Message: "the WebSocket execution descriptor is invalid"})
 		return
 	}
-	fiberContext, contextOK := adaptor.LocalContextFromHTTPRequest(r)
-	if !contextOK {
-		fiberContext = r.Context()
-	}
-	route, ok := fiberContext.Value(websocketExecutionContextKey{}).(websocketExecutionContext)
-	if !ok {
-		_ = outer.WriteJSON(websocketOpenResponse{Type: "error", Message: "the WebSocket execution context is unavailable"})
+	if input.CollectionID != "" && input.CollectionID != route.collectionID {
+		_ = outer.WriteJSON(websocketOpenResponse{Type: "error", Message: "collection_id must match the query scope"})
 		return
 	}
+	input.CollectionID = route.collectionID
 	startedAt := time.Now()
 	upstream, target, err := h.service.OpenWebSocket(fiberContext, route.actor, route.workspaceID, input)
 	if err != nil {
@@ -252,8 +347,9 @@ func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer upstream.Close()
-	outer.SetReadLimit(maxWebSocketMessageBytes)
-	upstream.SetReadLimit(maxWebSocketMessageBytes)
+	messageBound := route.snapshot.Effective["websocket.message_bytes"]
+	setWebSocketReadLimit(outer, messageBound)
+	setWebSocketReadLimit(upstream, messageBound)
 	defer func() {
 		h.service.recordExecution(
 			fiberContext, route.actor, route.workspaceID, "WEBSOCKET", target, 101, time.Since(startedAt),
@@ -266,8 +362,8 @@ func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	errors := make(chan error, 2)
 	bridgeWebSocketControlFrames(outer, upstream)
 	bridgeWebSocketControlFrames(upstream, outer)
-	go relayWebSocket(outer, upstream, errors)
-	go relayWebSocket(upstream, outer, errors)
+	go relayWebSocketBounded(outer, upstream, errors, messageBound)
+	go relayWebSocketBounded(upstream, outer, errors, messageBound)
 	<-errors
 }
 
@@ -297,10 +393,18 @@ func bridgeWebSocketControlFrames(source, destination *gorillaWebsocket.Conn) {
 }
 
 func relayWebSocket(source, destination *gorillaWebsocket.Conn, errors chan<- error) {
+	relayWebSocketBounded(source, destination, errors, executionlimits.Bound{Value: maxWebSocketMessageBytes})
+}
+
+func relayWebSocketBounded(source, destination *gorillaWebsocket.Conn, errors chan<- error, bound executionlimits.Bound) {
 	for {
 		messageType, payload, err := source.ReadMessage()
 		if err != nil {
 			errors <- err
+			return
+		}
+		if exceeds(bound, int64(len(payload))) {
+			errors <- fiber.ErrRequestEntityTooLarge
 			return
 		}
 		if err := destination.WriteMessage(messageType, payload); err != nil {
@@ -308,6 +412,40 @@ func relayWebSocket(source, destination *gorillaWebsocket.Conn, errors chan<- er
 			return
 		}
 	}
+}
+
+func setWebSocketReadLimit(connection *gorillaWebsocket.Conn, bound executionlimits.Bound) {
+	if bound.Unlimited {
+		connection.SetReadLimit(0)
+		return
+	}
+	// Gorilla interprets zero as unlimited; permit at most one byte and reject
+	// nonempty messages explicitly when the configured bound is zero.
+	value := bound.Value
+	if value == 0 {
+		value = 1
+	}
+	connection.SetReadLimit(value)
+}
+
+func (h *Handler) admitWebSocket(scope string, bound executionlimits.Bound) (func(), bool) {
+	h.slotsMu.Lock()
+	defer h.slotsMu.Unlock()
+	if !bound.Unlimited && h.websocketSlots[scope] >= bound.Value {
+		return nil, false
+	}
+	h.websocketSlots[scope]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			h.slotsMu.Lock()
+			defer h.slotsMu.Unlock()
+			h.websocketSlots[scope]--
+			if h.websocketSlots[scope] == 0 {
+				delete(h.websocketSlots, scope)
+			}
+		})
+	}, true
 }
 
 func (h *Handler) AddAllowlistEntryController() fiber.Handler {

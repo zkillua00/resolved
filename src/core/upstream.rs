@@ -21,6 +21,7 @@ use zeroize::Zeroizing;
 use super::{
     BodyFieldKind, BodyMode, Collection, Environment, RequestDraft, RequestError, ResourceCreator,
     ResponseData, Workspace,
+    execution_limits::ExecutionLimits,
     request::ResponseHeader,
     template::RequestTemplate,
     upstream_management::RequestExecutionMode,
@@ -30,10 +31,7 @@ use super::{
 const LOGIN_RESPONSE_LIMIT_BYTES: usize = 64 * 1024;
 const WORKSPACE_RESPONSE_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(20);
-const PROXY_TIMEOUT: Duration = Duration::from_secs(75);
 const PROXY_POLICY_RESPONSE_LIMIT_BYTES: usize = 64 * 1024;
-const PROXY_ENVELOPE_LIMIT_BYTES: usize = 96 * 1024 * 1024;
-const MAX_PROXY_BODY_BYTES: usize = 64 * 1024 * 1024;
 static NEXT_UPSTREAM_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Persisted connection metadata for every self-hosted Resolved server.
@@ -658,16 +656,17 @@ pub fn build_upstream_execution_client() -> Result<Client, RequestError> {
             env!("RESOLVED_BUILD_VERSION")
         ))
         .redirect(Policy::none())
-        .timeout(PROXY_TIMEOUT)
         .build()
         .map_err(RequestError::Transport)
 }
 
-#[derive(Deserialize)]
-struct ProxyExecutionPolicy {
-    mode: RequestExecutionMode,
+#[derive(Clone, Debug, Deserialize)]
+pub struct ProxyExecutionPolicy {
+    pub mode: RequestExecutionMode,
     #[serde(default)]
-    cookie_jar: bool,
+    pub cookie_jar: bool,
+    #[serde(default)]
+    pub limits: ExecutionLimits,
 }
 
 pub async fn get_upstream_execution_policy(
@@ -684,13 +683,32 @@ async fn load_execution_policy(
     base_url: &Url,
     bearer_token: &str,
 ) -> Result<ProxyExecutionPolicy, RequestError> {
-    let endpoint = base_url.join("api/v1/request-execution").map_err(|error| {
+    get_upstream_execution_policy_for_scope(client, base_url, bearer_token, "", None).await
+}
+
+pub async fn get_upstream_execution_policy_for_scope(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    collection_id: Option<&str>,
+) -> Result<ProxyExecutionPolicy, RequestError> {
+    let mut endpoint = base_url.join("api/v1/request-execution").map_err(|error| {
         RequestError::Upstream(format!(
             "the server execution policy URL is invalid: {error}"
         ))
     })?;
+    if !workspace_id.is_empty() {
+        endpoint
+            .query_pairs_mut()
+            .append_pair("workspace_id", workspace_id);
+    }
+    if let Some(id) = collection_id {
+        endpoint.query_pairs_mut().append_pair("collection_id", id);
+    }
     let mut response = client
         .get(endpoint)
+        .timeout(LOGIN_TIMEOUT)
         .bearer_auth(bearer_token)
         .send()
         .await
@@ -701,12 +719,14 @@ async fn load_execution_policy(
         ));
     }
     let status = response.status();
-    // Servers released before request proxying do not expose a policy route;
-    // their server workspaces retain the original local-execution behavior.
-    if status == StatusCode::NOT_FOUND {
+    // Legacy unscoped callers may probe older servers without a policy route.
+    // A scoped 404 can instead mean deleted/inaccessible ancestry and must
+    // never authorize local execution or fabricate default limits.
+    if status == StatusCode::NOT_FOUND && workspace_id.is_empty() && collection_id.is_none() {
         return Ok(ProxyExecutionPolicy {
             mode: RequestExecutionMode::Local,
             cookie_jar: false,
+            limits: ExecutionLimits::default(),
         });
     }
     if response
@@ -741,11 +761,13 @@ async fn load_execution_policy(
             .unwrap_or_else(|| format!("could not load server execution policy: HTTP {status}"));
         return Err(RequestError::Upstream(message));
     }
-    envelope.data.ok_or_else(|| {
+    let policy = envelope.data.ok_or_else(|| {
         RequestError::Upstream(
             "the server response did not include its request execution policy".to_owned(),
         )
-    })
+    })?;
+    policy.limits.validate().map_err(RequestError::Upstream)?;
+    Ok(policy)
 }
 
 #[derive(Serialize)]
@@ -838,11 +860,45 @@ pub async fn send_request_for_upstream_workspace_with_cookies(
     request: RequestDraft,
     jar: &super::CookieJar,
 ) -> Result<ResponseData, RequestError> {
+    let policy = get_upstream_execution_policy_for_scope(
+        upstream_client,
+        base_url,
+        bearer_token,
+        workspace_id,
+        None,
+    )
+    .await?;
+    send_request_for_upstream_workspace_with_scope(
+        upstream_client,
+        local_client,
+        base_url,
+        bearer_token,
+        workspace_id,
+        request,
+        jar,
+        None,
+        &policy,
+    )
+    .await
+}
+
+pub async fn send_request_for_upstream_workspace_with_scope(
+    upstream_client: &Client,
+    local_client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    request: RequestDraft,
+    jar: &super::CookieJar,
+    collection_id: Option<&str>,
+    policy: &ProxyExecutionPolicy,
+) -> Result<ResponseData, RequestError> {
     jar.synchronized().await.map_err(RequestError::Upstream)?;
-    let policy = load_execution_policy(upstream_client, base_url, bearer_token).await?;
     match policy.mode {
         RequestExecutionMode::Local => {
-            let result = super::request::send_request(local_client, request).await;
+            let result =
+                super::request::send_request_with_limits(local_client, request, &policy.limits)
+                    .await;
             jar.synchronized().await.map_err(|e| {
                 RequestError::Upstream(format!(
                     "Request completed, but cookie synchronization failed: {e}"
@@ -856,13 +912,15 @@ pub async fn send_request_for_upstream_workspace_with_cookies(
                     "Update this server to support encrypted cookie jars.".into(),
                 ));
             }
-            let result = execute_upstream_request_with_cookies(
+            let result = execute_upstream_request_with_scope(
                 upstream_client,
                 base_url,
                 bearer_token,
                 workspace_id,
                 request,
                 jar.enabled(),
+                collection_id,
+                &policy.limits,
             )
             .await;
             jar.refresh().await.map_err(|e| {
@@ -877,6 +935,8 @@ pub async fn send_request_for_upstream_workspace_with_cookies(
 
 #[derive(Serialize)]
 struct ProxyExecuteRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collection_id: Option<String>,
     use_cookie_jar: bool,
     method: String,
     url: String,
@@ -952,25 +1012,86 @@ async fn execute_upstream_request_with_cookies(
     request: RequestDraft,
     use_cookie_jar: bool,
 ) -> Result<ResponseData, RequestError> {
-    let mut payload = proxy_request_payload(request).await?;
-    payload.use_cookie_jar = use_cookie_jar;
+    execute_upstream_request_with_scope(
+        client,
+        base_url,
+        bearer_token,
+        workspace_id,
+        request,
+        use_cookie_jar,
+        None,
+        &ExecutionLimits::default(),
+    )
+    .await
+}
 
-    let endpoint = base_url
+pub async fn execute_upstream_request_with_scope(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    request: RequestDraft,
+    use_cookie_jar: bool,
+    collection_id: Option<&str>,
+    limits: &ExecutionLimits,
+) -> Result<ResponseData, RequestError> {
+    let mut payload = proxy_request_payload_with_limits(request, limits).await?;
+    payload.use_cookie_jar = use_cookie_jar;
+    payload.collection_id = collection_id.map(str::to_owned);
+    let encoded =
+        serde_json::to_vec(&payload).map_err(|error| RequestError::Upstream(error.to_string()))?;
+    let envelope_limit = limits
+        .get("http.envelope_bytes")
+        .as_usize()
+        .map_err(RequestError::Upstream)?;
+    if envelope_limit.is_some_and(|limit| encoded.len() > limit) {
+        return Err(RequestError::Upstream(
+            "request envelope exceeds http.envelope_bytes".into(),
+        ));
+    }
+
+    let mut endpoint = base_url
         .join(&format!("api/v1/workspaces/{workspace_id}/execute"))
         .map_err(|error| {
             RequestError::Upstream(format!("the server execution URL is invalid: {error}"))
         })?;
+    if let Some(id) = collection_id {
+        endpoint.query_pairs_mut().append_pair("collection_id", id);
+    }
     let response = client
         .post(endpoint)
         .bearer_auth(bearer_token)
-        .json(&payload)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(encoded)
         .send()
         .await
         .map_err(RequestError::Transport)?;
-    parse_proxy_response(response).await
+    parse_proxy_response(response, limits).await
 }
 
 async fn proxy_request_payload(request: RequestDraft) -> Result<ProxyExecuteRequest, RequestError> {
+    proxy_request_payload_with_limits(request, &ExecutionLimits::default()).await
+}
+
+async fn proxy_request_payload_with_limits(
+    request: RequestDraft,
+    limits: &ExecutionLimits,
+) -> Result<ProxyExecuteRequest, RequestError> {
+    let body_limit = limits
+        .get("http.request_bytes")
+        .as_usize()
+        .map_err(RequestError::Upstream)?;
+    if request.body_mode == BodyMode::FormUrlEncoded {
+        let mut encoded = url::form_urlencoded::Serializer::new(String::new());
+        for field in request
+            .body_fields
+            .iter()
+            .filter(|field| field.enabled && !field.name.trim().is_empty())
+        {
+            encoded.append_pair(&field.name, &field.value);
+        }
+        ensure_proxy_body_limit(encoded.finish().len(), body_limit)?;
+    }
     let mut headers = request
         .headers
         .iter()
@@ -998,7 +1119,7 @@ async fn proxy_request_payload(request: RequestDraft) -> Result<ProxyExecuteRequ
             fields: Vec::new(),
         },
         BodyMode::Raw => {
-            ensure_proxy_body_limit(request.body.len())?;
+            ensure_proxy_body_limit(request.body.len(), body_limit)?;
             ProxyBody {
                 mode: "raw",
                 raw_content_type: (!request.body.is_empty())
@@ -1035,7 +1156,7 @@ async fn proxy_request_payload(request: RequestDraft) -> Result<ProxyExecuteRequ
                 match field.kind {
                     BodyFieldKind::Text => {
                         materialized_bytes = materialized_bytes.saturating_add(field.value.len());
-                        ensure_proxy_body_limit(materialized_bytes)?;
+                        ensure_proxy_body_limit(materialized_bytes, body_limit)?;
                         fields.push(ProxyBodyField {
                             name: field.name.clone(),
                             kind: "text",
@@ -1054,7 +1175,8 @@ async fn proxy_request_payload(request: RequestDraft) -> Result<ProxyExecuteRequ
                             .map(|name| name.to_string_lossy().into_owned())
                             .unwrap_or_else(|| "file".to_owned());
                         let field_name = field.name.clone();
-                        let remaining = MAX_PROXY_BODY_BYTES.saturating_sub(materialized_bytes);
+                        let remaining =
+                            body_limit.map(|limit| limit.saturating_sub(materialized_bytes));
                         let task_path = path.clone();
                         let content = tokio::task::spawn_blocking(move || {
                             read_proxy_file(&task_path, remaining)
@@ -1069,7 +1191,7 @@ async fn proxy_request_payload(request: RequestDraft) -> Result<ProxyExecuteRequ
                             }
                         })?;
                         materialized_bytes = materialized_bytes.saturating_add(content.len());
-                        ensure_proxy_body_limit(materialized_bytes)?;
+                        ensure_proxy_body_limit(materialized_bytes, body_limit)?;
                         fields.push(ProxyBodyField {
                             name: field_name,
                             kind: "file",
@@ -1090,6 +1212,7 @@ async fn proxy_request_payload(request: RequestDraft) -> Result<ProxyExecuteRequ
     };
 
     Ok(ProxyExecuteRequest {
+        collection_id: None,
         use_cookie_jar: false,
         method: request.method,
         url: request.url,
@@ -1098,23 +1221,25 @@ async fn proxy_request_payload(request: RequestDraft) -> Result<ProxyExecuteRequ
     })
 }
 
-fn read_proxy_file(path: &PathBuf, limit: usize) -> std::io::Result<Vec<u8>> {
+fn read_proxy_file(path: &PathBuf, limit: Option<usize>) -> std::io::Result<Vec<u8>> {
     let file = File::open(path)?;
-    let take_limit = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
+    let take_limit = limit
+        .map(|v| (v as u64).saturating_add(1))
+        .unwrap_or(u64::MAX);
     let mut content = Vec::new();
     file.take(take_limit).read_to_end(&mut content)?;
-    if content.len() > limit {
+    if limit.is_some_and(|limit| content.len() > limit) {
         return Err(std::io::Error::other(format!(
-            "file exceeds the {MAX_PROXY_BODY_BYTES}-byte proxied request limit"
+            "file exceeds the configured proxied request limit"
         )));
     }
     Ok(content)
 }
 
-fn ensure_proxy_body_limit(size: usize) -> Result<(), RequestError> {
-    if size > MAX_PROXY_BODY_BYTES {
+fn ensure_proxy_body_limit(size: usize, limit: Option<usize>) -> Result<(), RequestError> {
+    if limit.is_some_and(|limit| size > limit) {
         return Err(RequestError::Upstream(format!(
-            "request body exceeds the {MAX_PROXY_BODY_BYTES}-byte proxied request limit"
+            "request body exceeds the configured proxied request limit"
         )));
     }
     Ok(())
@@ -1122,7 +1247,16 @@ fn ensure_proxy_body_limit(size: usize) -> Result<(), RequestError> {
 
 async fn parse_proxy_response(
     mut response: reqwest::Response,
+    limits: &ExecutionLimits,
 ) -> Result<ResponseData, RequestError> {
+    let envelope_limit = limits
+        .get("http.envelope_bytes")
+        .as_usize()
+        .map_err(RequestError::Upstream)?;
+    let response_limit = limits
+        .get("http.response_bytes")
+        .as_usize()
+        .map_err(RequestError::Upstream)?;
     if response.status().is_redirection() {
         return Err(RequestError::Upstream(
             "the server redirected the proxied request endpoint".to_owned(),
@@ -1131,7 +1265,7 @@ async fn parse_proxy_response(
     let status = response.status();
     if response
         .content_length()
-        .is_some_and(|length| length > PROXY_ENVELOPE_LIMIT_BYTES as u64)
+        .is_some_and(|length| envelope_limit.is_some_and(|limit| length > limit as u64))
     {
         return Err(RequestError::Upstream(
             "the server returned an oversized proxied response".to_owned(),
@@ -1139,7 +1273,7 @@ async fn parse_proxy_response(
     }
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(RequestError::Transport)? {
-        if body.len().saturating_add(chunk.len()) > PROXY_ENVELOPE_LIMIT_BYTES {
+        if envelope_limit.is_some_and(|limit| body.len().saturating_add(chunk.len()) > limit) {
             return Err(RequestError::Upstream(
                 "the server returned an oversized proxied response".to_owned(),
             ));
@@ -1178,10 +1312,8 @@ async fn parse_proxy_response(
             "the server returned invalid response data: {error}"
         ))
     })?;
-    if decoded.len() > MAX_PROXY_BODY_BYTES {
-        return Err(RequestError::ResponseBodyTooLarge {
-            limit_bytes: MAX_PROXY_BODY_BYTES,
-        });
+    if let Some(limit_bytes) = response_limit.filter(|limit| decoded.len() > *limit) {
+        return Err(RequestError::ResponseBodyTooLarge { limit_bytes });
     }
 
     Ok(ResponseData {
@@ -2030,6 +2162,32 @@ mod tests {
 
     use super::*;
     use crate::core::{BodyField, HeaderEntry};
+
+    #[test]
+    fn policy_defaults_and_dynamic_body_limits_preserve_zero_and_unlimited() {
+        let policy: ProxyExecutionPolicy = serde_json::from_str(r#"{"mode":"server"}"#).unwrap();
+        assert_eq!(policy.limits.get("http.request_bytes").value, 67_108_864);
+        assert!(ensure_proxy_body_limit(1, Some(0)).is_err());
+        assert!(ensure_proxy_body_limit(0, Some(0)).is_ok());
+        assert!(ensure_proxy_body_limit(9, Some(8)).is_err());
+        assert!(ensure_proxy_body_limit(9, Some(10)).is_ok());
+        assert!(ensure_proxy_body_limit(usize::MAX, None).is_ok());
+        let payload = ProxyExecuteRequest {
+            collection_id: Some("nested-collection".into()),
+            use_cookie_jar: false,
+            method: "GET".into(),
+            url: "https://example.com".into(),
+            headers: vec![],
+            body: ProxyBody {
+                mode: "none",
+                raw_content_type: None,
+                data_base64: None,
+                fields: vec![],
+            },
+        };
+        let encoded = serde_json::to_value(payload).unwrap();
+        assert_eq!(encoded["collection_id"], "nested-collection");
+    }
 
     fn upstream_creator(id: &str, display_name: &str) -> UpstreamUserSummary {
         UpstreamUserSummary {
@@ -3544,6 +3702,39 @@ mod tests {
         target_server.join().unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(response.body.as_ref(), b"local response");
+    }
+
+    #[test]
+    fn scoped_missing_policy_never_falls_back_to_local_execution() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.starts_with(
+                "GET /api/v1/request-execution?workspace_id=workspace&collection_id=deleted HTTP/1.1"
+            ));
+            let body = br#"{"success":false,"error":{"code":"scope_not_found","message":"collection no longer exists"}}"#;
+            write!(stream, "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            stream.write_all(body).unwrap();
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let error = runtime
+            .block_on(get_upstream_execution_policy_for_scope(
+                &build_upstream_execution_client().unwrap(),
+                &Url::parse(&format!("http://{address}/")).unwrap(),
+                "test-session",
+                "workspace",
+                Some("deleted"),
+            ))
+            .err()
+            .expect("a missing scope must reject execution");
+        server.join().unwrap();
+        assert!(error.to_string().contains("collection no longer exists"));
     }
 
     #[test]

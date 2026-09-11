@@ -956,6 +956,8 @@ impl ApiTester {
             sending: false,
             execution_stage: None,
             request_generation: 0,
+            prepared_execution: None,
+            local_execution_limit_editor: None,
             mcp_http_operation_id: None,
             mcp_http_request_id: None,
             mcp_http_exchange: None,

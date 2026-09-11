@@ -36,6 +36,25 @@ use super::{
 /// responsible for actually performing the (non-blocking) execution.
 pub trait InlineChainer: Send + Sync {
     fn run(&self, requested: &[ChainedRequest]) -> Vec<Result<ChainRun, String>>;
+
+    fn run_at_depth(
+        &self,
+        requested: &[ChainedRequest],
+        _depth: usize,
+    ) -> Vec<Result<ChainRun, String>> {
+        self.run(requested)
+    }
+
+    /// Production runners bound the entire awaited pipeline by this absolute
+    /// deadline. The default preserves compatibility with synchronous callbacks.
+    fn run_with_budget(
+        &self,
+        requested: &[ChainedRequest],
+        depth: usize,
+        _deadline: Option<Instant>,
+    ) -> Vec<Result<ChainRun, String>> {
+        self.run_at_depth(requested, depth)
+    }
 }
 
 impl<F> InlineChainer for F
@@ -343,6 +362,28 @@ const PRELUDE: &str = r#"
     return kind === "object" ? "object" : kind;
   }
 
+  // Count UTF-8 bytes rather than UTF-16 code units, including non-BMP text.
+  function byteLength(text) {
+    let bytes = 0;
+    for (const char of text) {
+      const code = char.codePointAt(0);
+      bytes += code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4;
+    }
+    return bytes;
+  }
+
+  function bytePrefix(text, budget) {
+    let bytes = 0;
+    let end = 0;
+    for (const char of text) {
+      const size = byteLength(char);
+      if (bytes + size > budget) break;
+      bytes += size;
+      end += char.length;
+    }
+    return text.slice(0, end);
+  }
+
   function writeLog(level, values) {
     if (logs.length >= input.maxLogEntries || logCharacters >= input.maxLogBytes) return;
     let remaining = input.maxLogBytes - logCharacters;
@@ -352,12 +393,12 @@ const PRELUDE: &str = r#"
       if (inspectedValues.length > 0) remaining -= 1;
       if (remaining <= 0) break;
       let preview = printable(value);
-      if (preview.length > remaining) preview = preview.slice(0, remaining);
-      remaining -= preview.length;
+      if (byteLength(preview) > remaining) preview = bytePrefix(preview, remaining);
+      remaining -= byteLength(preview);
       inspectedValues.push({ kind: consoleValueKind(value), preview });
     }
     const message = inspectedValues.map(value => value.preview).join(" ");
-    logCharacters += message.length;
+    logCharacters += byteLength(message);
     logs.push({ level, message, values: inspectedValues });
   }
 
@@ -590,6 +631,8 @@ pub struct ScriptScope {
     /// full awaited request pipeline and its own pre/post scripts). Defaults to
     /// [`SCRIPT_TIMEOUT`]; the app overrides it from persisted settings.
     pub script_timeout: std::time::Duration,
+    /// Effective server-workspace policy, absent for standalone local workspaces.
+    pub execution_limits: Option<super::execution_limits::ExecutionLimits>,
 }
 
 impl Default for ScriptScope {
@@ -599,11 +642,37 @@ impl Default for ScriptScope {
             collection_variables: BTreeMap::new(),
             extra_secrets: Vec::new(),
             script_timeout: SCRIPT_TIMEOUT,
+            execution_limits: None,
         }
     }
 }
 
 impl ScriptScope {
+    fn budgets(&self, phase: ScriptPhase) -> Result<ScriptBudgets, ScriptError> {
+        let mut budgets = ScriptBudgets::default();
+        budgets.timeout = Some(self.script_timeout);
+        if let Some(policy) = &self.execution_limits {
+            let parse = || -> Result<ScriptBudgets, String> {
+                policy.validate()?;
+                let size = |key| policy.get(key).as_usize().map(|v| v.unwrap_or(usize::MAX));
+                Ok(ScriptBudgets {
+                    timeout: policy.get("script.timeout_ms").as_duration()?,
+                    memory: size("script.memory_bytes")?,
+                    stack: size("script.stack_bytes")?,
+                    source: size("script.source_bytes")?,
+                    body: size("script.body_bytes")?,
+                    result: size("script.result_bytes")?,
+                    log_entries: size("script.log_entries")?,
+                    log_bytes: size("script.log_bytes")?,
+                })
+            };
+            budgets = parse().map_err(|message| {
+                simple_error(phase, ScriptErrorKind::Engine, message, &self.redactor())
+            })?;
+        }
+        Ok(budgets)
+    }
+
     pub fn redactor(&self) -> SecretRedactor {
         let mut redactor = SecretRedactor::default();
         redactor.extend(
@@ -614,6 +683,33 @@ impl ScriptScope {
         );
         redactor.extend(self.extra_secrets.iter().cloned());
         redactor
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ScriptBudgets {
+    timeout: Option<Duration>,
+    memory: usize,
+    stack: usize,
+    source: usize,
+    body: usize,
+    result: usize,
+    log_entries: usize,
+    log_bytes: usize,
+}
+
+impl Default for ScriptBudgets {
+    fn default() -> Self {
+        Self {
+            timeout: Some(SCRIPT_TIMEOUT),
+            memory: SCRIPT_MEMORY_LIMIT_BYTES,
+            stack: SCRIPT_STACK_LIMIT_BYTES,
+            source: MAX_SCRIPT_SOURCE_BYTES,
+            body: MAX_SCRIPT_BODY_BYTES,
+            result: MAX_SCRIPT_RESULT_BYTES,
+            log_entries: MAX_SCRIPT_LOG_ENTRIES,
+            log_bytes: MAX_SCRIPT_LOG_BYTES,
+        }
     }
 }
 
@@ -693,6 +789,7 @@ impl SecretRedactor {
 #[derive(Clone, Debug, Default)]
 pub struct ScriptCancellation {
     cancelled: Arc<AtomicBool>,
+    parent: Option<Arc<ScriptCancellation>>,
 }
 
 impl ScriptCancellation {
@@ -704,8 +801,22 @@ impl ScriptCancellation {
         self.cancelled.store(true, Ordering::Release);
     }
 
+    pub fn child(&self) -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            parent: Some(Arc::new(self.clone())),
+        }
+    }
+
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
+        let mut current = Some(self);
+        while let Some(token) = current {
+            if token.cancelled.load(Ordering::Acquire) {
+                return true;
+            }
+            current = token.parent.as_deref();
+        }
+        false
     }
 }
 
@@ -887,6 +998,7 @@ struct EngineOutput {
 struct EngineRun {
     output: EngineOutput,
     duration: Duration,
+    budgets: ScriptBudgets,
 }
 
 /// Execute WebSocket modules with the shared Resolved API and chain driver.
@@ -899,9 +1011,37 @@ pub fn execute_websocket_script(
     namespace: &RequestNamespaceCatalog,
     chainer: Option<&dyn InlineChainer>,
 ) -> Result<super::websocket::WebSocketAutomationOutput, String> {
-    super::websocket::validate_automation_sources(source, modules)?;
+    if scope.execution_limits.is_none() {
+        super::websocket::validate_automation_sources(source, modules)?;
+    } else {
+        for name in modules.keys() {
+            super::websocket::validate_automation_module_name(name)?;
+        }
+    }
     let refs = namespace.runtime_specs();
     let mut redactor = scope.redactor();
+    let budgets = scope
+        .budgets(ScriptPhase::PostResponse)
+        .map_err(|error| error.to_string())?;
+    if let Some(limits) = &scope.execution_limits {
+        let source_bytes = modules.values().fold(source.len(), |bytes, module| {
+            bytes.saturating_add(module.len())
+        });
+        if limits
+            .get("websocket.script_source_bytes")
+            .as_usize()?
+            .is_some_and(|max| source_bytes > max)
+        {
+            return Err("WebSocket automation source exceeds websocket.script_source_bytes".into());
+        }
+        if limits
+            .get("websocket.script_modules")
+            .as_usize()?
+            .is_some_and(|max| modules.len() > max)
+        {
+            return Err("WebSocket automation modules exceed websocket.script_modules".into());
+        }
+    }
     let run = run_engine(
         source,
         ScriptPhase::PostResponse,
@@ -912,12 +1052,12 @@ pub fn execute_websocket_script(
             environment: scope.environment.values(),
             collection_variables: &scope.collection_variables,
             request_references: &refs,
-            max_log_entries: MAX_SCRIPT_LOG_ENTRIES,
-            max_log_bytes: MAX_SCRIPT_LOG_BYTES,
+            max_log_entries: budgets.log_entries,
+            max_log_bytes: budgets.log_bytes,
         },
         &ScriptCancellation::new(),
         chainer,
-        scope.script_timeout,
+        budgets,
         &redactor,
         &scope.environment.secret_names,
         None,
@@ -981,7 +1121,8 @@ fn execute_pre_request_inner(
     }
 
     let mut redactor = scope.redactor();
-    validate_source_and_body(phase, source, request, &redactor)?;
+    let budgets = scope.budgets(phase)?;
+    validate_source_and_body(phase, source, request, &redactor, budgets)?;
     let input = EngineInput {
         phase: phase.engine_name(),
         request,
@@ -989,8 +1130,8 @@ fn execute_pre_request_inner(
         environment: scope.environment.values(),
         collection_variables: &scope.collection_variables,
         request_references: &request_namespace.runtime_specs(),
-        max_log_entries: MAX_SCRIPT_LOG_ENTRIES,
-        max_log_bytes: MAX_SCRIPT_LOG_BYTES,
+        max_log_entries: budgets.log_entries,
+        max_log_bytes: budgets.log_bytes,
     };
     let run = run_engine(
         source,
@@ -998,7 +1139,7 @@ fn execute_pre_request_inner(
         input,
         cancellation,
         chain_inline,
-        scope.script_timeout,
+        budgets,
         &redactor,
         &scope.environment.secret_names,
         None,
@@ -1006,15 +1147,16 @@ fn execute_pre_request_inner(
     )?;
     extend_redactor_with_secret_mutations(&mut redactor, scope, &run.output.environment_mutations);
     let report = report_from_run(phase, &run, false, &redactor);
-    if request_body_size(&run.output.request) > MAX_SCRIPT_BODY_BYTES {
+    if request_body_size(&run.output.request) > budgets.body {
         return Err(ScriptError {
             diagnostic: ScriptDiagnostic {
                 phase,
                 kind: ScriptErrorKind::BodyLimit,
                 filename: phase.filename(),
                 message: format!(
-                    "pre-request script produced a {} byte body; the limit is {MAX_SCRIPT_BODY_BYTES} bytes",
-                    request_body_size(&run.output.request)
+                    "pre-request script produced a {} byte body; the limit is {} bytes",
+                    request_body_size(&run.output.request),
+                    budgets.body
                 ),
                 stack: None,
             },
@@ -1094,8 +1236,9 @@ fn execute_post_response_inner(
     }
 
     let mut redactor = scope.redactor();
-    validate_source_and_body(phase, source, request, &redactor)?;
-    let (engine_response, truncated) = engine_response(response);
+    let budgets = scope.budgets(phase)?;
+    validate_source_and_body(phase, source, request, &redactor, budgets)?;
+    let (engine_response, truncated) = engine_response(response, budgets.body);
     let input = EngineInput {
         phase: phase.engine_name(),
         request,
@@ -1103,8 +1246,8 @@ fn execute_post_response_inner(
         environment: scope.environment.values(),
         collection_variables: &scope.collection_variables,
         request_references: &request_namespace.runtime_specs(),
-        max_log_entries: MAX_SCRIPT_LOG_ENTRIES,
-        max_log_bytes: MAX_SCRIPT_LOG_BYTES,
+        max_log_entries: budgets.log_entries,
+        max_log_bytes: budgets.log_bytes,
     };
     let run = run_engine(
         source,
@@ -1112,7 +1255,7 @@ fn execute_post_response_inner(
         input,
         cancellation,
         chain_inline,
-        scope.script_timeout,
+        budgets,
         &redactor,
         &scope.environment.secret_names,
         console_session,
@@ -1206,6 +1349,7 @@ pub struct ScriptConsoleSession {
     context: JsContext,
     runtime: JsRuntime,
     secrets: Vec<String>,
+    budgets: ScriptBudgets,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1295,25 +1439,28 @@ fn validate_source_and_body(
     source: &str,
     request: &RequestDraft,
     redactor: &SecretRedactor,
+    budgets: ScriptBudgets,
 ) -> Result<(), ScriptError> {
-    if source.len() > MAX_SCRIPT_SOURCE_BYTES {
+    if source.len() > budgets.source {
         return Err(simple_error(
             phase,
             ScriptErrorKind::SourceLimit,
             format!(
-                "script source is {} bytes; the limit is {MAX_SCRIPT_SOURCE_BYTES} bytes",
-                source.len()
+                "script source is {} bytes; the limit is {} bytes",
+                source.len(),
+                budgets.source
             ),
             redactor,
         ));
     }
-    if request_body_size(request) > MAX_SCRIPT_BODY_BYTES {
+    if request_body_size(request) > budgets.body {
         return Err(simple_error(
             phase,
             ScriptErrorKind::BodyLimit,
             format!(
-                "request body is {} bytes; scripts accept at most {MAX_SCRIPT_BODY_BYTES} bytes",
-                request_body_size(request)
+                "request body is {} bytes; scripts accept at most {} bytes",
+                request_body_size(request),
+                budgets.body
             ),
             redactor,
         ));
@@ -1337,7 +1484,7 @@ fn run_engine(
     input: EngineInput<'_>,
     cancellation: &ScriptCancellation,
     chain_inline: Option<&dyn InlineChainer>,
-    timeout: std::time::Duration,
+    budgets: ScriptBudgets,
     redactor: &SecretRedactor,
     secret_names: &BTreeSet<String>,
     mut console_session: Option<&mut Option<ScriptConsoleSession>>,
@@ -1355,14 +1502,43 @@ fn run_engine(
         ));
     }
 
+    // The pinned rquickjs wrapper silently turns larger finite values into
+    // zero (disabled checking). Reject that unsupported representation instead
+    // of relaxing an operator's finite budget. Explicit Unlimited still works.
+    if budgets.stack != usize::MAX && budgets.stack > 16 * 1024 * 1024 {
+        return Err(simple_error(
+            phase,
+            ScriptErrorKind::Engine,
+            "the pinned JavaScript runtime cannot enforce finite script.stack_bytes above 16777216; choose a supported value or explicit Unlimited",
+            redactor,
+        ));
+    }
+    if budgets.memory == 0 || budgets.stack == 0 || budgets.timeout == Some(Duration::ZERO) {
+        return Err(simple_error(
+            phase,
+            if budgets.timeout == Some(Duration::ZERO) {
+                ScriptErrorKind::TimedOut
+            } else {
+                ScriptErrorKind::MemoryLimit
+            },
+            "script execution is disabled by a zero runtime budget",
+            redactor,
+        ));
+    }
     let started = Instant::now();
-    let deadline = started + timeout;
+    let timeout = budgets.timeout.unwrap_or(Duration::MAX);
+    let deadline = budgets.timeout;
     let timed_out = Arc::new(AtomicBool::new(false));
     let timed_out_for_interrupt = Arc::clone(&timed_out);
-    let cancelled_for_interrupt = Arc::clone(&cancellation.cancelled);
+    let cancelled_for_interrupt = cancellation.clone();
 
     let interactive = console_session.is_some();
-    let existing = console_session.as_deref_mut().and_then(Option::take);
+    // A retained realm closes over its initial response and log budgets. A
+    // policy change must not reuse those stale truncation limits.
+    let existing = console_session
+        .as_deref_mut()
+        .and_then(Option::take)
+        .filter(|session| session.budgets == budgets);
     let initialized = existing.is_some();
     let (runtime, context) = if let Some(session) = existing {
         (session.runtime, session.context)
@@ -1376,6 +1552,16 @@ fn run_engine(
                 redactor,
             )
         })?;
+        runtime.set_memory_limit(if budgets.memory == usize::MAX {
+            0
+        } else {
+            budgets.memory
+        });
+        runtime.set_max_stack_size(if budgets.stack == usize::MAX {
+            0
+        } else {
+            budgets.stack
+        });
         let context = JsContext::full(&runtime).map_err(|error| {
             engine_error(
                 phase,
@@ -1397,13 +1583,21 @@ fn run_engine(
         }
         runtime.set_loader(resolver, loader);
     }
-    runtime.set_memory_limit(SCRIPT_MEMORY_LIMIT_BYTES);
-    runtime.set_max_stack_size(SCRIPT_STACK_LIMIT_BYTES);
+    runtime.set_memory_limit(if budgets.memory == usize::MAX {
+        0
+    } else {
+        budgets.memory
+    });
+    runtime.set_max_stack_size(if budgets.stack == usize::MAX {
+        0
+    } else {
+        budgets.stack
+    });
     runtime.set_interrupt_handler(Some(Box::new(move || {
-        if cancelled_for_interrupt.load(Ordering::Acquire) {
+        if cancelled_for_interrupt.is_cancelled() {
             return true;
         }
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| started.elapsed() >= deadline) {
             timed_out_for_interrupt.store(true, Ordering::Release);
             return true;
         }
@@ -1415,6 +1609,7 @@ fn run_engine(
             runtime: runtime.clone(),
             context: context.clone(),
             secrets: redactor.secrets.clone(),
+            budgets,
         });
     }
 
@@ -1507,7 +1702,7 @@ fn run_engine(
                             &output.environment_mutations,
                         );
                         if serde_json::to_vec(&output)
-                            .is_ok_and(|encoded| encoded.len() <= MAX_SCRIPT_RESULT_BYTES)
+                            .is_ok_and(|encoded| encoded.len() <= budgets.result)
                         {
                             caught_output = Some(output);
                         }
@@ -1515,7 +1710,7 @@ fn run_engine(
                     let mut error = caught_error(phase, caught, duration, &caught_redactor);
                     if let Some(output) = caught_output {
                         error.report =
-                            report_from_output(phase, &output, duration, false, &caught_redactor);
+                            report_from_output(phase, &output, duration, false, &caught_redactor, budgets);
                     }
                     return Err(error);
                 }
@@ -1577,7 +1772,9 @@ fn run_engine(
                 redactor,
             ));
         }
-        if timed_out.load(Ordering::Acquire) || Instant::now() >= deadline {
+        if timed_out.load(Ordering::Acquire)
+            || deadline.is_some_and(|deadline| started.elapsed() >= deadline)
+        {
             timed_out.store(true, Ordering::Release);
             return Err(engine_error(
                 phase,
@@ -1594,7 +1791,7 @@ fn run_engine(
             if cancellation.is_cancelled() || timed_out.load(Ordering::Acquire) {
                 break false;
             }
-            if Instant::now() >= deadline {
+            if deadline.is_some_and(|deadline| started.elapsed() >= deadline) {
                 timed_out.store(true, Ordering::Release);
                 break false;
             }
@@ -1706,7 +1903,20 @@ fn run_engine(
                     .collect();
                 // A single batch call: the provider runs every awaited pipeline
                 // concurrently on one shared async runtime.
-                let outcomes = chain_inline.run(&requested);
+                let outcomes = chain_inline.run_with_budget(
+                    &requested,
+                    0,
+                    deadline.and_then(|timeout| started.checked_add(timeout)),
+                );
+                // Do not re-enter JS to settle rejected children after the
+                // caller's budget expired: that would obscure its Timeout.
+                if deadline.is_some_and(|timeout| started.elapsed() >= timeout) {
+                    timed_out.store(true, Ordering::Release);
+                    break;
+                }
+                if cancellation.is_cancelled() {
+                    break;
+                }
 
                 for ((id, _path), outcome) in pending.iter().zip(outcomes) {
                     let id_json = serde_json::to_string(id).unwrap_or_else(|_| "\"\"".to_owned());
@@ -1828,9 +2038,7 @@ fn run_engine(
                 secret_names,
                 &output.environment_mutations,
             );
-            if serde_json::to_vec(&output)
-                .is_ok_and(|encoded| encoded.len() <= MAX_SCRIPT_RESULT_BYTES)
-            {
+            if serde_json::to_vec(&output).is_ok_and(|encoded| encoded.len() <= budgets.result) {
                 caught_output = Some(output);
             }
         }
@@ -1838,8 +2046,14 @@ fn run_engine(
             capture_top_level_rejection(&ctx, phase, started.elapsed(), &caught_redactor)
         });
         if let Some(output) = caught_output {
-            error.report =
-                report_from_output(phase, &output, started.elapsed(), false, &caught_redactor);
+            error.report = report_from_output(
+                phase,
+                &output,
+                started.elapsed(),
+                false,
+                &caught_redactor,
+                budgets,
+            );
         }
         return Err(error);
     }
@@ -1880,13 +2094,14 @@ fn run_engine(
             redactor,
         )
     })?;
-    if output_size.len() > MAX_SCRIPT_RESULT_BYTES {
+    if output_size.len() > budgets.result {
         return Err(engine_error(
             phase,
             ScriptErrorKind::OutputLimit,
             format!(
-                "script output is {} bytes; the limit is {MAX_SCRIPT_RESULT_BYTES} bytes",
-                output_size.len()
+                "script output is {} bytes; the limit is {} bytes",
+                output_size.len(),
+                budgets.result
             ),
             started.elapsed(),
             redactor,
@@ -1896,6 +2111,7 @@ fn run_engine(
     Ok(EngineRun {
         output,
         duration: started.elapsed(),
+        budgets,
     })
 }
 
@@ -1911,6 +2127,7 @@ fn report_from_run(
         run.duration,
         response_body_truncated,
         redactor,
+        run.budgets,
     )
 }
 
@@ -1920,29 +2137,38 @@ fn report_from_output(
     duration: Duration,
     response_body_truncated: bool,
     redactor: &SecretRedactor,
+    budgets: ScriptBudgets,
 ) -> ScriptReport {
     let mut used_bytes = 0;
     let logs = output
         .logs
         .iter()
-        .take(MAX_SCRIPT_LOG_ENTRIES)
+        .take(budgets.log_entries)
         .filter_map(|log| {
-            if used_bytes >= MAX_SCRIPT_LOG_BYTES {
+            if used_bytes >= budgets.log_bytes {
                 return None;
             }
             let mut message = redactor.scrub(&log.message);
-            let remaining = MAX_SCRIPT_LOG_BYTES - used_bytes;
+            let remaining = budgets.log_bytes - used_bytes;
             truncate_utf8(&mut message, remaining);
             used_bytes += message.len();
+            let mut preview_bytes = remaining;
             Some(ScriptLog {
                 level: log.level,
                 message,
                 values: log
                     .values
                     .iter()
-                    .map(|value| ScriptLogValue {
-                        kind: value.kind.clone(),
-                        preview: redactor.scrub(&value.preview),
+                    .map(|value| {
+                        let mut preview = redactor.scrub(&value.preview);
+                        truncate_utf8(&mut preview, preview_bytes);
+                        preview_bytes = preview_bytes
+                            .saturating_sub(preview.len())
+                            .saturating_sub(1);
+                        ScriptLogValue {
+                            kind: value.kind.clone(),
+                            preview,
+                        }
                     })
                     .collect(),
             })
@@ -2094,8 +2320,8 @@ fn engine_error(
     }
 }
 
-fn engine_response(response: &ResponseData) -> (EngineResponse, bool) {
-    let visible_len = response.body.len().min(MAX_SCRIPT_BODY_BYTES);
+fn engine_response(response: &ResponseData, body_limit: usize) -> (EngineResponse, bool) {
+    let visible_len = response.body.len().min(body_limit);
     let visible_body = &response.body[..visible_len];
     let truncated = response.body.len() > visible_len;
     let is_utf8 = std::str::from_utf8(visible_body).is_ok();
@@ -2162,6 +2388,225 @@ fn encode_base64(input: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    fn policy_scope(key: &str, bound: super::super::execution_limits::Bound) -> super::ScriptScope {
+        super::ScriptScope {
+            execution_limits: Some(super::super::execution_limits::ExecutionLimits(
+                [(key.to_owned(), bound)].into_iter().collect(),
+            )),
+            ..super::ScriptScope::default()
+        }
+    }
+
+    #[test]
+    fn policy_budgets_preserve_lower_larger_unlimited_and_zero() {
+        use super::super::execution_limits::Bound;
+        for key in [
+            "script.memory_bytes",
+            "script.stack_bytes",
+            "script.source_bytes",
+            "script.body_bytes",
+            "script.result_bytes",
+            "script.log_entries",
+            "script.log_bytes",
+        ] {
+            for bound in [
+                Bound::limited(0),
+                Bound::limited(1),
+                Bound::limited(128 * 1024 * 1024),
+                Bound::unlimited(),
+            ] {
+                let budgets = policy_scope(key, bound)
+                    .budgets(super::ScriptPhase::PreRequest)
+                    .unwrap();
+                let actual = match key {
+                    "script.memory_bytes" => budgets.memory,
+                    "script.stack_bytes" => budgets.stack,
+                    "script.source_bytes" => budgets.source,
+                    "script.body_bytes" => budgets.body,
+                    "script.result_bytes" => budgets.result,
+                    "script.log_entries" => budgets.log_entries,
+                    _ => budgets.log_bytes,
+                };
+                assert_eq!(
+                    actual,
+                    bound.as_usize().unwrap().unwrap_or(usize::MAX),
+                    "{key}"
+                );
+            }
+        }
+        for bound in [
+            Bound::limited(0),
+            Bound::limited(1),
+            Bound::limited(60000),
+            Bound::unlimited(),
+        ] {
+            assert_eq!(
+                policy_scope("script.timeout_ms", bound)
+                    .budgets(super::ScriptPhase::PreRequest)
+                    .unwrap()
+                    .timeout,
+                bound.as_duration().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn zero_and_tiny_runtime_budgets_cannot_disable_the_guard() {
+        use super::super::execution_limits::Bound;
+        for key in [
+            "script.memory_bytes",
+            "script.stack_bytes",
+            "script.timeout_ms",
+        ] {
+            let result = super::execute_pre_request(
+                "while (true) {}",
+                &request(),
+                &policy_scope(key, Bound::limited(0)),
+                &super::RequestNamespaceCatalog::default(),
+                &super::ScriptCancellation::new(),
+            );
+            assert!(result.is_err(), "{key}");
+        }
+        let unsupported = super::execute_pre_request(
+            "1;",
+            &request(),
+            &policy_scope("script.stack_bytes", Bound::limited(16 * 1024 * 1024 + 1)),
+            &super::RequestNamespaceCatalog::default(),
+            &super::ScriptCancellation::new(),
+        )
+        .unwrap_err();
+        assert!(
+            unsupported
+                .to_string()
+                .contains("cannot enforce finite script.stack_bytes")
+        );
+        for key in ["script.memory_bytes", "script.stack_bytes"] {
+            assert!(
+                super::execute_pre_request(
+                    "console.log('ok')",
+                    &request(),
+                    &policy_scope(key, Bound::limited(1)),
+                    &super::RequestNamespaceCatalog::default(),
+                    &super::ScriptCancellation::new(),
+                )
+                .is_err(),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_source_body_and_result_limits_apply_at_real_boundaries() {
+        use super::super::execution_limits::Bound;
+        let run = |source: &str, key: &str, bound| {
+            super::execute_pre_request(
+                source,
+                &super::RequestDraft::default(),
+                &policy_scope(key, bound),
+                &super::RequestNamespaceCatalog::default(),
+                &super::ScriptCancellation::new(),
+            )
+        };
+        assert!(run("1;", "script.source_bytes", Bound::limited(1)).is_err());
+        assert!(run("1;", "script.source_bytes", Bound::limited(2)).is_ok());
+        assert!(run("1;", "script.source_bytes", Bound::limited(0)).is_err());
+        assert!(run("1;", "script.source_bytes", Bound::unlimited()).is_ok());
+        assert!(
+            run(
+                "api.request.body='ab'",
+                "script.body_bytes",
+                Bound::limited(1)
+            )
+            .is_err()
+        );
+        assert!(
+            run(
+                "api.request.body='ab'",
+                "script.body_bytes",
+                Bound::limited(2)
+            )
+            .is_ok()
+        );
+        assert!(
+            run(
+                "api.request.body='a'",
+                "script.body_bytes",
+                Bound::limited(0)
+            )
+            .is_err()
+        );
+        assert!(
+            run(
+                "api.request.body='ab'",
+                "script.body_bytes",
+                Bound::unlimited()
+            )
+            .is_ok()
+        );
+        assert!(run("1;", "script.result_bytes", Bound::limited(0)).is_err());
+        assert!(run("1;", "script.result_bytes", Bound::limited(1)).is_err());
+        assert!(run("1;", "script.result_bytes", Bound::limited(16384)).is_ok());
+        assert!(run("1;", "script.result_bytes", Bound::unlimited()).is_ok());
+        for key in [
+            "script.memory_bytes",
+            "script.stack_bytes",
+            "script.timeout_ms",
+        ] {
+            assert!(run("1;", key, Bound::unlimited()).is_ok(), "{key}");
+        }
+    }
+
+    #[test]
+    fn policy_logs_count_utf8_bytes_and_remove_old_entry_cap() {
+        use super::super::execution_limits::Bound;
+        let run = |source: &str, key: &str, bound| {
+            super::execute_pre_request(
+                source,
+                &request(),
+                &policy_scope(key, bound),
+                &super::RequestNamespaceCatalog::default(),
+                &super::ScriptCancellation::new(),
+            )
+            .unwrap()
+            .report
+            .logs
+        };
+        assert_eq!(
+            run("console.log('é😀z')", "script.log_bytes", Bound::limited(6))[0].message,
+            "é😀"
+        );
+        assert!(run("console.log('a')", "script.log_bytes", Bound::limited(0)).is_empty());
+        assert!(run("console.log('a')", "script.log_entries", Bound::limited(0)).is_empty());
+        assert_eq!(
+            run(
+                "console.log('a'); console.log('b')",
+                "script.log_entries",
+                Bound::limited(1)
+            )
+            .len(),
+            1
+        );
+        for bound in [Bound::limited(101), Bound::unlimited()] {
+            assert_eq!(
+                run(
+                    "for(let i=0;i<101;i++) console.log('a')",
+                    "script.log_entries",
+                    bound
+                )
+                .len(),
+                101
+            );
+        }
+        for bound in [Bound::limited(65537), Bound::unlimited()] {
+            assert_eq!(
+                run("console.log('x'.repeat(65537))", "script.log_bytes", bound)[0]
+                    .message
+                    .len(),
+                65537
+            );
+        }
+    }
+
     use std::thread;
 
     use super::*;
@@ -2571,6 +3016,21 @@ throw new Error("broken");
             .expect("script worker should not panic")
             .expect_err("cancelled script should fail");
         assert_eq!(error.diagnostic.kind, ScriptErrorKind::Cancelled);
+    }
+
+    #[test]
+    fn child_cancellation_is_local_and_parent_cancellation_propagates() {
+        let root = ScriptCancellation::new();
+        let child = root.child();
+        let grandchild = child.child();
+        let sibling = root.child();
+        child.cancel();
+        assert!(child.is_cancelled());
+        assert!(grandchild.is_cancelled());
+        assert!(!root.is_cancelled());
+        assert!(!sibling.is_cancelled());
+        root.cancel();
+        assert!(sibling.is_cancelled());
     }
 
     #[test]
@@ -3180,6 +3640,32 @@ api.environment.set("seven", String(value));
                     value: "hello".into()
                 })
         );
+    }
+
+    #[test]
+    fn websocket_module_budgets_preserve_defaults_and_allow_overrides() {
+        use super::super::execution_limits::Bound;
+        let (_, catalog) = chaining_workspace();
+        let event = super::super::websocket::WebSocketAutomationEvent::opened();
+        let modules =
+            BTreeMap::from([("helper.js".to_owned(), "export const value = 1;".to_owned())]);
+        let run = |key, bound| {
+            execute_websocket_script(
+                "1;",
+                &modules,
+                &event,
+                &request(),
+                &policy_scope(key, bound),
+                &catalog,
+                None,
+            )
+        };
+        assert!(run("websocket.script_modules", Bound::limited(0)).is_err());
+        assert!(run("websocket.script_modules", Bound::limited(1)).is_ok());
+        assert!(run("websocket.script_modules", Bound::unlimited()).is_ok());
+        assert!(run("websocket.script_source_bytes", Bound::limited(1)).is_err());
+        assert!(run("websocket.script_source_bytes", Bound::limited(1024)).is_ok());
+        assert!(run("websocket.script_source_bytes", Bound::unlimited()).is_ok());
     }
 
     #[test]

@@ -2,6 +2,193 @@ use super::*;
 use serde::Deserialize;
 use std::sync::atomic::Ordering;
 
+#[cfg(test)]
+mod policy_scope_tests {
+    use super::*;
+
+    #[test]
+    fn saved_request_scope_tracks_actual_folder_not_url_or_root_selection() {
+        let mut workspace = crate::core::Workspace::default();
+        let root = workspace.create_collection("Root").unwrap();
+        let folder = workspace
+            .create_collection_folder(&root, None, "Parent")
+            .unwrap();
+        let nested = workspace
+            .create_collection_folder(&root, Some(&folder), "Nested")
+            .unwrap();
+        let template = RequestTemplate::new(RequestDraft::new("GET", "https://same.example"));
+        let at_root = workspace
+            .create_saved_request_in_folder(&root, None, "Root request", template.clone())
+            .unwrap();
+        let in_folder = workspace
+            .create_saved_request_in_folder(&root, Some(&nested), "Nested request", template)
+            .unwrap();
+        assert_eq!(
+            request_collection_scope(&workspace, Some(&at_root)).unwrap(),
+            Some(root.clone())
+        );
+        assert_eq!(
+            request_collection_scope(&workspace, Some(&in_folder)).unwrap(),
+            Some(nested)
+        );
+        assert_eq!(request_collection_scope(&workspace, None).unwrap(), None);
+        assert!(request_collection_scope(&workspace, Some("deleted")).is_err());
+        workspace
+            .move_saved_request(&root, &in_folder, Some(&folder))
+            .unwrap();
+        assert_eq!(
+            request_collection_scope(&workspace, Some(&in_folder)).unwrap(),
+            Some(folder)
+        );
+    }
+
+    #[test]
+    fn execution_snapshot_is_independent_of_later_policy_edits() {
+        let mut limits: crate::core::execution_limits::ExecutionLimits = serde_json::from_value(
+            serde_json::json!({"chain.max_requests": {"unlimited": false, "value": 0}}),
+        )
+        .unwrap();
+        let snapshot = PreparedExecution {
+            scope_key: "local:test".to_owned(),
+            limits: limits.clone(),
+            upstream: None,
+        };
+        limits = serde_json::from_value(
+            serde_json::json!({"chain.max_requests": {"unlimited": true, "value": 0}}),
+        )
+        .unwrap();
+        assert!(!snapshot.limits.get("chain.max_requests").unlimited);
+        assert_eq!(snapshot.limits.get("chain.max_requests").value, 0);
+        assert!(limits.get("chain.max_requests").unlimited);
+    }
+}
+
+/// Immutable execution state captured before any user script runs.
+#[derive(Clone)]
+pub(super) struct PreparedExecution {
+    pub(super) scope_key: String,
+    pub(super) limits: crate::core::execution_limits::ExecutionLimits,
+    pub(super) upstream: Option<PreparedUpstreamExecution>,
+}
+
+#[derive(Clone)]
+pub(super) struct PreparedUpstreamExecution {
+    pub(super) target: workspace_connections::ActiveUpstreamWorkspace,
+    pub(super) credential: Arc<crate::core::UpstreamCredential>,
+    pub(super) collection_id: Option<String>,
+    pub(super) policy: crate::core::ProxyExecutionPolicy,
+}
+
+/// Remote folder IDs are remote collection IDs. Never associate a draft by URL.
+pub(super) fn request_collection_scope(
+    workspace: &crate::core::Workspace,
+    request_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(id) = request_id else {
+        return Ok(None);
+    };
+    let (collection, request) = workspace
+        .saved_request(id)
+        .ok_or_else(|| format!("Saved request '{id}' is no longer present."))?;
+    Ok(Some(
+        request.folder_id.as_ref().unwrap_or(&collection.id).clone(),
+    ))
+}
+
+impl PreparedExecution {
+    pub(super) async fn send(
+        &self,
+        upstream_client: &Client,
+        request: RequestDraft,
+        cookie_jar: &Arc<CookieJar>,
+    ) -> Result<ResponseData, RequestError> {
+        let local_client =
+            crate::core::build_http_client_with_limits(cookie_jar.clone(), &self.limits)?;
+        match &self.upstream {
+            Some(upstream) => {
+                crate::core::send_request_for_upstream_workspace_with_scope(
+                    upstream_client,
+                    &local_client,
+                    &upstream.target.base_url,
+                    upstream.credential.bearer_token(),
+                    &upstream.target.workspace_id,
+                    request,
+                    cookie_jar,
+                    upstream.collection_id.as_deref(),
+                    &upstream.policy,
+                )
+                .await
+            }
+            None => {
+                crate::core::send_request_with_limits(&local_client, request, &self.limits).await
+            }
+        }
+    }
+}
+
+impl ApiTester {
+    /// Capture identity synchronously, then authenticate and fetch before script execution.
+    pub(super) fn prepare_execution(
+        &self,
+        request_id: Option<&str>,
+    ) -> impl std::future::Future<Output = Result<PreparedExecution, String>> + Send + 'static + use<>
+    {
+        let collection_id = request_collection_scope(&self.workspace, request_id);
+        let provider_key = self.workspace_providers.active_id().to_string();
+        let local = match self.workspace_providers.active_id() {
+            WorkspaceProviderId::Local(_) => {
+                Some(self.local_execution_limits_for_request(request_id))
+            }
+            WorkspaceProviderId::Upstream { .. } => None,
+        };
+        let target = self.active_upstream_workspace();
+        let vault = self.credential_vault.clone();
+        let runtime = self.runtime.clone();
+        let client = self.upstream_execution_client.clone();
+        async move {
+            let collection_id = collection_id?;
+            let scope_key = serde_json::json!([provider_key, collection_id]).to_string();
+            if let Some(local) = local {
+                return Ok(PreparedExecution {
+                    scope_key,
+                    limits: local?,
+                    upstream: None,
+                });
+            }
+            let target = target?;
+            let upstream_id = target.upstream_id.clone();
+            let credential = runtime
+                .spawn_blocking(move || vault.load_upstream(&upstream_id))
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Log in to this server again.".to_owned())?;
+            if credential.expires_at <= Utc::now() {
+                return Err("Log in to this server again.".to_owned());
+            }
+            let policy = crate::core::get_upstream_execution_policy_for_scope(
+                &client,
+                &target.base_url,
+                credential.bearer_token(),
+                &target.workspace_id,
+                collection_id.as_deref(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            Ok(PreparedExecution {
+                scope_key,
+                limits: policy.limits.clone(),
+                upstream: Some(PreparedUpstreamExecution {
+                    target,
+                    credential: Arc::new(credential),
+                    collection_id,
+                    policy,
+                }),
+            })
+        }
+    }
+}
+
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct McpHttpRequestOverrides {
@@ -171,6 +358,8 @@ impl ApiTester {
         self.request_generation = self.request_generation.wrapping_add(1);
         let generation = self.request_generation;
         self.request_history_target = self.active_upstream_workspace().ok();
+        self.prepared_execution = None;
+        let preparation = self.prepare_execution(self.active_saved_request_id.as_deref());
         self.sending = true;
         self.execution_stage = Some(ExecutionStage::PreRequest);
         self.response = None;
@@ -192,22 +381,48 @@ impl ApiTester {
         self.chain_budget.store(0, Ordering::Relaxed);
         let tape_environment = environment_id.clone();
         let chainer = self.build_inline_chainer(&tape_environment);
-        let task = self.runtime.spawn_blocking(move || {
-            crate::core::execute_pre_request_with_chain(
-                &source,
-                &request,
-                &scope,
-                &namespace,
-                &cancellation,
-                Some(&chainer),
-            )
+        let runtime = self.runtime.clone();
+        let task = self.runtime.spawn(async move {
+            let prepared = preparation.await?;
+            scope.execution_limits = Some(prepared.limits.clone());
+            let chainer = chainer.with_execution_limits(&prepared.limits);
+            let result = runtime
+                .spawn_blocking(move || {
+                    crate::core::execute_pre_request_with_chain(
+                        &source,
+                        &request,
+                        &scope,
+                        &namespace,
+                        &cancellation,
+                        Some(&chainer),
+                    )
+                })
+                .await;
+            Ok::<_, String>((prepared, result))
         });
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                this.finish_pre_request(generation, template, environment_id, result, window, cx);
+                if generation != this.request_generation {
+                    return;
+                }
+                match result {
+                    Ok(Ok((prepared, result))) => {
+                        this.prepared_execution = Some(prepared);
+                        this.finish_pre_request(
+                            generation,
+                            template,
+                            environment_id,
+                            result,
+                            window,
+                            cx,
+                        );
+                    }
+                    Ok(Err(error)) => this.fail_request(&template.request, error, cx),
+                    Err(error) => this.fail_request(&template.request, error.to_string(), cx),
+                }
             });
         })
         .detach();
@@ -341,6 +556,9 @@ impl ApiTester {
             generation,
             environment_id,
             scheduled,
+            self.prepared_execution
+                .as_ref()
+                .map(|prepared| prepared.limits.clone()),
             window,
             cx,
             move |this, run, window, cx| {
@@ -371,6 +589,7 @@ impl ApiTester {
         generation: u64,
         environment_id: Option<String>,
         scheduled: Vec<crate::core::ChainedRequest>,
+        execution_limits: Option<crate::core::execution_limits::ExecutionLimits>,
         window: &mut Window,
         cx: &mut Context<Self>,
         on_complete: impl FnOnce(&mut Self, crate::core::ChainRun, &mut Window, &mut Context<Self>)
@@ -388,83 +607,22 @@ impl ApiTester {
             return;
         };
         let budget = Arc::clone(&self.chain_budget);
-        let local_client = self.client.clone();
-        let cookie_jar = self.cookie_jar.clone();
-        let upstream_client = self.upstream_execution_client.clone();
-        let target = match self.workspace_providers.active_id() {
-            WorkspaceProviderId::Local(_) => None,
-            WorkspaceProviderId::Upstream { .. } => match self.active_upstream_workspace() {
-                Ok(target) => Some((target.upstream_id, target.workspace_id, target.base_url)),
-                Err(error) => {
-                    self.fail_request(
-                        &crate::core::RequestDraft::new("GET", ""),
-                        format!("Could not prepare chained execution: {error}"),
-                        cx,
-                    );
-                    return;
-                }
-            },
+        let runner = self.build_inline_chainer(&environment_id);
+        let runner = match execution_limits {
+            Some(limits) => runner.with_execution_limits(&limits),
+            None => runner,
         };
-        let vault = self.credential_vault.clone();
-        let runtime = Arc::clone(&self.runtime);
-        let limits = crate::core::ChainLimits {
-            script_timeout: self.settings.script.timeout(),
-            ..Default::default()
-        };
+        let limits = runner.limits;
 
         let task = self.runtime.spawn(async move {
-            let sender = move |request: crate::core::RequestDraft| {
-                let local_client = local_client.clone();
-                let cookie_jar = cookie_jar.clone();
-                let upstream_client = upstream_client.clone();
-                let vault = vault.clone();
-                let runtime = Arc::clone(&runtime);
-                let target = target.clone();
-                async move {
-                    match target {
-                        None => crate::core::send_request(&local_client, request).await,
-                        Some((upstream_id, workspace_id, base_url)) => {
-                            let credential = runtime
-                                .spawn_blocking(move || vault.load_upstream(&upstream_id))
-                                .await
-                                .map_err(|error| {
-                                    crate::core::RequestError::TaskFailed(error.to_string())
-                                })?
-                                .map_err(|error| {
-                                    crate::core::RequestError::Upstream(error.to_string())
-                                })?
-                                .ok_or_else(|| {
-                                    crate::core::RequestError::Upstream(
-                                        "Log in to this server again.".to_owned(),
-                                    )
-                                })?;
-                            if credential.expires_at <= Utc::now() {
-                                return Err(crate::core::RequestError::Upstream(
-                                    "Log in to this server again.".to_owned(),
-                                ));
-                            }
-                            crate::core::send_request_for_upstream_workspace(
-                                &upstream_client,
-                                &local_client,
-                                &base_url,
-                                credential.bearer_token(),
-                                &workspace_id,
-                                request,
-                                cookie_jar.as_ref(),
-                            )
-                            .await
-                        }
-                    }
-                }
-            };
-            crate::core::run_chain(
+            crate::core::run_chain_with_executor(
                 &workspace,
                 environment_id.as_deref(),
                 &scheduled,
                 &namespace,
                 &chain_cancellation,
-                None,
-                sender,
+                Some(&runner),
+                &runner,
                 limits,
                 &budget,
             )
@@ -510,35 +668,48 @@ impl ApiTester {
         let environment_id = environment_id.clone();
         let chain_cancellation = self.script_cancellation.clone().unwrap_or_default();
         let budget = Arc::clone(&self.chain_budget);
-        let local_client = self.client.clone();
         let cookie_jar = self.cookie_jar.clone();
         let upstream_client = self.upstream_execution_client.clone();
         let vault = self.credential_vault.clone();
         let runtime = Arc::clone(&self.runtime);
         let target = match self.workspace_providers.active_id() {
-            WorkspaceProviderId::Local(_) => None,
-            WorkspaceProviderId::Upstream { .. } => match self.active_upstream_workspace() {
-                Ok(target) => Some((target.upstream_id, target.workspace_id, target.base_url)),
-                Err(_) => None,
-            },
+            WorkspaceProviderId::Local(_) => Ok(None),
+            WorkspaceProviderId::Upstream { .. } => self.active_upstream_workspace().map(Some),
         };
+        let local_limits = workspace
+            .collections
+            .iter()
+            .flat_map(|collection| collection.requests.iter())
+            .map(|request| {
+                (
+                    request.id.clone(),
+                    self.local_execution_limits_for_request(Some(&request.id)),
+                )
+            })
+            .collect();
         let limits = crate::core::ChainLimits {
             script_timeout: self.settings.script.timeout(),
             ..Default::default()
         };
-        InlineChainRunner {
+        let runner = InlineChainRunner {
+            provider_key: self.workspace_providers.active_id().to_string(),
             workspace,
             namespace,
             environment_id,
             chain_cancellation,
             budget,
-            local_client,
             cookie_jar,
             upstream_client,
             vault,
             runtime,
             target,
+            local_limits,
             limits,
+        };
+        if let Some(prepared) = &self.prepared_execution {
+            runner.with_execution_limits(&prepared.limits)
+        } else {
+            runner
         }
     }
 
@@ -592,60 +763,20 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) {
         self.execution_stage = Some(ExecutionStage::Request);
-        let task: RequestTask = match self.workspace_providers.active_id() {
-            WorkspaceProviderId::Local(_) => spawn_request(
-                self.runtime.handle(),
-                self.client.clone(),
-                resolved.request.clone(),
-            ),
-            WorkspaceProviderId::Upstream { .. } => {
-                let target = match self.active_upstream_workspace() {
-                    Ok(target) => target,
-                    Err(error) => {
-                        self.pre_script_report = Some(pre_report);
-                        self.fail_request_with_secrets(
-                            &resolved.request,
-                            resolved.redact_secrets(&error),
-                            &resolved.sensitive_values,
-                            cx,
-                        );
-                        return;
-                    }
-                };
-                let vault = self.credential_vault.clone();
-                let client = self.upstream_execution_client.clone();
-                let local_client = self.client.clone();
-                let cookie_jar = self.cookie_jar.clone();
-                let runtime = Arc::clone(&self.runtime);
-                let credential_upstream_id = target.upstream_id.clone();
-                let request = resolved.request.clone();
-                RequestTask::spawn(self.runtime.handle(), async move {
-                    let credential = runtime
-                        .spawn_blocking(move || vault.load_upstream(&credential_upstream_id))
-                        .await
-                        .map_err(|error| RequestError::TaskFailed(error.to_string()))?
-                        .map_err(|error| RequestError::Upstream(error.to_string()))?
-                        .ok_or_else(|| {
-                            RequestError::Upstream("Log in to this server again.".to_owned())
-                        })?;
-                    if credential.expires_at <= Utc::now() {
-                        return Err(RequestError::Upstream(
-                            "Log in to this server again.".to_owned(),
-                        ));
-                    }
-                    send_request_for_upstream_workspace(
-                        &client,
-                        &local_client,
-                        &target.base_url,
-                        credential.bearer_token(),
-                        &target.workspace_id,
-                        request,
-                        cookie_jar.as_ref(),
-                    )
-                    .await
-                })
-            }
+        let Some(prepared) = self.prepared_execution.clone() else {
+            self.fail_request(
+                &resolved.request,
+                "Execution policy snapshot was lost.".to_owned(),
+                cx,
+            );
+            return;
         };
+        let client = self.upstream_execution_client.clone();
+        let cookie_jar = self.cookie_jar.clone();
+        let request = resolved.request.clone();
+        let task = RequestTask::spawn(self.runtime.handle(), async move {
+            prepared.send(&client, request, &cookie_jar).await
+        });
         self.abort_handle = Some(task.abort_handle());
         cx.notify();
 
@@ -742,6 +873,10 @@ impl ApiTester {
                 .and_then(|id| self.workspace.environment(id)),
         );
         scope.script_timeout = self.settings.script.timeout();
+        scope.execution_limits = self
+            .prepared_execution
+            .as_ref()
+            .map(|prepared| prepared.limits.clone());
         let source = template.scripts.post_response.clone();
         let request = resolved.request.clone();
         let history_request = resolved.request.clone();
@@ -872,7 +1007,11 @@ impl ApiTester {
         if post_chained.is_empty() {
             self.finalize_post_response(generation, window, cx);
         } else {
-            self.run_post_chain(generation, environment_id, post_chained, window, cx);
+            let limits = self
+                .prepared_execution
+                .as_ref()
+                .map(|prepared| prepared.limits.clone());
+            self.run_post_chain(generation, environment_id, post_chained, limits, window, cx);
         }
     }
 
@@ -908,6 +1047,7 @@ impl ApiTester {
         generation: u64,
         environment_id: Option<String>,
         post_chained: Vec<crate::core::ChainedRequest>,
+        execution_limits: Option<crate::core::execution_limits::ExecutionLimits>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -915,6 +1055,7 @@ impl ApiTester {
             generation,
             environment_id,
             post_chained,
+            execution_limits,
             window,
             cx,
             move |this, run, window, cx| {
@@ -1277,21 +1418,135 @@ impl ApiTester {
 
 #[derive(Clone)]
 pub(super) struct InlineChainRunner {
+    provider_key: String,
     workspace: crate::core::Workspace,
     namespace: crate::core::RequestNamespaceCatalog,
     environment_id: Option<String>,
     chain_cancellation: crate::core::ScriptCancellation,
     budget: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    local_client: reqwest::Client,
     cookie_jar: Arc<CookieJar>,
     upstream_client: reqwest::Client,
     vault: crate::core::CredentialVault,
     runtime: std::sync::Arc<tokio::runtime::Runtime>,
-    target: Option<(String, String, reqwest::Url)>,
+    target: Result<Option<workspace_connections::ActiveUpstreamWorkspace>, String>,
+    local_limits: HashMap<String, Result<crate::core::execution_limits::ExecutionLimits, String>>,
     limits: crate::core::ChainLimits,
 }
 
+struct PreparedChainExecution<'a> {
+    prepared: PreparedExecution,
+    runner: &'a InlineChainRunner,
+}
+
+impl crate::core::ChainRequestExecution for PreparedChainExecution<'_> {
+    fn execution_limits(&self) -> Option<&crate::core::execution_limits::ExecutionLimits> {
+        Some(&self.prepared.limits)
+    }
+    fn send(
+        &self,
+        request: RequestDraft,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<ResponseData, RequestError>> + Send + '_>,
+    > {
+        Box::pin(self.prepared.send(
+            &self.runner.upstream_client,
+            request,
+            &self.runner.cookie_jar,
+        ))
+    }
+}
+
+impl crate::core::ChainExecutor for InlineChainRunner {
+    fn prepare(
+        &self,
+        request_id: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<Box<dyn crate::core::ChainRequestExecution + '_>, RequestError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        let collection_id = request_collection_scope(&self.workspace, Some(request_id));
+        let local_limits = self.local_limits.get(request_id).cloned();
+        Box::pin(async move {
+            let collection_id = collection_id.map_err(RequestError::Upstream)?;
+            let scope_key = serde_json::json!([self.provider_key, collection_id]).to_string();
+            let prepared = match self.target.clone().map_err(RequestError::Upstream)? {
+                None => PreparedExecution {
+                    scope_key,
+                    limits: local_limits
+                        .ok_or_else(|| {
+                            RequestError::Upstream("Saved request policy was lost.".to_owned())
+                        })?
+                        .map_err(RequestError::Upstream)?,
+                    upstream: None,
+                },
+                Some(target) => {
+                    let vault = self.vault.clone();
+                    let upstream_id = target.upstream_id.clone();
+                    let credential = self
+                        .runtime
+                        .spawn_blocking(move || vault.load_upstream(&upstream_id))
+                        .await
+                        .map_err(|error| RequestError::TaskFailed(error.to_string()))?
+                        .map_err(|error| RequestError::Upstream(error.to_string()))?
+                        .ok_or_else(|| {
+                            RequestError::Upstream("Log in to this server again.".to_owned())
+                        })?;
+                    if credential.expires_at <= Utc::now() {
+                        return Err(RequestError::Upstream(
+                            "Log in to this server again.".to_owned(),
+                        ));
+                    }
+                    let policy = crate::core::get_upstream_execution_policy_for_scope(
+                        &self.upstream_client,
+                        &target.base_url,
+                        credential.bearer_token(),
+                        &target.workspace_id,
+                        collection_id.as_deref(),
+                    )
+                    .await?;
+                    PreparedExecution {
+                        scope_key,
+                        limits: policy.limits.clone(),
+                        upstream: Some(PreparedUpstreamExecution {
+                            target,
+                            credential: Arc::new(credential),
+                            collection_id,
+                            policy,
+                        }),
+                    }
+                }
+            };
+            Ok(Box::new(PreparedChainExecution {
+                prepared,
+                runner: self,
+            })
+                as Box<dyn crate::core::ChainRequestExecution>)
+        })
+    }
+}
+
 impl InlineChainRunner {
+    pub(super) fn with_execution_limits(
+        mut self,
+        limits: &crate::core::execution_limits::ExecutionLimits,
+    ) -> Self {
+        let count = |key| {
+            let bound = limits.get(key);
+            if bound.unlimited {
+                usize::MAX
+            } else {
+                usize::try_from(bound.value).unwrap_or(0)
+            }
+        };
+        self.limits.max_depth = count("chain.max_depth");
+        self.limits.max_total = count("chain.max_requests");
+        self
+    }
+
     pub(super) fn apply_websocket_environment_mutations(
         &mut self,
         mutations: &[EnvironmentMutation],
@@ -1313,9 +1568,39 @@ impl InlineChainRunner {
 }
 
 impl crate::core::InlineChainer for InlineChainRunner {
+    fn run_at_depth(
+        &self,
+        requested: &[crate::core::ChainedRequest],
+        depth: usize,
+    ) -> Vec<Result<crate::core::ChainRun, String>> {
+        self.run_with_budget(requested, depth, None)
+    }
+
     fn run(
         &self,
         requested: &[crate::core::ChainedRequest],
+    ) -> Vec<Result<crate::core::ChainRun, String>> {
+        self.run_with_budget(requested, 0, None)
+    }
+
+    fn run_with_budget(
+        &self,
+        requested: &[crate::core::ChainedRequest],
+        depth: usize,
+        deadline: Option<std::time::Instant>,
+    ) -> Vec<Result<crate::core::ChainRun, String>> {
+        let mut nested = self.clone();
+        nested.limits.max_depth = nested.limits.max_depth.saturating_sub(depth);
+        nested.chain_cancellation = self.chain_cancellation.child();
+        nested.run_batch(requested, deadline)
+    }
+}
+
+impl InlineChainRunner {
+    fn run_batch(
+        &self,
+        requested: &[crate::core::ChainedRequest],
+        deadline: Option<std::time::Instant>,
     ) -> Vec<Result<crate::core::ChainRun, String>> {
         let futures = requested
             .iter()
@@ -1325,80 +1610,26 @@ impl crate::core::InlineChainer for InlineChainRunner {
                 let environment_id = self.environment_id.clone();
                 let chain_cancellation = self.chain_cancellation.clone();
                 let budget = self.budget.clone();
-                let local_client = self.local_client.clone();
-                let cookie_jar = self.cookie_jar.clone();
-                let upstream_client = self.upstream_client.clone();
-                let vault = self.vault.clone();
-                let runtime = self.runtime.clone();
-                let target = self.target.clone();
                 let limits = self.limits;
-                let script_timeout = self.limits.script_timeout;
                 let chain_inline: &dyn crate::core::InlineChainer = self;
                 let requested = vec![scheduled.clone()];
                 async move {
-                    let sender = move |request: crate::core::RequestDraft| {
-                        let local_client = local_client.clone();
-                        let cookie_jar = cookie_jar.clone();
-                        let upstream_client = upstream_client.clone();
-                        let vault = vault.clone();
-                        let runtime = runtime.clone();
-                        let target = target.clone();
-                        async move {
-                            match target {
-                                None => crate::core::send_request(&local_client, request).await,
-                                Some((upstream_id, workspace_id, base_url)) => {
-                                    let credential = runtime
-                                        .spawn_blocking(move || vault.load_upstream(&upstream_id))
-                                        .await
-                                        .map_err(|error| {
-                                            crate::core::RequestError::TaskFailed(error.to_string())
-                                        })?
-                                        .map_err(|error| {
-                                            crate::core::RequestError::Upstream(error.to_string())
-                                        })?
-                                        .ok_or_else(|| {
-                                            crate::core::RequestError::Upstream(
-                                                "Log in to this server again.".to_owned(),
-                                            )
-                                        })?;
-                                    if credential.expires_at <= Utc::now() {
-                                        return Err(crate::core::RequestError::Upstream(
-                                            "Log in to this server again.".to_owned(),
-                                        ));
-                                    }
-                                    crate::core::send_request_for_upstream_workspace(
-                                        &upstream_client,
-                                        &local_client,
-                                        &base_url,
-                                        credential.bearer_token(),
-                                        &workspace_id,
-                                        request,
-                                        cookie_jar.as_ref(),
-                                    )
-                                    .await
-                                }
-                            }
-                        }
-                    };
-                    match tokio::time::timeout(
-                        script_timeout,
-                        crate::core::run_chain(
-                            &workspace,
-                            environment_id.as_deref(),
-                            &requested,
-                            &namespace,
-                            &chain_cancellation,
-                            Some(chain_inline),
-                            sender,
-                            limits,
-                            &budget,
-                        ),
+                    let run = crate::core::run_chain_with_executor(
+                        &workspace,
+                        environment_id.as_deref(),
+                        &requested,
+                        &namespace,
+                        &chain_cancellation,
+                        Some(chain_inline),
+                        self,
+                        limits,
+                        &budget,
                     )
-                    .await
-                    {
-                        Ok(run) if run.error.is_none() => Ok(run),
-                        Ok(run) => Err(run.error.unwrap().message),
-                        Err(_) => Err("awaited request exceeded its execution limit".to_owned()),
+                    .await;
+                    if let Some(error) = run.error.as_ref() {
+                        Err(error.message.clone())
+                    } else {
+                        Ok(run)
                     }
                 }
             })
@@ -1410,19 +1641,16 @@ impl crate::core::InlineChainer for InlineChainRunner {
         // from within the enclosing runtime, so `block_on` must happen on a
         // thread with no active runtime context (avoids "runtime within a
         // runtime"). reqwest multiplexes all in-flight network calls.
-        std::thread::scope(|scope| {
-            scope
-                .spawn(move || {
-                    self.runtime
-                        .block_on(async { futures::future::join_all(futures).await })
-                })
-                .join()
-                .unwrap_or_else(|_| {
-                    requested
-                        .iter()
-                        .map(|_| Err("awaited request execution thread panicked".to_owned()))
-                        .collect()
-                })
-        })
+        let failure = match crate::core::drive_inline_with_budget(
+            &self.runtime,
+            &self.chain_cancellation,
+            deadline,
+            futures::future::join_all(futures),
+        ) {
+            Ok(Some(outcomes)) => return outcomes,
+            Ok(None) => "awaited request execution timed out",
+            Err(_) => "awaited request execution thread panicked",
+        };
+        requested.iter().map(|_| Err(failure.to_owned())).collect()
     }
 }

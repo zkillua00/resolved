@@ -22,6 +22,11 @@ import (
 
 const MaxRequestBodyBytes = 64 * 1024 * 1024
 
+type Limit struct {
+	Unlimited bool
+	Value     int64
+}
+
 // Body describes a request body to encode, matching the wire format each entry
 // in History and the proxy requests accept.
 type Body struct {
@@ -42,20 +47,33 @@ type BodyField struct {
 // Build encodes input into a request body and its Content-Type, applying the
 // request size limit throughout.
 func Build(input Body) ([]byte, string, error) {
+	return BuildWithLimit(input, Limit{Value: MaxRequestBodyBytes})
+}
+
+func BuildWithLimit(input Body, limit Limit) ([]byte, string, error) {
 	switch input.Mode {
 	case "none":
 		return nil, "", nil
 	case "raw":
-		body, err := Decode(input.DataBase64, MaxRequestBodyBytes)
+		body, err := decodeBound(input.DataBase64, limit)
 		if len(body) == 0 {
 			return body, "", err
 		}
 		return body, input.RawContentType, err
 	case "form_url_encoded":
-		var encoded strings.Builder
+		encoded := boundedBuffer{limit: limit}
 		for _, field := range input.Fields {
 			if field.Kind != "text" {
 				return nil, "", invalidField("body.fields", "URL-encoded fields must contain text")
+			}
+			if !limit.Unlimited {
+				needed := queryEncodedLen(field.Name) + queryEncodedLen(field.Value) + 1
+				if encoded.Len() > 0 {
+					needed++
+				}
+				if needed > limit.Value-int64(encoded.Len()) {
+					return nil, "", requestBodyTooLarge()
+				}
 			}
 			if encoded.Len() > 0 {
 				encoded.WriteByte('&')
@@ -63,43 +81,55 @@ func Build(input Body) ([]byte, string, error) {
 			encoded.WriteString(url.QueryEscape(field.Name))
 			encoded.WriteByte('=')
 			encoded.WriteString(url.QueryEscape(field.Value))
-			if encoded.Len() > MaxRequestBodyBytes {
+			if encoded.exceeded {
 				return nil, "", requestBodyTooLarge()
 			}
 		}
 		return []byte(encoded.String()), "application/x-www-form-urlencoded", nil
 	case "multipart_form_data":
-		var encoded bytes.Buffer
+		encoded := boundedBuffer{limit: limit}
 		writer := multipart.NewWriter(&encoded)
 		for _, field := range input.Fields {
 			switch field.Kind {
 			case "text":
 				if err := writer.WriteField(field.Name, field.Value); err != nil {
+					if encoded.exceeded {
+						return nil, "", requestBodyTooLarge()
+					}
 					return nil, "", problem.Wrap(err, "encode multipart text field")
 				}
 			case "file":
-				content, err := Decode(field.ContentBase64, MaxRequestBodyBytes)
+				content, err := decodeBound(field.ContentBase64, limit)
 				if err != nil {
 					return nil, "", err
 				}
 				part, err := createFilePart(writer, field.Name, field.Filename)
 				if err != nil {
+					if encoded.exceeded {
+						return nil, "", requestBodyTooLarge()
+					}
 					return nil, "", problem.Wrap(err, "encode multipart file field")
 				}
 				if _, err := part.Write(content); err != nil {
+					if encoded.exceeded {
+						return nil, "", requestBodyTooLarge()
+					}
 					return nil, "", problem.Wrap(err, "encode multipart file content")
 				}
 			default:
 				return nil, "", invalidField("body.fields", "multipart fields must contain text or file data")
 			}
-			if encoded.Len() > MaxRequestBodyBytes {
+			if encoded.exceeded {
 				return nil, "", requestBodyTooLarge()
 			}
 		}
 		if err := writer.Close(); err != nil {
+			if encoded.exceeded {
+				return nil, "", requestBodyTooLarge()
+			}
 			return nil, "", problem.Wrap(err, "finish multipart body")
 		}
-		if encoded.Len() > MaxRequestBodyBytes {
+		if encoded.exceeded {
 			return nil, "", requestBodyTooLarge()
 		}
 		return encoded.Bytes(), writer.FormDataContentType(), nil
@@ -152,24 +182,65 @@ func escapeQuotes(value string) string {
 
 // Decode validates and decodes a base64 request body, enforcing limit.
 func Decode(encoded string, limit int) ([]byte, error) {
-	if len(encoded) > base64.StdEncoding.EncodedLen(limit) {
-		return nil, requestBodyTooLarge()
+	return decodeBound(encoded, Limit{Value: int64(limit)})
+}
+
+func decodeBound(encoded string, limit Limit) ([]byte, error) {
+	var reader io.Reader = base64.NewDecoder(base64.StdEncoding, strings.NewReader(encoded))
+	if !limit.Unlimited && limit.Value < int64(^uint64(0)>>1) {
+		reader = io.LimitReader(reader, limit.Value+1)
 	}
-	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	decoded, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, invalidField("body", "contains invalid base64 data")
 	}
-	if len(decoded) > limit {
+	if !limit.Unlimited && int64(len(decoded)) > limit.Value {
 		return nil, requestBodyTooLarge()
 	}
 	return decoded, nil
+}
+
+// Reject writes before growing the encoded body, including multipart headers.
+type boundedBuffer struct {
+	bytes.Buffer
+	limit    Limit
+	exceeded bool
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if !b.limit.Unlimited && int64(len(p)) > b.limit.Value-int64(b.Len()) {
+		b.exceeded = true
+		return 0, requestBodyTooLarge()
+	}
+	return b.Buffer.Write(p)
+}
+func (b *boundedBuffer) WriteString(value string) (int, error) {
+	if !b.limit.Unlimited && int64(len(value)) > b.limit.Value-int64(b.Len()) {
+		b.exceeded = true
+		return 0, requestBodyTooLarge()
+	}
+	return b.Buffer.WriteString(value)
+}
+func (b *boundedBuffer) WriteByte(value byte) error { _, err := b.Write([]byte{value}); return err }
+
+func queryEncodedLen(value string) int64 {
+	var size int64
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.' || c == '~' || c == ' ' {
+			size++
+		} else {
+			size += 3
+		}
+	}
+	return size
 }
 
 func requestBodyTooLarge() error {
 	return problem.New(
 		problem.KindPayloadTooLarge,
 		"proxy_request_too_large",
-		fmt.Sprintf("the proxied request body exceeds the %d-byte limit", MaxRequestBodyBytes),
+		"the proxied request body exceeds its execution limit",
 	)
 }
 

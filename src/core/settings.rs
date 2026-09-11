@@ -24,6 +24,7 @@ pub struct AppSettings {
     pub formatter: FormatterSettings,
     pub zoom: ZoomSettings,
     pub script: ScriptSettings,
+    pub execution_limits: super::local_execution_limits::LocalExecutionLimitSettings,
     pub mcp: McpSettings,
     pub navigation_compact: bool,
     pub metrics_position: MetricsPosition,

@@ -20,7 +20,7 @@ use tokio_tungstenite::{
     },
 };
 
-use super::{HeaderEntry, RawBodyLanguage};
+use super::{HeaderEntry, RawBodyLanguage, execution_limits::ExecutionLimits};
 
 pub const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_WEBSOCKET_TIMELINE_ENTRIES: usize = 2_000;
@@ -146,6 +146,8 @@ pub enum WebSocketSignal {
 
 #[derive(Serialize)]
 struct UpstreamWebSocketOpen {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collection_id: Option<String>,
     url: String,
     headers: Vec<UpstreamWebSocketHeader>,
 }
@@ -242,6 +244,10 @@ pub enum WebSocketDocumentError {
 
 #[derive(Debug, Error)]
 pub enum WebSocketConnectError {
+    #[error("invalid execution limit: {0}")]
+    InvalidLimit(String),
+    #[error("WebSocket handshake timed out")]
+    HandshakeTimeout,
     #[error("invalid WebSocket URL: {0}")]
     InvalidUrl(String),
     #[error("WebSocket URLs must use ws:// or wss://")]
@@ -432,7 +438,21 @@ pub async fn run_websocket_session(
     commands: UnboundedReceiver<WebSocketCommand>,
     signals: UnboundedSender<WebSocketSignal>,
 ) -> Result<(), WebSocketConnectError> {
-    run_reconnecting_session(url, headers, commands, signals, None).await;
+    run_websocket_session_with_limits(url, headers, commands, signals, &ExecutionLimits::default())
+        .await
+}
+
+pub async fn run_websocket_session_with_limits(
+    url: &str,
+    headers: &[HeaderEntry],
+    commands: UnboundedReceiver<WebSocketCommand>,
+    signals: UnboundedSender<WebSocketSignal>,
+    limits: &ExecutionLimits,
+) -> Result<(), WebSocketConnectError> {
+    limits
+        .validate()
+        .map_err(WebSocketConnectError::InvalidLimit)?;
+    run_reconnecting_session(url, headers, commands, signals, None, limits).await;
     Ok(())
 }
 
@@ -445,6 +465,34 @@ pub async fn run_upstream_websocket_session(
     commands: UnboundedReceiver<WebSocketCommand>,
     signals: UnboundedSender<WebSocketSignal>,
 ) -> Result<(), WebSocketConnectError> {
+    run_upstream_websocket_session_with_scope(
+        base_url,
+        bearer_token,
+        workspace_id,
+        url,
+        headers,
+        commands,
+        signals,
+        None,
+        &ExecutionLimits::default(),
+    )
+    .await
+}
+
+pub async fn run_upstream_websocket_session_with_scope(
+    base_url: &url::Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    url: &str,
+    headers: &[HeaderEntry],
+    commands: UnboundedReceiver<WebSocketCommand>,
+    signals: UnboundedSender<WebSocketSignal>,
+    collection_id: Option<&str>,
+    limits: &ExecutionLimits,
+) -> Result<(), WebSocketConnectError> {
+    limits
+        .validate()
+        .map_err(WebSocketConnectError::InvalidLimit)?;
     run_reconnecting_session(
         url,
         headers,
@@ -454,7 +502,9 @@ pub async fn run_upstream_websocket_session(
             base_url.clone(),
             bearer_token.to_owned(),
             workspace_id.to_owned(),
+            collection_id.map(str::to_owned),
         )),
+        limits,
     )
     .await;
     Ok(())
@@ -470,24 +520,37 @@ async fn run_reconnecting_session(
     headers: &[HeaderEntry],
     mut commands: UnboundedReceiver<WebSocketCommand>,
     signals: UnboundedSender<WebSocketSignal>,
-    upstream: Option<(url::Url, String, String)>,
+    upstream: Option<(url::Url, String, String, Option<String>)>,
+    limits: &ExecutionLimits,
 ) {
     let mut current_url = url.to_owned();
     let (wire_sender, mut wire_receiver) = tokio::sync::mpsc::unbounded_channel();
     let connect = |url: String| {
         let headers = headers.to_vec();
         let upstream = upstream.clone();
+        let limits = limits.clone();
         let signals = wire_sender.clone();
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let future: ConnectionFuture = Box::pin(async move {
             match upstream {
-                Some((base, token, workspace)) => {
-                    run_upstream_websocket_connection(
-                        &base, &token, &workspace, &url, &headers, receiver, signals,
+                Some((base, token, workspace, collection)) => {
+                    run_upstream_websocket_connection_with_scope(
+                        &base,
+                        &token,
+                        &workspace,
+                        &url,
+                        &headers,
+                        receiver,
+                        signals,
+                        collection.as_deref(),
+                        &limits,
                     )
                     .await
                 }
-                None => run_websocket_connection(&url, &headers, receiver, signals).await,
+                None => {
+                    run_websocket_connection_with_limits(&url, &headers, receiver, signals, &limits)
+                        .await
+                }
             }
         });
         (sender, future)
@@ -560,6 +623,23 @@ pub async fn run_websocket_connection(
     commands: UnboundedReceiver<WebSocketCommand>,
     signals: UnboundedSender<WebSocketSignal>,
 ) -> Result<(), WebSocketConnectError> {
+    run_websocket_connection_with_limits(
+        url,
+        headers,
+        commands,
+        signals,
+        &ExecutionLimits::default(),
+    )
+    .await
+}
+
+pub async fn run_websocket_connection_with_limits(
+    url: &str,
+    headers: &[HeaderEntry],
+    commands: UnboundedReceiver<WebSocketCommand>,
+    signals: UnboundedSender<WebSocketSignal>,
+    limits: &ExecutionLimits,
+) -> Result<(), WebSocketConnectError> {
     if let Err(error) = crate::tls::install_crypto_provider() {
         let _ = signals.send(WebSocketSignal::Failed(error.to_owned()));
         return Ok(());
@@ -590,17 +670,30 @@ pub async fn run_websocket_connection(
         })?;
         request.headers_mut().append(name, value);
     }
+    let message_limit = limits
+        .get("websocket.message_bytes")
+        .as_usize()
+        .map_err(WebSocketConnectError::InvalidLimit)?;
+    let timeout = limits
+        .get("websocket.handshake_timeout_ms")
+        .as_duration()
+        .map_err(WebSocketConnectError::InvalidLimit)?;
     let config = WebSocketConfig::default()
-        .max_message_size(Some(MAX_WEBSOCKET_MESSAGE_BYTES))
-        .max_frame_size(Some(MAX_WEBSOCKET_MESSAGE_BYTES));
-    let (stream, _) = match connect_async_with_config(request, Some(config), true).await {
+        .max_message_size(message_limit)
+        .max_frame_size(message_limit);
+    let (stream, _) = match handshake_timeout(
+        timeout,
+        connect_async_with_config(request, Some(config), true),
+    )
+    .await?
+    {
         Ok(connection) => connection,
         Err(error) => {
             let _ = signals.send(WebSocketSignal::Failed(error.to_string()));
             return Ok(());
         }
     };
-    drive_websocket_connection(stream, commands, signals).await;
+    drive_websocket_connection(stream, commands, signals, message_limit).await;
     Ok(())
 }
 
@@ -613,6 +706,31 @@ pub async fn run_upstream_websocket_connection(
     commands: UnboundedReceiver<WebSocketCommand>,
     signals: UnboundedSender<WebSocketSignal>,
 ) -> Result<(), WebSocketConnectError> {
+    run_upstream_websocket_connection_with_scope(
+        base_url,
+        bearer_token,
+        workspace_id,
+        url,
+        headers,
+        commands,
+        signals,
+        None,
+        &ExecutionLimits::default(),
+    )
+    .await
+}
+
+pub async fn run_upstream_websocket_connection_with_scope(
+    base_url: &url::Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    url: &str,
+    headers: &[HeaderEntry],
+    commands: UnboundedReceiver<WebSocketCommand>,
+    signals: UnboundedSender<WebSocketSignal>,
+    collection_id: Option<&str>,
+    limits: &ExecutionLimits,
+) -> Result<(), WebSocketConnectError> {
     if let Err(error) = crate::tls::install_crypto_provider() {
         let _ = signals.send(WebSocketSignal::Failed(error.to_owned()));
         return Ok(());
@@ -620,6 +738,9 @@ pub async fn run_upstream_websocket_connection(
     let mut endpoint = base_url
         .join(&format!("api/v1/workspaces/{workspace_id}/execute"))
         .map_err(|error| WebSocketConnectError::InvalidUrl(error.to_string()))?;
+    if let Some(id) = collection_id {
+        endpoint.query_pairs_mut().append_pair("collection_id", id);
+    }
     let socket_scheme = match endpoint.scheme() {
         "http" => "ws",
         "https" => "wss",
@@ -641,10 +762,35 @@ pub async fn run_upstream_websocket_connection(
             }
         })?,
     );
+    let message_limit = limits
+        .get("websocket.message_bytes")
+        .as_usize()
+        .map_err(WebSocketConnectError::InvalidLimit)?;
+    let opening_limit = limits
+        .get("websocket.opening_bytes")
+        .as_usize()
+        .map_err(WebSocketConnectError::InvalidLimit)?;
+    let timeout = limits
+        .get("websocket.handshake_timeout_ms")
+        .as_duration()
+        .map_err(WebSocketConnectError::InvalidLimit)?;
+    // Control messages are opening traffic, not application messages (which may have a zero budget).
+    // tokio-tungstenite cannot change config after upgrading. Bound the transport
+    // by the larger phase budget and enforce each phase's own budget below.
+    let transport_limit = match (message_limit, opening_limit) {
+        (Some(message), Some(opening)) => Some(message.max(opening)),
+        _ => None,
+    };
     let config = WebSocketConfig::default()
-        .max_message_size(Some(MAX_WEBSOCKET_MESSAGE_BYTES))
-        .max_frame_size(Some(MAX_WEBSOCKET_MESSAGE_BYTES));
-    let (mut stream, _) = match connect_async_with_config(request, Some(config), true).await {
+        .max_message_size(transport_limit)
+        .max_frame_size(transport_limit);
+    let started = std::time::Instant::now();
+    let (mut stream, _) = match handshake_timeout(
+        timeout,
+        connect_async_with_config(request, Some(config), true),
+    )
+    .await?
+    {
         Ok(connection) => connection,
         Err(error) => {
             let _ = signals.send(WebSocketSignal::Failed(error.to_string()));
@@ -652,6 +798,7 @@ pub async fn run_upstream_websocket_connection(
         }
     };
     let descriptor = UpstreamWebSocketOpen {
+        collection_id: collection_id.map(str::to_owned),
         url: url.to_owned(),
         headers: headers
             .iter()
@@ -664,11 +811,26 @@ pub async fn run_upstream_websocket_connection(
     };
     let payload = serde_json::to_string(&descriptor)
         .map_err(|error| WebSocketConnectError::InvalidUrl(error.to_string()))?;
-    if let Err(error) = stream.send(Message::Text(payload.into())).await {
+    if opening_limit.is_some_and(|limit| payload.len() > limit) {
+        return Err(WebSocketConnectError::InvalidLimit(
+            "WebSocket opening descriptor exceeds opening_bytes".into(),
+        ));
+    }
+    if let Err(error) = handshake_timeout(
+        timeout.map(|budget| budget.saturating_sub(started.elapsed())),
+        stream.send(Message::Text(payload.into())),
+    )
+    .await?
+    {
         let _ = signals.send(WebSocketSignal::Failed(error.to_string()));
         return Ok(());
     }
-    let response = match stream.next().await {
+    let response = match handshake_timeout(
+        timeout.map(|budget| budget.saturating_sub(started.elapsed())),
+        stream.next(),
+    )
+    .await?
+    {
         Some(Ok(Message::Text(response))) => response,
         Some(Ok(_)) => {
             let _ = signals.send(WebSocketSignal::Failed(
@@ -687,6 +849,11 @@ pub async fn run_upstream_websocket_connection(
             return Ok(());
         }
     };
+    if opening_limit.is_some_and(|limit| response.len() > limit) {
+        return Err(WebSocketConnectError::InvalidLimit(
+            "WebSocket opening response exceeds opening_bytes".into(),
+        ));
+    }
     let response: UpstreamWebSocketOpenResponse = match serde_json::from_str(&response) {
         Ok(response) => response,
         Err(error) => {
@@ -705,14 +872,28 @@ pub async fn run_upstream_websocket_connection(
         let _ = signals.send(WebSocketSignal::Failed(message));
         return Ok(());
     }
-    drive_websocket_connection(stream, commands, signals).await;
+    drive_websocket_connection(stream, commands, signals, message_limit).await;
     Ok(())
+}
+
+async fn handshake_timeout<F: std::future::Future>(
+    duration: Option<Duration>,
+    future: F,
+) -> Result<F::Output, WebSocketConnectError> {
+    match duration {
+        Some(duration) if duration.is_zero() => Err(WebSocketConnectError::HandshakeTimeout),
+        Some(duration) => tokio::time::timeout(duration, future)
+            .await
+            .map_err(|_| WebSocketConnectError::HandshakeTimeout),
+        None => Ok(future.await),
+    }
 }
 
 async fn drive_websocket_connection<S>(
     stream: tokio_tungstenite::WebSocketStream<S>,
     mut commands: UnboundedReceiver<WebSocketCommand>,
     signals: UnboundedSender<WebSocketSignal>,
+    message_limit: Option<usize>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -730,6 +911,11 @@ async fn drive_websocket_connection<S>(
                     WebSocketCommand::Close => Message::Close(None),
                     WebSocketCommand::Reconnect(_) => return,
                 };
+                if matches!(message, Message::Text(_) | Message::Binary(_))
+                    && message_limit.is_some_and(|limit| message.len() > limit) {
+                    let _ = signals.send(WebSocketSignal::Failed("WebSocket message exceeds message_bytes".into()));
+                    continue;
+                }
                 if let Err(error) = writer.send(message).await {
                     let _ = signals.send(WebSocketSignal::Failed(error.to_string()));
                     return;
@@ -740,6 +926,11 @@ async fn drive_websocket_connection<S>(
                     let _ = signals.send(WebSocketSignal::Closed(None));
                     return;
                 };
+                if let Ok(message @ (Message::Text(_) | Message::Binary(_))) = &incoming
+                    && message_limit.is_some_and(|limit| message.len() > limit) {
+                    let _ = signals.send(WebSocketSignal::Failed("WebSocket message exceeds message_bytes".into()));
+                    return;
+                }
                 let signal = match incoming {
                     Ok(Message::Text(text)) => WebSocketSignal::Text(text.to_string()),
                     Ok(Message::Binary(bytes)) => WebSocketSignal::Binary(bytes.to_vec()),
@@ -775,6 +966,32 @@ pub fn binary_preview(bytes: &[u8]) -> String {
 mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
+
+    #[test]
+    fn scoped_opening_descriptor_and_zero_timeout() {
+        let descriptor = UpstreamWebSocketOpen {
+            collection_id: Some("nested-collection".into()),
+            url: "wss://example.com".into(),
+            headers: vec![],
+        };
+        let encoded = serde_json::to_value(descriptor).unwrap();
+        assert_eq!(encoded["collection_id"], "nested-collection");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert!(
+            runtime
+                .block_on(handshake_timeout(Some(Duration::ZERO), async {}))
+                .is_err()
+        );
+        assert_eq!(
+            runtime
+                .block_on(handshake_timeout(None, async { 7 }))
+                .unwrap(),
+            7
+        );
+    }
 
     use tokio::net::TcpListener;
     use tokio_tungstenite::{

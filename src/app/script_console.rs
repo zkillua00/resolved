@@ -362,30 +362,53 @@ impl ApiTester {
         let namespace = self.request_namespace.clone();
         let cancellation = ScriptCancellation::new();
         self.script_cancellation = Some(cancellation.clone());
+        self.chain_budget
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         let chainer = self.build_inline_chainer(&environment_id);
-        let session_key = (generation, format!("{tab_id:?}"));
-        if self.script_console_session_key.as_ref() != Some(&session_key) {
-            self.script_console_session = None;
-        }
-        self.script_console_session_key = Some(session_key);
+        let preparation = self.prepare_execution(self.active_saved_request_id.as_deref());
+        let previous_session_key = self.script_console_session_key.take();
+        let session_tab_key = format!("{tab_id:?}");
         let mut session = self.script_console_session.take();
-        let task = self.runtime.spawn_blocking(move || {
-            let result = crate::core::execute_post_response_console_session(
-                &source,
-                &request,
-                &response,
-                &scope,
-                &namespace,
-                &cancellation,
-                Some(&chainer),
-                &mut session,
+        let runtime = self.runtime.clone();
+        let task = self.runtime.spawn(async move {
+            let prepared = preparation.await?;
+            // QuickJS memory/stack budgets belong to a realm. Reuse one only
+            // while identity and effective policy are unchanged.
+            let session_key = (
+                generation,
+                serde_json::json!([session_tab_key, prepared.scope_key, prepared.limits])
+                    .to_string(),
             );
-            (result, session)
+            if previous_session_key.as_ref() != Some(&session_key) {
+                session = None;
+            }
+            let limits = prepared.limits;
+            scope.execution_limits = Some(limits.clone());
+            let chainer = chainer.with_execution_limits(&limits);
+            runtime
+                .spawn_blocking(move || {
+                    let result = crate::core::execute_post_response_console_session(
+                        &source,
+                        &request,
+                        &response,
+                        &scope,
+                        &namespace,
+                        &cancellation,
+                        Some(&chainer),
+                        &mut session,
+                    );
+                    (result, session, session_key, limits)
+                })
+                .await
+                .map_err(|error| error.to_string())
         });
 
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
+                if operation_id != this.mcp_script_console_generation {
+                    return;
+                }
                 this.script_console_running = false;
                 this.mcp_script_console_owned = false;
                 if generation != this.request_generation
@@ -395,10 +418,16 @@ impl ApiTester {
                     cx.notify();
                     return;
                 }
-                let result = result.map(|(result, session)| {
-                    this.script_console_session = session;
-                    result
-                });
+                let mut execution_limits = None;
+                let result = result
+                    .map_err(|error| error.to_string())
+                    .and_then(|result| result)
+                    .map(|(result, session, session_key, limits)| {
+                        this.script_console_session = session;
+                        this.script_console_session_key = Some(session_key);
+                        execution_limits = Some(limits);
+                        result
+                    });
                 match result {
                     Ok(Ok(result)) => {
                         let chained = result.chained_requests.clone();
@@ -416,6 +445,7 @@ impl ApiTester {
                                 generation,
                                 environment_id.clone(),
                                 chained,
+                                execution_limits,
                                 window,
                                 cx,
                             );
