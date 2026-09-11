@@ -47,15 +47,53 @@ On Windows, use the extracted `resolved-mcp.exe`; it runs outside the MSIX.
 The adapter is released as a separate download and is not bundled into
 `Resolved.app`, the Windows MSIX, or Linux packages.
 
-Resolved must be running with MCP enabled. Otherwise `tools/list` is empty and
-tool calls report that local control is unavailable. Changing a tool switch
+Resolved must be running with MCP enabled for workspace tools. Otherwise
+`tools/list` contains only `ask`, and workspace tool calls report that local
+control is unavailable. Changing a tool switch
 changes subsequent `tools/list` responses. The adapter does not currently send
 MCP list-change notifications, so refresh or reconnect clients that cache tool
 discovery.
 
+## Ask the documentation
+
+Agents can call the read-only `ask` tool to learn how Resolved actually works:
+
+```json
+{
+  "name": "ask",
+  "arguments": {
+    "question": "How do I run a saved request from a script with api.requests.execute?"
+  }
+}
+```
+
+The adapter also exposes an MCP prompt named `ask`, with the same required
+`question` argument. Clients that surface MCP prompts as slash commands can
+offer it as `/ask` (the exact spelling or server prefix depends on the client).
+The prompt includes retrieved documentation and asks the agent to answer with
+citations, preserve documented limits, and acknowledge missing information.
+
+Both entry points search the official user guide, MCP guide, WebSocket automation,
+request import, and execution-limit documentation embedded in the adapter at
+build time. No network service, model, API key, or source checkout is required.
+Use an adapter release matching the desktop app: the result's
+`documentation_version` identifies the build, not the running application's state.
+
+Results contain up to five relevant sections with `source`, `heading`,
+`start_line`, `end_line`, and `excerpt`. Excerpts are capped at 12,000 characters
+each and explicitly marked `truncated` when shortened. Search uses keyword
+overlap, favoring headings; specific feature names and API identifiers work best.
+No matches produce an empty result with guidance to refine the question, not an
+invented answer. The calling agent interprets the excerpts to answer the question.
+
+Documentation is always available while the adapter is running, even if the app
+is closed or MCP workspace access is disabled. It has no desktop tool switch:
+it reads only bundled public documentation, never requests, secrets, or workspace
+state. Workspace tool authorization is unchanged.
+
 ## Tool visibility and authorization
 
-Every tool has its own switch under **Settings -> MCP**. Disabling a tool removes
+Every workspace tool has its own switch under **Settings -> MCP**. Disabling a tool removes
 it from the next `tools/list` response, so an agent does not discover it. The
 desktop also rejects direct calls to disabled tools, protecting against clients
 that cached an older list. Turning MCP off stops the local transport and removes
@@ -63,7 +101,8 @@ its discovery files.
 
 **Allow server workspaces** is a separate, off-by-default switch. While a server
 workspace is active and this switch is off, only `status`, `list_workspaces`,
-and `switch_workspace` are advertised, so an agent can still return to a local
+and `switch_workspace` workspace tools are advertised (alongside the adapter's
+`ask` tool), so an agent can still return to a local
 workspace; all other workspace-scoped tools are also rejected inside the desktop.
 Turning it on permits the individually enabled tools to use the active server
 workspace, subject to the signed-in user's server RBAC permissions.
