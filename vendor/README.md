@@ -18,6 +18,11 @@ Tree-sitter styles, exposes buffer context to completion triggers, avoids unused
 inline-completion work for menu-only providers, and keeps completion-menu
 highlight ranges within UTF-8 label boundaries.
 
+The custom-hover-renderer patch also makes tooltip surfaces occlude pointer
+hits, like editor popovers. This includes tooltip padding: moving into a
+documentation explanation must not activate another field's tooltip underneath
+it or steal clicks from reference links.
+
 Use `scripts/cargo.sh` instead of invoking Cargo directly. The wrapper prepares
 the dependency idempotently before forwarding all arguments to Cargo. The
 macOS bundle script performs the same preparation automatically.

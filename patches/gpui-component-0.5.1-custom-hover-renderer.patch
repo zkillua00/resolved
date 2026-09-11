@@ -99,3 +99,22 @@ diff --git a/src/input/popovers/hover_popover.rs b/src/input/popovers/hover_popo
          )
          .into_any_element()
      }
+diff --git a/src/tooltip.rs b/src/tooltip.rs
+--- a/src/tooltip.rs
++++ b/src/tooltip.rs
+@@ -1,4 +1,4 @@
+ use gpui::{
+     div, prelude::FluentBuilder, px, Action, AnyElement, AnyView, App, AppContext, Context,
+-    IntoElement, ParentElement, Render, SharedString, StyleRefinement, Styled, Window,
++    InteractiveElement, IntoElement, ParentElement, Render, SharedString, StyleRefinement, Styled, Window,
+ };
+@@ -98,6 +98,9 @@
+         div().child(
+             // Wrap in a child, to ensure the left margin is applied to the tooltip
+             h_flex()
++                // Match editor popovers: the entire visible surface, including
++                // padding, owns pointer hits instead of the fields underneath.
++                .occlude()
+                 .font_family(cx.theme().font_family.clone())
+                 .m_3()
+                 .bg(cx.theme().popover)

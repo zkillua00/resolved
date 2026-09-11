@@ -436,8 +436,9 @@ pub(super) mod tests {
         assert_body_hover_link(
             cx,
             RawBodyLanguage::Json,
-            r#"{"session_id":"example"}"#,
-            "@body /session_id @Ref([\"AI Chat Admin\"].Auth.Login)",
+            "{ \"session_id\": \"example\",\n  \"underneath\": \"another documented field\"\n}",
+            "@body /session_id @Ref([\"AI Chat Admin\"].Auth.Login)\n\
+             @body /underneath Underlying field must not replace the open hover.",
         );
     }
 
@@ -618,6 +619,90 @@ pub(super) mod tests {
     }
 
     #[gpui::test]
+    fn query_documentation_hover_links_survive_overlapping_rows(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+        store.initialize().unwrap();
+        let mut app = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            crate::theme::configure(cx);
+            let bindings = shortcuts::capture_base_key_bindings(cx);
+            let view = cx.new(|cx| ApiTester::new_with_database_store(bindings, store, window, cx));
+            app = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app = app.unwrap();
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_resize(size(px(1200.), px(800.)));
+
+        for selector in ["query-param-key-cell", "query-param-description-cell"] {
+            cx.update(|window, cx| {
+                app.update(cx, |app, cx| {
+                    app.workspace = crate::documentation_references::tests::workspace_fixture();
+                    app.open_blank_request_tab(window, cx);
+                    app.request_pane = RequestPane::Params;
+                    app.url.update(cx, |input, cx| {
+                        input.set_value(
+                            "https://example.test/search?first=1&underneath=2",
+                            window,
+                            cx,
+                        )
+                    });
+                    app.documentation.update(cx, |editor, cx| {
+                        editor.set_value(
+                            "@param query.first @Ref(Backend.Auth.Login)\n\
+                             @param query.underneath Underlying parameter must not replace the hover.",
+                            window,
+                            cx,
+                        )
+                    });
+                    cx.notify();
+                });
+            });
+            cx.run_until_parked();
+            let underneath = cx.debug_bounds(selector).unwrap();
+            // Stay near the left edge so a tooltip on the rightmost column
+            // fits without being flipped into a different column.
+            let source_point =
+                underneath.origin + gpui::point(px(20.), -underneath.size.height / 2.);
+            cx.simulate_mouse_move(source_point, None, gpui::Modifiers::none());
+            cx.run_until_parked();
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(600));
+            cx.run_until_parked();
+            let hover = cx
+                .debug_bounds("documentation-explanation-hover")
+                .unwrap_or_else(|| panic!("{selector}: hover must open"));
+            let link_point = hover.origin + gpui::point(px(10.), hover.size.height / 2.);
+            assert!(
+                underneath.contains(&link_point),
+                "{selector}: overlap required"
+            );
+            // Cross the padding before settling over the link for longer than
+            // the underlying row's tooltip delay.
+            for x in [-4., 10.] {
+                let point = hover.origin + gpui::point(px(x), hover.size.height / 2.);
+                cx.simulate_mouse_move(point, None, gpui::Modifiers::none());
+                cx.run_until_parked();
+                cx.executor()
+                    .advance_clock(std::time::Duration::from_millis(600));
+                cx.run_until_parked();
+            }
+            cx.simulate_click(link_point, gpui::Modifiers::none());
+            cx.run_until_parked();
+            cx.read(|cx| {
+                assert_eq!(
+                    app.read(cx).request_template(cx).request.url,
+                    "https://example.test/login?secret=never-expose-url",
+                    "{selector}: the original hover's link must remain clickable",
+                );
+                assert!(!app.read(cx).sending);
+            });
+        }
+    }
+
+    #[gpui::test]
     fn documentation_links_navigate_without_executing_and_reject_stale_targets(
         cx: &mut TestAppContext,
     ) {
@@ -780,15 +865,24 @@ pub(super) mod tests {
                 app.request_pane = RequestPane::Headers;
                 app.headers.clear();
                 app.push_header_row("X-CSRF", "", true, false, window, cx);
+                app.push_header_row("X-Underneath", "", true, false, window, cx);
                 app.documentation.update(cx, |editor, cx| {
-                    editor.set_value("@header X-CSRF @Ref(Backend.Auth.Login)", window, cx)
+                    editor.set_value(
+                        "@header X-CSRF @Ref(Backend.Auth.Login)\n\
+                         @header X-Underneath Underlying header must not replace the open hover.",
+                        window,
+                        cx,
+                    )
                 });
                 cx.notify();
             })
         });
         cx.run_until_parked();
+        // Repeated debug selectors retain the last row's bounds. Target the
+        // first of these two adjacent, equally sized header rows.
         let bounds = cx.debug_bounds("header-explanation-source").unwrap();
-        cx.simulate_mouse_move(bounds.center(), None, gpui::Modifiers::none());
+        let source_point = bounds.center() - gpui::point(px(0.), bounds.size.height);
+        cx.simulate_mouse_move(source_point, None, gpui::Modifiers::none());
         cx.run_until_parked();
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(600));
@@ -797,6 +891,22 @@ pub(super) mod tests {
             .debug_bounds("documentation-explanation-hover")
             .expect("hover visible");
         let link_point = hover.origin + gpui::point(px(10.), hover.size.height / 2.);
+        // The tooltip's left padding also overlaps the next documented row.
+        // It must block underlying hover triggers, not just the text itself.
+        let padding_point = hover.origin + gpui::point(px(-4.), hover.size.height / 2.);
+        assert!(
+            bounds.contains(&link_point),
+            "link must overlap the next header"
+        );
+        assert!(
+            bounds.contains(&padding_point),
+            "padding must overlap the next header"
+        );
+        cx.simulate_mouse_move(padding_point, None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        cx.run_until_parked();
         cx.simulate_mouse_move(link_point, None, gpui::Modifiers::none());
         cx.run_until_parked();
         cx.executor()
