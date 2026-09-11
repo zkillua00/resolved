@@ -3,7 +3,9 @@ set -eu
 
 project_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 profile="${1:-release}"
-format="${2:-all}"
+if [ "$#" -gt 0 ]; then shift; fi
+if [ "$#" -eq 0 ]; then set -- all; fi
+formats="$*"
 
 case "$profile" in
     debug)
@@ -15,18 +17,20 @@ case "$profile" in
         binary_dir="release"
         ;;
     *)
-        echo "usage: scripts/package-linux.sh [debug|release] [all|deb|rpm|appimage|archive]" >&2
+        echo "usage: scripts/package-linux.sh [debug|release] [all|deb|rpm|appimage|archive]..." >&2
         exit 2
         ;;
 esac
 
-case "$format" in
-    all | deb | rpm | appimage | archive) ;;
-    *)
-        echo "usage: scripts/package-linux.sh [debug|release] [all|deb|rpm|appimage|archive]" >&2
-        exit 2
-        ;;
-esac
+for format in "$@"; do
+    case "$format" in
+        all | deb | rpm | appimage | archive) ;;
+        *)
+            echo "usage: scripts/package-linux.sh [debug|release] [all|deb|rpm|appimage|archive]..." >&2
+            exit 2
+            ;;
+    esac
+done
 
 if [ "$(uname -s)" != "Linux" ]; then
     echo "error: Linux packages must be built on Linux" >&2
@@ -41,7 +45,10 @@ require_command() {
 }
 
 wants_format() {
-    [ "$format" = "all" ] || [ "$format" = "$1" ]
+    case " $formats " in
+        *" all "* | *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 require_command install

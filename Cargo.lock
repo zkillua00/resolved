@@ -6274,6 +6274,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "resolved-mcp"
+version = "0.0.0"
+dependencies = [
+ "dirs 6.0.0",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "resvg"
 version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

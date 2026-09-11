@@ -118,7 +118,9 @@ The script builds once and writes four artifacts to `target/release/`:
 - `Resolved-<version>-linux-<architecture>.tar.xz`
 
 Pass `deb`, `rpm`, `appimage`, or `archive` as the second argument to build
-only one format. The Debian and RPM packages install the binary, desktop entry,
+only one format, or pass several formats to share one build and payload staging
+step (for example, `scripts/package-linux.sh release deb rpm archive`, as in CI).
+The Debian and RPM packages install the binary, desktop entry,
 AppStream metadata, and icon. The AppImage is a single-file portable launcher
 but uses the host's matched GTK 3 and WebKitGTK 4.1 runtime. The relocatable
 archive instead carries its distributable shared-library dependency closure
@@ -174,4 +176,55 @@ commands through GPUI control-area hitboxes.
 On Windows, permissions for the local data directory and SQLite files come
 from NTFS ACLs rather than POSIX modes; the `0700`/`0600` restrictions apply
 to Linux and macOS.
+
+## CI build performance
+
+Nightly and version releases share the five-platform matrix in
+`.github/workflows/build-release.yml`. Keep release optimization, platform
+coverage, MCP tests, and artifact verification enabled when tuning build time.
+
+Baseline: [nightly run 34573979792](https://github.com/zkillua00/resolved/actions/runs/34573979792)
+took 26m 29s. Windows was the critical path: Cargo's release build took 16m 51s,
+and the MCP test build took another 6m 31s while its four tests ran in 0.01s.
+MCP originally belonged to the desktop package, so even `test --bin resolved-mcp`
+compiled the entire GUI dependency graph in the test profile.
+
+- MCP now has a lightweight workspace package while retaining its existing
+  binary name, output directory, shared tool definitions, and wrapper commands.
+  This avoids compiling GUI dependencies for adapter-only builds/tests and
+  reduces the debug artifacts in each platform cache.
+- Only default-branch runs save Rust caches. Tag/other-ref builds can restore
+  default-branch caches, but do not save copies that future tags cannot reuse.
+  The baseline's default-branch platform caches totaled about 8.7 GB before
+  additional release-ref copies; avoid multiplying that set under GitHub's
+  cache quota. **Warm release caches** runs automatically on default-branch
+  pushes changing Cargo manifests/lockfile, toolchain/config, workspace crates,
+  patches, vendored dependencies, or build scripts/workflows. It uses the same
+  five-platform matrix, release profile, and cache keys as nightly/tag builds,
+  without signing, packaging, uploading artifacts, or publishing a release.
+  Exact cache hits skip compilation and MCP tests; misses build and test before
+  saving the cache. This is cache maintenance, not a replacement for release
+  checks: nightly/tag runs always build, test, and verify artifacts.
+- Source-only desktop edits (`src/`) and docs/server/assets-only changes do not
+  trigger warm-up: application outputs are not cached. Warm-up runs aren't
+  canceled by newer pushes, so an active build can finish saving its caches;
+  only the latest pending run is retained. For a dependency-changing release,
+  wait for **Warm release caches** to finish before pushing the tag. A tag pushed
+  immediately alongside the branch may start before that cache is available;
+  releases do not wait for warm-up and remain correct on a cold cache.
+  **Actions → Warm release caches → Run workflow** on the default branch also
+  works for manual warming after eviction or a runner/toolchain-image update.
+- Cache generated patched grammar sources alongside GPUI sources to preserve
+  their timestamps relative to cached native build outputs. Preparation still
+  verifies patched trees; do not replace checksum verification with a CI bypass.
+- Linux creates Debian, RPM, and archive packages in one invocation instead of
+  repeating dependency preparation, Cargo startup, and payload staging.
+
+To measure the result, compare both a cold run and a subsequent default-branch
+warm run, followed by a tag release. Check cache restore messages, Cargo's
+`Finished` timings, MCP test/build time, and post-job cache save time for each
+platform, not just total workflow time (which also includes runner queueing).
+The measured baseline is not a guaranteed time saving: hosted-runner load and
+cache eviction vary. Thin LTO remains enabled; changing release optimization or
+paying for larger runners requires a separate runtime/size or cost comparison.
 

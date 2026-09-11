@@ -4,6 +4,16 @@ version = "0.9.1"
 edition = "2024"
 description = "A native desktop API workbench that keeps request intent, wire state, and responses explicit"
 license = "Apache-2.0"
+autobins = false
+
+[workspace]
+members = ["crates/resolved-mcp"]
+default-members = [".", "crates/resolved-mcp"]
+resolver = "3"
+
+[[bin]]
+name = "api-tester"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"

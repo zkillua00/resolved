@@ -1,0 +1,36 @@
+name: Warm release caches
+on:
+  push:
+    # Expressions aren't supported in branch filters; the job below restricts
+    # execution to the repository's current default branch, including renames.
+    branches: ['**']
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - '.cargo/**'
+      - 'rust-toolchain*'
+      - 'crates/**'
+      - 'patches/**'
+      - 'vendor/**'
+      - 'scripts/**'
+      - '.github/workflows/build-release.yml'
+      - '.github/workflows/warm-cache.yml'
+  workflow_dispatch:
+# The reusable workflow declares a write-scoped publish job. GitHub requires
+# callers to permit it, even though cache-only skips that job entirely.
+# Its metadata/build jobs run with contents: read; no release is published.
+permissions:
+  contents: write
+concurrency:
+  group: warm-release-caches-${{ github.ref }}
+  # Let an active run save its caches. GitHub keeps only the latest pending run.
+  cancel-in-progress: false
+jobs:
+  warm:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    uses: ./.github/workflows/build-release.yml
+    with:
+      # Resolve an identity on a branch without requiring a version tag.
+      channel: nightly
+      cache-only: true

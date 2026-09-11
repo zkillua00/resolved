@@ -1,0 +1,18 @@
+[package]
+name = "resolved-mcp"
+# Internal package identity only; the advertised version comes from the root
+# package (or RESOLVED_BUILD_VERSION), as it does for the desktop app.
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+autobins = false
+
+[[bin]]
+name = "resolved-mcp"
+path = "../../src/bin/resolved-mcp.rs"
+
+[dependencies]
+dirs = "6.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

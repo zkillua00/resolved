@@ -5,6 +5,10 @@ on:
       channel:
         required: true
         type: string
+      cache-only:
+        description: Compile release dependencies without packaging or publishing
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -78,18 +82,29 @@ jobs:
           & ./scripts/prepare-typescript-service.ps1
           if ($LASTEXITCODE -ne 0) { throw 'TypeScript preparation failed' }
       - name: Cache Rust dependencies
+        id: rust-cache
         uses: Swatinem/rust-cache@v2
         with:
-          # Share nightly/version caches, but isolate platforms and patched sources.
+          # Share push/nightly/version caches, but isolate platforms and patched sources.
           # The action also keys by compiler, Cargo manifests/lockfile and build flags.
           shared-key: desktop-${{ matrix.os }}-${{ matrix.arch }}-${{ hashFiles('patches/**', 'scripts/prepare-*', 'vendor/gpui-wry-0.5.0/**') }}
           cache-bin: false
-          # Preserve source timestamps for compiled local GPUI dependencies.
+          # Tags can restore default-branch caches, but their own copies cannot
+          # warm future releases and evict the reusable five-platform cache set.
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+          # Preserve source timestamps for ALL generated local dependencies.
+          # Re-extracted patched grammar sources otherwise invalidate native builds.
           cache-directories: |
             vendor/gpui-0.2.2
             vendor/gpui-component-0.5.1
+            vendor/tree-sitter-c-sharp-0.23.5
+            vendor/tree-sitter-cpp-0.23.4
+            vendor/tree-sitter-swift-0.7.3
+            vendor/tree-sitter-kotlin-ng-1.1.0
+            vendor/tree-sitter-scala-0.23.4
+            vendor/tree-sitter-sequel-0.3.11
       - name: Install Linux dependencies
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && (!inputs.cache-only || steps.rust-cache.outputs.cache-hit != 'true')
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake clang libclang-dev pkg-config \
@@ -98,7 +113,7 @@ jobs:
             libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-randr0-dev \
             libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev rpm patchelf file xz-utils
       - name: Install Linux archive tool
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !inputs.cache-only
         run: |
           # Same pinned release and checksums as linux/Dockerfile.
           case "$(uname -m)" in
@@ -117,8 +132,19 @@ jobs:
             --output "$RUNNER_TEMP/linuxdeploy"
           echo "$tool_sha256  $RUNNER_TEMP/linuxdeploy" | sha256sum --check
           sudo install -m 755 "$RUNNER_TEMP/linuxdeploy" /usr/local/bin/linuxdeploy
+      # The cache contains dependencies, not the app. An exact hit already has
+      # everything a warm-up can contribute; releases still always build/test.
+      - name: Warm release build (macOS/Linux)
+        if: inputs.cache-only && runner.os != 'Windows' && steps.rust-cache.outputs.cache-hit != 'true'
+        run: scripts/cargo.sh build --release --locked
+      - name: Warm release build (Windows)
+        if: inputs.cache-only && runner.os == 'Windows' && steps.rust-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          & ./scripts/cargo.ps1 build --release --locked
+          if ($LASTEXITCODE -ne 0) { throw 'Windows cache warm-up failed' }
       - name: Build and package macOS
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && !inputs.cache-only
         env:
           ARCH: ${{ matrix.arch }}
         run: |
@@ -127,16 +153,14 @@ jobs:
           cp "target/release/Resolved-$RESOLVED_BUILD_VERSION-$API_TESTER_BUILD_NUMBER-macos.zip" \
             "dist/Resolved-$RESOLVED_BUILD_VERSION-macos-$ARCH.zip"
       - name: Build and package Linux
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !inputs.cache-only
         run: |
-          scripts/package-linux.sh release deb
-          scripts/package-linux.sh release rpm
-          scripts/package-linux.sh release archive
+          scripts/package-linux.sh release deb rpm archive
           mkdir -p dist
           cp target/release/Resolved-*.deb target/release/Resolved-*.rpm \
             target/release/Resolved-*.tar.xz dist/
       - name: Build and package Windows
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && !inputs.cache-only
         shell: pwsh
         env:
           CHANNEL: ${{ inputs.channel }}
@@ -159,12 +183,12 @@ jobs:
             throw 'MSIX was not signed'
           }
       - name: Test and build MCP adapter (macOS/Linux)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && (!inputs.cache-only || steps.rust-cache.outputs.cache-hit != 'true')
         run: |
           scripts/cargo.sh test --locked --bin resolved-mcp
           scripts/cargo.sh build --release --locked --bin resolved-mcp
       - name: Test and build MCP adapter (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && (!inputs.cache-only || steps.rust-cache.outputs.cache-hit != 'true')
         shell: pwsh
         run: |
           & ./scripts/cargo.ps1 test --locked --bin resolved-mcp
@@ -172,15 +196,18 @@ jobs:
           & ./scripts/cargo.ps1 build --release --locked --bin resolved-mcp
           if ($LASTEXITCODE -ne 0) { throw 'MCP adapter build failed' }
       - uses: actions/setup-python@v5
+        if: ${{ !inputs.cache-only }}
         with:
           python-version: '3.12'
       - name: Verify and package standalone MCP adapter
+        if: ${{ !inputs.cache-only }}
         env:
           PLATFORM: ${{ matrix.platform }}
           ARCH: ${{ matrix.arch }}
         shell: bash
         run: python scripts/package-mcp.py "$PLATFORM" "$ARCH" "$RESOLVED_BUILD_VERSION"
       - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.cache-only }}
         with:
           name: desktop-${{ matrix.platform }}-${{ matrix.arch }}
           path: dist/*
@@ -189,6 +216,7 @@ jobs:
           retention-days: 14
 
   publish:
+    if: ${{ !inputs.cache-only }}
     needs: [metadata, build]
     runs-on: ubuntu-24.04
     permissions:

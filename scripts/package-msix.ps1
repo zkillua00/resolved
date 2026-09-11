@@ -39,8 +39,13 @@ if (-not (Test-Path $exePath)) {
 $identityName = 'dev.apiworkbench.resolved'
 $certificateSubject = 'CN=apiworkbench.dev'
 $publisher = $certificateSubject.Substring(3)
-$version = (& cargo metadata --no-deps --format-version 1 |
-    ConvertFrom-Json).packages[0].version
+$metadata = & cargo metadata --manifest-path (Join-Path $projectDir 'Cargo.toml') --no-deps --format-version 1
+if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed' }
+# Workspace package order is not an identity: MCP has its own internal version.
+$desktopPackages = @(($metadata | ConvertFrom-Json).packages |
+    Where-Object { $_.name -eq 'api-tester' })
+if ($desktopPackages.Count -ne 1) { throw 'Expected exactly one api-tester package' }
+$version = $desktopPackages[0].version
 # MSIX versions use four numeric parts. Release packages start at revision 0;
 # repeated local installs of the same Cargo version advance the revision so
 # Windows deploys the rebuilt executable instead of retaining stale bytes.
