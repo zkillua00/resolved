@@ -3387,6 +3387,77 @@ mod tests {
     }
 
     #[test]
+    fn execute_payload_preserves_saved_request_identity_and_omits_unsaved_identity() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for expected_id in [Some("saved-child-id"), None] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .unwrap();
+                let request = read_http_request(&mut stream);
+                let header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .unwrap();
+                let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+                assert!(
+                    headers.starts_with("POST /api/v1/workspaces/workspace-1/execute HTTP/1.1\r\n")
+                );
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request[header_end + 4..]).unwrap();
+                match expected_id {
+                    Some(id) => assert_eq!(body["request_id"], id),
+                    None => assert!(body.get("request_id").is_none()),
+                }
+                assert_eq!(body["url"], "https://target.example.test/items/42");
+                let response_body = serde_json::to_vec(&serde_json::json!({
+                    "success": true,
+                    "data": {
+                        "status": 200,
+                        "status_text": "OK",
+                        "http_version": "HTTP/1.1",
+                        "final_url": "https://target.example.test/items/42",
+                        "headers": [],
+                        "body_base64": "",
+                        "duration_micros": 1
+                    }
+                }))
+                .unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response_body.len()
+                )
+                .unwrap();
+                stream.write_all(&response_body).unwrap();
+            }
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = build_upstream_execution_client().unwrap();
+        let base_url = Url::parse(&format!("http://{address}/")).unwrap();
+        for saved_id in [Some("saved-child-id"), None] {
+            runtime
+                .block_on(execute_upstream_request_with_cookies(
+                    &client,
+                    &base_url,
+                    "saved-session-token",
+                    "workspace-1",
+                    saved_id,
+                    RequestDraft::new("GET", "https://target.example.test/items/42"),
+                    false,
+                ))
+                .unwrap();
+        }
+        server.join().unwrap();
+    }
+
+    #[test]
     fn proxied_request_validation_error_includes_the_field_reason() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();

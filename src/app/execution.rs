@@ -413,7 +413,7 @@ impl ApiTester {
         };
 
         let task = self.runtime.spawn(async move {
-            let sender = move |request: crate::core::RequestDraft| {
+            let sender = move |saved_id: String, request: crate::core::RequestDraft| {
                 let local_client = local_client.clone();
                 let cookie_jar = cookie_jar.clone();
                 let upstream_client = upstream_client.clone();
@@ -443,16 +443,13 @@ impl ApiTester {
                                     "Log in to this server again.".to_owned(),
                                 ));
                             }
-                            // Chained requests execute without a saved-request
-                            // identity; workspace- and server-scoped proxies
-                            // still apply on the server.
                             crate::core::send_request_for_upstream_workspace(
                                 &upstream_client,
                                 &local_client,
                                 &base_url,
                                 credential.bearer_token(),
                                 &workspace_id,
-                                None,
+                                Some(saved_id.as_str()),
                                 request,
                                 cookie_jar.as_ref(),
                             )
@@ -1342,7 +1339,7 @@ impl crate::core::InlineChainer for InlineChainRunner {
                 let chain_inline: &dyn crate::core::InlineChainer = self;
                 let requested = vec![scheduled.clone()];
                 async move {
-                    let sender = move |request: crate::core::RequestDraft| {
+                    let sender = move |saved_id: String, request: crate::core::RequestDraft| {
                         let local_client = local_client.clone();
                         let cookie_jar = cookie_jar.clone();
                         let upstream_client = upstream_client.clone();
@@ -1378,7 +1375,7 @@ impl crate::core::InlineChainer for InlineChainRunner {
                                         &base_url,
                                         credential.bearer_token(),
                                         &workspace_id,
-                                        None,
+                                        Some(saved_id.as_str()),
                                         request,
                                         cookie_jar.as_ref(),
                                     )
