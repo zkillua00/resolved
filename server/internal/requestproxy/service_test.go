@@ -56,18 +56,15 @@ func TestServiceEmitsPermissionScopedSettingsEvent(t *testing.T) {
 	}
 
 	capture := &capturedOperationEvents{}
-	service := NewService(nil, NewSettingsRepository(db), WithEvents(capture))
+	service := NewService(nil, NewSettingsRepository(db), nil, WithEvents(capture))
 	actorUserID := uuid.NewString()
 	updated, err := service.UpdateSettings(t.Context(), actorUserID, Settings{
 		Mode: ModeServer,
-		HostnameOverrides: []HostnameOverride{
-			{Hostname: "api.internal", Target: "https://gateway.internal"},
-		},
 	})
 	if err != nil {
 		t.Fatalf("update settings: %v", err)
 	}
-	if updated.Mode != ModeServer || len(updated.HostnameOverrides) != 1 {
+	if updated.Mode != ModeServer {
 		t.Fatalf("updated settings = %+v", updated)
 	}
 	if len(capture.changes) != 1 {
@@ -255,65 +252,47 @@ func TestDecodeBodyAllowsPaddedPayloadAtLimit(t *testing.T) {
 	}
 }
 
-func TestNormalizeSettingsCanonicalizesHostnamesAndIPTargets(t *testing.T) {
-	settings, err := normalizeSettings(Settings{
-		Mode: ModeServer,
-		HostnameOverrides: []HostnameOverride{
-			{Hostname: "API.Internal.", Target: "HTTPS://Gateway.Internal./"},
-			{Hostname: "files.internal", Target: "[2001:0db8::1]"},
-		},
+func TestNormalizeOverrideRulesCanonicalizesHostnamesAndIPTargets(t *testing.T) {
+	rules, err := normalizeOverrideRules("rules", []HostnameOverride{
+		{Hostname: "API.Internal.", Target: "HTTPS://Gateway.Internal./"},
+		{Hostname: "files.internal", Target: "[2001:0db8::1]"},
 	})
 	if err != nil {
-		t.Fatalf("normalize settings: %v", err)
+		t.Fatalf("normalize rules: %v", err)
 	}
-	if settings.Mode != ModeServer || len(settings.HostnameOverrides) != 2 {
-		t.Fatalf("normalized settings = %+v", settings)
+	if len(rules) != 2 {
+		t.Fatalf("normalized rules = %+v", rules)
 	}
-	if settings.HostnameOverrides[0] != (HostnameOverride{Hostname: "api.internal", Target: "https://gateway.internal"}) {
-		t.Fatalf("hostname target = %+v", settings.HostnameOverrides[0])
+	if rules[0] != (HostnameOverride{Hostname: "api.internal", Target: "https://gateway.internal"}) {
+		t.Fatalf("hostname target = %+v", rules[0])
 	}
-	if settings.HostnameOverrides[1] != (HostnameOverride{Hostname: "files.internal", Target: "2001:db8::1"}) {
-		t.Fatalf("IP target = %+v", settings.HostnameOverrides[1])
+	if rules[1] != (HostnameOverride{Hostname: "files.internal", Target: "2001:db8::1"}) {
+		t.Fatalf("IP target = %+v", rules[1])
 	}
 }
 
-func TestNormalizeSettingsRejectsAmbiguousOverrides(t *testing.T) {
-	tests := []Settings{
+func TestNormalizeOverrideRulesRejectsAmbiguousOverrides(t *testing.T) {
+	tests := [][]HostnameOverride{
 		{
-			Mode: ModeServer,
-			HostnameOverrides: []HostnameOverride{
-				{Hostname: "api.internal", Target: "127.0.0.1"},
-				{Hostname: "API.INTERNAL.", Target: "127.0.0.2"},
-			},
+			{Hostname: "api.internal", Target: "127.0.0.1"},
+			{Hostname: "API.INTERNAL.", Target: "127.0.0.2"},
 		},
 		{
-			Mode: ModeServer,
-			HostnameOverrides: []HostnameOverride{
-				{Hostname: "127.0.0.1", Target: "gateway.internal"},
-			},
+			{Hostname: "127.0.0.1", Target: "gateway.internal"},
 		},
 		{
-			Mode: ModeServer,
-			HostnameOverrides: []HostnameOverride{
-				{Hostname: "api.internal", Target: "ftp://gateway.internal"},
-			},
+			{Hostname: "api.internal", Target: "ftp://gateway.internal"},
 		},
 		{
-			Mode: ModeServer,
-			HostnameOverrides: []HostnameOverride{
-				{Hostname: "api.internal", Target: "https://gateway.internal:8443"},
-			},
+			{Hostname: "api.internal", Target: "https://gateway.internal:8443"},
 		},
 		{
-			Mode: ModeServer,
-			HostnameOverrides: []HostnameOverride{
-				{Hostname: "api.internal", Target: "https://gateway.internal/path"},
-			},
+			{Hostname: "api.internal", Target: "https://gateway.internal/path"},
 		},
 	}
-	for index, settings := range tests {
-		if _, err := normalizeSettings(settings); err == nil {
-			t.Fatalf("case %d accepted invalid settings: %+v", index, settings)
+	for index, rules := range tests {
+		if _, err := normalizeOverrideRules("rules", rules); err == nil {
+			t.Fatalf("case %d accepted invalid rules: %+v", index, rules)
 		}
 	}
 }

@@ -66,14 +66,14 @@ impl RealtimeResourceChange {
     pub fn refreshes_management(&self) -> bool {
         matches!(
             self.resource.as_str(),
-            "user" | "role" | "workspace" | "collection" | "request" | "server_settings"
+            "user" | "role" | "workspace" | "collection" | "request" | "server_settings" | "proxy"
         )
     }
 
     pub fn updates_audit_log(&self) -> bool {
         matches!(
             self.resource.as_str(),
-            "user" | "role" | "request_execution" | "server_settings"
+            "user" | "role" | "request_execution" | "server_settings" | "proxy"
         )
     }
 

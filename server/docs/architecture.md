@@ -395,8 +395,8 @@ The deployment-wide request execution policy defaults to `local`. A server
 workspace therefore continues to send from the user's computer unless an
 administrator with `server_settings.update` explicitly selects `server` mode.
 The authenticated policy route exposes only that mode; reading or replacing the
-full configuration, including hostname overrides, has separate server-settings
-permissions.
+full configuration has separate server-settings permissions, and proxies (named
+sets of hostname overrides) have their own `proxies.*` permissions.
 
 Server mode moves HTTP exchanges and user-created WebSocket connections onto
 the self-hosted server. Variable resolution and pre-request/post-response
@@ -422,8 +422,21 @@ pong, and close frames. An `error` control message terminates setup failures.
 The collaboration bearer token authenticates only the outer connection and is
 never forwarded to the target.
 
-Hostname overrides are exact, case-insensitive mappings from the request URL's
-hostname to another hostname or IP. An IP target is DNS-style: it changes only
+Hostname overrides live in proxies: named rule sets assigned to scopes. A proxy
+takes effect server-wide or on one workspace, collection, or saved request, and
+a scope node carries at most one proxy. Executions resolve overrides most
+specific scope first — saved request, then each enclosing collection from
+innermost to outermost, then the workspace, then the server-wide scope — and
+the first proxy that covers a hostname wins, while uncovered hostnames keep
+layering in from less specific scopes. Users and roles can be excluded from a
+proxy; for an excluded user that proxy is skipped and resolution falls through
+to the next scope, exactly as if the proxy did not exist. Exclusion is
+therefore not an access-control tool: it removes private-DNS behavior instead
+of blocking the destination. Pre-proxy deployments migrate their single
+override table into a "Server default" proxy assigned server-wide at startup.
+
+Hostname override rules are exact, case-insensitive mappings from the request
+URL's hostname to another hostname or IP. An IP target is DNS-style: it changes only
 the dial address and preserves the requested URL hostname, HTTP Host, and HTTPS
 SNI. A hostname target rewrites the outgoing URL hostname, HTTP Host, and HTTPS
 SNI to that target. A target may carry an `http://` or `https://` prefix. Its
@@ -432,9 +445,9 @@ source hostname to omit a scheme. Both target forms retain the request's
 original port, and targets cannot supply a port or path. Overrides take
 precedence over the process's HTTP-proxy selection. Redirects are bounded by the
 ten-redirect limit. Each redirect receives fresh target context and is checked
-independently against the override table and blocked-network policy. Changing
-the configuration closes idle target connections so the next request cannot
-reuse an earlier destination.
+independently against the resolved override set and blocked-network policy.
+Changing proxy rules, assignments, or exclusions closes idle target connections
+so the next request cannot reuse an earlier destination.
 
 This is intentionally a network-capability permission. By default, resolution
 rejects loopback, link-local, private, carrier-grade NAT, unspecified, and

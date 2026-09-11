@@ -63,10 +63,9 @@ type hostnameOverrideTarget struct {
 }
 
 type Settings struct {
-	Mode                 string             `json:"mode"`
-	HostnameOverrides    []HostnameOverride `json:"hostname_overrides"`
-	AllowlistedRequests  []string           `json:"allowlisted_requests"`
-	AllowlistedAddresses []string           `json:"allowlisted_addresses"`
+	Mode                 string   `json:"mode"`
+	AllowlistedRequests  []string `json:"allowlisted_requests"`
+	AllowlistedAddresses []string `json:"allowlisted_addresses"`
 }
 
 type AllowlistEntry struct {
@@ -100,7 +99,7 @@ func NewSettingsRepository(db *gorm.DB, dataCipher ...*security.DataCipher) *Set
 
 func (r *SettingsRepository) Get(ctx context.Context) (Settings, error) {
 	settings := Settings{
-		Mode: ModeLocal, HostnameOverrides: []HostnameOverride{},
+		Mode:                ModeLocal,
 		AllowlistedRequests: []string{}, AllowlistedAddresses: []string{},
 	}
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -131,6 +130,26 @@ func (r *SettingsRepository) Get(ctx context.Context) (Settings, error) {
 			settings.AllowlistedRequests = payload.Requests
 			settings.AllowlistedAddresses = payload.Addresses
 		}
+		return nil
+	})
+	if err != nil {
+		return Settings{}, problem.Wrap(err, "load request execution settings")
+	}
+	return settings, nil
+}
+
+// legacyOverrides reads the pre-proxy server-wide hostname overrides from the
+// encrypted settings blob or, before encryption-at-rest, the plaintext rows.
+func (r *SettingsRepository) legacyOverrides(ctx context.Context) ([]HostnameOverride, error) {
+	var overrides []HostnameOverride
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var record SettingsRecord
+		if err := tx.First(&record, "id = ?", SettingsRecordID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
 		if len(record.OverridesCiphertext) > 0 {
 			if r.dataCipher == nil {
 				return security.ErrDataKeyUnavailable
@@ -143,22 +162,14 @@ func (r *SettingsRepository) Get(ctx context.Context) (Settings, error) {
 				return fmt.Errorf("decrypt request hostname overrides: %w", err)
 			}
 			defer clear(plaintext)
-			if err := json.Unmarshal(plaintext, &settings.HostnameOverrides); err != nil {
-				return fmt.Errorf("decode request hostname overrides: %w", err)
-			}
-			if settings.HostnameOverrides == nil {
-				settings.HostnameOverrides = []HostnameOverride{}
-			}
-			return nil
+			return json.Unmarshal(plaintext, &overrides)
 		}
-
 		var records []HostnameOverrideRecord
 		if err := tx.Order("hostname ASC").Find(&records).Error; err != nil {
 			return err
 		}
-		settings.HostnameOverrides = make([]HostnameOverride, 0, len(records))
 		for _, override := range records {
-			settings.HostnameOverrides = append(settings.HostnameOverrides, HostnameOverride{
+			overrides = append(overrides, HostnameOverride{
 				Hostname: override.Hostname,
 				Target:   override.Target,
 			})
@@ -166,9 +177,23 @@ func (r *SettingsRepository) Get(ctx context.Context) (Settings, error) {
 		return nil
 	})
 	if err != nil {
-		return Settings{}, problem.Wrap(err, "load request execution settings")
+		return nil, problem.Wrap(err, "load legacy hostname overrides")
 	}
-	return settings, nil
+	return overrides, nil
+}
+
+func (r *SettingsRepository) clearLegacyOverrides(ctx context.Context) error {
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&SettingsRecord{}).Where("id = ?", SettingsRecordID).
+			Update("overrides_ciphertext", nil).Error; err != nil {
+			return err
+		}
+		return tx.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&HostnameOverrideRecord{}).Error
+	})
+	if err != nil {
+		return problem.Wrap(err, "clear legacy hostname overrides")
+	}
+	return nil
 }
 
 func (r *SettingsRepository) AddAllowlistEntry(ctx context.Context, entry AllowlistEntry) (Settings, error) {
@@ -260,130 +285,24 @@ func containsString(values []string, value string) bool {
 }
 
 func (r *SettingsRepository) Replace(ctx context.Context, settings Settings) (Settings, error) {
-	normalized, err := normalizeSettings(settings)
-	if err != nil {
-		return Settings{}, err
+	if settings.Mode != ModeLocal && settings.Mode != ModeServer {
+		return Settings{}, invalidField("mode", "must be local or server")
 	}
-	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var overridesCiphertext []byte
-		if r.dataCipher != nil {
-			plaintext, marshalErr := json.Marshal(normalized.HostnameOverrides)
-			if marshalErr != nil {
-				return fmt.Errorf("encode request hostname overrides: %w", marshalErr)
-			}
-			defer clear(plaintext)
-			overridesCiphertext, marshalErr = r.dataCipher.Encrypt(
-				ctx, tx, security.DeploymentDataScope(), "request_hostname_overrides", SettingsRecordID, plaintext,
-			)
-			if marshalErr != nil {
-				return fmt.Errorf("encrypt request hostname overrides: %w", marshalErr)
-			}
-		}
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var record SettingsRecord
 		if err := tx.First(&record, "id = ?", SettingsRecordID).Error; err != nil {
 			if !errors.Is(err, gorm.ErrRecordNotFound) {
 				return err
 			}
-			record = SettingsRecord{
-				ID: SettingsRecordID, Mode: normalized.Mode, OverridesCiphertext: overridesCiphertext,
-			}
-			if err := tx.Create(&record).Error; err != nil {
-				return err
-			}
-		} else if err := tx.Model(&record).Updates(map[string]any{
-			"mode": normalized.Mode, "overrides_ciphertext": overridesCiphertext,
-		}).Error; err != nil {
-			return err
+			record = SettingsRecord{ID: SettingsRecordID, Mode: settings.Mode}
+			return tx.Create(&record).Error
 		}
-		if err := tx.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&HostnameOverrideRecord{}).Error; err != nil {
-			return err
-		}
-		if r.dataCipher != nil || len(normalized.HostnameOverrides) == 0 {
-			return nil
-		}
-		records := make([]HostnameOverrideRecord, 0, len(normalized.HostnameOverrides))
-		for _, override := range normalized.HostnameOverrides {
-			records = append(records, HostnameOverrideRecord{
-				Hostname: override.Hostname,
-				Target:   override.Target,
-			})
-		}
-		return tx.Create(&records).Error
+		return tx.Model(&record).Update("mode", settings.Mode).Error
 	})
 	if err != nil {
 		return Settings{}, problem.Wrap(err, "save request execution settings")
 	}
-	return normalized, nil
-}
-
-func (r *SettingsRepository) EncryptLegacyOverrides(ctx context.Context) error {
-	if r.dataCipher == nil {
-		return security.ErrDataKeyUnavailable
-	}
-	var record SettingsRecord
-	if err := r.db.WithContext(ctx).First(&record, "id = ?", SettingsRecordID).Error; err != nil {
-		return err
-	}
-	if len(record.OverridesCiphertext) > 0 {
-		return nil
-	}
-	var records []HostnameOverrideRecord
-	if err := r.db.WithContext(ctx).Order("hostname ASC").Find(&records).Error; err != nil {
-		return err
-	}
-	overrides := make([]HostnameOverride, 0, len(records))
-	for _, override := range records {
-		overrides = append(overrides, HostnameOverride{Hostname: override.Hostname, Target: override.Target})
-	}
-	_, err := r.Replace(ctx, Settings{Mode: record.Mode, HostnameOverrides: overrides})
-	return err
-}
-
-func normalizeSettings(settings Settings) (Settings, error) {
-	if settings.Mode != ModeLocal && settings.Mode != ModeServer {
-		return Settings{}, invalidField("mode", "must be local or server")
-	}
-	if len(settings.HostnameOverrides) > MaxHostOverrides {
-		return Settings{}, invalidField(
-			"hostname_overrides",
-			fmt.Sprintf("must contain at most %d entries", MaxHostOverrides),
-		)
-	}
-
-	normalized := Settings{Mode: settings.Mode, HostnameOverrides: make([]HostnameOverride, 0, len(settings.HostnameOverrides))}
-	seen := make(map[string]struct{}, len(settings.HostnameOverrides))
-	for index, override := range settings.HostnameOverrides {
-		hostname, ok := normalizeDNSHostname(override.Hostname)
-		if !ok || net.ParseIP(hostname) != nil {
-			return Settings{}, invalidField(
-				fmt.Sprintf("hostname_overrides.%d.hostname", index),
-				"must be a valid hostname, not an IP address",
-			)
-		}
-		if _, duplicate := seen[hostname]; duplicate {
-			return Settings{}, invalidField(
-				fmt.Sprintf("hostname_overrides.%d.hostname", index),
-				"duplicates another hostname override",
-			)
-		}
-		seen[hostname] = struct{}{}
-
-		target, valid := parseHostnameOverrideTarget(override.Target)
-		if !valid {
-			return Settings{}, invalidField(
-				fmt.Sprintf("hostname_overrides.%d.target", index),
-				"must be a hostname or IP, optionally prefixed with http:// or https://, without a port or path",
-			)
-		}
-		normalized.HostnameOverrides = append(normalized.HostnameOverrides, HostnameOverride{
-			Hostname: hostname,
-			Target:   target.String(),
-		})
-	}
-	sort.Slice(normalized.HostnameOverrides, func(left, right int) bool {
-		return normalized.HostnameOverrides[left].Hostname < normalized.HostnameOverrides[right].Hostname
-	})
-	return normalized, nil
+	return r.Get(ctx)
 }
 
 func normalizeDNSHostname(value string) (string, bool) {
@@ -453,17 +372,6 @@ func (target hostnameOverrideTarget) String() string {
 		return host
 	}
 	return target.Scheme + "://" + host
-}
-
-func (settings Settings) overrideMap() map[string]hostnameOverrideTarget {
-	overrides := make(map[string]hostnameOverrideTarget, len(settings.HostnameOverrides))
-	for _, override := range settings.HostnameOverrides {
-		target, valid := parseHostnameOverrideTarget(override.Target)
-		if valid {
-			overrides[override.Hostname] = target
-		}
-	}
-	return overrides
 }
 
 func (settings Settings) allowlistMaps() (map[string]struct{}, map[string]struct{}) {

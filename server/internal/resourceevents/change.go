@@ -31,6 +31,7 @@ const (
 	ResourceEnvironmentVariable Resource = "environment_variable"
 	ResourceRequestExecution    Resource = "request_execution"
 	ResourceServerSettings      Resource = "server_settings"
+	ResourceProxy               Resource = "proxy"
 )
 
 type Audience struct {

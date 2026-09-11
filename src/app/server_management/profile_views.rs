@@ -777,6 +777,7 @@ mod tests {
                         permissions: None,
                         workspaces: None,
                         request_execution_settings: None,
+                        proxies: None,
                     });
                 app.server_management.selected_profile_id = Some("author".to_owned());
                 app.server_management.profile_history_status = ProfileHistoryStatus::Ready;

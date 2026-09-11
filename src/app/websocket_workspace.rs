@@ -694,6 +694,7 @@ impl ApiTester {
         let vault = self.credential_vault.clone();
         let runtime = Arc::clone(&self.runtime);
         let upstream_client = self.upstream_execution_client.clone();
+        let saved_request_id = self.active_saved_request_id.clone();
         let task = self.runtime.spawn(async move {
             let result = match upstream_target {
                 None => {
@@ -750,6 +751,7 @@ impl ApiTester {
                                 &target.base_url,
                                 credential.bearer_token(),
                                 &target.workspace_id,
+                                saved_request_id.as_deref(),
                                 &url,
                                 &headers,
                                 command_receiver,

@@ -145,6 +145,7 @@ func New(cfg config.Config, accessLog io.Writer) (*Application, error) {
 	environmentRepository := workspaces.NewEnvironmentRepository(workspaceRepository)
 	sharedHistoryRepository := sharedhistory.NewRepository(db, dataCipher)
 	settingsRepository := requestproxy.NewSettingsRepository(db, dataCipher)
+	proxyRepository := requestproxy.NewProxyRepository(db, dataCipher)
 	if err := workspaceRepository.EncryptLegacyResourceNames(context.Background()); err != nil {
 		closeCipherOnError()
 		return nil, fmt.Errorf("encrypt existing workspace resource names: %w", err)
@@ -165,9 +166,9 @@ func New(cfg config.Config, accessLog io.Writer) (*Application, error) {
 		closeCipherOnError()
 		return nil, fmt.Errorf("encrypt existing activity logs: %w", err)
 	}
-	if err := settingsRepository.EncryptLegacyOverrides(context.Background()); err != nil {
+	if err := proxyRepository.AdoptLegacyOverrides(context.Background(), settingsRepository); err != nil {
 		closeCipherOnError()
-		return nil, fmt.Errorf("encrypt existing request hostname overrides: %w", err)
+		return nil, fmt.Errorf("adopt existing request hostname overrides: %w", err)
 	}
 	if err := database.FinalizeDataEncryptionMigration(context.Background(), db, cfg.Database); err != nil {
 		closeCipherOnError()
@@ -187,6 +188,7 @@ func New(cfg config.Config, accessLog io.Writer) (*Application, error) {
 	requestProxyHandler := requestproxy.NewHandler(requestproxy.NewService(
 		workspacesService,
 		settingsRepository,
+		proxyRepository,
 		requestproxy.WithEvents(recordedEvents),
 	))
 	sharedHistoryHandler := sharedhistory.NewHandler(sharedhistory.NewService(

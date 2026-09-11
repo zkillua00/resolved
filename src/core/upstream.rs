@@ -829,12 +829,14 @@ pub async fn send_request_for_upstream_workspace(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn send_request_for_upstream_workspace_with_cookies(
     upstream_client: &Client,
     local_client: &Client,
     base_url: &Url,
     bearer_token: &str,
     workspace_id: &str,
+    saved_request_id: Option<&str>,
     request: RequestDraft,
     jar: &super::CookieJar,
 ) -> Result<ResponseData, RequestError> {
@@ -861,6 +863,7 @@ pub async fn send_request_for_upstream_workspace_with_cookies(
                 base_url,
                 bearer_token,
                 workspace_id,
+                saved_request_id,
                 request,
                 jar.enabled(),
             )
@@ -878,6 +881,10 @@ pub async fn send_request_for_upstream_workspace_with_cookies(
 #[derive(Serialize)]
 struct ProxyExecuteRequest {
     use_cookie_jar: bool,
+    /// The saved request being executed, when known, so the server can apply
+    /// request- and collection-scoped proxies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
     method: String,
     url: String,
     headers: Vec<ProxyHeader>,
@@ -939,21 +946,25 @@ pub async fn execute_upstream_request(
         base_url,
         bearer_token,
         workspace_id,
+        None,
         request,
         false,
     )
     .await
 }
+#[allow(clippy::too_many_arguments)]
 async fn execute_upstream_request_with_cookies(
     client: &Client,
     base_url: &Url,
     bearer_token: &str,
     workspace_id: &str,
+    saved_request_id: Option<&str>,
     request: RequestDraft,
     use_cookie_jar: bool,
 ) -> Result<ResponseData, RequestError> {
     let mut payload = proxy_request_payload(request).await?;
     payload.use_cookie_jar = use_cookie_jar;
+    payload.request_id = saved_request_id.map(ToOwned::to_owned);
 
     let endpoint = base_url
         .join(&format!("api/v1/workspaces/{workspace_id}/execute"))
@@ -1091,6 +1102,7 @@ async fn proxy_request_payload(request: RequestDraft) -> Result<ProxyExecuteRequ
 
     Ok(ProxyExecuteRequest {
         use_cookie_jar: false,
+        request_id: None,
         method: request.method,
         url: request.url,
         headers,

@@ -443,12 +443,16 @@ impl ApiTester {
                                     "Log in to this server again.".to_owned(),
                                 ));
                             }
+                            // Chained requests execute without a saved-request
+                            // identity; workspace- and server-scoped proxies
+                            // still apply on the server.
                             crate::core::send_request_for_upstream_workspace(
                                 &upstream_client,
                                 &local_client,
                                 &base_url,
                                 credential.bearer_token(),
                                 &workspace_id,
+                                None,
                                 request,
                                 cookie_jar.as_ref(),
                             )
@@ -619,6 +623,7 @@ impl ApiTester {
                 let runtime = Arc::clone(&self.runtime);
                 let credential_upstream_id = target.upstream_id.clone();
                 let request = resolved.request.clone();
+                let saved_request_id = self.active_saved_request_id.clone();
                 RequestTask::spawn(self.runtime.handle(), async move {
                     let credential = runtime
                         .spawn_blocking(move || vault.load_upstream(&credential_upstream_id))
@@ -639,6 +644,7 @@ impl ApiTester {
                         &target.base_url,
                         credential.bearer_token(),
                         &target.workspace_id,
+                        saved_request_id.as_deref(),
                         request,
                         cookie_jar.as_ref(),
                     )
@@ -1372,6 +1378,7 @@ impl crate::core::InlineChainer for InlineChainRunner {
                                         &base_url,
                                         credential.bearer_token(),
                                         &workspace_id,
+                                        None,
                                         request,
                                         cookie_jar.as_ref(),
                                     )

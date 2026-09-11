@@ -48,6 +48,7 @@ type websocketOpenResponse struct {
 type ExecuteRequest struct {
 	UseCookieJar bool           `json:"use_cookie_jar"`
 	WorkspaceID  string         `json:"-" validate:"required"`
+	RequestID    string         `json:"request_id" validate:"omitempty,uuid"`
 	Method       string         `json:"method" validate:"required,max=64"`
 	URL          string         `json:"url" validate:"required,max=16384"`
 	Headers      []Header       `json:"headers" validate:"max=256"`
@@ -57,8 +58,7 @@ type ExecuteRequest struct {
 type ExecutePayload ExecuteRequest
 
 type UpdateSettingsRequest struct {
-	Mode              string             `json:"mode" validate:"required,oneof=local server"`
-	HostnameOverrides []HostnameOverride `json:"hostname_overrides" validate:"max=256,dive"`
+	Mode string `json:"mode" validate:"required,oneof=local server"`
 }
 
 type UpdateSettingsPayload UpdateSettingsRequest
@@ -157,10 +157,7 @@ func (h *Handler) UpdateSettingsController() fiber.Handler {
 			settings, err := h.service.UpdateSettings(
 				c.Context(),
 				principal.User.ID,
-				Settings{
-					Mode:              payload.Mode,
-					HostnameOverrides: payload.HostnameOverrides,
-				},
+				Settings{Mode: payload.Mode},
 			)
 			if err != nil {
 				return httpkit.NewErrorResponse[Settings](err)
@@ -183,6 +180,7 @@ func (h *Handler) ExecuteController() fiber.Handler {
 				payload.WorkspaceID,
 				ExecuteInput{
 					UseCookieJar: payload.UseCookieJar,
+					RequestID:    payload.RequestID,
 					Method:       payload.Method,
 					URL:          payload.URL,
 					Headers:      payload.Headers,
@@ -331,9 +329,14 @@ func (h *Handler) AddAllowlistEntryController() fiber.Handler {
 
 func actorFromContext(c fiber.Ctx) workspaces.Actor {
 	principal := auth.PrincipalFromContext(c)
+	roleIDs := make([]string, 0, len(principal.User.Roles))
+	for _, role := range principal.User.Roles {
+		roleIDs = append(roleIDs, role.ID)
+	}
 	return workspaces.Actor{
 		UserID:            principal.User.ID,
 		Owner:             principal.HasRole(identity.OwnerRoleID),
+		RoleIDs:           roleIDs,
 		EnvironmentKey:    principal.EnvironmentKey(),
 		CredentialVersion: sha256.Sum256([]byte(principal.User.PasswordHash)),
 	}

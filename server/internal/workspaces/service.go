@@ -29,7 +29,10 @@ type Actor struct {
 	CredentialVersion [32]byte
 	UserID            string
 	Owner             bool
-	EnvironmentKey    []byte
+	// RoleIDs lists the acting user's role IDs for callers that apply
+	// role-based rules on top of workspace access (e.g. proxy exclusions).
+	RoleIDs        []string
+	EnvironmentKey []byte
 }
 
 type AccessScope struct {

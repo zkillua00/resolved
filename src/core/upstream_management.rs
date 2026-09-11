@@ -41,6 +41,11 @@ pub const REQUESTS_UPDATE: &str = "requests.update";
 pub const REQUESTS_DELETE: &str = "requests.delete";
 pub const SERVER_SETTINGS_READ: &str = "server_settings.read";
 pub const SERVER_SETTINGS_UPDATE: &str = "server_settings.update";
+pub const PROXIES_READ: &str = "proxies.read";
+pub const PROXIES_CREATE: &str = "proxies.create";
+pub const PROXIES_UPDATE: &str = "proxies.update";
+pub const PROXIES_DELETE: &str = "proxies.delete";
+pub const PROXIES_ASSIGN: &str = "proxies.assign";
 pub const HISTORY_READ_OTHERS: &str = "history.read_others";
 pub const AUDIT_READ: &str = "audit.read";
 pub const ENVIRONMENTS_READ: &str = "environments.read";
@@ -315,7 +320,37 @@ fn truncate_shared_text(value: &str, max_bytes: usize) -> (String, bool) {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RequestExecutionSettings {
     pub mode: RequestExecutionMode,
-    pub hostname_overrides: Vec<HostnameOverride>,
+}
+
+#[derive(Copy, Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyScopeKind {
+    Server,
+    Workspace,
+    Collection,
+    Request,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProxyAssignment {
+    pub scope_kind: ProxyScopeKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_id: Option<String>,
+}
+
+/// A named set of hostname-override rules that applies where it is assigned:
+/// server-wide, or to one workspace, collection, or saved request. Excluded
+/// users and roles fall through to the next, less specific scope.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct ManagementProxy {
+    pub id: String,
+    pub name: String,
+    pub rules: Vec<HostnameOverride>,
+    pub assignments: Vec<ProxyAssignment>,
+    pub excluded_user_ids: Vec<String>,
+    pub excluded_role_ids: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -376,6 +411,7 @@ pub struct UpstreamManagementSnapshot {
     pub permissions: Option<Vec<ManagementPermission>>,
     pub workspaces: Option<Vec<UpstreamWorkspaceView>>,
     pub request_execution_settings: Option<RequestExecutionSettings>,
+    pub proxies: Option<Vec<ManagementProxy>>,
 }
 
 impl UpstreamManagementSnapshot {
@@ -446,6 +482,31 @@ struct ReplacePermissionsRequest<'a> {
 #[derive(Serialize)]
 struct ReplaceUsersRequest<'a> {
     user_ids: &'a [String],
+}
+
+#[derive(Serialize)]
+struct CreateProxyRequest<'a> {
+    name: &'a str,
+    rules: &'a [HostnameOverride],
+}
+
+#[derive(Serialize)]
+struct UpdateProxyRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rules: Option<&'a [HostnameOverride]>,
+}
+
+#[derive(Serialize)]
+struct ReplaceProxyAssignmentsRequest<'a> {
+    assignments: &'a [ProxyAssignment],
+}
+
+#[derive(Serialize)]
+struct ReplaceProxyExclusionsRequest<'a> {
+    excluded_user_ids: &'a [String],
+    excluded_role_ids: &'a [String],
 }
 
 #[derive(Deserialize)]
@@ -524,14 +585,24 @@ pub async fn load_upstream_management(
             Ok(None)
         }
     };
+    let proxies_request = async {
+        if current_user.has_permission(PROXIES_READ) {
+            get(client, base_url, bearer_token, "api/v1/proxies")
+                .await
+                .map(Some)
+        } else {
+            Ok(None)
+        }
+    };
 
-    let (profiles, users, roles, permissions, workspaces, request_execution_settings) = futures::try_join!(
+    let (profiles, users, roles, permissions, workspaces, request_execution_settings, proxies) = futures::try_join!(
         profiles_request,
         users_request,
         roles_request,
         permissions_request,
         workspaces_request,
-        request_execution_settings_request
+        request_execution_settings_request,
+        proxies_request
     )?;
     Ok(UpstreamManagementSnapshot {
         current_user,
@@ -541,6 +612,7 @@ pub async fn load_upstream_management(
         permissions,
         workspaces,
         request_execution_settings,
+        proxies,
     })
 }
 
@@ -680,6 +752,99 @@ pub async fn update_request_execution_settings(
         Method::PUT,
         "api/v1/request-execution/settings",
         settings,
+    )
+    .await
+}
+
+pub async fn create_management_proxy(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    name: &str,
+    rules: &[HostnameOverride],
+) -> Result<ManagementProxy, UpstreamManagementError> {
+    send(
+        client,
+        base_url,
+        bearer_token,
+        Method::POST,
+        "api/v1/proxies",
+        &CreateProxyRequest { name, rules },
+    )
+    .await
+}
+
+pub async fn update_management_proxy(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    proxy_id: &str,
+    name: Option<&str>,
+    rules: Option<&[HostnameOverride]>,
+) -> Result<ManagementProxy, UpstreamManagementError> {
+    send(
+        client,
+        base_url,
+        bearer_token,
+        Method::PATCH,
+        &format!("api/v1/proxies/{proxy_id}"),
+        &UpdateProxyRequest { name, rules },
+    )
+    .await
+}
+
+pub async fn delete_management_proxy(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    proxy_id: &str,
+) -> Result<ManagementProxy, UpstreamManagementError> {
+    let endpoint = endpoint(base_url, &format!("api/v1/proxies/{proxy_id}"))?;
+    let response = client
+        .delete(endpoint)
+        .bearer_auth(bearer_token)
+        .send()
+        .await
+        .map_err(UpstreamManagementError::Transport)?;
+    parse_response(response).await
+}
+
+pub async fn replace_management_proxy_assignments(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    proxy_id: &str,
+    assignments: &[ProxyAssignment],
+) -> Result<ManagementProxy, UpstreamManagementError> {
+    send(
+        client,
+        base_url,
+        bearer_token,
+        Method::PUT,
+        &format!("api/v1/proxies/{proxy_id}/assignments"),
+        &ReplaceProxyAssignmentsRequest { assignments },
+    )
+    .await
+}
+
+pub async fn replace_management_proxy_exclusions(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    proxy_id: &str,
+    excluded_user_ids: &[String],
+    excluded_role_ids: &[String],
+) -> Result<ManagementProxy, UpstreamManagementError> {
+    send(
+        client,
+        base_url,
+        bearer_token,
+        Method::PUT,
+        &format!("api/v1/proxies/{proxy_id}/exclusions"),
+        &ReplaceProxyExclusionsRequest {
+            excluded_user_ids,
+            excluded_role_ids,
+        },
     )
     .await
 }

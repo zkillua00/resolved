@@ -3310,6 +3310,7 @@ impl ApiTester {
         let vault = self.credential_vault.clone();
         let upstream_client = self.upstream_execution_client.clone();
         let connection_wire_sender = wire_sender.clone();
+        let saved_request_id = request_id.clone();
         let task = self.runtime.spawn(async move {
             let result = match upstream_target {
                 None => {
@@ -3369,6 +3370,7 @@ impl ApiTester {
                                 &target.base_url,
                                 credential.bearer_token(),
                                 &target.workspace_id,
+                                Some(&saved_request_id),
                                 &url,
                                 &headers,
                                 command_receiver,

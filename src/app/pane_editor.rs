@@ -1936,11 +1936,12 @@ impl ApiTester {
             return;
         }
         let template = session.snapshot_template(cx);
-        if let Some(record) = self.request_tabs.get_mut(&tab_id) {
+        let saved_request_id = if let Some(record) = self.request_tabs.get_mut(&tab_id) {
             record.set_template(template.clone());
+            record.association().saved_request_id().map(ToOwned::to_owned)
         } else {
             return;
-        }
+        };
 
         let validation_error = if template.request.method.trim().is_empty() {
             Some("HTTP method cannot be empty.".to_owned())
@@ -2034,6 +2035,7 @@ impl ApiTester {
                         &target.base_url,
                         credential.bearer_token(),
                         &target.workspace_id,
+                        saved_request_id.as_deref(),
                         request,
                         cookie_jar.as_ref(),
                     )

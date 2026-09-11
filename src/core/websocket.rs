@@ -147,6 +147,10 @@ pub enum WebSocketSignal {
 #[derive(Serialize)]
 struct UpstreamWebSocketOpen {
     url: String,
+    /// The saved request being executed, when known, so the server can apply
+    /// request- and collection-scoped proxies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
     headers: Vec<UpstreamWebSocketHeader>,
 }
 
@@ -436,10 +440,12 @@ pub async fn run_websocket_session(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_upstream_websocket_session(
     base_url: &url::Url,
     bearer_token: &str,
     workspace_id: &str,
+    saved_request_id: Option<&str>,
     url: &str,
     headers: &[HeaderEntry],
     commands: UnboundedReceiver<WebSocketCommand>,
@@ -450,14 +456,23 @@ pub async fn run_upstream_websocket_session(
         headers,
         commands,
         signals,
-        Some((
-            base_url.clone(),
-            bearer_token.to_owned(),
-            workspace_id.to_owned(),
-        )),
+        Some(UpstreamWebSocketTarget {
+            base_url: base_url.clone(),
+            bearer_token: bearer_token.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            saved_request_id: saved_request_id.map(ToOwned::to_owned),
+        }),
     )
     .await;
     Ok(())
+}
+
+#[derive(Clone)]
+struct UpstreamWebSocketTarget {
+    base_url: url::Url,
+    bearer_token: String,
+    workspace_id: String,
+    saved_request_id: Option<String>,
 }
 
 type ConnectionFuture =
@@ -470,7 +485,7 @@ async fn run_reconnecting_session(
     headers: &[HeaderEntry],
     mut commands: UnboundedReceiver<WebSocketCommand>,
     signals: UnboundedSender<WebSocketSignal>,
-    upstream: Option<(url::Url, String, String)>,
+    upstream: Option<UpstreamWebSocketTarget>,
 ) {
     let mut current_url = url.to_owned();
     let (wire_sender, mut wire_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -481,9 +496,16 @@ async fn run_reconnecting_session(
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let future: ConnectionFuture = Box::pin(async move {
             match upstream {
-                Some((base, token, workspace)) => {
+                Some(target) => {
                     run_upstream_websocket_connection(
-                        &base, &token, &workspace, &url, &headers, receiver, signals,
+                        &target.base_url,
+                        &target.bearer_token,
+                        &target.workspace_id,
+                        target.saved_request_id.as_deref(),
+                        &url,
+                        &headers,
+                        receiver,
+                        signals,
                     )
                     .await
                 }
@@ -604,10 +626,12 @@ pub async fn run_websocket_connection(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_upstream_websocket_connection(
     base_url: &url::Url,
     bearer_token: &str,
     workspace_id: &str,
+    saved_request_id: Option<&str>,
     url: &str,
     headers: &[HeaderEntry],
     commands: UnboundedReceiver<WebSocketCommand>,
@@ -653,6 +677,7 @@ pub async fn run_upstream_websocket_connection(
     };
     let descriptor = UpstreamWebSocketOpen {
         url: url.to_owned(),
+        request_id: saved_request_id.map(ToOwned::to_owned),
         headers: headers
             .iter()
             .filter(|header| header.enabled && !header.name.trim().is_empty())
@@ -1216,6 +1241,7 @@ mod tests {
             };
             let descriptor: serde_json::Value = serde_json::from_str(&descriptor).unwrap();
             assert_eq!(descriptor["url"], "wss://target.example/socket");
+            assert_eq!(descriptor["request_id"], "request-1");
             assert_eq!(descriptor["headers"][0]["name"], "X-Target");
             assert_eq!(descriptor["headers"][0]["value"], "yes");
             socket
@@ -1234,6 +1260,7 @@ mod tests {
                 &base_url,
                 "server-session",
                 "workspace-1",
+                Some("request-1"),
                 "wss://target.example/socket",
                 &[HeaderEntry::new("X-Target", "yes")],
                 command_receiver,
