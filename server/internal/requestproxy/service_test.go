@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"resolved-server/internal/executionlimits"
 	"resolved-server/internal/identity"
 	"resolved-server/internal/problem"
 	"resolved-server/internal/requestproxy/proxybody"
@@ -51,7 +52,7 @@ func TestServiceEmitsPermissionScopedSettingsEvent(t *testing.T) {
 		t.Fatalf("access database: %v", err)
 	}
 	t.Cleanup(func() { _ = sqlDatabase.Close() })
-	if err := db.AutoMigrate(&SettingsRecord{}, &HostnameOverrideRecord{}); err != nil {
+	if err := db.AutoMigrate(&SettingsRecord{}, &HostnameOverrideRecord{}, &executionlimits.Record{}); err != nil {
 		t.Fatalf("migrate settings: %v", err)
 	}
 

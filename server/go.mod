@@ -8,6 +8,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/puzpuzpuz/xsync/v4 v4.4.0
+	github.com/valyala/fasthttp v1.72.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/term v0.45.0
 	gorm.io/driver/mysql v1.6.0
@@ -44,7 +45,6 @@ require (
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
-	github.com/valyala/fasthttp v1.72.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect

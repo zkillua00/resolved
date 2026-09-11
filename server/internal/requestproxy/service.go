@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/textproto"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	gorillaWebsocket "github.com/gorilla/websocket"
+	"resolved-server/internal/executionlimits"
 	"resolved-server/internal/identity"
 	"resolved-server/internal/problem"
 	"resolved-server/internal/requestproxy/proxybody"
@@ -38,6 +38,7 @@ type Service struct {
 	proxies    *ProxyRepository
 	client     *http.Client
 	events     resourceevents.Emitter
+	limits     *executionlimits.Provider
 }
 
 type ServiceOption func(*Service)
@@ -49,6 +50,7 @@ func WithEvents(events resourceevents.Emitter) ServiceOption {
 }
 
 type ExecuteInput struct {
+	CollectionID string
 	UseCookieJar bool
 	// RequestID optionally names the saved request being executed so proxy
 	// resolution can apply request- and collection-scoped proxies.
@@ -60,9 +62,10 @@ type ExecuteInput struct {
 }
 
 type WebSocketOpenInput struct {
-	URL       string   `json:"url"`
-	RequestID string   `json:"request_id"`
-	Headers   []Header `json:"headers"`
+	RequestID    string   `json:"request_id"`
+	CollectionID string   `json:"collection_id,omitempty"`
+	URL          string   `json:"url"`
+	Headers      []Header `json:"headers"`
 }
 
 type Header struct {
@@ -109,17 +112,9 @@ func NewService(
 		workspaces: workspaceService,
 		settings:   settingsRepository,
 		proxies:    proxyRepository,
+		limits:     executionlimits.NewProvider(settingsRepository.db),
 		client: &http.Client{
 			Transport: transport,
-			Timeout:   DefaultTimeout,
-			CheckRedirect: func(request *http.Request, via []*http.Request) error {
-				if len(via) >= MaxRedirects {
-					return fmt.Errorf("stopped after %d redirects", MaxRedirects)
-				}
-				setRequestTargetContext(request)
-				applyHostnameOriginOverride(request)
-				return nil
-			},
 		},
 	}
 	for _, option := range options {
@@ -134,7 +129,6 @@ func transportWithHostnameOverrides(base *http.Transport) *http.Transport {
 	baseDialContext := transport.DialContext
 	if baseDialContext == nil {
 		dialer := &net.Dialer{
-			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}
 		baseDialContext = dialer.DialContext
@@ -243,7 +237,15 @@ func (s *Service) Policy(ctx context.Context) (Policy, error) {
 	if err != nil {
 		return Policy{}, err
 	}
-	return Policy{Mode: settings.Mode, CookieJar: true}, nil
+	cached, ok := ctx.Value(executionSnapshotKey{}).(executionSnapshot)
+	snapshot := cached.snapshot
+	if !ok {
+		snapshot, err = s.limits.Resolve(ctx, executionlimits.Scope{})
+		if err != nil {
+			return Policy{}, err
+		}
+	}
+	return Policy{Mode: settings.Mode, CookieJar: true, Limits: snapshot.Effective}, nil
 }
 
 func (s *Service) Settings(ctx context.Context) (Settings, error) {
@@ -312,6 +314,15 @@ func (s *Service) Execute(
 	if err != nil {
 		return ExecuteResult{}, err
 	}
+	snapshot, err := s.resolveLimits(ctx, actor, workspaceID, input.CollectionID)
+	if err != nil {
+		return ExecuteResult{}, err
+	}
+	if err := validateDescriptor(snapshot, input.URL, input.Headers); err != nil {
+		return ExecuteResult{}, err
+	}
+	ctx, cancel := executionContext(ctx, snapshot.Effective["http.timeout_ms"])
+	defer cancel()
 	settings, err := s.settings.Get(ctx)
 	if err != nil {
 		return ExecuteResult{}, err
@@ -360,7 +371,8 @@ func (s *Service) Execute(
 		return ExecuteResult{}, invalidField("method", "is required")
 	}
 
-	body, contentType, err := proxybody.Build(input.Body)
+	bodyBound := snapshot.Effective["http.request_bytes"]
+	body, contentType, err := proxybody.BuildWithLimit(input.Body, proxybody.Limit{Unlimited: bodyBound.Unlimited, Value: bodyBound.Value})
 	if err != nil {
 		return ExecuteResult{}, err
 	}
@@ -392,6 +404,24 @@ func (s *Service) Execute(
 	}()
 
 	client := *s.client
+	client.Timeout = 0
+	if base, ok := client.Transport.(*http.Transport); ok {
+		transport := executionTransport(base, snapshot)
+		defer transport.CloseIdleConnections()
+		client.Transport = transport
+	}
+	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		bound := snapshot.Effective["http.redirects"]
+		if !bound.Unlimited && int64(len(via)) > bound.Value {
+			return fmt.Errorf("redirect limit exceeded")
+		}
+		if err := validateDescriptor(snapshot, request.URL.String(), nil); err != nil {
+			return err
+		}
+		setRequestTargetContext(request)
+		applyHostnameOriginOverride(request)
+		return nil
+	}
 	var cookies *executionCookieJar
 	if input.UseCookieJar {
 		snapshot, err := s.workspaces.GetCookieJar(ctx, actor, workspaceID)
@@ -426,14 +456,14 @@ func (s *Service) Execute(
 	defer response.Body.Close()
 	statusToRecord = response.StatusCode
 
-	if response.ContentLength > MaxResponseBodyBytes {
+	if exceeds(snapshot.Effective["http.response_bytes"], response.ContentLength) {
 		return ExecuteResult{}, proxyResponseTooLarge()
 	}
-	responseBody, err := io.ReadAll(io.LimitReader(response.Body, MaxResponseBodyBytes+1))
+	responseBody, tooLarge, err := readLimited(response.Body, snapshot.Effective["http.response_bytes"])
 	if err != nil {
 		return ExecuteResult{}, proxyTransportError(err)
 	}
-	if len(responseBody) > MaxResponseBodyBytes {
+	if tooLarge {
 		return ExecuteResult{}, proxyResponseTooLarge()
 	}
 
@@ -458,16 +488,19 @@ func (s *Service) OpenWebSocket(
 	workspaceID string,
 	input WebSocketOpenInput,
 ) (*gorillaWebsocket.Conn, *url.URL, error) {
-	if len(input.URL) > 16384 {
-		return nil, nil, invalidField("url", "is too long")
-	}
-	if len(input.Headers) > 256 {
-		return nil, nil, invalidField("headers", "contains too many entries")
-	}
 	workspace, err := s.workspaces.Get(ctx, actor, workspaceID)
 	if err != nil {
 		return nil, nil, err
 	}
+	snapshot, err := s.resolveLimits(ctx, actor, workspaceID, input.CollectionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := validateDescriptor(snapshot, input.URL, input.Headers); err != nil {
+		return nil, nil, err
+	}
+	ctx, cancel := executionContext(ctx, snapshot.Effective["websocket.handshake_timeout_ms"])
+	defer cancel()
 	settings, err := s.settings.Get(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -539,7 +572,9 @@ func (s *Service) OpenWebSocket(
 		return nil, nil, problem.New(problem.KindInternal, "proxy_unavailable", "the request proxy transport is unavailable")
 	}
 	dialer := *gorillaWebsocket.DefaultDialer
-	dialer.HandshakeTimeout = DefaultTimeout
+	transport = executionTransport(transport, snapshot)
+	defer transport.CloseIdleConnections()
+	dialer.HandshakeTimeout = limitDuration(snapshot.Effective["websocket.handshake_timeout_ms"])
 	dialer.Proxy = webSocketProxySelector(transport.Proxy)
 	dialer.NetDialContext = transport.DialContext
 	dialer.TLSClientConfig = webSocketTLSClientConfig(transport.TLSClientConfig)
@@ -843,7 +878,7 @@ func proxyResponseTooLarge() error {
 	return problem.New(
 		problem.KindPayloadTooLarge,
 		"proxy_response_too_large",
-		fmt.Sprintf("the proxied response exceeds the %d-byte limit", MaxResponseBodyBytes),
+		"the proxied response exceeds its execution limit",
 	)
 }
 

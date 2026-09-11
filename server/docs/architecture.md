@@ -394,7 +394,8 @@ Vault Transit and back up Vault according to its own recovery procedure.
 The deployment-wide request execution policy defaults to `local`. A server
 workspace therefore continues to send from the user's computer unless an
 administrator with `server_settings.update` explicitly selects `server` mode.
-The authenticated policy route exposes only that mode; reading or replacing the
+The authenticated policy route exposes that mode and effective execution limits
+for the authorized workspace/collection scope; reading or replacing the
 full configuration has separate server-settings permissions, and proxies (named
 sets of hostname overrides) have their own `proxies.*` permissions.
 
@@ -410,7 +411,7 @@ the normal authentication middleware, requires `requests.execute`, and then
 checks that the user can access the addressed workspace. The collaboration
 session token is used only on the outer call and is not copied into target
 headers. Hop-by-hop headers and caller-supplied content lengths are discarded;
-target redirects are bounded by Go's standard ten-redirect policy. The endpoint
+target redirects obey the effective redirect policy (default ten). The endpoint
 also reloads the execution policy and rejects the request before connecting if
 an administrator has returned the deployment to local mode.
 
@@ -443,8 +444,8 @@ SNI to that target. A target may carry an `http://` or `https://` prefix. Its
 scheme becomes the outgoing scheme and permits a request URL with the exact
 source hostname to omit a scheme. Both target forms retain the request's
 original port, and targets cannot supply a port or path. Overrides take
-precedence over the process's HTTP-proxy selection. Redirects are bounded by the
-ten-redirect limit. Each redirect receives fresh target context and is checked
+precedence over the process's HTTP-proxy selection. Redirects use the execution's
+resolved limit. Each redirect receives fresh target context and is checked
 independently against the resolved override set and blocked-network policy.
 Changing proxy rules, assignments, or exclusions closes idle target connections
 so the next request cannot reuse an earlier destination.
@@ -457,9 +458,14 @@ explicit exception for a private destination. A user with
 hostname/IP to the encrypted deployment-wide allowlist through
 `POST /api/v1/request-execution/allowlist`; either match permits later calls.
 Administrators should grant execution and proxy-management permissions
-carefully. Request and response
-bodies are buffered up to 64 MiB each, and
-the target exchange has a 60-second deadline. The execution endpoint itself
+carefully. Request and response bodies default to 64 MiB each, and the target
+exchange defaults to a 60-second deadline. These budgets and the outer execution
+envelope limit are resolved from persisted sparse overrides: defaults,
+deployment, workspace, ancestor collections, and the selected collection.
+Nearest explicit values win, including relaxed or unlimited values. Settings
+changes affect new executions without restarting; in-flight operations retain
+their policy snapshot. See [Execution limits](../../docs/execution-limits.md).
+The execution endpoint itself
 does not persist target payloads or responses. It emits only a metadata
 `request_execution` invalidation to `audit.read` connections. Independently,
 the desktop uploads the sanitized shared-history

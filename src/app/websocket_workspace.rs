@@ -1,8 +1,85 @@
 use std::{collections::BTreeMap, time::Instant};
 
 use super::*;
-use crate::core::parse_json_lines;
+use crate::core::{execution_limits::ExecutionLimits, parse_json_lines};
 use base64::Engine as _;
+
+static LOCAL_WEBSOCKET_SESSIONS: std::sync::OnceLock<std::sync::Mutex<BTreeMap<String, usize>>> =
+    std::sync::OnceLock::new();
+
+struct LocalWebSocketPermit(String);
+
+impl LocalWebSocketPermit {
+    fn acquire(scope: &str, limits: &ExecutionLimits) -> Result<Self, String> {
+        let maximum = limits.get("websocket.concurrent_sessions").as_usize()?;
+        let mut sessions = LOCAL_WEBSOCKET_SESSIONS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let current = sessions.get(scope).copied().unwrap_or(0);
+        if maximum.is_some_and(|maximum| current >= maximum) {
+            return Err("WebSocket concurrent session limit reached for this scope.".to_owned());
+        }
+        sessions.insert(scope.to_owned(), current + 1);
+        Ok(Self(scope.to_owned()))
+    }
+}
+
+impl Drop for LocalWebSocketPermit {
+    fn drop(&mut self) {
+        let mut sessions = LOCAL_WEBSOCKET_SESSIONS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(current) = sessions.get_mut(&self.0) {
+            *current -= 1;
+            if *current == 0 {
+                sessions.remove(&self.0);
+            }
+        }
+    }
+}
+
+impl execution::PreparedExecution {
+    /// UI and MCP connections share routing and retain the same policy on reconnect.
+    pub(super) async fn run_websocket(
+        &self,
+        url: &str,
+        headers: &[HeaderEntry],
+        commands: tokio::sync::mpsc::UnboundedReceiver<WebSocketCommand>,
+        signals: tokio::sync::mpsc::UnboundedSender<WebSocketSignal>,
+    ) -> Result<(), String> {
+        if let Some(upstream) = &self.upstream
+            && upstream.policy.mode == RequestExecutionMode::Server
+        {
+            crate::core::run_upstream_websocket_session_with_scope(
+                &upstream.target.base_url,
+                upstream.credential.bearer_token(),
+                &upstream.target.workspace_id,
+                upstream.saved_request_id.as_deref(),
+                url,
+                headers,
+                commands,
+                signals,
+                upstream.collection_id.as_deref(),
+                &self.limits,
+            )
+            .await
+            .map_err(|error| error.to_string())
+        } else {
+            let _permit = LocalWebSocketPermit::acquire(&self.scope_key, &self.limits)?;
+            crate::core::run_websocket_session_with_limits(
+                url,
+                headers,
+                commands,
+                signals,
+                &self.limits,
+            )
+            .await
+            .map_err(|error| error.to_string())
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum WebSocketSection {
@@ -111,6 +188,7 @@ pub(in crate::app) struct WebSocketWorkspaceState {
     command_sender: Option<tokio::sync::mpsc::UnboundedSender<WebSocketCommand>>,
     abort_handle: Option<AbortHandle>,
     generation: u64,
+    execution_limits: Option<ExecutionLimits>,
     pub(in crate::app) mcp_connection_id: Option<u64>,
     mcp_last_event_id: u64,
     hydrating: bool,
@@ -291,6 +369,7 @@ impl WebSocketWorkspaceState {
             command_sender: None,
             abort_handle: None,
             generation: 0,
+            execution_limits: None,
             mcp_connection_id: None,
             mcp_last_event_id: 0,
             hydrating: false,
@@ -672,17 +751,10 @@ impl ApiTester {
             return;
         }
         let headers = resolved.request.headers;
-        let upstream_target = match self.workspace_providers.active_id() {
-            WorkspaceProviderId::Local(_) => None,
-            WorkspaceProviderId::Upstream { .. } => match self.active_upstream_workspace() {
-                Ok(target) => Some(target),
-                Err(error) => {
-                    self.websocket_workspace.notice = Some(error);
-                    cx.notify();
-                    return;
-                }
-            },
-        };
+        let preparation =
+            self.prepare_execution(self.request_tabs.active().association().saved_request_id());
+        self.websocket_workspace.execution_limits = None;
+        let (snapshot_sender, snapshot_receiver) = tokio::sync::oneshot::channel();
         let (command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (signal_sender, mut signal_receiver) = tokio::sync::mpsc::unbounded_channel();
         let generation = self.websocket_workspace.generation;
@@ -691,87 +763,30 @@ impl ApiTester {
         self.websocket_workspace.notice = None;
         self.websocket_workspace.recorded_session.clear();
         self.websocket_workspace.recorded_at = None;
-        let vault = self.credential_vault.clone();
-        let runtime = Arc::clone(&self.runtime);
-        let upstream_client = self.upstream_execution_client.clone();
-        let saved_request_id = self.active_saved_request_id.clone();
         let task = self.runtime.spawn(async move {
-            let result = match upstream_target {
-                None => {
-                    run_websocket_session(
-                        &url,
-                        &headers,
-                        command_receiver,
-                        signal_sender.clone(),
-                    )
-                    .await
-                }
-                Some(target) => {
-                    let upstream_id = target.upstream_id.clone();
-                    let credential = match runtime
-                        .spawn_blocking(move || vault.load_upstream(&upstream_id))
-                        .await
-                    {
-                        Ok(Ok(Some(credential))) if credential.expires_at > Utc::now() => {
-                            credential
-                        }
-                        Ok(Ok(_)) => {
-                            let _ = signal_sender.send(WebSocketSignal::Failed(
-                                "Log in to this server again.".to_owned(),
-                            ));
-                            return;
-                        }
-                        Ok(Err(error)) => {
-                            let _ = signal_sender.send(WebSocketSignal::Failed(error.to_string()));
-                            return;
-                        }
-                        Err(error) => {
-                            let _ = signal_sender.send(WebSocketSignal::Failed(error.to_string()));
-                            return;
-                        }
-                    };
-                    match get_upstream_execution_policy(
-                        &upstream_client,
-                        &target.base_url,
-                        credential.bearer_token(),
-                    )
-                    .await
-                    {
-                        Ok(RequestExecutionMode::Local) => {
-                            run_websocket_session(
-                                &url,
-                                &headers,
-                                command_receiver,
-                                signal_sender.clone(),
-                            )
-                            .await
-                        }
-                        Ok(RequestExecutionMode::Server) => {
-                            run_upstream_websocket_session(
-                                &target.base_url,
-                                credential.bearer_token(),
-                                &target.workspace_id,
-                                saved_request_id.as_deref(),
-                                &url,
-                                &headers,
-                                command_receiver,
-                                signal_sender.clone(),
-                            )
-                            .await
-                        }
-                        Err(error) => {
-                            let _ = signal_sender.send(WebSocketSignal::Failed(error.to_string()));
-                            return;
-                        }
-                    }
+            let prepared = match preparation.await {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let _ = signal_sender.send(WebSocketSignal::Failed(error));
+                    return;
                 }
             };
+            let _ = snapshot_sender.send(prepared.limits.clone());
+            let result = prepared
+                .run_websocket(&url, &headers, command_receiver, signal_sender.clone())
+                .await;
             if let Err(error) = result {
                 let _ = signal_sender.send(WebSocketSignal::Failed(error.to_string()));
             }
         });
         self.websocket_workspace.abort_handle = Some(task.abort_handle());
         cx.spawn_in(window, async move |this, cx| {
+            let limits = snapshot_receiver.await.ok();
+            let _ = this.update_in(cx, |this, _, _| {
+                if this.websocket_workspace.generation == generation {
+                    this.websocket_workspace.execution_limits = limits;
+                }
+            });
             while let Some(signal) = signal_receiver.recv().await {
                 let _ = this.update_in(cx, |this, window, cx| {
                     if this.websocket_workspace.generation != generation {
@@ -799,7 +814,8 @@ impl ApiTester {
                 self.websocket_workspace.status = WebSocketConnectionStatus::Connecting;
                 self.websocket_workspace.notice = None;
                 self.push_websocket_timeline(
-                    WebSocketTimelineDirection::System, "reconnect",
+                    WebSocketTimelineDirection::System,
+                    "reconnect",
                     format!("Reconnecting in {} ms", options.delay_ms),
                 );
             }
@@ -878,11 +894,17 @@ impl ApiTester {
             return;
         }
         let environment_id = self.workspace.active_environment_id.clone();
+        let Some(limits) = self.websocket_workspace.execution_limits.clone() else {
+            // A failed policy lookup is not permission to run an unscoped script.
+            return;
+        };
         let mut scope = Self::script_scope(self.workspace.active_environment());
         scope.script_timeout = self.settings.script.timeout();
+        scope.execution_limits = Some(limits.clone());
         let namespace = self.request_namespace.clone();
         let chainer = self
             .build_inline_chainer(&environment_id)
+            .with_execution_limits(&limits)
             .for_websocket_event();
         let request = RequestDraft {
             url: self.websocket_workspace.document.url.clone(),
@@ -2083,7 +2105,9 @@ impl ApiTester {
                             })
                             .primary()
                             .on_click(cx.listener(|this, _, window, cx| {
-                                if this.websocket_workspace.status != WebSocketConnectionStatus::Disconnected {
+                                if this.websocket_workspace.status
+                                    != WebSocketConnectionStatus::Disconnected
+                                {
                                     if this.websocket_workspace.mcp_connection_id.is_some() {
                                         this.stop_mcp_websocket();
                                     } else {
@@ -4048,6 +4072,47 @@ mod tests {
     use gpui::{TestAppContext, VisualTestContext, px, size};
 
     use super::*;
+
+    #[test]
+    fn local_websocket_admission_is_scoped_and_released() {
+        let limits: ExecutionLimits = serde_json::from_str(
+            r#"{"websocket.concurrent_sessions":{"unlimited":false,"value":1}}"#,
+        )
+        .unwrap();
+        let first = LocalWebSocketPermit::acquire("test-scope-a", &limits).unwrap();
+        assert!(LocalWebSocketPermit::acquire("test-scope-a", &limits).is_err());
+        let other = LocalWebSocketPermit::acquire("test-scope-b", &limits).unwrap();
+        drop(first);
+        let replacement = LocalWebSocketPermit::acquire("test-scope-a", &limits).unwrap();
+        drop((other, replacement));
+    }
+
+    #[test]
+    fn local_websocket_override_zero_and_unlimited_affect_new_sessions_only() {
+        let mut limits: ExecutionLimits = serde_json::from_str(
+            r#"{"websocket.concurrent_sessions":{"unlimited":true,"value":0}}"#,
+        )
+        .unwrap();
+        let first = LocalWebSocketPermit::acquire("test-lowered-scope", &limits).unwrap();
+        limits.overlay(
+            &serde_json::from_str(
+                r#"{"websocket.concurrent_sessions":{"unlimited":false,"value":0}}"#,
+            )
+            .unwrap(),
+        );
+        assert!(LocalWebSocketPermit::acquire("test-lowered-scope", &limits).is_err());
+        // Existing permit is retained when a later snapshot lowers the budget.
+        assert_eq!(
+            LOCAL_WEBSOCKET_SESSIONS
+                .get()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .get("test-lowered-scope"),
+            Some(&1)
+        );
+        drop(first);
+    }
 
     fn mount_app(
         cx: &mut TestAppContext,

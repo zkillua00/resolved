@@ -1,6 +1,9 @@
 mod chain;
 mod cookie_jar;
 mod database;
+pub mod execution_limits;
+pub mod local_execution_limits;
+pub(crate) use chain::drive_inline_with_budget;
 mod format;
 mod history;
 mod interchange;
@@ -22,7 +25,10 @@ mod workspace_provider;
 #[cfg(test)]
 mod mvp_smoke_test;
 
-pub use chain::{ChainFailure, ChainLimits, ChainRun, run_chain};
+pub use chain::{
+    ChainExecutor, ChainFailure, ChainLimits, ChainRequestExecution, ChainRun,
+    run_chain_with_executor,
+};
 pub use cookie_jar::{CookieEntry, CookieJar};
 pub use database::{DatabaseStore, LocalWorkspace};
 pub use format::{
@@ -38,8 +44,8 @@ pub use request::build_client;
 pub use request::{
     BodyField, BodyFieldKind, BodyMode, HeaderEntry, QueryParamEntry, RawBodyLanguage,
     RequestDraft, RequestError, RequestTask, ResponseData, STANDARD_HTTP_METHODS,
-    build_client_with_cookie_jar, query_params_from_url, send_request, spawn_request,
-    url_with_query_params,
+    build_client_with_cookie_jar, build_http_client_with_limits, query_params_from_url,
+    send_request_with_limits, spawn_request, url_with_query_params,
 };
 #[allow(unused_imports)]
 pub use request_namespace::{
@@ -79,21 +85,22 @@ pub use snippet::{
 pub use template::{RequestTemplate, ResolvedRequest, resolve_request};
 #[allow(unused_imports)]
 pub use upstream::{
-    LoginPermission, LoginRole, LoginUser, UpstreamCollectionView, UpstreamEnvironmentVariableView,
-    UpstreamEnvironmentView, UpstreamLoginError, UpstreamLoginResult, UpstreamProfile,
-    UpstreamSavedRequestView, UpstreamSettings, UpstreamUrlError, UpstreamUserSummary,
-    UpstreamWorkspaceError, UpstreamWorkspaceSummary, UpstreamWorkspaceView,
-    add_upstream_proxy_allowlist_entry, build_upstream_client, build_upstream_execution_client,
-    create_upstream_collection, create_upstream_environment, create_upstream_environment_variable,
-    create_upstream_saved_request, create_upstream_workspace, delete_upstream_collection,
-    delete_upstream_environment, delete_upstream_environment_variable,
+    LoginPermission, LoginRole, LoginUser, ProxyExecutionPolicy, UpstreamCollectionView,
+    UpstreamEnvironmentVariableView, UpstreamEnvironmentView, UpstreamLoginError,
+    UpstreamLoginResult, UpstreamProfile, UpstreamSavedRequestView, UpstreamSettings,
+    UpstreamUrlError, UpstreamUserSummary, UpstreamWorkspaceError, UpstreamWorkspaceSummary,
+    UpstreamWorkspaceView, add_upstream_proxy_allowlist_entry, build_upstream_client,
+    build_upstream_execution_client, create_upstream_collection, create_upstream_environment,
+    create_upstream_environment_variable, create_upstream_saved_request, create_upstream_workspace,
+    delete_upstream_collection, delete_upstream_environment, delete_upstream_environment_variable,
     delete_upstream_saved_request, delete_upstream_workspace, get_upstream_execution_policy,
-    get_upstream_user, get_upstream_workspace, list_upstream_environments,
-    list_upstream_workspaces, login_upstream, move_upstream_collection,
+    get_upstream_execution_policy_for_scope, get_upstream_user, get_upstream_workspace,
+    list_upstream_environments, list_upstream_workspaces, login_upstream, move_upstream_collection,
     move_upstream_saved_request, normalize_upstream_url, put_upstream_environment_variable_value,
     save_upstream_environment,
     send_request_for_upstream_workspace_with_cookies as send_request_for_upstream_workspace,
-    update_upstream_collection, update_upstream_environment, update_upstream_environment_variable,
+    send_request_for_upstream_workspace_with_scope, update_upstream_collection,
+    update_upstream_environment, update_upstream_environment_variable,
     update_upstream_saved_request, update_upstream_workspace, upstream_url_label,
 };
 #[allow(unused_imports)]
@@ -101,6 +108,8 @@ pub use upstream_management::{
     AUDIT_READ, ActivityLogDiff, ActivityLogEntry, ActivityLogPage, COLLECTIONS_ASSIGN_USERS,
     COLLECTIONS_CREATE, COLLECTIONS_DELETE, COLLECTIONS_READ, COLLECTIONS_UPDATE,
     ENVIRONMENT_VALUES_UPDATE, ENVIRONMENTS_CREATE, ENVIRONMENTS_DELETE, ENVIRONMENTS_READ,
+    ExecutionLimitDefinition, ExecutionLimitScope, ExecutionLimitSnapshot,
+    ExecutionLimitSource, load_execution_limits, replace_execution_limits,
     ENVIRONMENTS_UPDATE, HISTORY_READ_OTHERS, HostnameOverride, ManagementPermission,
     ManagementProxy, ManagementRole, ManagementUser, PERMISSIONS_READ, PROXIES_ASSIGN,
     PROXIES_CREATE, PROXIES_DELETE, PROXIES_READ, PROXIES_UPDATE, ProfileView, ProxyAssignment,
@@ -123,9 +132,9 @@ pub use websocket::{
     MAX_WEBSOCKET_MESSAGE_BYTES, MAX_WEBSOCKET_TIMELINE_ENTRIES, WebSocketAutomationEvent,
     WebSocketCommand, WebSocketMessageTemplate, WebSocketReplay, WebSocketReplayDirection,
     WebSocketReplayFrame, WebSocketSavedMessage, WebSocketSignal, WebSocketWorkspace,
-    binary_preview, compare_replay_frames,
-    render_message_template, run_upstream_websocket_session, run_websocket_session,
-    template_variable_names, validate_automation_module_name,
+    binary_preview, compare_replay_frames, render_message_template, run_upstream_websocket_session,
+    run_upstream_websocket_session_with_scope, run_websocket_session,
+    run_websocket_session_with_limits, template_variable_names, validate_automation_module_name,
 };
 pub use workspace::{
     Collection, CollectionFolder, Environment, EnvironmentVariable, RequestScripts,

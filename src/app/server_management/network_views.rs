@@ -171,7 +171,8 @@ impl ApiTester {
                                             }),
                                     ),
                             )
-                            .child(content),
+                            .child(content)
+                            .child(self.render_execution_limits(cx)),
                     ),
             )
             .into_any_element()

@@ -358,14 +358,7 @@ impl PaneEditorState {
             template.request.query_params.clone()
         };
         for param in query_params {
-            self.push_query_param_row(
-                pane_id,
-                param.key,
-                param.value,
-                param.enabled,
-                window,
-                cx,
-            );
+            self.push_query_param_row(pane_id, param.key, param.value, param.enabled, window, cx);
         }
         if self.query_params.is_empty() {
             self.push_query_param_row(pane_id, "", "", true, window, cx);
@@ -1422,7 +1415,13 @@ impl ApiTester {
                         cx.entity().downgrade(),
                     ))
                 })
-                .child(Input::new(&row.name).appearance(false).small().size_full().px_3()),
+                .child(
+                    Input::new(&row.name)
+                        .appearance(false)
+                        .small()
+                        .size_full()
+                        .px_3(),
+                ),
             Input::new(&row.value)
                 .appearance(false)
                 .small()
@@ -1924,6 +1923,11 @@ fn status_color(status: u16, cx: &App) -> Hsla {
     }
 }
 
+fn pane_execution_request_id<'a>(tabs: &'a RequestTabs, tab_id: &RequestTabId) -> Option<&'a str> {
+    tabs.get(tab_id)
+        .and_then(|record| record.association().saved_request_id())
+}
+
 impl ApiTester {
     fn start_pane_request(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.pane_editors.get(&pane_id) else {
@@ -1936,12 +1940,11 @@ impl ApiTester {
             return;
         }
         let template = session.snapshot_template(cx);
-        let saved_request_id = if let Some(record) = self.request_tabs.get_mut(&tab_id) {
+        if let Some(record) = self.request_tabs.get_mut(&tab_id) {
             record.set_template(template.clone());
-            record.association().saved_request_id().map(ToOwned::to_owned)
         } else {
             return;
-        };
+        }
 
         let validation_error = if template.request.method.trim().is_empty() {
             Some("HTTP method cannot be empty.".to_owned())
@@ -1995,54 +1998,16 @@ impl ApiTester {
             session.copied = false;
         }
 
+        // Capture this pane's saved identity, not the primary tab or a URL match.
+        let preparation =
+            self.prepare_execution(pane_execution_request_id(&self.request_tabs, &tab_id));
         let request = resolved.request.clone();
-        let task = match self.workspace_providers.active_id() {
-            WorkspaceProviderId::Local(_) => {
-                spawn_request(self.runtime.handle(), self.client.clone(), request)
-            }
-            WorkspaceProviderId::Upstream { .. } => {
-                let target = match self.active_upstream_workspace() {
-                    Ok(target) => target,
-                    Err(error) => {
-                        self.pane_requests_in_flight.remove(tab_id.as_str());
-                        self.finish_pane_request_error(&tab_id, error.to_string(), window, cx);
-                        return;
-                    }
-                };
-                let vault = self.credential_vault.clone();
-                let client = self.upstream_execution_client.clone();
-                let local_client = self.client.clone();
-                let cookie_jar = self.cookie_jar.clone();
-                let runtime = Arc::clone(&self.runtime);
-                let credential_upstream_id = target.upstream_id.clone();
-                RequestTask::spawn(self.runtime.handle(), async move {
-                    let credential = runtime
-                        .spawn_blocking(move || vault.load_upstream(&credential_upstream_id))
-                        .await
-                        .map_err(|error| RequestError::TaskFailed(error.to_string()))?
-                        .map_err(|error| RequestError::Upstream(error.to_string()))?
-                        .ok_or_else(|| {
-                            RequestError::Upstream("Log in to this server again.".to_owned())
-                        })?;
-                    if credential.expires_at <= Utc::now() {
-                        return Err(RequestError::Upstream(
-                            "Log in to this server again.".to_owned(),
-                        ));
-                    }
-                    send_request_for_upstream_workspace(
-                        &client,
-                        &local_client,
-                        &target.base_url,
-                        credential.bearer_token(),
-                        &target.workspace_id,
-                        saved_request_id.as_deref(),
-                        request,
-                        cookie_jar.as_ref(),
-                    )
-                    .await
-                })
-            }
-        };
+        let client = self.upstream_execution_client.clone();
+        let cookie_jar = self.cookie_jar.clone();
+        let task = RequestTask::spawn(self.runtime.handle(), async move {
+            let prepared = preparation.await.map_err(RequestError::Upstream)?;
+            prepared.send(&client, request, &cookie_jar).await
+        });
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
@@ -2482,6 +2447,46 @@ mod tests {
     use gpui::{TestAppContext, px, size};
     use std::time::Duration;
 
+    #[test]
+    fn pane_execution_scope_uses_its_saved_identity_not_active_tab_or_url() {
+        let mut tabs = RequestTabs::new();
+        let template = RequestTemplate::default();
+        let secondary = tabs
+            .open_saved(
+                "secondary",
+                template.clone(),
+                RequestTabAssociation::new(
+                    Some("folder-a".into()),
+                    Some("root-a".into()),
+                    Some("saved-a".into()),
+                ),
+            )
+            .tab_id;
+        let primary = tabs
+            .open_saved(
+                "primary",
+                template.clone(),
+                RequestTabAssociation::new(
+                    Some("folder-b".into()),
+                    Some("root-b".into()),
+                    Some("saved-b".into()),
+                ),
+            )
+            .tab_id;
+        assert_eq!(tabs.active_tab_id(), &primary);
+        assert_eq!(
+            pane_execution_request_id(&tabs, &secondary),
+            Some("saved-a")
+        );
+        assert_eq!(pane_execution_request_id(&tabs, &primary), Some("saved-b"));
+        let blank = tabs.open_unsaved(
+            "blank",
+            template,
+            RequestTabAssociation::new(Some("folder-a".into()), Some("root-a".into()), None),
+        );
+        assert_eq!(pane_execution_request_id(&tabs, &blank), None);
+    }
+
     struct QueryTableTestView {
         app: Entity<ApiTester>,
         secondary: Option<PaneId>,
@@ -2715,7 +2720,8 @@ mod tests {
                 pre_request: "api.log('pre');".to_owned(),
                 post_response: "api.log('post');".to_owned(),
             },
-            documentation: "# Split pane notes\n\n@header X-Trace Secondary tracing explanation.".to_owned(),
+            documentation: "# Split pane notes\n\n@header X-Trace Secondary tracing explanation."
+                .to_owned(),
             websocket: None,
         }
     }
@@ -2969,7 +2975,8 @@ mod tests {
                         crate::documentation_intelligence::TargetKind::Header,
                         "x-trace",
                         cx,
-                    ).as_deref(),
+                    )
+                    .as_deref(),
                     Some("Secondary tracing explanation."),
                 );
                 assert_eq!(
@@ -2984,9 +2991,10 @@ mod tests {
                     "secondary explanations must not leak into the primary request",
                 );
                 assert!(
-                    session.documentation_intelligence.diagnostics(
-                        session.documentation.read(cx).value(cx).as_ref(),
-                    ).is_empty(),
+                    session
+                        .documentation_intelligence
+                        .diagnostics(session.documentation.read(cx).value(cx).as_ref(),)
+                        .is_empty(),
                     "secondary diagnostics must resolve against secondary header names",
                 );
                 assert_eq!(session.active_tab_id.as_ref(), Some(&second));

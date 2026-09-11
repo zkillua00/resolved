@@ -3287,17 +3287,17 @@ impl ApiTester {
         if resolved.request.url.is_empty() {
             return Err("The WebSocket URL cannot be empty.".to_owned());
         }
-        let upstream_target = match self.workspace_providers.active_id() {
-            WorkspaceProviderId::Local(_) => None,
-            WorkspaceProviderId::Upstream { .. } => {
-                if !self.active_upstream_has_permission(WORKSPACES_READ) {
-                    return Err(format!(
-                        "The signed-in server user lacks the '{WORKSPACES_READ}' permission required by 'connect_websocket'."
-                    ));
-                }
-                Some(self.active_upstream_workspace()?)
-            }
-        };
+        if matches!(
+            self.workspace_providers.active_id(),
+            WorkspaceProviderId::Upstream { .. }
+        ) && !self.active_upstream_has_permission(WORKSPACES_READ)
+        {
+            return Err(format!(
+                "The signed-in server user lacks the '{WORKSPACES_READ}' permission required by 'connect_websocket'."
+            ));
+        }
+        let preparation = self.prepare_execution(Some(&request_id));
+        let (snapshot_sender, snapshot_receiver) = tokio::sync::oneshot::channel();
 
         self.stop_mcp_websocket();
         self.mcp_websocket_generation = self.mcp_websocket_generation.wrapping_add(1).max(1);
@@ -3307,85 +3307,24 @@ impl ApiTester {
         let (event_sender, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
         let url = resolved.request.url;
         let headers = resolved.request.headers;
-        let vault = self.credential_vault.clone();
-        let upstream_client = self.upstream_execution_client.clone();
         let connection_wire_sender = wire_sender.clone();
-        let saved_request_id = request_id.clone();
         let task = self.runtime.spawn(async move {
-            let result = match upstream_target {
-                None => {
-                    run_websocket_session(
-                        &url,
-                        &headers,
-                        command_receiver,
-                        connection_wire_sender.clone(),
-                    )
-                    .await
-                }
-                Some(target) => {
-                    let upstream_id = target.upstream_id.clone();
-                    let credential = match tokio::task::spawn_blocking(move || {
-                        vault.load_upstream(&upstream_id)
-                    })
-                    .await
-                    {
-                        Ok(Ok(Some(credential))) if credential.expires_at > Utc::now() => {
-                            credential
-                        }
-                        Ok(Ok(_)) => {
-                            let _ = connection_wire_sender.send(WebSocketSignal::Failed(
-                                "Log in to this server again.".to_owned(),
-                            ));
-                            return;
-                        }
-                        Ok(Err(error)) => {
-                            let _ = connection_wire_sender
-                                .send(WebSocketSignal::Failed(error.to_string()));
-                            return;
-                        }
-                        Err(error) => {
-                            let _ = connection_wire_sender
-                                .send(WebSocketSignal::Failed(error.to_string()));
-                            return;
-                        }
-                    };
-                    match get_upstream_execution_policy(
-                        &upstream_client,
-                        &target.base_url,
-                        credential.bearer_token(),
-                    )
-                    .await
-                    {
-                        Ok(RequestExecutionMode::Local) => {
-                            run_websocket_session(
-                                &url,
-                                &headers,
-                                command_receiver,
-                                connection_wire_sender.clone(),
-                            )
-                            .await
-                        }
-                        Ok(RequestExecutionMode::Server) => {
-                            run_upstream_websocket_session(
-                                &target.base_url,
-                                credential.bearer_token(),
-                                &target.workspace_id,
-                                Some(&saved_request_id),
-                                &url,
-                                &headers,
-                                command_receiver,
-                                connection_wire_sender.clone(),
-                            )
-                            .await
-                        }
-                        Err(error) => {
-                            let _ = connection_wire_sender
-                                .send(WebSocketSignal::Failed(error.to_string()));
-                            return;
-                        }
-                    }
+            let prepared = match preparation.await {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let _ = connection_wire_sender.send(WebSocketSignal::Failed(error));
+                    return;
                 }
             };
+            let _ = snapshot_sender.send(prepared.limits.clone());
+            let result = prepared
+                .run_websocket(
+                    &url,
+                    &headers,
+                    command_receiver,
+                    connection_wire_sender.clone(),
+                )
+                .await;
             if let Err(error) = result {
                 let _ = connection_wire_sender.send(WebSocketSignal::Failed(error.to_string()));
             }
@@ -3414,6 +3353,11 @@ impl ApiTester {
         let automation_commands = command_sender.clone();
         let automation_events = event_sender.clone();
         self.runtime.spawn(async move {
+            // Resolve once before any event scripts, including close/error handlers.
+            automation_scope.execution_limits = snapshot_receiver.await.ok();
+            if let Some(limits) = &automation_scope.execution_limits {
+                automation_chainer = automation_chainer.with_execution_limits(limits);
+            }
             while let Some(signal) = wire_receiver.recv().await {
                 let automation_event = match &signal {
                     WebSocketSignal::Connected => Some(WebSocketAutomationEvent::opened()),
@@ -3429,8 +3373,12 @@ impl ApiTester {
                         reason: None,
                         error: None,
                     }),
-                    WebSocketSignal::Closed(reason) => Some(WebSocketAutomationEvent::closed(reason.clone(), None)),
-                    WebSocketSignal::Failed(error) => Some(WebSocketAutomationEvent::closed(None, Some(error.clone()))),
+                    WebSocketSignal::Closed(reason) => {
+                        Some(WebSocketAutomationEvent::closed(reason.clone(), None))
+                    }
+                    WebSocketSignal::Failed(error) => {
+                        Some(WebSocketAutomationEvent::closed(None, Some(error.clone())))
+                    }
                     _ => None,
                 };
                 if automation_events
@@ -3443,7 +3391,8 @@ impl ApiTester {
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
                     .clone();
-                if !config.enabled
+                if automation_scope.execution_limits.is_none()
+                    || !config.enabled
                     || task_automation_paused.load(std::sync::atomic::Ordering::SeqCst)
                 {
                     continue;
@@ -3893,7 +3842,9 @@ impl ApiTester {
         let params: Params = decode(params)?;
         let (state, mirrored) = {
             let connection = self.control_websocket_mut(params.connection_id)?;
-            connection.automation_paused.store(true, std::sync::atomic::Ordering::SeqCst);
+            connection
+                .automation_paused
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             if matches!(
                 connection.status,
                 ControlWebSocketStatus::Disconnected | ControlWebSocketStatus::Failed
@@ -3945,11 +3896,14 @@ impl ApiTester {
         connection_id: u64,
         incoming: ControlWebSocketIncoming,
     ) {
-        if matches!(&incoming, ControlWebSocketIncoming::Wire(WebSocketSignal::Reconnecting(_)))
-            && self.mcp_websocket.as_ref().is_some_and(|connection| {
-                connection.automation_paused.load(std::sync::atomic::Ordering::SeqCst)
-            })
-        {
+        if matches!(
+            &incoming,
+            ControlWebSocketIncoming::Wire(WebSocketSignal::Reconnecting(_))
+        ) && self.mcp_websocket.as_ref().is_some_and(|connection| {
+            connection
+                .automation_paused
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }) {
             return;
         }
         if matches!(&incoming, ControlWebSocketIncoming::Wire(WebSocketSignal::Reconnecting(options)) if options.clear_console)
@@ -3968,8 +3922,14 @@ impl ApiTester {
                 ControlWebSocketIncoming::Wire(WebSocketSignal::Reconnecting(options)) => {
                     connection.status = ControlWebSocketStatus::Connecting;
                     connection.notice = None;
-                    if options.clear_console { connection.events.clear(); }
-                    connection.push_event("system", "reconnect", Some(format!("Reconnecting in {} ms", options.delay_ms)));
+                    if options.clear_console {
+                        connection.events.clear();
+                    }
+                    connection.push_event(
+                        "system",
+                        "reconnect",
+                        Some(format!("Reconnecting in {} ms", options.delay_ms)),
+                    );
                 }
                 ControlWebSocketIncoming::EnvironmentMutations(..) => return,
                 ControlWebSocketIncoming::Wire(WebSocketSignal::Connected) => {

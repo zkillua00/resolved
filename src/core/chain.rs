@@ -35,6 +35,144 @@ use super::{
     workspace::Workspace,
 };
 
+pub trait ChainRequestExecution: Send + Sync {
+    fn execution_limits(&self) -> Option<&super::execution_limits::ExecutionLimits>;
+    fn send(
+        &self,
+        request: RequestDraft,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<ResponseData, RequestError>> + Send + '_>>;
+}
+
+/// Preparation happens for the actual target ID before its pre-script.
+pub trait ChainExecutor: Send + Sync {
+    fn prepare(
+        &self,
+        request_id: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<Output = Result<Box<dyn ChainRequestExecution + '_>, RequestError>>
+                + Send
+                + '_,
+        >,
+    >;
+}
+
+struct BoundInlineChainer<'a> {
+    inner: &'a dyn InlineChainer,
+    depth: usize,
+}
+
+impl InlineChainer for BoundInlineChainer<'_> {
+    fn run(&self, requested: &[ChainedRequest]) -> Vec<Result<ChainRun, String>> {
+        self.run_with_budget(requested, 0, None)
+    }
+
+    fn run_at_depth(
+        &self,
+        requested: &[ChainedRequest],
+        depth: usize,
+    ) -> Vec<Result<ChainRun, String>> {
+        self.run_with_budget(requested, depth, None)
+    }
+
+    fn run_with_budget(
+        &self,
+        requested: &[ChainedRequest],
+        depth: usize,
+        deadline: Option<std::time::Instant>,
+    ) -> Vec<Result<ChainRun, String>> {
+        self.inner
+            .run_with_budget(requested, self.depth.saturating_add(depth), deadline)
+    }
+}
+
+/// Drive borrowed pipelines off the caller's Tokio context. The independent
+/// watchdog is essential: a synchronous QuickJS child can monopolize a future
+/// poll, preventing timeout_at itself from being polled. Cancel only this batch's
+/// linked token, then join the worker so no child user code survives the call.
+pub(crate) fn drive_inline_with_budget<T: Send>(
+    runtime: &tokio::runtime::Runtime,
+    cancellation: &ScriptCancellation,
+    deadline: Option<std::time::Instant>,
+    future: impl Future<Output = T> + Send,
+) -> std::thread::Result<Option<T>> {
+    std::thread::scope(|scope| {
+        let (finished, completion) = std::sync::mpsc::channel::<()>();
+        if let Some(deadline) = deadline {
+            scope.spawn(move || {
+                if matches!(
+                    completion.recv_timeout(
+                        deadline.saturating_duration_since(std::time::Instant::now())
+                    ),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    cancellation.cancel();
+                }
+            });
+        }
+        let worker = scope.spawn(move || {
+            let _finished = finished;
+            runtime.block_on(async {
+                match deadline {
+                    Some(deadline) => {
+                        match tokio::time::timeout_at(deadline.into(), future).await {
+                            Ok(result) => Some(result),
+                            Err(_) => {
+                                cancellation.cancel();
+                                None
+                            }
+                        }
+                    }
+                    None => Some(future.await),
+                }
+            })
+        });
+        worker.join()
+    })
+}
+
+struct LegacyExecutor<S>(S);
+struct LegacyExecution<'a, S>(&'a S, String);
+
+impl<S, Fut> ChainExecutor for LegacyExecutor<S>
+where
+    S: Fn(String, RequestDraft) -> Fut + Send + Sync,
+    Fut: Future<Output = Result<ResponseData, RequestError>> + Send + 'static,
+{
+    fn prepare(
+        &self,
+        saved_request_id: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<Output = Result<Box<dyn ChainRequestExecution + '_>, RequestError>>
+                + Send
+                + '_,
+        >,
+    > {
+        let saved_request_id = saved_request_id.to_owned();
+        Box::pin(async move {
+            Ok(Box::new(LegacyExecution(&self.0, saved_request_id)) as Box<dyn ChainRequestExecution>)
+        })
+    }
+}
+
+impl<S, Fut> ChainRequestExecution for LegacyExecution<'_, S>
+where
+    S: Fn(String, RequestDraft) -> Fut + Send + Sync,
+    Fut: Future<Output = Result<ResponseData, RequestError>> + Send + 'static,
+{
+    fn execution_limits(&self) -> Option<&super::execution_limits::ExecutionLimits> {
+        None
+    }
+    fn send(
+        &self,
+        request: RequestDraft,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<ResponseData, RequestError>> + Send + '_>>
+    {
+        Box::pin((self.0)(self.1.clone(), request))
+    }
+}
+
 /// Result of running a chain (or the chain prefix that ran before a failure).
 #[derive(Clone, Debug, Default)]
 pub struct ChainRun {
@@ -98,8 +236,34 @@ pub async fn run_chain<S, Fut>(
 ) -> ChainRun
 where
     S: Fn(String, RequestDraft) -> Fut + Send + Sync,
-    Fut: Future<Output = Result<ResponseData, RequestError>> + Send,
+    Fut: Future<Output = Result<ResponseData, RequestError>> + Send + 'static,
 {
+    run_chain_with_executor(
+        workspace,
+        environment_id,
+        scheduled,
+        namespace,
+        cancellation,
+        chain_inline,
+        &LegacyExecutor(sender),
+        limits,
+        budget,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_chain_with_executor(
+    workspace: &Workspace,
+    environment_id: Option<&str>,
+    scheduled: &[ChainedRequest],
+    namespace: &RequestNamespaceCatalog,
+    cancellation: &ScriptCancellation,
+    chain_inline: Option<&dyn InlineChainer>,
+    sender: &dyn ChainExecutor,
+    limits: ChainLimits,
+    budget: &AtomicUsize,
+) -> ChainRun {
     let mut run = ChainRun::default();
     let mut working = workspace.clone();
     let mut stack: Vec<String> = Vec::new();
@@ -112,7 +276,7 @@ where
             namespace,
             cancellation,
             chain_inline,
-            &sender,
+            sender,
             limits,
             &mut stack,
             1,
@@ -127,7 +291,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn execute_chained<'a, S, Fut>(
+fn execute_chained<'a>(
     run: &'a mut ChainRun,
     workspace: &'a mut Workspace,
     environment_id: Option<&'a str>,
@@ -135,16 +299,12 @@ fn execute_chained<'a, S, Fut>(
     namespace: &'a RequestNamespaceCatalog,
     cancellation: &'a ScriptCancellation,
     chain_inline: Option<&'a dyn InlineChainer>,
-    sender: &'a S,
+    sender: &'a dyn ChainExecutor,
     limits: ChainLimits,
     stack: &'a mut Vec<String>,
     depth: usize,
     budget: &'a AtomicUsize,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
-where
-    S: Fn(String, RequestDraft) -> Fut + Send + Sync,
-    Fut: Future<Output = Result<ResponseData, RequestError>> + Send,
-{
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
     Box::pin(async move {
         if run.error.is_some() {
             return;
@@ -201,17 +361,51 @@ where
         };
         let saved_id = saved.id.clone();
         let template = saved.definition.clone();
-        budget.fetch_add(1, Ordering::Relaxed);
+        // Awaited batches can enter concurrently; admission and increment must
+        // be one operation, not a check followed by fetch_add.
+        if budget
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                (used < limits.max_total).then(|| used.saturating_add(1))
+            })
+            .is_err()
+        {
+            run.error = Some(ChainFailure {
+                path: Some(scheduled.path.clone()),
+                message: format!(
+                    "Chained execution exceeded the maximum of {} total chained requests.",
+                    limits.max_total
+                ),
+            });
+            return;
+        }
 
+        let prepared = match cancellation_drive(sender.prepare(&saved_id), cancellation).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                run.error = Some(ChainFailure {
+                    path: Some(scheduled.path.clone()),
+                    message: format!("Could not prepare chained execution: {error}"),
+                });
+                return;
+            }
+        };
         // Pre-request script (may itself schedule more requests).
-        let scope = scope_from_workspace(workspace, environment_id, limits.script_timeout);
+        let mut scope = scope_from_workspace(workspace, environment_id, limits.script_timeout);
+        scope.execution_limits = prepared.execution_limits().cloned();
+        let scoped_inline = chain_inline.map(|chainer| BoundInlineChainer {
+            inner: chainer,
+            depth,
+        });
+        let script_inline = scoped_inline
+            .as_ref()
+            .map(|chainer| chainer as &dyn InlineChainer);
         let pre = match execute_pre_request_with_chain(
             &template.scripts.pre_request,
             &template.request,
             &scope,
             namespace,
             cancellation,
-            chain_inline,
+            script_inline,
         ) {
             Ok(result) => result,
             Err(error) => {
@@ -281,7 +475,7 @@ where
         };
         let request = resolved.request.clone();
         let sensitive_values = resolved.sensitive_values;
-        let network = cancellation_drive(sender(saved_id, request.clone()), cancellation).await;
+        let network = cancellation_drive(prepared.send(request.clone()), cancellation).await;
 
         let response = match network {
             Ok(response) => response,
@@ -312,7 +506,8 @@ where
         push_history(run, &request, &response, &sensitive_values);
 
         // Post-response script (may itself schedule more requests).
-        let post_scope = scope_from_workspace(workspace, environment_id, limits.script_timeout);
+        let mut post_scope = scope_from_workspace(workspace, environment_id, limits.script_timeout);
+        post_scope.execution_limits = prepared.execution_limits().cloned();
         let post = match execute_post_response_with_chain(
             &template.scripts.post_response,
             &request,
@@ -320,7 +515,7 @@ where
             &post_scope,
             namespace,
             cancellation,
-            chain_inline,
+            script_inline,
         ) {
             Ok(result) => result,
             Err(error) => {
@@ -482,12 +677,12 @@ fn record_failed(
 /// Await a chained send, polling the shared cancellation token so cancelling
 /// the top-level Send aborts an in-flight chained HTTP request and prevents
 /// the rest of the chain from starting.
-async fn cancellation_drive<F>(
+async fn cancellation_drive<F, T>(
     future: F,
     cancellation: &ScriptCancellation,
-) -> Result<ResponseData, RequestError>
+) -> Result<T, RequestError>
 where
-    F: Future<Output = Result<ResponseData, RequestError>>,
+    F: Future<Output = Result<T, RequestError>>,
 {
     let mut future = Box::pin(future);
     loop {
@@ -526,6 +721,293 @@ mod tests {
             documentation: String::new(),
             websocket: None,
         }
+    }
+
+    #[test]
+    fn inline_binding_preserves_depth_and_absolute_deadline() {
+        struct Probe(Mutex<Option<(usize, Option<std::time::Instant>)>>);
+        impl InlineChainer for Probe {
+            fn run(&self, _: &[ChainedRequest]) -> Vec<Result<ChainRun, String>> {
+                panic!("budget must not be erased")
+            }
+            fn run_with_budget(
+                &self,
+                _: &[ChainedRequest],
+                depth: usize,
+                deadline: Option<std::time::Instant>,
+            ) -> Vec<Result<ChainRun, String>> {
+                *self.0.lock().unwrap() = Some((depth, deadline));
+                Vec::new()
+            }
+        }
+        let probe = Probe(Mutex::new(None));
+        let outer = BoundInlineChainer {
+            inner: &probe,
+            depth: 2,
+        };
+        let inner = BoundInlineChainer {
+            inner: &outer,
+            depth: 3,
+        };
+        let deadline = Some(std::time::Instant::now());
+        inner.run_with_budget(&[], 4, deadline);
+        assert_eq!(*probe.0.lock().unwrap(), Some((9, deadline)));
+    }
+
+    #[test]
+    fn inline_parent_budget_bounds_unlimited_children() {
+        use crate::core::execution_limits::{Bound, ExecutionLimits};
+        use crate::core::script::ScriptErrorKind;
+        use std::time::{Duration, Instant};
+
+        struct Stalled {
+            limits: ExecutionLimits,
+            dropped: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl ChainRequestExecution for Stalled {
+            fn execution_limits(&self) -> Option<&ExecutionLimits> {
+                Some(&self.limits)
+            }
+            fn send(
+                &self,
+                _: RequestDraft,
+            ) -> std::pin::Pin<
+                Box<dyn Future<Output = Result<ResponseData, RequestError>> + Send + '_>,
+            > {
+                struct MarkDrop(Arc<std::sync::atomic::AtomicBool>);
+                impl Drop for MarkDrop {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::Release);
+                    }
+                }
+                Box::pin(async {
+                    let _drop = MarkDrop(self.dropped.clone());
+                    // Finite safety net: a regression fails instead of hanging.
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    Err(RequestError::Cancelled)
+                })
+            }
+        }
+        impl ChainExecutor for Stalled {
+            fn prepare(
+                &self,
+                _: &str,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn Future<Output = Result<Box<dyn ChainRequestExecution + '_>, RequestError>>
+                        + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async {
+                    Ok(Box::new(Stalled {
+                        limits: self.limits.clone(),
+                        dropped: self.dropped.clone(),
+                    }) as Box<dyn ChainRequestExecution>)
+                })
+            }
+        }
+        struct Runner {
+            runtime: tokio::runtime::Runtime,
+            workspace: Workspace,
+            catalog: RequestNamespaceCatalog,
+            cancellation: ScriptCancellation,
+            sender: Stalled,
+        }
+        impl InlineChainer for Runner {
+            fn run(&self, requested: &[ChainedRequest]) -> Vec<Result<ChainRun, String>> {
+                self.run_with_budget(requested, 0, None)
+            }
+            fn run_with_budget(
+                &self,
+                requested: &[ChainedRequest],
+                _: usize,
+                deadline: Option<Instant>,
+            ) -> Vec<Result<ChainRun, String>> {
+                let child = self.cancellation.child();
+                let budget = AtomicUsize::new(0);
+                let run = drive_inline_with_budget(
+                    &self.runtime,
+                    &child,
+                    deadline,
+                    run_chain_with_executor(
+                        &self.workspace,
+                        None,
+                        requested,
+                        &self.catalog,
+                        &child,
+                        None,
+                        &self.sender,
+                        ChainLimits::default(),
+                        &budget,
+                    ),
+                )
+                .expect("inline worker should not panic");
+                vec![run.ok_or_else(|| "timed out".to_owned())]
+            }
+        }
+
+        // CPU children run synchronously inside future.poll: the independent
+        // watchdog must interrupt them even when Tokio cannot poll its timer.
+        for cpu in [false, true] {
+            for user_cancel in [false, true] {
+                let mut workspace = Workspace::default();
+                let col = workspace.create_collection("Root").unwrap();
+                workspace
+                    .create_saved_request(
+                        &col,
+                        "Child",
+                        template(
+                            "https://unused.invalid",
+                            "GET",
+                            if cpu { "while (true) {}" } else { "" },
+                            "",
+                        ),
+                    )
+                    .unwrap();
+                let catalog = RequestNamespaceCatalog::from_workspace(&workspace);
+                let cancellation = ScriptCancellation::new();
+                let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let runner = Runner {
+                    runtime: tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap(),
+                    workspace,
+                    catalog,
+                    cancellation: cancellation.clone(),
+                    sender: Stalled {
+                        limits: ExecutionLimits(
+                            [
+                                ("http.timeout_ms".to_owned(), Bound::unlimited()),
+                                ("script.timeout_ms".to_owned(), Bound::unlimited()),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        ),
+                        dropped: dropped.clone(),
+                    },
+                };
+                let scope = ScriptScope {
+                    execution_limits: Some(ExecutionLimits(
+                        [(
+                            "script.timeout_ms".to_owned(),
+                            if user_cancel {
+                                Bound::unlimited()
+                            } else {
+                                Bound::limited(50)
+                            },
+                        )]
+                        .into_iter()
+                        .collect(),
+                    )),
+                    ..ScriptScope::default()
+                };
+                // Also bounds the CPU regression if the watchdog breaks.
+                let (done, completion) = std::sync::mpsc::channel::<()>();
+                let fallback = cancellation.clone();
+                let canceller = std::thread::spawn(move || {
+                    if completion
+                        .recv_timeout(if user_cancel {
+                            Duration::from_millis(50)
+                        } else {
+                            Duration::from_secs(2)
+                        })
+                        .is_err()
+                    {
+                        fallback.cancel();
+                    }
+                });
+                let started = Instant::now();
+                let error = execute_pre_request_with_chain(
+                    "await api.requests.execute(Root.Child);",
+                    &RequestDraft::new("GET", "https://unused.invalid"),
+                    &scope,
+                    &runner.catalog,
+                    &cancellation,
+                    Some(&runner),
+                )
+                .expect_err("await must be interrupted");
+                done.send(()).ok();
+                canceller.join().unwrap();
+                assert!(
+                    started.elapsed() < Duration::from_secs(1),
+                    "cpu={cpu}, cancel={user_cancel}"
+                );
+                assert_eq!(
+                    error.diagnostic.kind,
+                    if user_cancel {
+                        ScriptErrorKind::Cancelled
+                    } else {
+                        ScriptErrorKind::TimedOut
+                    }
+                );
+                assert_eq!(
+                    cancellation.is_cancelled(),
+                    user_cancel,
+                    "deadline must not cancel root"
+                );
+                if !cpu {
+                    assert!(
+                        dropped.load(Ordering::Acquire),
+                        "network future must be dropped"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_preparation_uses_target_identity_and_fails_before_script() {
+        struct Denied(Mutex<Vec<String>>);
+        impl ChainExecutor for Denied {
+            fn prepare(
+                &self,
+                id: &str,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn Future<Output = Result<Box<dyn ChainRequestExecution + '_>, RequestError>>
+                        + Send
+                        + '_,
+                >,
+            > {
+                self.0.lock().unwrap().push(id.to_owned());
+                Box::pin(async { Err(RequestError::Upstream("policy denied".to_owned())) })
+            }
+        }
+        let mut workspace = Workspace::default();
+        let root = workspace.create_collection("Root").unwrap();
+        let child = workspace
+            .create_saved_request(
+                &root,
+                "Child",
+                template(
+                    "https://same.example",
+                    "GET",
+                    "throw new Error('script must not run')",
+                    "",
+                ),
+            )
+            .unwrap();
+        let namespace = RequestNamespaceCatalog::from_workspace(&workspace);
+        let executor = Denied(Mutex::new(Vec::new()));
+        let run = run_chain_with_executor(
+            &workspace,
+            None,
+            &[schedule(&child, "Root.Child")],
+            &namespace,
+            &ScriptCancellation::new(),
+            None,
+            &executor,
+            ChainLimits::default(),
+            &AtomicUsize::new(0),
+        )
+        .await;
+        assert_eq!(*executor.0.lock().unwrap(), vec![child]);
+        let error = run.error.unwrap().message;
+        assert!(error.contains("policy denied"), "{error}");
+        assert!(!error.contains("script must not run"));
+        assert!(run.history.is_empty());
     }
 
     /// Spawn a blocking loopback server that records each request's request line

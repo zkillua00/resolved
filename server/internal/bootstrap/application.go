@@ -11,6 +11,7 @@ import (
 	"resolved-server/internal/auth"
 	"resolved-server/internal/config"
 	"resolved-server/internal/database"
+	"resolved-server/internal/executionlimits"
 	"resolved-server/internal/identity"
 	"resolved-server/internal/realtime"
 	"resolved-server/internal/requestproxy"
@@ -206,6 +207,7 @@ func New(cfg config.Config, accessLog io.Writer) (*Application, error) {
 		server.WithIdentity(authService, authHandler, usersHandler, rolesHandler),
 		server.WithWorkspaces(authService, workspacesHandler),
 		server.WithRequestProxy(authService, requestProxyHandler),
+		server.WithExecutionLimits(authService, executionlimits.NewHandler(executionlimits.NewProvider(db), recordedEvents)),
 		server.WithSharedHistory(authService, sharedHistoryHandler),
 		server.WithActivityLogs(authService, activityHandler),
 		server.WithRealtime(authService, realtimePublisher),

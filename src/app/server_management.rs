@@ -28,6 +28,7 @@ use super::*;
 
 pub(super) mod activity_views;
 mod discord_views;
+mod execution_limit_views;
 mod network_views;
 mod profile_views;
 
@@ -149,6 +150,7 @@ pub(super) struct ServerManagementState {
     pub(super) expanded_proxy_assignments: BTreeSet<String>,
     /// Proxy IDs whose exclusion editor is expanded on the request-proxy page.
     pub(super) expanded_proxy_exclusions: BTreeSet<String>,
+    execution_limits: execution_limit_views::ExecutionLimitState,
 }
 
 impl Default for ServerManagementState {
@@ -173,6 +175,7 @@ impl Default for ServerManagementState {
             realtime_refresh_pending: false,
             expanded_proxy_assignments: BTreeSet::new(),
             expanded_proxy_exclusions: BTreeSet::new(),
+            execution_limits: execution_limit_views::ExecutionLimitState::default(),
         }
     }
 }
@@ -765,6 +768,12 @@ impl ApiTester {
             == Some(&upstream_id))
         .then(|| self.server_management.selected_role_id.clone())
         .flatten();
+        let execution_limits =
+            if self.server_management.upstream_id.as_deref() == Some(&upstream_id) {
+                self.server_management.execution_limits.clone()
+            } else {
+                execution_limit_views::ExecutionLimitState::default()
+            };
         self.server_management = ServerManagementState {
             upstream_id: Some(upstream_id.clone()),
             status: ServerManagementStatus::Loading,
@@ -773,6 +782,7 @@ impl ApiTester {
             audit_log,
             selected_role_id,
             role_permission_drafts,
+            execution_limits,
             ..ServerManagementState::default()
         };
         let vault = self.credential_vault.clone();

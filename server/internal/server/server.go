@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"resolved-server/internal/activitylog"
 	"resolved-server/internal/auth"
+	"resolved-server/internal/executionlimits"
 	"resolved-server/internal/httpkit"
 	"resolved-server/internal/identity"
 	"resolved-server/internal/problem"
@@ -234,6 +236,13 @@ func WithRequestProxy(authService *auth.Service, handler *requestproxy.Handler) 
 	}
 }
 
+func WithExecutionLimits(authService *auth.Service, handler *executionlimits.Handler) Modifier {
+	return func(app *fiber.App) {
+		app.Get("/api/v1/request-execution/limits", authService.Middleware(), handler.Controller())
+		app.Put("/api/v1/request-execution/limits", authService.Middleware(), handler.Controller())
+	}
+}
+
 func WithSharedHistory(authService *auth.Service, handler *sharedhistory.Handler) Modifier {
 	return func(app *fiber.App) {
 		protected := app.Group("/api/v1", authService.Middleware())
@@ -267,9 +276,11 @@ func New(address string, accessLog io.Writer, modifiers ...Modifier) *Server {
 		accessLog = os.Stdout
 	}
 	app := fiber.New(fiber.Config{
-		AppName:      "Resolved collaboration server",
-		ErrorHandler: httpkit.ErrorHandler,
-		BodyLimit:    96 * 1024 * 1024,
+		AppName:                      "Resolved collaboration server",
+		ErrorHandler:                 httpkit.ErrorHandler,
+		BodyLimit:                    96 * 1024 * 1024,
+		StreamRequestBody:            true,
+		DisablePreParseMultipartForm: true,
 	})
 	app.Use(recover.New())
 	app.Use(requestid.New())
@@ -279,12 +290,41 @@ func New(address string, accessLog io.Writer, modifiers ...Modifier) *Server {
 		Stream:   accessLog,
 	}))
 	app.Use(helmet.New())
+	app.Use(normalAPIBodyLimit)
 
 	for _, modifier := range modifiers {
 		modifier(app)
 	}
 
 	return &Server{App: app, Address: address}
+}
+
+// StreamRequestBody makes BodyLimit a streaming threshold, not an execution
+// ceiling. Only the execution route owns its live envelope policy; all other
+// endpoints retain the existing 96 MiB guard, including chunked requests.
+func normalAPIBodyLimit(c fiber.Ctx) error {
+	parts := strings.Split(strings.Trim(c.Path(), "/"), "/")
+	if c.Method() == fiber.MethodPost && len(parts) == 5 &&
+		parts[0] == "api" && parts[1] == "v1" && parts[2] == "workspaces" && parts[4] == "execute" {
+		return c.Next()
+	}
+	const maximum = 96 * 1024 * 1024
+	if c.Request().Header.ContentLength() > maximum {
+		return fiber.ErrRequestEntityTooLarge
+	}
+	if stream := c.Request().BodyStream(); stream != nil {
+		body, err := io.ReadAll(io.LimitReader(stream, maximum+1))
+		if err != nil {
+			return fiber.ErrBadRequest
+		}
+		if len(body) > maximum {
+			return fiber.ErrRequestEntityTooLarge
+		}
+		c.Request().SetBodyRaw(body)
+	} else if len(c.Body()) > maximum {
+		return fiber.ErrRequestEntityTooLarge
+	}
+	return c.Next()
 }
 
 func WithIdentity(

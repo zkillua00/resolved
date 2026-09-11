@@ -68,7 +68,7 @@ impl Targets {
 #[derive(Debug)]
 struct Annotation {
     kind: TargetKind,
-    name: String,
+    names: Vec<String>,
     explanation: String,
     range: Range<usize>,
 }
@@ -170,6 +170,30 @@ fn encode_name(name: &str) -> String {
     }
 }
 
+/// Alternatives are full name tokens separated by a standalone `|`.
+/// Keep byte ranges, including an unfinished last token, for editor completion.
+fn target_tokens(text: &str, alternatives: bool) -> Vec<Range<usize>> {
+    let mut tokens = Vec::new();
+    let mut start = 0;
+    loop {
+        let end = start + name_token(&text[start..]).map_or(text.len() - start, |(_, n)| n);
+        tokens.push(start..end);
+        let remainder = &text[end..];
+        if !alternatives || !remainder.starts_with(char::is_whitespace) {
+            break;
+        }
+        let next = remainder.trim_start();
+        let Some(after_pipe) = next.strip_prefix('|') else {
+            break;
+        };
+        if !after_pipe.is_empty() && !after_pipe.starts_with(char::is_whitespace) {
+            break;
+        }
+        start = text.len() - after_pipe.trim_start().len();
+    }
+    tokens
+}
+
 /// Keep tag recognition identical for parsing and completion.
 fn annotation_tag(tag: &str) -> Result<Option<(TargetKind, &'static str)>, &'static str> {
     match tag {
@@ -222,8 +246,8 @@ fn parse(source: &str) -> Index {
         // Names are literal, even if they contain @Ref(...). Reserve incomplete
         // quoted tokens too, so reference completion cannot steal path editing.
         let token = target.strip_prefix(prefix).unwrap_or(target);
-        let token_end =
-            range.end - token.len() + name_token(token).map_or(token.len(), |(_, length)| length);
+        let tokens = target_tokens(token, matches!(kind, TargetKind::Body(_)));
+        let token_end = range.end - token.len() + tokens.last().unwrap().end;
         literal_targets.push(range.end - target.len()..token_end);
         let Some(text) = target.strip_prefix(prefix) else {
             index.diagnostics.push(warning(
@@ -233,7 +257,11 @@ fn parse(source: &str) -> Index {
             ));
             continue;
         };
-        let Some((name, length)) = name_token(text) else {
+        let Some(names) = tokens
+            .iter()
+            .map(|range| name_token(&text[range.clone()]).map(|(name, _)| name))
+            .collect::<Option<Vec<_>>>()
+        else {
             index.diagnostics.push(warning(
                 source,
                 range,
@@ -241,8 +269,8 @@ fn parse(source: &str) -> Index {
             ));
             continue;
         };
-        let remainder = &text[length..];
-        if (name.is_empty() && !matches!(kind, TargetKind::Body(BodyMode::Json)))
+        let remainder = &text[tokens.last().unwrap().end..];
+        if (names.iter().any(String::is_empty) && !matches!(kind, TargetKind::Body(BodyMode::Json)))
             || (!remainder.is_empty() && !remainder.starts_with(char::is_whitespace))
         {
             index
@@ -256,7 +284,7 @@ fn parse(source: &str) -> Index {
             .annotation_tokens
             .push((target_start..target_end, false));
         if let TargetKind::Body(mode) = kind {
-            if !valid_path(mode, &name) {
+            if names.iter().any(|name| !valid_path(mode, name)) {
                 index.diagnostics.push(warning(
                     source,
                     target_start..target_end,
@@ -278,7 +306,7 @@ fn parse(source: &str) -> Index {
         }
         index.annotations.push(Annotation {
             kind,
-            name,
+            names,
             explanation,
             range: range.start..target_end,
         });
@@ -385,10 +413,9 @@ impl DocumentationIntelligence {
     pub fn explanation(&self, source: &str, kind: TargetKind, name: &str) -> Option<String> {
         self.with_index(source, |index| {
             let key = kind.key(name);
-            let mut matches = index
-                .annotations
-                .iter()
-                .filter(|annotation| annotation.kind == kind && kind.key(&annotation.name) == key);
+            let mut matches = index.annotations.iter().filter(|annotation| {
+                annotation.kind == kind && annotation.names.iter().any(|name| kind.key(name) == key)
+            });
             let annotation = matches.next()?;
             // Conflicting annotations never pick an arbitrary winner.
             (matches.next().is_none() && !annotation.explanation.is_empty())
@@ -459,11 +486,11 @@ impl DocumentationIntelligence {
                 }
             }
             for annotation in &index.annotations {
-                let found = match annotation.kind {
-                    TargetKind::Body(mode) => self.body.borrow().targets.contains(mode, &annotation.name),
-                    kind => Some(targets.contains(kind, &annotation.name)),
-                };
-                if found == Some(false) {
+                let all_missing = annotation.names.iter().all(|name| match annotation.kind {
+                    TargetKind::Body(mode) => self.body.borrow().targets.contains(mode, name) == Some(false),
+                    kind => !targets.contains(kind, name),
+                });
+                if all_missing {
                     diagnostics.push(information(
                         source,
                         annotation.range.clone(),
@@ -474,7 +501,9 @@ impl DocumentationIntelligence {
                 // authoring mistake. Keep annotations without per-path notices.
                 if index.annotations.iter().filter(|other| {
                     other.kind == annotation.kind
-                        && other.kind.key(&other.name) == annotation.kind.key(&annotation.name)
+                        && other.names.iter().any(|other_name| annotation.names.iter().any(|name| {
+                            other.kind.key(other_name) == annotation.kind.key(name)
+                        }))
                 }).count() > 1 {
                     diagnostics.push(warning(
                         source, annotation.range.clone(),
@@ -548,7 +577,7 @@ impl DocumentationIntelligence {
                 return Vec::new();
             };
             let rest = line[tag_end..].trim_start();
-            let start = line_range.end - rest.len();
+            let mut start = line_range.end - rest.len();
             if offset < start {
                 return Vec::new();
             }
@@ -557,7 +586,17 @@ impl DocumentationIntelligence {
             } else {
                 0
             };
-            let token = &rest[token_start..];
+            let mut token = &rest[token_start..];
+            if matches!(kind, TargetKind::Body(_)) {
+                let Some(range) = target_tokens(token, true)
+                    .into_iter()
+                    .find(|range| start + range.start <= offset && offset <= start + range.end)
+                else {
+                    return Vec::new();
+                };
+                token = &token[range.clone()];
+                start += range.start;
+            }
             let end = start + token_start + name_token(token).map_or(token.len(), |(_, end)| end);
             if offset > end {
                 return Vec::new();
@@ -637,6 +676,124 @@ impl CompletionProvider for DocumentationIntelligence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn body_alternatives_match_each_shape_and_only_report_when_all_missing() {
+        let intelligence = intelligence();
+        let source = "@body /filter/session_id | /session_id Session ID.";
+        for body in [
+            r#"{"session_id":1}"#,
+            r#"{"filter":{"session_id":1}}"#,
+            r#"{"filter":{"session_id":1},"session_id":2}"#,
+        ] {
+            intelligence.replace_body(Some(BodyMode::Json), body);
+            assert!(intelligence.diagnostics(source).is_empty());
+            for (offset, _) in body.match_indices("session_id") {
+                assert_eq!(
+                    intelligence.body_explanations(source, offset),
+                    ["Session ID."]
+                );
+            }
+        }
+        intelligence.replace_body(Some(BodyMode::Json), "{}");
+        assert_eq!(intelligence.diagnostics(source).len(), 1);
+        intelligence.replace_body(Some(BodyMode::Json), "{");
+        assert!(intelligence.diagnostics(source).is_empty());
+        intelligence.replace_body(Some(BodyMode::Json), r#"{"filter":"{\"session_id\":1}"}"#);
+        assert_eq!(intelligence.diagnostics(source).len(), 1);
+
+        let source = "@body(XML) /request/filter/@id | /request/@id Identifier.";
+        for body in [
+            "<request id=\"1\"/>",
+            "<request><filter id=\"1\"/></request>",
+        ] {
+            intelligence.replace_body(Some(BodyMode::Xml), body);
+            assert!(intelligence.diagnostics(source).is_empty());
+            assert_eq!(
+                intelligence.body_explanations(source, body.find("id").unwrap()),
+                ["Identifier."]
+            );
+        }
+    }
+
+    #[test]
+    fn alternatives_preserve_quoting_references_and_conflict_rules() {
+        let intelligence = intelligence();
+        intelligence.replace_body(Some(BodyMode::Json), r#"{"a | b":1,"other":2}"#);
+        let source = "@body \"/a | b\" | /other Shared.";
+        assert!(intelligence.diagnostics(source).is_empty());
+        assert_eq!(
+            intelligence
+                .explanation(source, TargetKind::Body(BodyMode::Json), "/a | b")
+                .as_deref(),
+            Some("Shared.")
+        );
+        let duplicate = format!("{source}\n@body /other Second.");
+        assert_eq!(intelligence.diagnostics(&duplicate).len(), 2);
+        assert_eq!(
+            intelligence.explanation(&duplicate, TargetKind::Body(BodyMode::Json), "/other"),
+            None
+        );
+        assert_eq!(
+            intelligence
+                .explanation(&duplicate, TargetKind::Body(BodyMode::Json), "/a | b")
+                .as_deref(),
+            Some("Shared.")
+        );
+        assert!(
+            intelligence
+                .diagnostics("@body /other | /other Shared.")
+                .is_empty()
+        );
+        assert!(
+            intelligence
+                .references("@body /other | \"/@Ref(Not.A.Link)\" Explanation.")
+                .is_empty()
+        );
+        assert_eq!(
+            parse("@header X-Test Explanation | prose.").annotations[0].explanation,
+            "Explanation | prose."
+        );
+        for source in [
+            "@body /other |",
+            "@body /other | ",
+            "@body /other | relative Explanation.",
+            "@body /other | \"/unfinished",
+            "@body(XML) /request | /bad/* Explanation.",
+        ] {
+            assert!(parse(source).annotations.is_empty(), "{source}");
+            assert_eq!(parse(source).diagnostics.len(), 1, "{source}");
+        }
+    }
+
+    #[test]
+    fn completion_edits_only_the_active_alternative() {
+        let intelligence = intelligence();
+        intelligence.replace_body(Some(BodyMode::Json), r#"{"session_id":1}"#);
+        let source = "@body /filter/session_id | /sess Explanation.";
+        let start = source.find("/sess Explanation").unwrap();
+        let items = intelligence.completion_items(source, start + 5);
+        assert_eq!(items.len(), 1);
+        let Some(CompletionTextEdit::Edit(edit)) = &items[0].text_edit else {
+            panic!("edit")
+        };
+        assert_eq!(edit.new_text, "/session_id");
+        assert_eq!(edit.range, source_range(source, start, start + 5));
+        assert!(
+            intelligence
+                .completion_items(source, source.len())
+                .is_empty()
+        );
+        let incomplete = "@body /filter/session_id | ";
+        assert!(
+            intelligence
+                .completion_items(incomplete, incomplete.len())
+                .iter()
+                .any(|item| item.label == "/session_id")
+        );
+        let spans = parse(source).annotation_tokens;
+        assert_eq!(&source[spans[1].0.clone()], "/filter/session_id | /sess");
+    }
 
     #[test]
     fn semantic_overlay_colors_structure_and_preserves_markdown_prose() {

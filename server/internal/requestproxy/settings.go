@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"resolved-server/internal/executionlimits"
 	"resolved-server/internal/problem"
 	"resolved-server/internal/security"
 
@@ -79,8 +80,9 @@ type allowlistPayload struct {
 }
 
 type Policy struct {
-	CookieJar bool   `json:"cookie_jar"`
-	Mode      string `json:"mode"`
+	Limits    map[string]executionlimits.Bound `json:"limits"`
+	CookieJar bool                             `json:"cookie_jar"`
+	Mode      string                           `json:"mode"`
 }
 
 type SettingsRepository struct {

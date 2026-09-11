@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use futures::StreamExt as _;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,7 @@ use tokio::runtime::Handle;
 use tokio::task::{AbortHandle, JoinHandle};
 use url::Url;
 
+use super::execution_limits::ExecutionLimits;
 use super::{CookieJar, DbStringEnum};
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -684,7 +686,110 @@ pub async fn send_request(
     client: &Client,
     request: RequestDraft,
 ) -> Result<ResponseData, RequestError> {
+    send_request_inner(client, request, None).await
+}
+
+/// Build a policy-specific client while retaining workspace cookie isolation.
+///
+/// reqwest's connection timeout includes DNS, TCP and TLS. It does not expose
+/// a separate TLS-only handshake timer, so `http.tls_handshake_timeout_ms`
+/// applies only to server-proxied execution. `http.envelope_bytes` likewise
+/// has no local counterpart: no relay JSON envelope is transmitted here.
+pub fn build_http_client_with_limits(
+    cookie_jar: Arc<CookieJar>,
+    limits: &ExecutionLimits,
+) -> Result<Client, RequestError> {
+    limits.validate().map_err(RequestError::TaskFailed)?;
+    crate::tls::install_crypto_provider()
+        .map_err(|error| RequestError::TaskFailed(error.to_owned()))?;
+    let redirects = limits
+        .get("http.redirects")
+        .as_usize()
+        .map_err(RequestError::TaskFailed)?;
+    let url_bytes = limits
+        .get("http.url_bytes")
+        .as_usize()
+        .map_err(RequestError::TaskFailed)?;
+    let mut builder = Client::builder()
+        .user_agent(DEFAULT_USER_AGENT)
+        .cookie_provider(cookie_jar)
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if url_bytes.is_some_and(|max| attempt.url().as_str().len() > max) {
+                return attempt.error("redirect URL exceeds http.url_bytes");
+            }
+            if redirects.is_some_and(|max| attempt.previous().len() > max) {
+                return attempt.error("redirect count exceeds http.redirects");
+            }
+            attempt.follow()
+        }));
+    if let Some(timeout) = limits
+        .get("http.connect_timeout_ms")
+        .as_duration()
+        .map_err(RequestError::TaskFailed)?
+    {
+        builder = builder.connect_timeout(timeout);
+    }
+    // Overall timeout is enforced by send_request_with_limits, including body
+    // preparation and buffering. No default client timeout can override Unlimited.
+    builder.build().map_err(RequestError::Transport)
+}
+
+/// Execute using a client constructed with `build_http_client_with_limits`
+/// and the same immutable policy snapshot.
+pub async fn send_request_with_limits(
+    client: &Client,
+    request: RequestDraft,
+    limits: &ExecutionLimits,
+) -> Result<ResponseData, RequestError> {
+    limits.validate().map_err(RequestError::TaskFailed)?;
+    let timeout = limits
+        .get("http.timeout_ms")
+        .as_duration()
+        .map_err(RequestError::TaskFailed)?;
+    if timeout == Some(Duration::ZERO)
+        || limits
+            .get("http.connect_timeout_ms")
+            .as_duration()
+            .map_err(RequestError::TaskFailed)?
+            == Some(Duration::ZERO)
+    {
+        return Err(RequestError::TaskFailed(
+            "HTTP execution is disabled by a zero time budget".into(),
+        ));
+    }
+    let future = send_request_inner(client, request, Some(limits));
+    match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, future)
+            .await
+            .map_err(|_| RequestError::TaskFailed("request exceeded http.timeout_ms".into()))?,
+        None => future.await,
+    }
+}
+
+fn check_http_size(limits: &ExecutionLimits, key: &str, size: usize) -> Result<(), RequestError> {
+    if limits
+        .get(key)
+        .as_usize()
+        .map_err(RequestError::TaskFailed)?
+        .is_some_and(|max| size > max)
+    {
+        return Err(RequestError::TaskFailed(format!(
+            "{key} exceeded ({size} bytes or entries)"
+        )));
+    }
+    Ok(())
+}
+
+async fn send_request_inner(
+    client: &Client,
+    request: RequestDraft,
+    limits: Option<&ExecutionLimits>,
+) -> Result<ResponseData, RequestError> {
     let prepared = request.prepared()?;
+    if let Some(limits) = limits {
+        check_http_size(limits, "http.url_bytes", prepared.url.as_str().len())?;
+        check_http_size(limits, "http.header_count", prepared.headers.len())?;
+    }
     let PreparedRequest {
         method,
         url,
@@ -700,10 +805,18 @@ pub async fn send_request(
     }
 
     let mut builder = client.request(method, url).headers(headers);
-    builder = apply_request_body(builder, &request, has_user_content_type).await?;
+    let body_limit = limits
+        .map(|limits| limits.get("http.request_bytes").as_usize())
+        .transpose()
+        .map_err(RequestError::TaskFailed)?
+        .flatten();
+    builder = apply_request_body(builder, &request, has_user_content_type, body_limit).await?;
 
     let started_at = Instant::now();
     let response = builder.send().await?;
+    if let Some(limits) = limits {
+        check_http_size(limits, "http.url_bytes", response.url().as_str().len())?;
+    }
 
     let status = response.status();
     let final_url = response.url().to_string();
@@ -721,7 +834,15 @@ pub async fn send_request(
             value: String::from_utf8_lossy(value.as_bytes()).into_owned(),
         })
         .collect();
-    let body = read_response_body(response, MAX_BUFFERED_RESPONSE_BODY_BYTES).await?;
+    let response_limit = match limits {
+        Some(limits) => limits
+            .get("http.response_bytes")
+            .as_usize()
+            .map_err(RequestError::TaskFailed)?
+            .unwrap_or(usize::MAX),
+        None => MAX_BUFFERED_RESPONSE_BODY_BYTES,
+    };
+    let body = read_response_body(response, response_limit).await?;
 
     Ok(ResponseData {
         status: status.as_u16(),
@@ -739,10 +860,12 @@ async fn apply_request_body(
     mut builder: reqwest::RequestBuilder,
     request: &RequestDraft,
     has_user_content_type: bool,
+    body_limit: Option<usize>,
 ) -> Result<reqwest::RequestBuilder, RequestError> {
     match request.body_mode {
         BodyMode::None => {}
         BodyMode::Raw => {
+            check_request_body_size(body_limit, request.body.len())?;
             if request.body.is_empty() {
                 return Ok(builder);
             }
@@ -765,7 +888,9 @@ async fn apply_request_body(
             if !has_user_content_type {
                 builder = builder.header(CONTENT_TYPE, "application/x-www-form-urlencoded");
             }
-            builder = builder.body(serializer.finish());
+            let encoded = serializer.finish();
+            check_request_body_size(body_limit, encoded.len())?;
+            builder = builder.body(encoded);
         }
         BodyMode::MultipartFormData => {
             let mut form = reqwest::multipart::Form::new();
@@ -793,10 +918,37 @@ async fn apply_request_body(
                     }
                 }
             }
-            builder = builder.multipart(form);
+            if let Some(limit) = body_limit {
+                // Count the actual multipart framing and streamed file bytes,
+                // not just file metadata (files can change while being read).
+                let content_type = format!("multipart/form-data; boundary={}", form.boundary());
+                let mut size = 0usize;
+                let stream = form.into_stream().map(move |chunk| {
+                    let chunk = chunk.map_err(std::io::Error::other)?;
+                    size = size
+                        .checked_add(chunk.len())
+                        .ok_or_else(|| std::io::Error::other("request body size overflow"))?;
+                    check_request_body_size(Some(limit), size).map_err(std::io::Error::other)?;
+                    Ok::<_, std::io::Error>(chunk)
+                });
+                builder = builder
+                    .header(CONTENT_TYPE, content_type)
+                    .body(reqwest::Body::wrap_stream(stream));
+            } else {
+                builder = builder.multipart(form);
+            }
         }
     }
     Ok(builder)
+}
+
+fn check_request_body_size(limit: Option<usize>, size: usize) -> Result<(), RequestError> {
+    if limit.is_some_and(|limit| size > limit) {
+        return Err(RequestError::TaskFailed(
+            "request body exceeds http.request_bytes".into(),
+        ));
+    }
+    Ok(())
 }
 
 async fn read_response_body(
@@ -913,6 +1065,134 @@ impl DbStringEnum for BodyFieldKind {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn configured_http_sizes_preserve_exact_zero_and_unlimited() {
+        use super::super::execution_limits::Bound;
+        for key in [
+            "http.request_bytes",
+            "http.response_bytes",
+            "http.header_count",
+            "http.url_bytes",
+        ] {
+            for bound in [
+                Bound::limited(0),
+                Bound::limited(2),
+                Bound::limited(128 * 1024 * 1024),
+                Bound::unlimited(),
+            ] {
+                let limits =
+                    super::ExecutionLimits([(key.to_owned(), bound)].into_iter().collect());
+                assert!(super::check_http_size(&limits, key, 0).is_ok());
+                assert_eq!(
+                    super::check_http_size(&limits, key, 3).is_ok(),
+                    bound.unlimited || bound.value >= 3
+                );
+            }
+        }
+        assert!(super::check_request_body_size(Some(0), 0).is_ok());
+        assert!(super::check_request_body_size(Some(0), 1).is_err());
+        assert!(super::check_request_body_size(Some(2), 2).is_ok());
+        assert!(super::check_request_body_size(Some(2), 3).is_err());
+        assert!(super::check_request_body_size(None, usize::MAX).is_ok());
+    }
+
+    #[test]
+    fn configured_body_limit_checks_encoded_bytes_not_editor_text() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = super::build_client().unwrap();
+        let request = super::RequestDraft {
+            body_mode: super::BodyMode::FormUrlEncoded,
+            body_fields: vec![super::BodyField::text("x", " ")],
+            ..super::RequestDraft::default()
+        };
+        assert!(
+            runtime
+                .block_on(super::apply_request_body(
+                    client.post("http://example.test"),
+                    &request,
+                    false,
+                    Some(2),
+                ))
+                .is_err()
+        );
+        let built = runtime
+            .block_on(super::apply_request_body(
+                client.post("http://example.test"),
+                &request,
+                false,
+                Some(3),
+            ))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(built.body().unwrap().as_bytes().unwrap(), b"x=+");
+    }
+
+    #[test]
+    fn configured_http_zero_timeout_rejects_before_network() {
+        use super::super::execution_limits::Bound;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = super::build_client().unwrap();
+        for key in ["http.timeout_ms", "http.connect_timeout_ms"] {
+            let limits =
+                super::ExecutionLimits([(key.to_owned(), Bound::limited(0))].into_iter().collect());
+            let error = runtime
+                .block_on(super::send_request_with_limits(
+                    &client,
+                    super::RequestDraft::new("GET", "http://127.0.0.1:1"),
+                    &limits,
+                ))
+                .unwrap_err();
+            assert!(error.to_string().contains("zero time budget"));
+        }
+    }
+
+    #[test]
+    fn configured_response_limit_applies_to_actual_stream() {
+        use super::super::execution_limits::Bound;
+        for bound in [
+            Bound::limited(0),
+            Bound::limited(2),
+            Bound::limited(3),
+            Bound::limited(4),
+            Bound::unlimited(),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request).unwrap();
+                stream.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nabc\r\n0\r\n\r\n").unwrap();
+            });
+            let limits = super::ExecutionLimits(
+                [("http.response_bytes".to_owned(), bound)]
+                    .into_iter()
+                    .collect(),
+            );
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let result = runtime.block_on(super::send_request_with_limits(
+                &super::build_client().unwrap(),
+                super::RequestDraft::new("GET", format!("http://{address}")),
+                &limits,
+            ));
+            assert_eq!(result.is_ok(), bound.unlimited || bound.value >= 3);
+            if let Ok(response) = result {
+                assert_eq!(response.body.as_ref(), b"abc");
+            }
+            server.join().unwrap();
+        }
+    }
+
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -1142,9 +1422,15 @@ mod tests {
     fn query_rows_no_longer_persist_separate_explanations() {
         let row: QueryParamEntry = serde_json::from_str(
             r#"{"key":"limit","value":"25","description":"Old alpha description"}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(row, QueryParamEntry::new("limit", "25"));
-        assert!(serde_json::to_value(row).unwrap().get("description").is_none());
+        assert!(
+            serde_json::to_value(row)
+                .unwrap()
+                .get("description")
+                .is_none()
+        );
     }
 
     #[test]
