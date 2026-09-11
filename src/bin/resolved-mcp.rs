@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 
 #[path = "../control_tools.rs"]
 mod control_tools;
+#[path = "../mcp_docs.rs"]
+mod mcp_docs;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -53,7 +55,11 @@ fn main() {
                         .pointer("/params/protocolVersion")
                         .and_then(Value::as_str)
                         .unwrap_or(MCP_PROTOCOL_VERSION),
-                    "capabilities": { "tools": { "listChanged": false } },
+                    "capabilities": {
+                        "tools": { "listChanged": false },
+                        "prompts": { "listChanged": false }
+                    },
+                    "instructions": "Use the ask tool to learn Resolved workflows and scripting APIs from bundled documentation before acting. Documentation is not live app state.",
                     "serverInfo": {
                         "name": "resolved-mcp",
                         "version": env!("RESOLVED_BUILD_VERSION")
@@ -61,6 +67,13 @@ fn main() {
                 }),
             ),
             "ping" => rpc_result(id, json!({})),
+            "prompts/list" => rpc_result(id, mcp_docs::prompt_definitions()),
+            "prompts/get" => {
+                match mcp_docs::get_prompt(message.get("params").unwrap_or(&Value::Null)) {
+                    Ok(result) => rpc_result(id, result),
+                    Err(error) => rpc_error(id, -32602, error),
+                }
+            }
             "tools/list" => rpc_result(id, json!({ "tools": enabled_tool_definitions() })),
             "tools/call" => call_tool(id, message.get("params").cloned().unwrap_or_default()),
             _ => rpc_error(id, -32601, format!("method '{method}' was not found")),
@@ -78,7 +91,12 @@ fn call_tool(id: Value, params: Value) -> Value {
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    match invoke_control(name, arguments) {
+    let result = if name == "ask" {
+        mcp_docs::ask(&arguments)
+    } else {
+        invoke_control(name, arguments)
+    };
+    match result {
         Ok(result) => rpc_result(
             id,
             json!({
@@ -991,12 +1009,33 @@ fn enabled_tool_definitions() -> Vec<Value> {
                 .and_then(Value::as_str)
                 .is_some_and(|name| enabled.contains(name))
         })
+        // Documentation is adapter-local and never reads workspace data.
+        .chain(std::iter::once(mcp_docs::tool_definition()))
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ask_is_local_and_uses_the_standard_tool_result_envelope() {
+        let result = call_tool(
+            json!(1),
+            json!({
+                "name": "ask", "arguments": {"question": "environment variables"}
+            }),
+        );
+        assert_eq!(result["result"]["isError"], false);
+        assert!(
+            !result["result"]["structuredContent"]["results"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let invalid = call_tool(json!(2), json!({"name": "ask", "arguments": {}}));
+        assert_eq!(invalid["result"]["isError"], true);
+    }
 
     #[test]
     fn mcp_definitions_match_the_desktop_tool_catalog() {
