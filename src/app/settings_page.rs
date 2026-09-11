@@ -190,8 +190,9 @@ impl ApiTester {
                     ]),
             );
 
-        let mut pages = Vec::with_capacity(7);
+        let mut pages = Vec::with_capacity(8);
         pages.push(servers_page);
+        pages.push(self.local_execution_limits_settings_page(cx));
         pages.extend([
             snippets_page,
             editor_page,

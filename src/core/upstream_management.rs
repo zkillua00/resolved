@@ -49,6 +49,160 @@ pub const ENVIRONMENTS_UPDATE: &str = "environments.update";
 pub const ENVIRONMENTS_DELETE: &str = "environments.delete";
 pub const ENVIRONMENT_VALUES_UPDATE: &str = "environment_values.update";
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ExecutionLimitScope {
+    #[default]
+    Deployment,
+    Workspace(String),
+    Collection {
+        workspace_id: String,
+        collection_id: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct ExecutionLimitSource {
+    pub kind: String,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub collection_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct ExecutionLimitDefinition {
+    pub key: String,
+    pub label: String,
+    pub unit: String,
+    pub default: super::execution_limits::Bound,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct ExecutionLimitSnapshot {
+    pub overrides: BTreeMap<String, super::execution_limits::Bound>,
+    pub effective: BTreeMap<String, super::execution_limits::Bound>,
+    pub sources: BTreeMap<String, ExecutionLimitSource>,
+    pub definitions: Vec<ExecutionLimitDefinition>,
+}
+
+fn execution_limits_endpoint(
+    base_url: &Url,
+    scope: &ExecutionLimitScope,
+) -> Result<Url, UpstreamManagementError> {
+    let mut url = endpoint(base_url, "api/v1/request-execution/limits")?;
+    match scope {
+        ExecutionLimitScope::Deployment => {}
+        ExecutionLimitScope::Workspace(id) => {
+            url.query_pairs_mut().append_pair("workspace_id", id);
+        }
+        ExecutionLimitScope::Collection {
+            workspace_id,
+            collection_id,
+        } => {
+            url.query_pairs_mut()
+                .append_pair("workspace_id", workspace_id)
+                .append_pair("collection_id", collection_id);
+        }
+    }
+    Ok(url)
+}
+
+pub async fn load_execution_limits(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    scope: &ExecutionLimitScope,
+) -> Result<ExecutionLimitSnapshot, UpstreamManagementError> {
+    let response = client
+        .get(execution_limits_endpoint(base_url, scope)?)
+        .bearer_auth(bearer_token)
+        .send()
+        .await
+        .map_err(UpstreamManagementError::Transport)?;
+    parse_response(response).await
+}
+
+/// Replace only the selected layer. Missing keys inherit; zero is an explicit bound.
+pub async fn replace_execution_limits(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    scope: &ExecutionLimitScope,
+    overrides: &BTreeMap<String, super::execution_limits::Bound>,
+) -> Result<ExecutionLimitSnapshot, UpstreamManagementError> {
+    #[derive(Serialize)]
+    struct Replace<'a> {
+        overrides: &'a BTreeMap<String, super::execution_limits::Bound>,
+    }
+    let response = client
+        .put(execution_limits_endpoint(base_url, scope)?)
+        .bearer_auth(bearer_token)
+        .json(&Replace { overrides })
+        .send()
+        .await
+        .map_err(UpstreamManagementError::Transport)?;
+    parse_response(response).await
+}
+
+#[cfg(test)]
+mod execution_limit_tests {
+    use super::*;
+
+    #[test]
+    fn scope_queries_are_encoded_and_deployment_has_no_scope() {
+        let base = Url::parse("https://example.com/").unwrap();
+        let deployment =
+            execution_limits_endpoint(&base, &ExecutionLimitScope::Deployment).unwrap();
+        assert_eq!(deployment.path(), "/api/v1/request-execution/limits");
+        assert_eq!(deployment.query(), None);
+        let collection = execution_limits_endpoint(
+            &base,
+            &ExecutionLimitScope::Collection {
+                workspace_id: "workspace & one".to_owned(),
+                collection_id: "collection/two".to_owned(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            collection.query_pairs().collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([
+                ("workspace_id".into(), "workspace & one".into()),
+                ("collection_id".into(), "collection/two".into()),
+            ]),
+        );
+    }
+
+    #[test]
+    fn server_metadata_and_explicit_bounds_are_preserved() {
+        let snapshot: ExecutionLimitSnapshot = serde_json::from_value(serde_json::json!({
+            "overrides": {
+                "future_limit": {"unlimited": false, "value": 0},
+                "another_limit": {"unlimited": true, "value": 0}
+            },
+            "effective": {"future_limit": {"unlimited": false, "value": 0}},
+            "sources": {"future_limit": {"kind": "collection", "workspace_id": "w", "collection_id": "c"}},
+            "definitions": [{
+                "key": "future_limit", "label": "A future server setting", "unit": "count",
+                "default": {"unlimited": false, "value": 12}
+            }]
+        })).unwrap();
+        assert_eq!(snapshot.definitions[0].label, "A future server setting");
+        assert_eq!(snapshot.overrides["future_limit"].value, 0);
+        assert!(!snapshot.overrides["future_limit"].unlimited);
+        assert!(snapshot.overrides["another_limit"].unlimited);
+        assert_eq!(
+            snapshot.sources["future_limit"].collection_id.as_deref(),
+            Some("c")
+        );
+        assert!(!snapshot.overrides.contains_key("inherited_limit"));
+        let encoded = serde_json::to_value(&snapshot.overrides).unwrap();
+        assert_eq!(
+            encoded["future_limit"],
+            serde_json::json!({"unlimited": false, "value": 0})
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestExecutionMode {

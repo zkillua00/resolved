@@ -7,6 +7,7 @@ import (
 
 	"resolved-server/internal/activitylog"
 	"resolved-server/internal/config"
+	"resolved-server/internal/executionlimits"
 	"resolved-server/internal/identity"
 	"resolved-server/internal/requestproxy"
 	"resolved-server/internal/security"
@@ -41,6 +42,7 @@ func MigrateAndSeed(db *gorm.DB) error {
 		&security.DataEncryptionKey{},
 		&requestproxy.SettingsRecord{},
 		&requestproxy.HostnameOverrideRecord{},
+		&executionlimits.Record{},
 		&workspaces.Workspace{},
 		&workspaces.Collection{},
 		&workspaces.SavedRequest{},

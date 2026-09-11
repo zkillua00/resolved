@@ -213,6 +213,9 @@ The tabs make their first request only when opened; older entries load through
 the cursor-based Load older changes control without displacing realtime inserts.
 
 Server workspaces use the deployment administrator's request-execution policy.
+Execution budgets support live deployment, workspace, and collection overrides
+with per-setting inheritance, explicit values, and Unlimited. See
+[Execution limits](execution-limits.md) for controls, precedence, and units.
 The safe default runs requests directly from each user's desktop. When an
 administrator enables server execution, accounts with `requests.execute` run
 the resolved HTTP exchange from that self-hosted server. In that mode, exact
@@ -675,17 +678,20 @@ and Cancel interrupts the pre-script, network request, or post-script.
 
 ### Script limits and security boundary
 
-Each invocation has these bounds:
+Both local and server-managed workspaces use
+[effective execution limits](execution-limits.md), with application/deployment,
+workspace, and collection overrides. Explicit zero and Unlimited retain their
+distinct meanings. The following values are defaults, not fixed ceilings:
 
 - 30-second execution deadline. Each script phase — pre-request, post-response,
   and every chained
   request's own scripts — plus the full-awaited-chain execution, is bounded by
-  this per-phase budget. A built-in floor of 1 ms keeps a mistyped `0` from
-  timing everything out instantly.
+  this per-phase budget. An explicitly configured zero timeout allows no
+  execution time; use Unlimited to disable the budget.
 - 32 MiB engine heap and 256 KiB engine stack
 - 256 KiB script source
 - 5 MiB script-visible request or response body
-- 64 MiB hard cap for the response buffered by the app
+- 64 MiB buffered response allowance
 - 100 console entries totaling at most 64 KiB
 - 8 MiB serialized result
 

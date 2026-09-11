@@ -76,18 +76,16 @@ use crate::{
         create_upstream_saved_request, create_upstream_workspace, delete_shared_history,
         delete_upstream_collection, delete_upstream_environment,
         delete_upstream_environment_variable, delete_upstream_saved_request,
-        delete_upstream_workspace, export_request,
-        format_body, generate_snippet, get_upstream_execution_policy, get_upstream_user,
-        get_upstream_workspace, import_requests, is_probably_text, list_upstream_environments,
-        list_upstream_workspaces, login_upstream, move_upstream_collection,
-        move_upstream_saved_request, normalize_upstream_url,
+        delete_upstream_workspace, export_request, format_body, generate_snippet,
+        get_upstream_user, get_upstream_workspace, import_requests, is_probably_text,
+        list_upstream_environments, list_upstream_workspaces, login_upstream,
+        move_upstream_collection, move_upstream_saved_request, normalize_upstream_url,
         put_upstream_environment_variable_value, query_params_from_url, render_message_template,
-        resolve_request, run_upstream_websocket_session, run_websocket_session,
-        save_upstream_environment, send_request_for_upstream_workspace, spawn_request,
-        template_variable_names, update_request_execution_settings, update_upstream_collection,
-        update_upstream_environment, update_upstream_environment_variable,
-        update_upstream_saved_request, update_upstream_workspace, upload_shared_history,
-        url_with_query_params, validate_automation_module_name, watch_upstream_changes,
+        resolve_request, save_upstream_environment, template_variable_names,
+        update_request_execution_settings, update_upstream_collection, update_upstream_environment,
+        update_upstream_environment_variable, update_upstream_saved_request,
+        update_upstream_workspace, upload_shared_history, url_with_query_params,
+        validate_automation_module_name, watch_upstream_changes,
     },
     debug_overlay::DebugOverlay,
     request_dirty::{RequestDirtyPart, RequestDirtyState},
@@ -125,6 +123,7 @@ mod execution;
 mod execution_stage;
 mod headers_editor;
 mod history_page;
+mod local_execution_limits;
 mod navigation_rail;
 mod pane_editor;
 mod pane_tree;
@@ -285,6 +284,8 @@ pub struct ApiTester {
     sending: bool,
     execution_stage: Option<ExecutionStage>,
     request_generation: u64,
+    prepared_execution: Option<execution::PreparedExecution>,
+    local_execution_limit_editor: Option<local_execution_limits::LocalExecutionLimitEditor>,
     mcp_http_operation_id: Option<u64>,
     mcp_http_request_id: Option<String>,
     mcp_http_exchange: Option<control::McpHttpExchangeSnapshot>,

@@ -66,8 +66,9 @@ root key makes encrypted server content unreadable.
 
 The safe default listen address is `127.0.0.1:8787`. Put the service behind a
 TLS reverse proxy before exposing it to a network, and forward WebSocket
-upgrades for `/api/v1/ws`. Request execution may remain open for 60 seconds, so
-proxy timeouts must accommodate that boundary.
+upgrades for `/api/v1/ws`. Request execution defaults to a 60-second timeout,
+but operators can increase or disable it at runtime. Reverse-proxy timeouts
+and upload limits must accommodate the configured execution policy.
 
 Run one server process for a deployment. Sessions, derived environment keys,
 login rate limits, and realtime delivery include process-local state; starting
@@ -271,8 +272,12 @@ Every redirect is checked as a new destination. An administrator with
 its hostname/IP from the desktop's blocking notification; those encrypted
 allowlist entries apply to future executions. An exact hostname override is
 also an explicit exception for its configured private destination. Proxied
-target requests time out after 60 seconds, and request and response bodies are
-each limited to 64 MiB.
+target requests default to 60 seconds and 64 MiB request/response bodies.
+These are runtime-configurable defaults, not fixed ceilings: deployment,
+workspace, and collection settings support per-limit inheritance, explicit
+values, and Unlimited. The nearest explicit override wins. See
+[Execution limits](../docs/execution-limits.md) for controls, API, units, and
+scope permissions.
 
 ## Backup and upgrades
 

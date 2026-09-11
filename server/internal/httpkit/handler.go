@@ -1,6 +1,8 @@
 package httpkit
 
 import (
+	"errors"
+
 	"resolved-server/internal/problem"
 
 	"github.com/gofiber/fiber/v3"
@@ -15,6 +17,16 @@ func WithProcessedPayload[
 	return func(c fiber.Ctx) error {
 		var request RequestPointer = RequestPointer(new(RequestType))
 		if err := request.BindFiber(c); err != nil {
+			// Explicit policy/validation errors must survive binding. Keep raw
+			// parser errors generic so request contents are never echoed back.
+			var policyError *problem.Error
+			var transportError *fiber.Error
+			if errors.As(err, &policyError) ||
+				(errors.As(err, &transportError) &&
+					(transportError.Code == fiber.StatusRequestEntityTooLarge ||
+						transportError.Code == fiber.StatusUnsupportedMediaType)) {
+				return sendResponse[ReturnType](c, NewErrorResponse[ReturnType](err))
+			}
 			return sendResponse[ReturnType](c, NewErrorResponse[ReturnType](
 				problem.New(problem.KindBadRequest, "invalid_body", "request body is invalid"),
 			))

@@ -82,9 +82,11 @@ in the WebSocket console. Automation pauses during replay. Edits to automation
 files and the enable switch also apply to already-open MCP connections; a
 changed configuration discards pending results from its previous configuration.
 
-The sandbox uses the configured script timeout, 32 MiB of JavaScript memory, and a
-256 KiB stack. A workspace supports up to 64 imported modules and 1 MiB of
-combined source. Language-service requests support up to 256 KiB per buffer.
+The sandbox uses the connection scope's [execution limits](execution-limits.md).
+Defaults are a 30-second script timeout, 32 MiB JavaScript memory, a 256 KiB stack,
+64 imported modules, and 1 MiB combined source. These runtime budgets support
+inherited overrides and Unlimited in local and server-managed workspaces.
+Language-service requests separately support up to 256 KiB per buffer.
 
 ## Reconnecting
 

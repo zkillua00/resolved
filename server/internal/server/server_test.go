@@ -20,6 +20,7 @@ import (
 	"resolved-server/internal/auth"
 	"resolved-server/internal/config"
 	"resolved-server/internal/database"
+	"resolved-server/internal/executionlimits"
 	"resolved-server/internal/identity"
 	"resolved-server/internal/realtime"
 	"resolved-server/internal/requestproxy"
@@ -1828,6 +1829,7 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, *gorm.DB, func()) 
 		),
 		server.WithWorkspaces(authService, workspaces.NewHandler(workspacesService)),
 		server.WithRequestProxy(authService, requestProxyHandler),
+		server.WithExecutionLimits(authService, executionlimits.NewHandler(executionlimits.NewProvider(db), recordedEvents)),
 		server.WithSharedHistory(authService, sharedHistoryHandler),
 		server.WithActivityLogs(authService, activityHandler),
 		server.WithRealtime(authService, realtimePublisher),
