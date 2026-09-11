@@ -162,9 +162,13 @@ the target connection and returns the buffered response. A server without the
 policy endpoint is treated as `local` for compatibility.
 
 Server administrators with `server_settings.read` and
-`server_settings.update` manage this policy and its exact hostname overrides in
-the Request proxy workspace. In server mode, an override maps the hostname in a
-request URL to another hostname or IP. An IP target is DNS-style: only the dial
+`server_settings.update` manage this policy in the Request proxy workspace.
+Exact hostname overrides live in proxies — named rule sets managed with the
+`proxies.*` permissions and assigned server-wide or to one workspace,
+collection, or saved request. Executions resolve overrides most specific scope
+first, and users or roles excluded from a proxy fall through to the next scope
+as if that proxy did not exist. In server mode, an override maps the hostname
+in a request URL to another hostname or IP. An IP target is DNS-style: only the dial
 destination changes, while the requested HTTP Host and HTTPS SNI stay intact. A
 hostname target becomes the outgoing URL hostname, HTTP Host, and HTTPS SNI.
 Targets may include an `http://` or `https://` prefix. A target scheme becomes
@@ -175,7 +179,7 @@ targets cannot define a port or path.
 Without an exact administrator-configured override, the server rejects
 loopback, link-local, private, carrier-grade NAT, unspecified, and multicast
 destinations. Hostname overrides are therefore the explicit mechanism for
-allowing a private origin; grant server-settings permissions accordingly.
+allowing a private origin; grant proxy-management permissions accordingly.
 
 Pre-request and post-response scripts, variable resolution, response rendering,
 and the full local history flow remain on the desktop in both modes. After a

@@ -9,14 +9,19 @@ use gpui_component::switch::Switch;
 use zeroize::Zeroizing;
 
 use crate::core::{
-    COLLECTIONS_ASSIGN_USERS, HISTORY_READ_OTHERS, ManagementRole, ManagementUser,
-    ROLES_ASSIGN_PERMISSIONS, ROLES_CREATE, ROLES_UPDATE, SharedHistoryEntry,
+    COLLECTIONS_ASSIGN_USERS, HISTORY_READ_OTHERS, ManagementProxy, ManagementRole,
+    ManagementUser, PROXIES_ASSIGN, PROXIES_CREATE, PROXIES_DELETE, PROXIES_UPDATE,
+    ProxyAssignment, ProxyScopeKind, ROLES_ASSIGN_PERMISSIONS, ROLES_CREATE, ROLES_UPDATE,
+    SharedHistoryEntry,
     SharedHistoryResponse, USERS_ASSIGN_ROLES, USERS_CREATE, USERS_UPDATE, UpstreamCollectionView,
     UpstreamManagementSnapshot, UpstreamSavedRequestView, UpstreamUserSummary,
-    UpstreamWorkspaceView, WORKSPACES_ASSIGN_USERS, create_management_role, create_management_user,
-    list_shared_history, load_upstream_management, replace_management_collection_users,
+    UpstreamWorkspaceView, WORKSPACES_ASSIGN_USERS, create_management_proxy,
+    create_management_role, create_management_user, delete_management_proxy, list_shared_history,
+    load_upstream_management, replace_management_collection_users,
+    replace_management_proxy_assignments, replace_management_proxy_exclusions,
     replace_management_role_permissions, replace_management_user_roles,
-    replace_management_workspace_users, update_management_role, update_management_user,
+    replace_management_workspace_users, update_management_proxy, update_management_role,
+    update_management_user,
 };
 
 use super::*;
@@ -141,6 +146,10 @@ pub(super) struct ServerManagementState {
     role_permission_drafts: BTreeMap<String, RolePermissionDraft>,
     selected_resource: Option<ManagementResourceSelection>,
     realtime_refresh_pending: bool,
+    /// Proxy IDs whose assignment editor is expanded on the request-proxy page.
+    pub(super) expanded_proxy_assignments: BTreeSet<String>,
+    /// Proxy IDs whose exclusion editor is expanded on the request-proxy page.
+    pub(super) expanded_proxy_exclusions: BTreeSet<String>,
     execution_limits: execution_limit_views::ExecutionLimitState,
 }
 
@@ -164,6 +173,8 @@ impl Default for ServerManagementState {
             role_permission_drafts: BTreeMap::new(),
             selected_resource: None,
             realtime_refresh_pending: false,
+            expanded_proxy_assignments: BTreeSet::new(),
+            expanded_proxy_exclusions: BTreeSet::new(),
             execution_limits: execution_limit_views::ExecutionLimitState::default(),
         }
     }
@@ -380,6 +391,29 @@ enum ManagementMutation {
     UpdateRequestExecutionSettings {
         settings: RequestExecutionSettings,
     },
+    CreateProxy {
+        name: String,
+    },
+    RenameProxy {
+        proxy_id: String,
+        name: String,
+    },
+    UpdateProxyRules {
+        proxy_id: String,
+        rules: Vec<HostnameOverride>,
+    },
+    DeleteProxy {
+        proxy_id: String,
+    },
+    ReplaceProxyAssignments {
+        proxy_id: String,
+        assignments: Vec<ProxyAssignment>,
+    },
+    ReplaceProxyExclusions {
+        proxy_id: String,
+        excluded_user_ids: Vec<String>,
+        excluded_role_ids: Vec<String>,
+    },
 }
 
 impl ManagementMutation {
@@ -525,6 +559,76 @@ impl ManagementMutation {
                         "Requests from server workspaces will run from this server.".to_owned()
                     }
                 })
+            }
+            Self::CreateProxy { name } => {
+                let proxy = create_management_proxy(client, base_url, bearer_token, &name, &[])
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok(format!("Created proxy {}.", proxy.name))
+            }
+            Self::RenameProxy { proxy_id, name } => {
+                let proxy = update_management_proxy(
+                    client,
+                    base_url,
+                    bearer_token,
+                    &proxy_id,
+                    Some(&name),
+                    None,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                Ok(format!("Renamed proxy to {}.", proxy.name))
+            }
+            Self::UpdateProxyRules { proxy_id, rules } => {
+                let proxy = update_management_proxy(
+                    client,
+                    base_url,
+                    bearer_token,
+                    &proxy_id,
+                    None,
+                    Some(&rules),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                Ok(format!("Updated rules for {}.", proxy.name))
+            }
+            Self::DeleteProxy { proxy_id } => {
+                let proxy = delete_management_proxy(client, base_url, bearer_token, &proxy_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok(format!("Deleted proxy {}.", proxy.name))
+            }
+            Self::ReplaceProxyAssignments {
+                proxy_id,
+                assignments,
+            } => {
+                let proxy = replace_management_proxy_assignments(
+                    client,
+                    base_url,
+                    bearer_token,
+                    &proxy_id,
+                    &assignments,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                Ok(format!("Updated assignments for {}.", proxy.name))
+            }
+            Self::ReplaceProxyExclusions {
+                proxy_id,
+                excluded_user_ids,
+                excluded_role_ids,
+            } => {
+                let proxy = replace_management_proxy_exclusions(
+                    client,
+                    base_url,
+                    bearer_token,
+                    &proxy_id,
+                    &excluded_user_ids,
+                    &excluded_role_ids,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                Ok(format!("Updated exclusions for {}.", proxy.name))
             }
         }
     }
@@ -1390,8 +1494,128 @@ impl ApiTester {
         name.read(cx).focus_handle(cx).focus(window);
     }
 
-    fn open_hostname_override_dialog(
+    fn management_proxy(&self, proxy_id: &str) -> Option<&ManagementProxy> {
+        self.server_management
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.proxies.as_ref())
+            .and_then(|proxies| proxies.iter().find(|proxy| proxy.id == proxy_id))
+    }
+
+    fn open_proxy_name_dialog(
         &mut self,
+        existing: Option<ManagementProxy>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = cx.new(|cx| {
+            let input = InputState::new(window, cx).placeholder("Internal routing");
+            if let Some(existing) = existing.as_ref() {
+                input.default_value(existing.name.clone())
+            } else {
+                input
+            }
+        });
+        let proxy_id = existing.as_ref().map(|proxy| proxy.id.clone());
+        let title = if existing.is_some() {
+            "Rename proxy"
+        } else {
+            "New proxy"
+        };
+        let this = cx.entity().downgrade();
+        let dialog_name = name.clone();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let save_this = this.clone();
+            let save_name = dialog_name.clone();
+            let save_proxy_id = proxy_id.clone();
+            dialog
+                .title(title)
+                .w(px(440.))
+                .confirm()
+                .button_props(DialogButtonProps::default().ok_text("Save proxy"))
+                .on_ok(move |_, window, cx| {
+                    let name = save_name.read(cx).value().trim().to_owned();
+                    if name.is_empty() {
+                        return false;
+                    }
+                    if let Some(this) = save_this.upgrade() {
+                        this.update(cx, |this, cx| {
+                            let mutation = match save_proxy_id.clone() {
+                                Some(proxy_id) => {
+                                    ManagementMutation::RenameProxy { proxy_id, name }
+                                }
+                                None => ManagementMutation::CreateProxy { name },
+                            };
+                            this.run_management_mutation(mutation, window, cx);
+                        });
+                    }
+                    true
+                })
+                .child(
+                    v_flex()
+                        .gap_4()
+                        .child(management_dialog_field("PROXY NAME", Input::new(&dialog_name)))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(
+                                    "A proxy is a named set of host override rules. It only takes effect where it is assigned: server-wide, or to a workspace, collection, or request.",
+                                ),
+                        ),
+                )
+        });
+        name.read(cx).focus_handle(cx).focus(window);
+    }
+
+    fn request_delete_proxy(
+        &mut self,
+        proxy_id: String,
+        proxy_name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let this = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let delete_this = this.clone();
+            let delete_proxy_id = proxy_id.clone();
+            dialog
+                .title("Delete proxy?")
+                .w(px(440.))
+                .confirm()
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Delete proxy")
+                        .ok_variant(ButtonVariant::Danger),
+                )
+                .on_ok(move |_, window, cx| {
+                    if let Some(this) = delete_this.upgrade() {
+                        this.update(cx, |this, cx| {
+                            this.run_management_mutation(
+                                ManagementMutation::DeleteProxy {
+                                    proxy_id: delete_proxy_id.clone(),
+                                },
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                    true
+                })
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!(
+                            "‘{proxy_name}’ and its rules, assignments, and exclusions will be removed. Hostnames it covered return to normal DNS resolution."
+                        )),
+                )
+        });
+    }
+
+    fn open_proxy_rule_dialog(
+        &mut self,
+        proxy_id: String,
         existing: Option<HostnameOverride>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1415,9 +1639,9 @@ impl ApiTester {
         });
         let original_hostname = existing.as_ref().map(|entry| entry.hostname.clone());
         let title = if existing.is_some() {
-            "Edit hostname override"
+            "Edit host override rule"
         } else {
-            "New hostname override"
+            "New host override rule"
         };
         let this = cx.entity().downgrade();
         let dialog_hostname = hostname.clone();
@@ -1427,11 +1651,12 @@ impl ApiTester {
             let save_hostname = dialog_hostname.clone();
             let save_target = dialog_target.clone();
             let save_original = original_hostname.clone();
+            let save_proxy_id = proxy_id.clone();
             dialog
                 .title(title)
                 .w(px(480.))
                 .confirm()
-                .button_props(DialogButtonProps::default().ok_text("Save override"))
+                .button_props(DialogButtonProps::default().ok_text("Save rule"))
                 .on_ok(move |_, window, cx| {
                     let hostname = save_hostname.read(cx).value().trim().to_owned();
                     let target = save_target.read(cx).value().trim().to_owned();
@@ -1440,25 +1665,22 @@ impl ApiTester {
                     }
                     if let Some(this) = save_this.upgrade() {
                         this.update(cx, |this, cx| {
-                            let Some(mut settings) = this
-                                .server_management
-                                .snapshot
-                                .as_ref()
-                                .and_then(|snapshot| snapshot.request_execution_settings.clone())
-                            else {
+                            let Some(proxy) = this.management_proxy(&save_proxy_id) else {
                                 return;
                             };
+                            let mut rules = proxy.rules.clone();
                             if let Some(original) = save_original.as_deref() {
-                                settings
-                                    .hostname_overrides
-                                    .retain(|entry| entry.hostname != original);
+                                rules.retain(|entry| entry.hostname != original);
                             }
-                            settings.hostname_overrides.push(HostnameOverride {
+                            rules.push(HostnameOverride {
                                 hostname: hostname.clone(),
                                 target: target.clone(),
                             });
                             this.run_management_mutation(
-                                ManagementMutation::UpdateRequestExecutionSettings { settings },
+                                ManagementMutation::UpdateProxyRules {
+                                    proxy_id: save_proxy_id.clone(),
+                                    rules,
+                                },
                                 window,
                                 cx,
                             );
@@ -1490,8 +1712,9 @@ impl ApiTester {
         hostname.read(cx).focus_handle(cx).focus(window);
     }
 
-    fn request_delete_hostname_override(
+    fn request_delete_proxy_rule(
         &mut self,
+        proxy_id: String,
         hostname: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1499,32 +1722,30 @@ impl ApiTester {
         let this = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, cx| {
             let delete_this = this.clone();
+            let delete_proxy_id = proxy_id.clone();
             let delete_hostname = hostname.clone();
             dialog
-                .title("Delete hostname override?")
+                .title("Delete host override rule?")
                 .w(px(440.))
                 .confirm()
                 .button_props(
                     DialogButtonProps::default()
-                        .ok_text("Delete override")
+                        .ok_text("Delete rule")
                         .ok_variant(ButtonVariant::Danger),
                 )
                 .on_ok(move |_, window, cx| {
                     if let Some(this) = delete_this.upgrade() {
                         this.update(cx, |this, cx| {
-                            let Some(mut settings) = this
-                                .server_management
-                                .snapshot
-                                .as_ref()
-                                .and_then(|snapshot| snapshot.request_execution_settings.clone())
-                            else {
+                            let Some(proxy) = this.management_proxy(&delete_proxy_id) else {
                                 return;
                             };
-                            settings
-                                .hostname_overrides
-                                .retain(|entry| entry.hostname != delete_hostname);
+                            let mut rules = proxy.rules.clone();
+                            rules.retain(|entry| entry.hostname != delete_hostname);
                             this.run_management_mutation(
-                                ManagementMutation::UpdateRequestExecutionSettings { settings },
+                                ManagementMutation::UpdateProxyRules {
+                                    proxy_id: delete_proxy_id.clone(),
+                                    rules,
+                                },
                                 window,
                                 cx,
                             );
@@ -1537,10 +1758,26 @@ impl ApiTester {
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
                         .child(format!(
-                            "Requests to ‘{hostname}’ will return to normal DNS resolution."
+                            "Requests to ‘{hostname}’ will fall through to less specific proxies or normal DNS resolution."
                         )),
                 )
         });
+    }
+
+    pub(super) fn toggle_proxy_assignments_editor(&mut self, proxy_id: &str, cx: &mut Context<Self>) {
+        let expanded = &mut self.server_management.expanded_proxy_assignments;
+        if !expanded.remove(proxy_id) {
+            expanded.insert(proxy_id.to_owned());
+        }
+        cx.notify();
+    }
+
+    pub(super) fn toggle_proxy_exclusions_editor(&mut self, proxy_id: &str, cx: &mut Context<Self>) {
+        let expanded = &mut self.server_management.expanded_proxy_exclusions;
+        if !expanded.remove(proxy_id) {
+            expanded.insert(proxy_id.to_owned());
+        }
+        cx.notify();
     }
 }
 

@@ -75,6 +75,8 @@ pub(super) struct PreparedExecution {
 pub(super) struct PreparedUpstreamExecution {
     pub(super) target: workspace_connections::ActiveUpstreamWorkspace,
     pub(super) credential: Arc<crate::core::UpstreamCredential>,
+    /// Saved identity for proxy assignments, captured before scripts or tab changes.
+    pub(super) saved_request_id: Option<String>,
     pub(super) collection_id: Option<String>,
     pub(super) policy: crate::core::ProxyExecutionPolicy,
 }
@@ -112,6 +114,7 @@ impl PreparedExecution {
                     &upstream.target.base_url,
                     upstream.credential.bearer_token(),
                     &upstream.target.workspace_id,
+                    upstream.saved_request_id.as_deref(),
                     request,
                     cookie_jar,
                     upstream.collection_id.as_deref(),
@@ -134,6 +137,7 @@ impl ApiTester {
     ) -> impl std::future::Future<Output = Result<PreparedExecution, String>> + Send + 'static + use<>
     {
         let collection_id = request_collection_scope(&self.workspace, request_id);
+        let saved_request_id = request_id.map(str::to_owned);
         let provider_key = self.workspace_providers.active_id().to_string();
         let local = match self.workspace_providers.active_id() {
             WorkspaceProviderId::Local(_) => {
@@ -181,6 +185,7 @@ impl ApiTester {
                 upstream: Some(PreparedUpstreamExecution {
                     target,
                     credential: Arc::new(credential),
+                    saved_request_id,
                     collection_id,
                     policy,
                 }),
@@ -1469,6 +1474,7 @@ impl crate::core::ChainExecutor for InlineChainRunner {
         >,
     > {
         let collection_id = request_collection_scope(&self.workspace, Some(request_id));
+        let saved_request_id = request_id.to_owned();
         let local_limits = self.local_limits.get(request_id).cloned();
         Box::pin(async move {
             let collection_id = collection_id.map_err(RequestError::Upstream)?;
@@ -1514,6 +1520,7 @@ impl crate::core::ChainExecutor for InlineChainRunner {
                         upstream: Some(PreparedUpstreamExecution {
                             target,
                             credential: Arc::new(credential),
+                            saved_request_id: Some(saved_request_id),
                             collection_id,
                             policy,
                         }),

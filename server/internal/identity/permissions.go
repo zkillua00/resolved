@@ -37,6 +37,12 @@ const (
 	PermissionServerSettingsRead   = "server_settings.read"
 	PermissionServerSettingsUpdate = "server_settings.update"
 
+	PermissionProxiesRead   = "proxies.read"
+	PermissionProxiesCreate = "proxies.create"
+	PermissionProxiesUpdate = "proxies.update"
+	PermissionProxiesDelete = "proxies.delete"
+	PermissionProxiesAssign = "proxies.assign"
+
 	PermissionEnvironmentsRead        = "environments.read"
 	PermissionEnvironmentsCreate      = "environments.create"
 	PermissionEnvironmentsUpdate      = "environments.update"
@@ -71,8 +77,13 @@ var permissionCatalog = []Permission{
 	{Key: PermissionRequestsExecute, Description: "Run requests from accessible workspaces through this server"},
 	{Key: PermissionHistoryReadOthers, Description: "View other users' shared request history in accessible workspaces"},
 	{Key: PermissionAuditRead, Description: "View the user and role audit log"},
-	{Key: PermissionServerSettingsRead, Description: "View server request execution and hostname override settings"},
-	{Key: PermissionServerSettingsUpdate, Description: "Update server request execution, hostname overrides, and destination allowlist"},
+	{Key: PermissionServerSettingsRead, Description: "View server request execution settings and the destination allowlist"},
+	{Key: PermissionServerSettingsUpdate, Description: "Update server request execution settings and the destination allowlist"},
+	{Key: PermissionProxiesRead, Description: "View proxies, their host override rules, assignments, and exclusions"},
+	{Key: PermissionProxiesCreate, Description: "Create proxies"},
+	{Key: PermissionProxiesUpdate, Description: "Update proxy names and host override rules"},
+	{Key: PermissionProxiesDelete, Description: "Delete proxies"},
+	{Key: PermissionProxiesAssign, Description: "Replace proxy scope assignments and user or role exclusions"},
 	{Key: PermissionEnvironmentsRead, Description: "View workspace environment definitions and the account's own values"},
 	{Key: PermissionEnvironmentsCreate, Description: "Create environments within directly accessible workspaces"},
 	{Key: PermissionEnvironmentsUpdate, Description: "Update environment names and shared variable definitions"},

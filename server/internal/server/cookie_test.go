@@ -89,7 +89,9 @@ func TestServerExecutionPersistsRedirectCookiesWithoutSharingClients(t *testing.
 	}))
 	defer target.Close()
 	port := target.Listener.Addr().(*net.TCPAddr).Port
-	request[requestproxy.Settings](t, app, http.MethodPut, "/api/v1/request-execution/settings", token, map[string]any{"mode": "server", "hostname_overrides": []map[string]string{{"hostname": "cookie.internal", "target": "127.0.0.1"}}}, fiber.StatusOK)
+	request[requestproxy.Settings](t, app, http.MethodPut, "/api/v1/request-execution/settings", token, map[string]any{"mode": "server"}, fiber.StatusOK)
+	cookieProxy := request[requestproxy.Proxy](t, app, http.MethodPost, "/api/v1/proxies", token, map[string]any{"name": "Cookie routing", "rules": []map[string]string{{"hostname": "cookie.internal", "target": "127.0.0.1"}}}, fiber.StatusCreated).Data
+	request[requestproxy.Proxy](t, app, http.MethodPut, "/api/v1/proxies/"+cookieProxy.ID+"/assignments", token, map[string]any{"assignments": []map[string]string{{"scope_kind": "server"}}}, fiber.StatusOK)
 	execute := func(path string, headers []map[string]string, useJar bool) {
 		request[requestproxy.ExecuteResult](t, app, http.MethodPost, "/api/v1/workspaces/"+workspace.ID+"/execute", token, map[string]any{"method": "GET", "url": fmt.Sprintf("http://cookie.internal:%d%s", port, path), "headers": headers, "body": map[string]any{"mode": "none"}, "use_cookie_jar": useJar}, fiber.StatusOK)
 	}

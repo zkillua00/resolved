@@ -219,7 +219,11 @@ with per-setting inheritance, explicit values, and Unlimited. See
 The safe default runs requests directly from each user's desktop. When an
 administrator enables server execution, accounts with `requests.execute` run
 the resolved HTTP exchange from that self-hosted server. In that mode, exact
-hostname overrides can connect an origin hostname to another hostname or IP. An
+hostname overrides can connect an origin hostname to another hostname or IP.
+Overrides are grouped into named proxies that administrators assign server-wide
+or to one workspace, collection, or saved request; the most specific assigned
+proxy wins per hostname, and users or roles excluded from a proxy fall through
+to the next scope. An
 IP target behaves like DNS and preserves the requested HTTP Host and HTTPS SNI;
 a hostname target becomes the outgoing HTTP Host and HTTPS SNI. A target may be
 prefixed with `http://` or `https://`; that scheme becomes the outgoing scheme

@@ -245,9 +245,14 @@ currently visible collection subtrees.
 
 Request execution defaults to `local`, so selecting a server workspace does not
 automatically move target traffic onto the server. Administrators with
-`server_settings.read` and `server_settings.update` can enable `server` mode and
-manage exact hostname overrides through the desktop's Request proxy workspace.
-The policy is deployment-wide and persisted in the collaboration database.
+`server_settings.read` and `server_settings.update` can enable `server` mode
+through the desktop's Request proxy workspace. Exact hostname overrides live in
+proxies: named rule sets managed with the `proxies.*` permissions and assigned
+server-wide or to one workspace, collection, or saved request. Executions
+resolve overrides most specific scope first, and users or roles excluded from a
+proxy fall through to the next scope. The policy is deployment-wide and
+persisted in the collaboration database; pre-existing overrides migrate into a
+"Server default" proxy at startup.
 
 In `server` mode, `POST /api/v1/workspaces/{workspace_id}/execute` runs an HTTP
 request from the Resolved server and returns the buffered target response. It
@@ -261,9 +266,21 @@ original port is preserved in both cases, and override targets cannot define a
 port or path. Request definitions, headers, bodies, uploaded multipart file
 bytes, and responses are not persisted by the execution endpoint. The Resolved
 bearer token authenticates the outer server call and is never forwarded
-automatically. Each execution emits a metadata-only `request_execution`
-WebSocket event to connections with `audit.read`; server-setting changes emit
-`server_settings` events to connections with `server_settings.read`.
+automatically. An optional `request_id` in the execution payload names the
+saved request being run so request- and collection-scoped proxies can apply; it
+must reference a saved request the caller can access in that workspace. Each
+execution emits a metadata-only `request_execution` WebSocket event to
+connections with `audit.read`; server-setting changes emit `server_settings`
+events to connections with `server_settings.read`, and proxy changes emit
+`proxy` events to connections with `proxies.read`.
+
+Proxies are managed under `/api/v1/proxies`: list (`GET`, `proxies.read`),
+create (`POST`, `proxies.create`), rename or replace rules (`PATCH
+/proxies/{proxy_id}`, `proxies.update`), delete (`DELETE /proxies/{proxy_id}`,
+`proxies.delete`), and replace assignments or exclusions (`PUT
+/proxies/{proxy_id}/assignments` and `PUT /proxies/{proxy_id}/exclusions`,
+both `proxies.assign`). A scope node carries at most one proxy; assigning a
+taken scope returns `proxy_scope_taken`.
 
 Grant `requests.execute` carefully. By default the proxy rejects loopback,
 link-local, private, carrier-grade NAT, unspecified, and multicast addresses.

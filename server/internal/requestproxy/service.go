@@ -35,6 +35,7 @@ const (
 type Service struct {
 	workspaces *workspaces.Service
 	settings   *SettingsRepository
+	proxies    *ProxyRepository
 	client     *http.Client
 	events     resourceevents.Emitter
 	limits     *executionlimits.Provider
@@ -51,13 +52,17 @@ func WithEvents(events resourceevents.Emitter) ServiceOption {
 type ExecuteInput struct {
 	CollectionID string
 	UseCookieJar bool
-	Method       string
-	URL          string
-	Headers      []Header
-	Body         proxybody.Body
+	// RequestID optionally names the saved request being executed so proxy
+	// resolution can apply request- and collection-scoped proxies.
+	RequestID string
+	Method    string
+	URL       string
+	Headers   []Header
+	Body      proxybody.Body
 }
 
 type WebSocketOpenInput struct {
+	RequestID    string   `json:"request_id"`
 	CollectionID string   `json:"collection_id,omitempty"`
 	URL          string   `json:"url"`
 	Headers      []Header `json:"headers"`
@@ -99,12 +104,14 @@ func (e *blockedDestinationError) Error() string {
 func NewService(
 	workspaceService *workspaces.Service,
 	settingsRepository *SettingsRepository,
+	proxyRepository *ProxyRepository,
 	options ...ServiceOption,
 ) *Service {
 	transport := transportWithHostnameOverrides(http.DefaultTransport.(*http.Transport))
 	service := &Service{
 		workspaces: workspaceService,
 		settings:   settingsRepository,
+		proxies:    proxyRepository,
 		limits:     executionlimits.NewProvider(settingsRepository.db),
 		client: &http.Client{
 			Transport: transport,
@@ -273,11 +280,6 @@ func (s *Service) UpdateSettings(
 		},
 		Diffs: []resourceevents.Diff{
 			{Field: "mode", From: before.Mode, To: updated.Mode},
-			{
-				Field: "hostname_override_count",
-				From:  len(before.HostnameOverrides),
-				To:    len(updated.HostnameOverrides),
-			},
 		},
 	})
 	return updated, nil
@@ -308,6 +310,10 @@ func (s *Service) Execute(
 	workspaceID string,
 	input ExecuteInput,
 ) (ExecuteResult, error) {
+	workspace, err := s.workspaces.Get(ctx, actor, workspaceID)
+	if err != nil {
+		return ExecuteResult{}, err
+	}
 	snapshot, err := s.resolveLimits(ctx, actor, workspaceID, input.CollectionID)
 	if err != nil {
 		return ExecuteResult{}, err
@@ -329,7 +335,10 @@ func (s *Service) Execute(
 		)
 	}
 
-	overrides := settings.overrideMap()
+	overrides, err := s.effectiveOverrides(ctx, actor, workspace, input.RequestID)
+	if err != nil {
+		return ExecuteResult{}, err
+	}
 	allowlistedRequests, allowlistedAddresses := settings.allowlistMaps()
 	target, err := resolveRequestURL(input.URL, overrides)
 	if err != nil {
@@ -479,6 +488,10 @@ func (s *Service) OpenWebSocket(
 	workspaceID string,
 	input WebSocketOpenInput,
 ) (*gorillaWebsocket.Conn, *url.URL, error) {
+	workspace, err := s.workspaces.Get(ctx, actor, workspaceID)
+	if err != nil {
+		return nil, nil, err
+	}
 	snapshot, err := s.resolveLimits(ctx, actor, workspaceID, input.CollectionID)
 	if err != nil {
 		return nil, nil, err
@@ -510,7 +523,10 @@ func (s *Service) OpenWebSocket(
 	originalTarget := *target
 	originalTarget.Fragment = ""
 
-	overrides := settings.overrideMap()
+	overrides, err := s.effectiveOverrides(ctx, actor, workspace, input.RequestID)
+	if err != nil {
+		return nil, nil, err
+	}
 	allowlistedRequests, allowlistedAddresses := settings.allowlistMaps()
 	if ip := net.ParseIP(target.Hostname()); ip != nil {
 		if _, overridden := overrides[normalizedHostname(target.Hostname())]; !overridden {
@@ -625,6 +641,64 @@ func applyWebSocketHostnameOriginOverride(request *http.Request) {
 	}
 	request.Host = request.URL.Host
 	markProxyBypass(request, target.Host)
+}
+
+// effectiveOverrides resolves the hostname overrides for one execution by
+// walking the proxy scope chain from the most specific assigned scope to the
+// server-wide scope. The workspace aggregate is already scoped to the actor,
+// so a request the actor cannot see cannot pull in its proxies either.
+func (s *Service) effectiveOverrides(
+	ctx context.Context,
+	actor workspaces.Actor,
+	workspace workspaces.Workspace,
+	requestID string,
+) (map[string]hostnameOverrideTarget, error) {
+	chain, err := proxyScopeChain(workspace, requestID)
+	if err != nil {
+		return nil, err
+	}
+	if s.proxies == nil {
+		return map[string]hostnameOverrideTarget{}, nil
+	}
+	return s.proxies.EffectiveOverrides(ctx, chain, actor.UserID, actor.RoleIDs)
+}
+
+// proxyScopeChain orders the scopes that may carry a proxy for one execution:
+// the saved request, its collection ancestors from innermost to outermost,
+// the workspace, and finally the server-wide scope.
+func proxyScopeChain(workspace workspaces.Workspace, requestID string) ([]ProxyScopeRef, error) {
+	chain := make([]ProxyScopeRef, 0, 8)
+	if requestID != "" {
+		path, found := findRequestCollectionPath(workspace.Collections, requestID)
+		if !found {
+			return nil, invalidField("request_id", "does not reference an accessible saved request in this workspace")
+		}
+		chain = append(chain, ProxyScopeRef{Kind: ProxyScopeRequest, ID: requestID})
+		for index := len(path) - 1; index >= 0; index-- {
+			chain = append(chain, ProxyScopeRef{Kind: ProxyScopeCollection, ID: path[index]})
+		}
+	}
+	chain = append(chain,
+		ProxyScopeRef{Kind: ProxyScopeWorkspace, ID: workspace.ID},
+		ProxyScopeRef{Kind: ProxyScopeServer, ID: ""},
+	)
+	return chain, nil
+}
+
+// findRequestCollectionPath returns the collection IDs from the workspace
+// root down to the collection holding the request.
+func findRequestCollectionPath(collections []workspaces.Collection, requestID string) ([]string, bool) {
+	for _, collection := range collections {
+		for _, request := range collection.Requests {
+			if request.ID == requestID {
+				return []string{collection.ID}, true
+			}
+		}
+		if path, found := findRequestCollectionPath(collection.SubCollections, requestID); found {
+			return append([]string{collection.ID}, path...), true
+		}
+	}
+	return nil, false
 }
 
 func resolveRequestURL(value string, overrides map[string]hostnameOverrideTarget) (*url.URL, error) {

@@ -851,12 +851,14 @@ pub async fn send_request_for_upstream_workspace(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn send_request_for_upstream_workspace_with_cookies(
     upstream_client: &Client,
     local_client: &Client,
     base_url: &Url,
     bearer_token: &str,
     workspace_id: &str,
+    saved_request_id: Option<&str>,
     request: RequestDraft,
     jar: &super::CookieJar,
 ) -> Result<ResponseData, RequestError> {
@@ -874,6 +876,7 @@ pub async fn send_request_for_upstream_workspace_with_cookies(
         base_url,
         bearer_token,
         workspace_id,
+        saved_request_id,
         request,
         jar,
         None,
@@ -888,6 +891,7 @@ pub async fn send_request_for_upstream_workspace_with_scope(
     base_url: &Url,
     bearer_token: &str,
     workspace_id: &str,
+    saved_request_id: Option<&str>,
     request: RequestDraft,
     jar: &super::CookieJar,
     collection_id: Option<&str>,
@@ -917,6 +921,7 @@ pub async fn send_request_for_upstream_workspace_with_scope(
                 base_url,
                 bearer_token,
                 workspace_id,
+                saved_request_id,
                 request,
                 jar.enabled(),
                 collection_id,
@@ -938,6 +943,10 @@ struct ProxyExecuteRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     collection_id: Option<String>,
     use_cookie_jar: bool,
+    /// The saved request being executed, when known, so the server can apply
+    /// request- and collection-scoped proxies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
     method: String,
     url: String,
     headers: Vec<ProxyHeader>,
@@ -999,16 +1008,19 @@ pub async fn execute_upstream_request(
         base_url,
         bearer_token,
         workspace_id,
+        None,
         request,
         false,
     )
     .await
 }
+#[allow(clippy::too_many_arguments)]
 async fn execute_upstream_request_with_cookies(
     client: &Client,
     base_url: &Url,
     bearer_token: &str,
     workspace_id: &str,
+    saved_request_id: Option<&str>,
     request: RequestDraft,
     use_cookie_jar: bool,
 ) -> Result<ResponseData, RequestError> {
@@ -1017,6 +1029,7 @@ async fn execute_upstream_request_with_cookies(
         base_url,
         bearer_token,
         workspace_id,
+        saved_request_id,
         request,
         use_cookie_jar,
         None,
@@ -1030,6 +1043,7 @@ pub async fn execute_upstream_request_with_scope(
     base_url: &Url,
     bearer_token: &str,
     workspace_id: &str,
+    saved_request_id: Option<&str>,
     request: RequestDraft,
     use_cookie_jar: bool,
     collection_id: Option<&str>,
@@ -1037,6 +1051,7 @@ pub async fn execute_upstream_request_with_scope(
 ) -> Result<ResponseData, RequestError> {
     let mut payload = proxy_request_payload_with_limits(request, limits).await?;
     payload.use_cookie_jar = use_cookie_jar;
+    payload.request_id = saved_request_id.map(str::to_owned);
     payload.collection_id = collection_id.map(str::to_owned);
     let encoded =
         serde_json::to_vec(&payload).map_err(|error| RequestError::Upstream(error.to_string()))?;
@@ -1214,6 +1229,7 @@ async fn proxy_request_payload_with_limits(
     Ok(ProxyExecuteRequest {
         collection_id: None,
         use_cookie_jar: false,
+        request_id: None,
         method: request.method,
         url: request.url,
         headers,
@@ -2174,6 +2190,7 @@ mod tests {
         assert!(ensure_proxy_body_limit(usize::MAX, None).is_ok());
         let payload = ProxyExecuteRequest {
             collection_id: Some("nested-collection".into()),
+            request_id: Some("saved-request".into()),
             use_cookie_jar: false,
             method: "GET".into(),
             url: "https://example.com".into(),
@@ -2187,6 +2204,7 @@ mod tests {
         };
         let encoded = serde_json::to_value(payload).unwrap();
         assert_eq!(encoded["collection_id"], "nested-collection");
+        assert_eq!(encoded["request_id"], "saved-request");
     }
 
     fn upstream_creator(id: &str, display_name: &str) -> UpstreamUserSummary {
@@ -3530,6 +3548,77 @@ mod tests {
             response.content_type.as_deref(),
             Some("application/octet-stream")
         );
+    }
+
+    #[test]
+    fn execute_payload_preserves_saved_request_identity_and_omits_unsaved_identity() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for expected_id in [Some("saved-child-id"), None] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .unwrap();
+                let request = read_http_request(&mut stream);
+                let header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .unwrap();
+                let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+                assert!(
+                    headers.starts_with("POST /api/v1/workspaces/workspace-1/execute HTTP/1.1\r\n")
+                );
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request[header_end + 4..]).unwrap();
+                match expected_id {
+                    Some(id) => assert_eq!(body["request_id"], id),
+                    None => assert!(body.get("request_id").is_none()),
+                }
+                assert_eq!(body["url"], "https://target.example.test/items/42");
+                let response_body = serde_json::to_vec(&serde_json::json!({
+                    "success": true,
+                    "data": {
+                        "status": 200,
+                        "status_text": "OK",
+                        "http_version": "HTTP/1.1",
+                        "final_url": "https://target.example.test/items/42",
+                        "headers": [],
+                        "body_base64": "",
+                        "duration_micros": 1
+                    }
+                }))
+                .unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response_body.len()
+                )
+                .unwrap();
+                stream.write_all(&response_body).unwrap();
+            }
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = build_upstream_execution_client().unwrap();
+        let base_url = Url::parse(&format!("http://{address}/")).unwrap();
+        for saved_id in [Some("saved-child-id"), None] {
+            runtime
+                .block_on(execute_upstream_request_with_cookies(
+                    &client,
+                    &base_url,
+                    "saved-session-token",
+                    "workspace-1",
+                    saved_id,
+                    RequestDraft::new("GET", "https://target.example.test/items/42"),
+                    false,
+                ))
+                .unwrap();
+        }
+        server.join().unwrap();
     }
 
     #[test]

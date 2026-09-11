@@ -185,6 +185,42 @@ func WithRequestProxy(authService *auth.Service, handler *requestproxy.Handler) 
 			auth.RequirePermission(identity.PermissionServerSettingsUpdate),
 			handler.AddAllowlistEntryController(),
 		)
+		app.Get(
+			"/api/v1/proxies",
+			authService.Middleware(),
+			auth.RequirePermission(identity.PermissionProxiesRead),
+			handler.ListProxiesController(),
+		)
+		app.Post(
+			"/api/v1/proxies",
+			authService.Middleware(),
+			auth.RequirePermission(identity.PermissionProxiesCreate),
+			handler.CreateProxyController(),
+		)
+		app.Patch(
+			"/api/v1/proxies/:proxy_id",
+			authService.Middleware(),
+			auth.RequirePermission(identity.PermissionProxiesUpdate),
+			handler.UpdateProxyController(),
+		)
+		app.Delete(
+			"/api/v1/proxies/:proxy_id",
+			authService.Middleware(),
+			auth.RequirePermission(identity.PermissionProxiesDelete),
+			handler.DeleteProxyController(),
+		)
+		app.Put(
+			"/api/v1/proxies/:proxy_id/assignments",
+			authService.Middleware(),
+			auth.RequirePermission(identity.PermissionProxiesAssign),
+			handler.ReplaceProxyAssignmentsController(),
+		)
+		app.Put(
+			"/api/v1/proxies/:proxy_id/exclusions",
+			authService.Middleware(),
+			auth.RequirePermission(identity.PermissionProxiesAssign),
+			handler.ReplaceProxyExclusionsController(),
+		)
 		app.Post(
 			"/api/v1/workspaces/:workspace_id/execute",
 			authService.Middleware(),

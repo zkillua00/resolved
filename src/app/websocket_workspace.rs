@@ -56,6 +56,7 @@ impl execution::PreparedExecution {
                 &upstream.target.base_url,
                 upstream.credential.bearer_token(),
                 &upstream.target.workspace_id,
+                upstream.saved_request_id.as_deref(),
                 url,
                 headers,
                 commands,

@@ -132,16 +132,16 @@ pub(crate) fn drive_inline_with_budget<T: Send>(
 }
 
 struct LegacyExecutor<S>(S);
-struct LegacyExecution<'a, S>(&'a S);
+struct LegacyExecution<'a, S>(&'a S, String);
 
 impl<S, Fut> ChainExecutor for LegacyExecutor<S>
 where
-    S: Fn(RequestDraft) -> Fut + Send + Sync,
+    S: Fn(String, RequestDraft) -> Fut + Send + Sync,
     Fut: Future<Output = Result<ResponseData, RequestError>> + Send + 'static,
 {
     fn prepare(
         &self,
-        _: &str,
+        saved_request_id: &str,
     ) -> std::pin::Pin<
         Box<
             dyn Future<Output = Result<Box<dyn ChainRequestExecution + '_>, RequestError>>
@@ -149,15 +149,16 @@ where
                 + '_,
         >,
     > {
-        Box::pin(
-            async move { Ok(Box::new(LegacyExecution(&self.0)) as Box<dyn ChainRequestExecution>) },
-        )
+        let saved_request_id = saved_request_id.to_owned();
+        Box::pin(async move {
+            Ok(Box::new(LegacyExecution(&self.0, saved_request_id)) as Box<dyn ChainRequestExecution>)
+        })
     }
 }
 
 impl<S, Fut> ChainRequestExecution for LegacyExecution<'_, S>
 where
-    S: Fn(RequestDraft) -> Fut + Send + Sync,
+    S: Fn(String, RequestDraft) -> Fut + Send + Sync,
     Fut: Future<Output = Result<ResponseData, RequestError>> + Send + 'static,
 {
     fn execution_limits(&self) -> Option<&super::execution_limits::ExecutionLimits> {
@@ -168,7 +169,7 @@ where
         request: RequestDraft,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<ResponseData, RequestError>> + Send + '_>>
     {
-        Box::pin((self.0)(request))
+        Box::pin((self.0)(self.1.clone(), request))
     }
 }
 
@@ -219,7 +220,8 @@ impl Default for ChainLimits {
 /// `budget` counts the total number of chained executions across the whole
 /// top-level Send (shared between the pre- and post-response chains). It must
 /// be zeroed at the start of each Send. `sender` performs the actual HTTP
-/// exchange for one resolved request.
+/// exchange for one resolved request, receiving its saved-request ID separately
+/// so execution policies can honor request- and collection-scoped settings.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_chain<S, Fut>(
     workspace: &Workspace,
@@ -233,7 +235,7 @@ pub async fn run_chain<S, Fut>(
     budget: &AtomicUsize,
 ) -> ChainRun
 where
-    S: Fn(RequestDraft) -> Fut + Send + Sync,
+    S: Fn(String, RequestDraft) -> Fut + Send + Sync,
     Fut: Future<Output = Result<ResponseData, RequestError>> + Send + 'static,
 {
     run_chain_with_executor(
@@ -1103,7 +1105,7 @@ mod tests {
         let catalog = RequestNamespaceCatalog::from_workspace(&workspace);
 
         let client = crate::core::request::build_client().unwrap();
-        let sender = move |request: RequestDraft| {
+        let sender = move |_saved_id: String, request: RequestDraft| {
             let client = client.clone();
             async move { crate::core::request::send_request(&client, request).await }
         };
@@ -1183,7 +1185,10 @@ mod tests {
             .unwrap();
         let catalog = RequestNamespaceCatalog::from_workspace(&workspace);
         let client = crate::core::request::build_client().unwrap();
-        let sender = move |request: RequestDraft| {
+        let sent_ids = Arc::new(Mutex::new(Vec::new()));
+        let sender_ids = Arc::clone(&sent_ids);
+        let sender = move |saved_id: String, request: RequestDraft| {
+            sender_ids.lock().unwrap().push(saved_id);
             let client = client.clone();
             async move { crate::core::request::send_request(&client, request).await }
         };
@@ -1222,7 +1227,7 @@ mod tests {
             lines.iter().any(|line| line.contains("/a ")),
             "A should have run after its nested chain: {lines:?}"
         );
-        let _ = b_id;
+        assert_eq!(*sent_ids.lock().unwrap(), vec![b_id, a_id]);
     }
 
     async fn run_with_limits(
@@ -1232,7 +1237,7 @@ mod tests {
         limits: ChainLimits,
     ) -> ChainRun {
         let client = crate::core::request::build_client().unwrap();
-        let sender = move |request: RequestDraft| {
+        let sender = move |_saved_id: String, request: RequestDraft| {
             let client = client.clone();
             async move { crate::core::request::send_request(&client, request).await }
         };
@@ -1426,7 +1431,7 @@ mod tests {
             .unwrap();
         let catalog = RequestNamespaceCatalog::from_workspace(&workspace);
         let client = crate::core::request::build_client().unwrap();
-        let sender = move |request: RequestDraft| {
+        let sender = move |_saved_id: String, request: RequestDraft| {
             let client = client.clone();
             async move { crate::core::request::send_request(&client, request).await }
         };
@@ -1478,7 +1483,7 @@ mod tests {
         let catalog = RequestNamespaceCatalog::from_workspace(&workspace);
 
         let client = crate::core::request::build_client().unwrap();
-        let sender = move |request: RequestDraft| {
+        let sender = move |_saved_id: String, request: RequestDraft| {
             let client = client.clone();
             async move { crate::core::request::send_request(&client, request).await }
         };

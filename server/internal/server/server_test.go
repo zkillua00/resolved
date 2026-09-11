@@ -277,17 +277,31 @@ func TestRequestProxyExecutesFromServerWithDynamicPermissionAndWorkspaceScope(t 
 		http.MethodPut,
 		"/api/v1/request-execution/settings",
 		ownerLogin.Token,
-		map[string]any{
-			"mode": requestproxy.ModeServer,
-			"hostname_overrides": []map[string]string{
-				{"hostname": "SERVICE.INTERNAL.", "target": "http://127.0.0.1"},
-			},
-		},
+		map[string]any{"mode": requestproxy.ModeServer},
 		fiber.StatusOK,
 	).Data
-	if settings.Mode != requestproxy.ModeServer || len(settings.HostnameOverrides) != 1 || settings.HostnameOverrides[0] != (requestproxy.HostnameOverride{Hostname: "service.internal", Target: "http://127.0.0.1"}) {
+	if settings.Mode != requestproxy.ModeServer {
 		t.Fatalf("normalized request execution settings = %+v", settings)
 	}
+	proxy := request[requestproxy.Proxy](t, app, http.MethodPost, "/api/v1/proxies", ownerLogin.Token, map[string]any{
+		"name": "Internal routing",
+		"rules": []map[string]string{
+			{"hostname": "SERVICE.INTERNAL.", "target": "http://127.0.0.1"},
+		},
+	}, fiber.StatusCreated).Data
+	if proxy.Name != "Internal routing" || len(proxy.Rules) != 1 ||
+		proxy.Rules[0] != (requestproxy.HostnameOverride{Hostname: "service.internal", Target: "http://127.0.0.1"}) {
+		t.Fatalf("normalized proxy = %+v", proxy)
+	}
+	request[requestproxy.Proxy](
+		t,
+		app,
+		http.MethodPut,
+		"/api/v1/proxies/"+proxy.ID+"/assignments",
+		ownerLogin.Token,
+		map[string]any{"assignments": []map[string]string{{"scope_kind": "server"}}},
+		fiber.StatusOK,
+	)
 	serverPolicy := request[requestproxy.Policy](
 		t, app, http.MethodGet, "/api/v1/request-execution", runnerLogin.Token, nil, fiber.StatusOK,
 	).Data
@@ -379,6 +393,164 @@ func TestRequestProxyExecutesFromServerWithDynamicPermissionAndWorkspaceScope(t 
 	}
 }
 
+func TestRequestProxyScopedAssignmentsAndExclusionFallThrough(t *testing.T) {
+	app, usersService, _, closeDatabase := newTestServer(t)
+	defer closeDatabase()
+
+	owner, err := usersService.BootstrapOwner(t.Context(), users.CreateInput{
+		Email: "scoped-owner", DisplayName: "Scoped Owner", Password: ownerPassword,
+	})
+	if err != nil {
+		t.Fatalf("bootstrap owner: %v", err)
+	}
+	ownerLogin := login(t, app, owner.Email, ownerPassword)
+	workspace := request[[]workspaces.WorkspaceView](
+		t, app, http.MethodGet, "/api/v1/workspaces", ownerLogin.Token, nil, fiber.StatusOK,
+	).Data[0]
+	collection := request[workspaces.CollectionView](
+		t, app, http.MethodPost, "/api/v1/workspaces/"+workspace.ID+"/collections", ownerLogin.Token,
+		map[string]any{"name": "Scoped"}, fiber.StatusCreated,
+	).Data
+	saved := request[workspaces.SavedRequestView](
+		t, app, http.MethodPost,
+		"/api/v1/workspaces/"+workspace.ID+"/collections/"+collection.ID+"/requests",
+		ownerLogin.Token,
+		map[string]any{"name": "Ping", "definition": map[string]any{}},
+		fiber.StatusCreated,
+	).Data
+
+	role := request[identity.RoleView](t, app, http.MethodPost, "/api/v1/roles", ownerLogin.Token, map[string]any{
+		"name":            "Scoped runner",
+		"description":     "Executes proxied requests",
+		"permission_keys": []string{identity.PermissionRequestsExecute},
+	}, fiber.StatusCreated).Data
+	runner := request[identity.UserView](t, app, http.MethodPost, "/api/v1/users", ownerLogin.Token, map[string]any{
+		"email":        "scoped-runner",
+		"display_name": "Scoped Runner",
+		"password":     collaboratorPassword,
+		"role_ids":     []string{role.ID},
+	}, fiber.StatusCreated).Data
+	request[workspaces.WorkspaceView](
+		t, app, http.MethodPut, "/api/v1/workspaces/"+workspace.ID+"/users", ownerLogin.Token,
+		map[string]any{"user_ids": []string{owner.ID, runner.ID}}, fiber.StatusOK,
+	)
+	runnerLogin := login(t, app, runner.Email, collaboratorPassword)
+
+	request[requestproxy.Settings](
+		t, app, http.MethodPut, "/api/v1/request-execution/settings", ownerLogin.Token,
+		map[string]any{"mode": requestproxy.ModeServer}, fiber.StatusOK,
+	)
+
+	hosts := make(chan string, 8)
+	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, incoming *http.Request) {
+		hosts <- incoming.Host
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	targetPort := target.Listener.Addr().(*net.TCPAddr).Port
+
+	createProxy := func(name string, rules []map[string]string, assignment map[string]string) requestproxy.Proxy {
+		t.Helper()
+		proxy := request[requestproxy.Proxy](t, app, http.MethodPost, "/api/v1/proxies", ownerLogin.Token, map[string]any{
+			"name": name, "rules": rules,
+		}, fiber.StatusCreated).Data
+		request[requestproxy.Proxy](
+			t, app, http.MethodPut, "/api/v1/proxies/"+proxy.ID+"/assignments", ownerLogin.Token,
+			map[string]any{"assignments": []map[string]string{assignment}}, fiber.StatusOK,
+		)
+		return proxy
+	}
+	// The workspace proxy rewrites the outgoing host (hostname target); the
+	// request proxy preserves it (IP target). The observed Host header tells
+	// which layer resolution picked.
+	workspaceProxy := createProxy(
+		"Workspace routing",
+		[]map[string]string{{"hostname": "api.demo", "target": "http://localhost"}},
+		map[string]string{"scope_kind": "workspace", "scope_id": workspace.ID},
+	)
+	requestProxy := createProxy(
+		"Request routing",
+		[]map[string]string{{"hostname": "api.demo", "target": "http://127.0.0.1"}},
+		map[string]string{"scope_kind": "request", "scope_id": saved.ID},
+	)
+
+	execute := func(token, requestID string, wantStatus int) string {
+		t.Helper()
+		payload := map[string]any{
+			"method": "GET",
+			"url":    fmt.Sprintf("http://api.demo:%d/ping", targetPort),
+			"body":   map[string]any{"mode": "none"},
+		}
+		if requestID != "" {
+			payload["request_id"] = requestID
+		}
+		response := request[requestproxy.ExecuteResult](
+			t, app, http.MethodPost, "/api/v1/workspaces/"+workspace.ID+"/execute", token, payload, wantStatus,
+		)
+		if wantStatus != fiber.StatusOK {
+			if response.Error.Code != "proxy_request_failed" {
+				t.Fatalf("execution error = %q, want proxy_request_failed", response.Error.Code)
+			}
+			return ""
+		}
+		select {
+		case host := <-hosts:
+			return host
+		default:
+			t.Fatal("the target did not receive the proxied request")
+			return ""
+		}
+	}
+	expectedRequestHost := fmt.Sprintf("api.demo:%d", targetPort)
+	expectedWorkspaceHost := fmt.Sprintf("localhost:%d", targetPort)
+
+	// The request-scoped proxy wins over the workspace proxy for the saved request.
+	if host := execute(ownerLogin.Token, saved.ID, fiber.StatusOK); host != expectedRequestHost {
+		t.Fatalf("request-scoped host = %q, want %q", host, expectedRequestHost)
+	}
+	// Ad-hoc executions in the workspace resolve the workspace proxy.
+	if host := execute(ownerLogin.Token, "", fiber.StatusOK); host != expectedWorkspaceHost {
+		t.Fatalf("workspace-scoped host = %q, want %q", host, expectedWorkspaceHost)
+	}
+
+	// Excluding the runner's role from the request proxy falls through to the
+	// workspace proxy for the same saved request.
+	request[requestproxy.Proxy](
+		t, app, http.MethodPut, "/api/v1/proxies/"+requestProxy.ID+"/exclusions", ownerLogin.Token,
+		map[string]any{"excluded_role_ids": []string{role.ID}}, fiber.StatusOK,
+	)
+	if host := execute(runnerLogin.Token, saved.ID, fiber.StatusOK); host != expectedWorkspaceHost {
+		t.Fatalf("role-excluded host = %q, want %q", host, expectedWorkspaceHost)
+	}
+	// The owner is not excluded and keeps the request-scoped proxy.
+	if host := execute(ownerLogin.Token, saved.ID, fiber.StatusOK); host != expectedRequestHost {
+		t.Fatalf("owner host after exclusion = %q, want %q", host, expectedRequestHost)
+	}
+
+	// Excluding the runner from the workspace proxy too leaves no override at
+	// all, so the synthetic hostname stops resolving.
+	request[requestproxy.Proxy](
+		t, app, http.MethodPut, "/api/v1/proxies/"+workspaceProxy.ID+"/exclusions", ownerLogin.Token,
+		map[string]any{"excluded_user_ids": []string{runner.ID}}, fiber.StatusOK,
+	)
+	execute(runnerLogin.Token, saved.ID, fiber.StatusBadGateway)
+
+	// A request ID outside the workspace is rejected explicitly.
+	invalid := request[requestproxy.ExecuteResult](
+		t, app, http.MethodPost, "/api/v1/workspaces/"+workspace.ID+"/execute", ownerLogin.Token,
+		map[string]any{
+			"method":     "GET",
+			"url":        fmt.Sprintf("http://api.demo:%d/ping", targetPort),
+			"body":       map[string]any{"mode": "none"},
+			"request_id": uuid.NewString(),
+		},
+		fiber.StatusUnprocessableEntity,
+	)
+	if invalid.Error.Code != "validation_failed" {
+		t.Fatalf("unknown request_id error = %q, want validation_failed", invalid.Error.Code)
+	}
+}
+
 func TestRequestProxyRelaysWebSocketExecution(t *testing.T) {
 	app, usersService, _, closeDatabase := newTestServer(t)
 	defer closeDatabase()
@@ -422,12 +594,22 @@ func TestRequestProxyRelaysWebSocketExecution(t *testing.T) {
 		http.MethodPut,
 		"/api/v1/request-execution/settings",
 		ownerLogin.Token,
-		map[string]any{
-			"mode": requestproxy.ModeServer,
-			"hostname_overrides": []map[string]string{
-				{"hostname": "socket.internal", "target": "http://127.0.0.1"},
-			},
+		map[string]any{"mode": requestproxy.ModeServer},
+		fiber.StatusOK,
+	)
+	socketProxy := request[requestproxy.Proxy](t, app, http.MethodPost, "/api/v1/proxies", ownerLogin.Token, map[string]any{
+		"name": "Socket routing",
+		"rules": []map[string]string{
+			{"hostname": "socket.internal", "target": "http://127.0.0.1"},
 		},
+	}, fiber.StatusCreated).Data
+	request[requestproxy.Proxy](
+		t,
+		app,
+		http.MethodPut,
+		"/api/v1/proxies/"+socketProxy.ID+"/assignments",
+		ownerLogin.Token,
+		map[string]any{"assignments": []map[string]string{{"scope_kind": "server"}}},
 		fiber.StatusOK,
 	)
 
@@ -1808,6 +1990,7 @@ func newTestServer(t *testing.T) (*fiber.App, *users.Service, *gorm.DB, func()) 
 	requestProxyHandler := requestproxy.NewHandler(requestproxy.NewService(
 		workspacesService,
 		requestproxy.NewSettingsRepository(db, dataCipher),
+		requestproxy.NewProxyRepository(db, dataCipher),
 	))
 	sharedHistoryHandler := sharedhistory.NewHandler(sharedhistory.NewService(
 		sharedhistory.NewRepository(db, dataCipher),

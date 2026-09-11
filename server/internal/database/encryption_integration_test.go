@@ -189,13 +189,9 @@ func TestSensitiveRepositoriesPersistCiphertextOnly(t *testing.T) {
 	)
 
 	settingsRepository := requestproxy.NewSettingsRepository(db, dataCipher)
-	wantSettings := requestproxy.Settings{
+	if _, err := settingsRepository.Replace(t.Context(), requestproxy.Settings{
 		Mode: requestproxy.ModeServer,
-		HostnameOverrides: []requestproxy.HostnameOverride{{
-			Hostname: "private.example.test", Target: "https://10.20.30.40",
-		}},
-	}
-	if _, err := settingsRepository.Replace(t.Context(), wantSettings); err != nil {
+	}); err != nil {
 		t.Fatalf("save encrypted request settings: %v", err)
 	}
 	if _, err := settingsRepository.AddAllowlistEntry(t.Context(), requestproxy.AllowlistEntry{
@@ -207,9 +203,6 @@ func TestSensitiveRepositoriesPersistCiphertextOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load encrypted request settings: %v", err)
 	}
-	if len(gotSettings.HostnameOverrides) != 1 || gotSettings.HostnameOverrides[0] != wantSettings.HostnameOverrides[0] {
-		t.Fatalf("settings round trip = %+v", gotSettings)
-	}
 	if len(gotSettings.AllowlistedRequests) != 1 {
 		t.Fatalf("request allowlist round trip = %+v", gotSettings.AllowlistedRequests)
 	}
@@ -218,18 +211,32 @@ func TestSensitiveRepositoriesPersistCiphertextOnly(t *testing.T) {
 		t.Fatalf("load raw request settings: %v", err)
 	}
 	assertCiphertextOnly(
-		t, rawSettings.OverridesCiphertext, "", "private.example.test", "10.20.30.40",
-	)
-	assertCiphertextOnly(
 		t, rawSettings.AllowlistCiphertext, "", "127.0.0.1", "allowlist-secret",
 	)
-	var overrideCount int64
-	if err := db.Model(&requestproxy.HostnameOverrideRecord{}).Count(&overrideCount).Error; err != nil {
-		t.Fatalf("count plaintext hostname overrides: %v", err)
+
+	proxyRepository := requestproxy.NewProxyRepository(db, dataCipher)
+	proxy, err := proxyRepository.Create(t.Context(), &user.ID, "Private proxy", []requestproxy.HostnameOverride{{
+		Hostname: "private.example.test", Target: "https://10.20.30.40",
+	}})
+	if err != nil {
+		t.Fatalf("create encrypted proxy: %v", err)
 	}
-	if overrideCount != 0 {
-		t.Fatalf("plaintext hostname overrides = %d, want 0", overrideCount)
+	gotProxy, err := proxyRepository.Get(t.Context(), proxy.ID)
+	if err != nil {
+		t.Fatalf("load encrypted proxy: %v", err)
 	}
+	if gotProxy.Name != "Private proxy" || len(gotProxy.Rules) != 1 ||
+		gotProxy.Rules[0] != (requestproxy.HostnameOverride{Hostname: "private.example.test", Target: "https://10.20.30.40"}) {
+		t.Fatalf("proxy round trip = %+v", gotProxy)
+	}
+	var rawProxy requestproxy.ProxyRecord
+	if err := db.First(&rawProxy, "id = ?", proxy.ID).Error; err != nil {
+		t.Fatalf("load raw proxy: %v", err)
+	}
+	assertCiphertextOnly(
+		t, rawProxy.PayloadCiphertext, "", "", "",
+		"Private proxy", "private.example.test", "10.20.30.40",
+	)
 }
 
 func TestLegacySensitiveRowsAreEncryptedAndCleared(t *testing.T) {
@@ -288,6 +295,7 @@ func encryptedRepositoryTestDatabase(t *testing.T) (*gorm.DB, *security.DataCiph
 		&workspaces.Environment{}, &workspaces.EnvironmentVariable{}, &workspaces.EnvironmentVariableValue{},
 		&sharedhistory.Entry{}, &activitylog.Entry{},
 		&requestproxy.SettingsRecord{}, &requestproxy.HostnameOverrideRecord{},
+		&requestproxy.ProxyRecord{}, &requestproxy.ProxyAssignmentRecord{}, &requestproxy.ProxyExclusionRecord{},
 	); err != nil {
 		t.Fatalf("migrate database: %v", err)
 	}

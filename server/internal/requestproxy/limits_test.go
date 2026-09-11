@@ -13,9 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
 	"resolved-server/internal/executionlimits"
 	"resolved-server/internal/problem"
 	"resolved-server/internal/requestproxy/proxybody"
@@ -124,15 +121,11 @@ func TestDescriptorLimits(t *testing.T) {
 }
 
 func TestExecuteUsesFrozenSnapshotAndTimeout(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
-	if err != nil {
+	db, proxies, repository := newProxyTestRepositories(t)
+	if err := db.AutoMigrate(&executionlimits.Record{}, &workspaces.WorkspaceUser{}, &workspaces.CollectionUser{}); err != nil {
 		t.Fatal(err)
 	}
-	sqlDB, _ := db.DB()
-	t.Cleanup(func() { _ = sqlDB.Close() })
-	if err := db.AutoMigrate(&SettingsRecord{}, &HostnameOverrideRecord{}, &executionlimits.Record{}); err != nil {
-		t.Fatal(err)
-	}
+	workspaceID, collectionID, requestID := createProxyScopeFixtures(t, db)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/redirect-two" {
 			http.Redirect(w, r, "/redirect-one", http.StatusFound)
@@ -152,20 +145,23 @@ func TestExecuteUsesFrozenSnapshotAndTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository := NewSettingsRepository(db)
-	// This isolated transport fixture uses the supported legacy override rows.
+	// Resolve this saved request's proxy alongside its frozen collection limits.
 	// Override targets never contain ports; the request URL owns the port.
 	if err := db.Create(&SettingsRecord{ID: SettingsRecordID, Mode: ModeServer}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Create(&HostnameOverrideRecord{Hostname: "limit.test", Target: target.Hostname()}).Error; err != nil {
+	proxy, err := proxies.Create(t.Context(), nil, "Limits fixture", []HostnameOverride{{Hostname: "limit.test", Target: target.Hostname()}})
+	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(nil, repository)
+	if _, err := proxies.ReplaceAssignments(t.Context(), proxy.ID, []ProxyAssignment{{ScopeKind: ProxyScopeRequest, ScopeID: requestID}}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(workspaces.NewService(workspaces.NewRepository(db), nil), repository, proxies)
 	execute := func(snapshot executionlimits.Snapshot, path string) error {
-		ctx := context.WithValue(t.Context(), executionSnapshotKey{}, executionSnapshot{"workspace", "collection", snapshot})
-		_, err := service.Execute(ctx, workspaces.Actor{}, "workspace", ExecuteInput{
-			CollectionID: "collection", Method: "POST", URL: "http://limit.test:" + target.Port() + path,
+		ctx := context.WithValue(t.Context(), executionSnapshotKey{}, executionSnapshot{workspaceID, collectionID, snapshot})
+		_, err := service.Execute(ctx, workspaces.Actor{Owner: true}, workspaceID, ExecuteInput{
+			RequestID: requestID, CollectionID: collectionID, Method: "POST", URL: "http://limit.test:" + target.Port() + path,
 			Body: proxybody.Body{Mode: "raw", DataBase64: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("x"), 4))},
 		})
 		return err
