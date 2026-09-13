@@ -13,7 +13,7 @@ workspaces, execution, and persistence work without it.
 | `src/app.rs`, `src/app/` | GPUI application state, pages, workspaces, editors, tabs, and UI actions |
 | `src/core/` | Request modeling and execution, scripts, persistence, history, interchange, settings, upstream clients, and realtime signals |
 | `src/control_server.rs`, `src/control_tools.rs` | Authenticated per-user local control transport and the authoritative MCP tool catalog |
-| `src/app/control.rs`, `src/bin/resolved-mcp.rs` | Desktop semantic control handlers and the standalone MCP stdio adapter |
+| `src/app/control.rs`, `src/mcp.rs`, `src/bin/resolved-mcp.rs` | Desktop semantic control handlers, shared MCP stdio adapter, and compatibility executable |
 | `src/platform.rs`, `src/platform/` | Compile-time Linux, macOS, and Windows integration |
 | `src/theme/` | Constrained CSS parsing, schema, palette mapping, and editor intelligence |
 | `scripts/` | Reproducible dependency preparation, builds, packaging, audits, releases, and profiling |
@@ -41,7 +41,7 @@ resource payloads.
 The optional local MCP path keeps the desktop process authoritative too:
 
 ```text
-MCP client -> resolved-mcp stdio adapter -> authenticated local IPC
+MCP client -> stdio adapter (macOS: resolved --mcp) -> authenticated local IPC
   -> GPUI application state -> active workspace provider and persistence
 ```
 

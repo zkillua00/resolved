@@ -20,6 +20,12 @@ mod documentation_intelligence;
 mod documentation_references;
 mod editor_util;
 mod instance_guard;
+#[cfg(target_os = "macos")]
+mod launch_mode;
+#[cfg(target_os = "macos")]
+mod macos_cli;
+#[cfg(target_os = "macos")]
+mod mcp;
 mod platform;
 mod request_dirty;
 mod script_intelligence;
@@ -166,6 +172,17 @@ pub(crate) fn log_diagnostic(message: &str) {
 }
 
 fn main() {
+    // MCP must not initialize GPUI, take the desktop lock, or open its database.
+    #[cfg(target_os = "macos")]
+    match launch_mode::parse(std::env::args_os().skip(1)) {
+        Ok(launch_mode::LaunchMode::Mcp) => return mcp::run_stdio(),
+        Ok(launch_mode::LaunchMode::Desktop) => {}
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    }
+
     if let Err(error) = platform::launch_blocker() {
         eprintln!("{error}");
         std::process::exit(1);

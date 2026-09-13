@@ -53,8 +53,16 @@ if [ "${1:-}" = "run" ] && [ "$(uname -s)" = "Darwin" ]; then
         esac
     done
 
-    "$project_dir/scripts/bundle-macos.sh" "$run_profile"
     bundle_path="$project_dir/target/$binary_dir/Resolved.app"
+    # MCP needs the caller's stdio pipes; LaunchServices does not forward them.
+    for arg in "$@"; do
+        if [ "$arg" = "--mcp" ]; then
+            # Build and packaging diagnostics must not contaminate MCP stdout.
+            "$project_dir/scripts/bundle-macos.sh" "$run_profile" >&2
+            exec "$bundle_path/Contents/MacOS/api-tester" "$@"
+        fi
+    done
+    "$project_dir/scripts/bundle-macos.sh" "$run_profile"
     if [ "$#" -gt 0 ]; then
         exec /usr/bin/open -W "$bundle_path" --args "$@"
     fi

@@ -10,6 +10,27 @@ enum ShortcutRecorderCommand {
 }
 
 impl ApiTester {
+    #[cfg(target_os = "macos")]
+    pub(super) fn install_macos_cli(&mut self, cx: &mut Context<Self>) {
+        self.settings_notice = Some(match crate::macos_cli::install_cli() {
+            Ok(notice) => notice,
+            Err(error) => format!("CLI installation failed: {error}"),
+        });
+        cx.notify();
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn copy_mcp_config(&mut self, cx: &mut Context<Self>) {
+        self.settings_notice = Some(match crate::macos_cli::mcp_config() {
+            Ok(config) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(config));
+                "Copied MCP JSON using this app's absolute executable path. Merge it into your client's MCP configuration, then enable MCP here to connect.".to_owned()
+            }
+            Err(error) => format!("Could not copy MCP configuration: {error}"),
+        });
+        cx.notify();
+    }
+
     pub(super) fn set_mcp_follow_agent_activity(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.settings.mcp.follow_agent_activity == enabled {
             return;

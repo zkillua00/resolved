@@ -5,7 +5,7 @@ the Model Context Protocol (MCP). This feature is experimental, disabled by
 default, and intended for semantic workspace automation rather than UI driving.
 
 ```text
-MCP client -> resolved-mcp over stdio
+MCP client -> Resolved MCP mode over stdio
   -> authenticated per-user local IPC
   -> Resolved desktop state and persistence
 ```
@@ -15,6 +15,39 @@ SQLite database. The adapter does not open the database or duplicate workspace
 rules; it forwards typed operations to the running app.
 
 ## Quick start
+
+### macOS: built into the app
+
+1. Install Resolved in a permanent location, such as `/Applications/Resolved.app`.
+2. Open **Settings -> MCP**, enable MCP, and select the tools the agent needs.
+3. Use **Copy MCP JSON** to copy a configuration pointing directly to
+   the installed executable with `--mcp`:
+
+   ```json
+   {
+     "mcpServers": {
+       "resolved": {
+         "command": "/Applications/Resolved.app/Contents/MacOS/api-tester",
+         "args": ["--mcp"]
+       }
+     }
+   }
+   ```
+
+Optionally use **Install resolved CLI** in the same settings page to create
+`~/.local/bin/resolved`, then invoke `resolved --mcp` if that directory is on
+your `PATH`. Installation never replaces a different existing file or symlink.
+The copied configuration uses an absolute path because GUI clients may not
+inherit your shell's `PATH`. Moving the app requires updating the client
+configuration and replacing the old command symlink.
+
+This starts only the stdio adapter inside the app executable, not another
+desktop instance. Keep the desktop running with MCP enabled. Do not use
+`open -a Resolved --args --mcp`: it does not forward the client's stdio pipes.
+For development, `./scripts/cargo.sh run -- --mcp` launches the bundled
+executable directly after building it.
+
+### Windows and Linux: standalone adapter
 
 1. Download the matching `resolved-mcp-<version>-<platform>-<arch>` archive
    from [GitHub Releases](https://github.com/zkillua00/resolved/releases) and
@@ -44,8 +77,8 @@ The exact outer configuration key varies by MCP client. The adapter itself
 needs no arguments or environment variables. It discovers the running Resolved
 instance through a descriptor in the application's per-user data directory.
 On Windows, use the extracted `resolved-mcp.exe`; it runs outside the MSIX.
-The adapter is released as a separate download and is not bundled into
-`Resolved.app`, the Windows MSIX, or Linux packages.
+Windows and Linux packaging is unchanged. The standalone adapter remains
+available for compatibility on macOS, but is no longer required there.
 
 Resolved must be running with MCP enabled. Otherwise `tools/list` is empty and
 tool calls report that local control is unavailable. Changing a tool switch

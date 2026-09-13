@@ -177,6 +177,18 @@ impl ApiTester {
                     .description("Disabled tools are neither advertised nor accepted by Resolved.")
                     .item(self.mcp_tools_setting_item(cx)),
             );
+        #[cfg(target_os = "macos")]
+        let mcp_page = mcp_page.group(
+            SettingGroup::new()
+                .title("CLI and client setup")
+                .description(
+                    "Uses this running app's executable. Keep Resolved in a stable location; moving it invalidates the CLI link and copied configuration.",
+                )
+                .items([
+                    self.macos_cli_setting_item(cx),
+                    self.mcp_config_setting_item(cx),
+                ]),
+        );
         let developer_page = SettingPage::new("Developer Settings")
             .description("Enable diagnostics for inspecting Resolved while it is running.")
             .resettable(false)
@@ -224,6 +236,50 @@ impl ApiTester {
             )
             .when_some(message_overlay, |this, overlay| this.child(overlay))
             .into_any_element()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_cli_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "Command-line launcher",
+            SettingField::<SharedString>::render(move |_, _, _| {
+                let this = this.clone();
+                Button::new("settings-install-macos-cli")
+                    .label("Install resolved CLI")
+                    .outline()
+                    .on_click(move |_, _, cx| {
+                        if let Some(this) = this.upgrade() {
+                            this.update(cx, |this, cx| this.install_macos_cli(cx));
+                        }
+                    })
+            }),
+        )
+        .description(
+            "Creates ~/.local/bin/resolved as a symlink to this app. Never replaces another file or link. Add ~/.local/bin to PATH to use resolved in your terminal.",
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn mcp_config_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
+        let this = cx.entity().downgrade();
+        SettingItem::new(
+            "MCP client configuration",
+            SettingField::<SharedString>::render(move |_, _, _| {
+                let this = this.clone();
+                Button::new("settings-copy-mcp-config")
+                    .label("Copy MCP JSON")
+                    .outline()
+                    .on_click(move |_, _, cx| {
+                        if let Some(this) = this.upgrade() {
+                            this.update(cx, |this, cx| this.copy_mcp_config(cx));
+                        }
+                    })
+            }),
+        )
+        .description(
+            "Copies mcpServers JSON with this app's absolute executable path and --mcp. No CLI installation or shell PATH is required.",
+        )
     }
 
     fn mcp_enabled_setting_item(&self, cx: &mut Context<Self>) -> SettingItem {
