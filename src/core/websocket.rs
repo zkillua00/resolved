@@ -436,6 +436,7 @@ pub(super) const AUTOMATION_PRELUDE: &str = r#"
 })();
 "#;
 
+#[cfg(test)]
 pub async fn run_websocket_session(
     url: &str,
     headers: &[HeaderEntry],
@@ -458,32 +459,6 @@ pub async fn run_websocket_session_with_limits(
         .map_err(WebSocketConnectError::InvalidLimit)?;
     run_reconnecting_session(url, headers, commands, signals, None, limits).await;
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn run_upstream_websocket_session(
-    base_url: &url::Url,
-    bearer_token: &str,
-    workspace_id: &str,
-    saved_request_id: Option<&str>,
-    url: &str,
-    headers: &[HeaderEntry],
-    commands: UnboundedReceiver<WebSocketCommand>,
-    signals: UnboundedSender<WebSocketSignal>,
-) -> Result<(), WebSocketConnectError> {
-    run_upstream_websocket_session_with_scope(
-        base_url,
-        bearer_token,
-        workspace_id,
-        saved_request_id,
-        url,
-        headers,
-        commands,
-        signals,
-        None,
-        &ExecutionLimits::default(),
-    )
-    .await
 }
 
 pub async fn run_upstream_websocket_session_with_scope(
@@ -636,6 +611,7 @@ async fn run_reconnecting_session(
     }
 }
 
+#[cfg(test)]
 pub async fn run_websocket_connection(
     url: &str,
     headers: &[HeaderEntry],
@@ -716,6 +692,7 @@ pub async fn run_websocket_connection_with_limits(
     Ok(())
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub async fn run_upstream_websocket_connection(
     base_url: &url::Url,

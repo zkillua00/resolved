@@ -131,9 +131,12 @@ pub(crate) fn drive_inline_with_budget<T: Send>(
     })
 }
 
+#[cfg(test)]
 struct LegacyExecutor<S>(S);
+#[cfg(test)]
 struct LegacyExecution<'a, S>(&'a S, String);
 
+#[cfg(test)]
 impl<S, Fut> ChainExecutor for LegacyExecutor<S>
 where
     S: Fn(String, RequestDraft) -> Fut + Send + Sync,
@@ -156,6 +159,7 @@ where
     }
 }
 
+#[cfg(test)]
 impl<S, Fut> ChainRequestExecution for LegacyExecution<'_, S>
 where
     S: Fn(String, RequestDraft) -> Fut + Send + Sync,
@@ -222,6 +226,7 @@ impl Default for ChainLimits {
 /// be zeroed at the start of each Send. `sender` performs the actual HTTP
 /// exchange for one resolved request, receiving its saved-request ID separately
 /// so execution policies can honor request- and collection-scoped settings.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub async fn run_chain<S, Fut>(
     workspace: &Workspace,

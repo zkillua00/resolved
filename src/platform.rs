@@ -10,9 +10,14 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
-use gpui::{App, Keystroke, Menu, MenuItem, Pixels, Task, WindowOptions, px};
+use gpui::{App, Keystroke, Pixels, Task, WindowOptions};
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use gpui::{Menu, MenuItem};
+#[cfg(target_os = "linux")]
+use gpui::px;
 use wry::{WebView, WebViewBuilder};
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use crate::shortcuts::{
     CloseRequestTab, NewRequestTab, QuitApp, SaveRequest, SaveRequestAs, SendOrCancelRequest,
     ShowSettings,
@@ -136,6 +141,7 @@ pub(crate) fn preview_data_directory() -> Option<PathBuf> {
     ActiveBackend::preview_data_directory()
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn configure_desktop_menus(cx: &mut App) {
     cx.set_menus(vec![
         Menu {
@@ -162,6 +168,7 @@ fn configure_desktop_menus(cx: &mut App) {
     ]);
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn control_shortcut(keystroke: &mut Keystroke) {
     if keystroke.modifiers.platform {
         keystroke.modifiers.platform = false;
@@ -169,6 +176,7 @@ fn control_shortcut(keystroke: &mut Keystroke) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn native_title_bar() -> TitleBarIntegration {
     TitleBarIntegration {
         leading_inset: px(12.),

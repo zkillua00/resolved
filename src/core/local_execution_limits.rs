@@ -33,20 +33,7 @@ pub fn validate_overrides(overrides: &Overrides) -> Result<(), String> {
 }
 
 impl LocalExecutionLimitSettings {
-    pub fn resolve(
-        &self,
-        workspace_id: &str,
-        workspace: &Workspace,
-        collection_id: Option<&str>,
-    ) -> Result<ExecutionLimits, String> {
-        self.resolve_with_timeout(
-            workspace_id,
-            workspace,
-            collection_id,
-            Duration::from_millis(30_000),
-        )
-    }
-
+    #[cfg(test)]
     pub fn resolve_with_timeout(
         &self,
         workspace_id: &str,

@@ -119,6 +119,7 @@ impl ExecutionLimits {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn overlay(&mut self, overrides: &Self) {
         self.0
             .extend(overrides.0.iter().map(|(key, bound)| (key.clone(), *bound)));

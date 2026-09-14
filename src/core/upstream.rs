@@ -669,6 +669,7 @@ pub struct ProxyExecutionPolicy {
     pub limits: ExecutionLimits,
 }
 
+#[cfg(test)]
 pub async fn get_upstream_execution_policy(
     client: &Client,
     base_url: &Url,
@@ -678,6 +679,7 @@ pub async fn get_upstream_execution_policy(
         .await?
         .mode)
 }
+#[cfg(test)]
 async fn load_execution_policy(
     client: &Client,
     base_url: &Url,
@@ -851,40 +853,6 @@ pub async fn send_request_for_upstream_workspace(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn send_request_for_upstream_workspace_with_cookies(
-    upstream_client: &Client,
-    local_client: &Client,
-    base_url: &Url,
-    bearer_token: &str,
-    workspace_id: &str,
-    saved_request_id: Option<&str>,
-    request: RequestDraft,
-    jar: &super::CookieJar,
-) -> Result<ResponseData, RequestError> {
-    let policy = get_upstream_execution_policy_for_scope(
-        upstream_client,
-        base_url,
-        bearer_token,
-        workspace_id,
-        None,
-    )
-    .await?;
-    send_request_for_upstream_workspace_with_scope(
-        upstream_client,
-        local_client,
-        base_url,
-        bearer_token,
-        workspace_id,
-        saved_request_id,
-        request,
-        jar,
-        None,
-        &policy,
-    )
-    .await
-}
-
 pub async fn send_request_for_upstream_workspace_with_scope(
     upstream_client: &Client,
     local_client: &Client,
@@ -1014,6 +982,7 @@ pub async fn execute_upstream_request(
     )
     .await
 }
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn execute_upstream_request_with_cookies(
     client: &Client,
@@ -1084,6 +1053,7 @@ pub async fn execute_upstream_request_with_scope(
     parse_proxy_response(response, limits).await
 }
 
+#[cfg(test)]
 async fn proxy_request_payload(request: RequestDraft) -> Result<ProxyExecuteRequest, RequestError> {
     proxy_request_payload_with_limits(request, &ExecutionLimits::default()).await
 }

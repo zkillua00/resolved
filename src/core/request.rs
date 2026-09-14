@@ -682,6 +682,7 @@ pub fn build_client_with_cookie_jar(cookie_jar: Arc<CookieJar>) -> Result<Client
 /// This future is cancellation-safe: it has no application-visible side
 /// effects before returning, and dropping/aborting it drops reqwest's pending
 /// response future.
+#[cfg(test)]
 pub async fn send_request(
     client: &Client,
     request: RequestDraft,
@@ -1041,6 +1042,7 @@ impl RequestTask {
     }
 }
 
+#[cfg(test)]
 pub fn spawn_request(runtime: &Handle, client: Client, request: RequestDraft) -> RequestTask {
     RequestTask::spawn(runtime, async move { send_request(&client, request).await })
 }
