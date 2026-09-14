@@ -260,25 +260,25 @@ pub const CONTROL_TOOLS: &[ControlToolDescriptor] = &[
     ControlToolDescriptor {
         name: "execute_http_request",
         label: "Execute HTTP request",
-        description: "Execute a saved HTTP request through Resolved with optional non-persistent overrides, including variables, pre/post scripts, request chaining, remote execution policy, and history.",
+        description: "Start an independent saved HTTP execution with optional non-persistent overrides, variables, pre/post scripts, request chaining, execution policy, and history. Repeated executions may overlap across workspaces. Retain the returned scoped string operation_id for polling, querying, or cancellation.",
         read_only: false,
     },
     ControlToolDescriptor {
         name: "get_http_exchange",
         label: "Get HTTP exchange",
-        description: "Poll a Resolved HTTP execution and read its response, errors, and script reports.",
+        description: "Poll a retained HTTP execution by operation_id and read its response, errors, script reports, and history_entry_ids independently of later runs or workspace selection. Omitted ID selects the latest started MCP HTTP execution. Raw results are session-only and subject to count and byte retention limits.",
         read_only: true,
     },
     ControlToolDescriptor {
         name: "query_http_response",
         label: "Query HTTP response",
-        description: "Select and optionally project bounded JSON from the latest HTTP response without returning its full body.",
+        description: "Select and optionally project bounded JSON from a retained HTTP response by operation_id without returning its full body. Omitted ID selects the latest started MCP HTTP execution.",
         read_only: true,
     },
     ControlToolDescriptor {
         name: "cancel_http_request",
         label: "Cancel HTTP request",
-        description: "Cancel the HTTP request or script stage currently running through Resolved.",
+        description: "Cancel one HTTP execution or its script stage by its scoped string operation_id without affecting concurrent siblings. Without an ID, cancel an active script console first, otherwise the latest MCP HTTP execution.",
         read_only: false,
     },
     ControlToolDescriptor {
@@ -290,7 +290,7 @@ pub const CONTROL_TOOLS: &[ControlToolDescriptor] = &[
     ControlToolDescriptor {
         name: "run_script_console",
         label: "Run script console",
-        description: "Evaluate JavaScript against the latest HTTP exchange using api.response.text() or api.response.json() in Resolved's post-response console runtime.",
+        description: "Evaluate JavaScript against an HTTP exchange using api.response.text() or api.response.json() in Resolved's post-response console runtime. Pass http_operation_id to select a retained isolated execution; its source workspace must be active.",
         read_only: false,
     },
     ControlToolDescriptor {
@@ -479,6 +479,10 @@ pub fn workspace_scoped_tool(name: &str) -> bool {
             | "delete_folder"
             | "search_requests"
             | "get_request"
+            | "execute_http_request"
+            | "get_http_exchange"
+            | "query_http_response"
+            | "cancel_http_request"
             | "create_request"
             | "save_request"
             | "duplicate_request"

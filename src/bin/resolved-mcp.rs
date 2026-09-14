@@ -473,7 +473,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "execute_http_request",
-            "Execute a saved HTTP request through Resolved with optional non-persistent overrides.",
+            "Start an independent saved HTTP execution with optional non-persistent overrides. Returns a unique scoped string operation_id; repeated executions may overlap. Retain that ID for polling, querying, or cancellation.",
             object_schema(
                 json!({
                     "request_id": { "type": "string" },
@@ -499,10 +499,10 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "get_http_exchange",
-            "Poll an HTTP execution and read its response and script reports.",
+            "Poll a retained HTTP execution by operation_id, independent of later runs or workspace selection. Results are in-memory and may expire after 64 executions or app restart. Omitted ID selects the latest MCP HTTP execution.",
             object_schema(
                 json!({
-                    "operation_id": { "type": "integer", "minimum": 0 },
+                    "operation_id": { "type": ["string", "integer"], "description": "Use the exact scoped string returned by execute_http_request. Integers are legacy UI/sequence operation IDs." },
                     "max_body_bytes": { "type": "integer", "minimum": 0, "maximum": 524288, "default": 262144 }
                 }),
                 &[],
@@ -514,7 +514,7 @@ fn tool_definitions() -> Vec<Value> {
             "Select and optionally project bounded JSON from an HTTP response without returning the full body.",
             object_schema(
                 json!({
-                    "operation_id": { "type": "integer", "minimum": 0 },
+                    "operation_id": { "type": ["string", "integer"], "description": "Use the exact scoped string returned by execute_http_request." },
                     "json_pointer": { "type": "string", "description": "RFC 6901 JSON Pointer. Use an empty string for the response root." },
                     "projection": {
                         "type": "object",
@@ -531,8 +531,8 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "cancel_http_request",
-            "Cancel the current HTTP request or script stage.",
-            empty(),
+            "Cancel one HTTP execution or its script stage by operation_id. Omitted ID selects the latest MCP execution; concurrent siblings are unaffected.",
+            object_schema(json!({"operation_id": {"type": "string"}}), &[]),
             false,
         ),
         tool(
@@ -548,8 +548,11 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "run_script_console",
-            "Evaluate JavaScript against the latest HTTP exchange; response data is available through api.response.text() and api.response.json().",
-            object_schema(json!({ "source": { "type": "string" } }), &["source"]),
+            "Evaluate JavaScript against an HTTP exchange in the active workspace. Use http_operation_id for a retained isolated execution; response data is available through api.response.text() and api.response.json().",
+            object_schema(
+                json!({ "source": { "type": "string" }, "http_operation_id": { "type": "string" } }),
+                &["source"],
+            ),
             false,
         ),
         tool(
@@ -915,7 +918,7 @@ fn tool_definitions() -> Vec<Value> {
                 json!({
                     "snippet_id": { "type": "string" },
                     "request_id": { "type": "string" },
-                    "operation_id": { "type": "integer", "minimum": 0 }
+                    "operation_id": { "type": ["string", "integer"] }
                 }),
                 &["snippet_id", "request_id"],
             ),
@@ -1130,6 +1133,27 @@ mod tests {
         assert_eq!(
             definition("query_http_response")["inputSchema"]["properties"]["limit"]["maximum"],
             1000
+        );
+        for name in ["get_http_exchange", "query_http_response", "run_snippet"] {
+            assert_eq!(
+                definition(name)["inputSchema"]["properties"]["operation_id"]["type"],
+                json!(["string", "integer"]),
+                "{name} must accept scoped execution IDs and legacy handles"
+            );
+        }
+        assert_eq!(
+            definition("cancel_http_request")["inputSchema"]["properties"]["operation_id"]["type"],
+            "string"
+        );
+        assert_eq!(
+            definition("run_script_console")["inputSchema"]["properties"]["http_operation_id"]["type"],
+            "string"
+        );
+        assert!(
+            definition("execute_http_request")["description"]
+                .as_str()
+                .unwrap()
+                .contains("operation_id")
         );
         for name in [
             "get_active_context",

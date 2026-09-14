@@ -52,7 +52,22 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let database_initialization = database_store.initialize();
+        Self::new_with_database_store_mode(base_key_bindings, database_store, None, window, cx)
+    }
+
+    pub(super) fn new_with_database_store_mode(
+        base_key_bindings: Vec<gpui::KeyBinding>,
+        database_store: DatabaseStore,
+        execution_runtime: Option<Arc<tokio::runtime::Runtime>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let execution_only = execution_runtime.is_some();
+        let database_initialization = if execution_only {
+            Ok(())
+        } else {
+            database_store.initialize()
+        };
         let (local_workspaces, active_local_workspace_id, local_catalog_warning) =
             match &database_initialization {
                 Ok(()) => match (
@@ -291,6 +306,20 @@ impl ApiTester {
             mut settings_warning,
             settings_writable,
         ) = match database_initialization {
+            Ok(()) if execution_only => (
+                RequestHistory::default(),
+                Workspace::default(),
+                None,
+                None,
+                RequestTabs::default(),
+                None,
+                true,
+                true,
+                false,
+                AppSettings::default(),
+                None,
+                false,
+            ),
             Ok(()) => {
                 let import_warning = database_store
                     .import_legacy_if_needed()
@@ -389,14 +418,18 @@ impl ApiTester {
                 false,
             ),
         };
-        let snippets = match database_store.load_snippets() {
-            Ok(snippets) => snippets,
-            Err(error) => {
-                tracing::warn!("snippets could not be loaded: {error}");
-                Vec::new()
+        let snippets = if execution_only {
+            Vec::new()
+        } else {
+            match database_store.load_snippets() {
+                Ok(snippets) => snippets,
+                Err(error) => {
+                    tracing::warn!("snippets could not be loaded: {error}");
+                    Vec::new()
+                }
             }
         };
-        if settings_writable {
+        if !execution_only && settings_writable {
             let mut candidate = settings.clone();
             let catalog_changed =
                 crate::theme::reconcile_catalog(&mut candidate.theme).unwrap_or(false);
@@ -420,7 +453,9 @@ impl ApiTester {
         debug_overlay.update(cx, |overlay, cx| {
             overlay.set_position(settings.metrics_position, cx);
         });
-        if let Err(error) = shortcuts::apply_key_bindings(cx, &base_key_bindings, &settings) {
+        if !execution_only
+            && let Err(error) = shortcuts::apply_key_bindings(cx, &base_key_bindings, &settings)
+        {
             let warning = format!(
                 "Stored shortcuts are invalid; defaults are active and the stored settings were left untouched: {error}"
             );
@@ -432,36 +467,38 @@ impl ApiTester {
                 tracing::error!("built-in shortcuts could not be applied: {error}");
             }
         }
-        crate::theme::set_zoom(
-            crate::theme::ThemeZoom {
-                ui: settings.zoom.effective_ui(),
-                editor: settings.zoom.effective_editor(),
-            },
-            cx,
-        );
-        if let Some(css_source) = settings.theme.css_source.as_deref()
-            && let Err(error) = crate::theme::parse_and_apply(css_source, cx)
-        {
-            let warning = format!(
-                "Stored CSS theme is invalid; the built-in theme is active and the stored source was left untouched: {error}"
+        if !execution_only {
+            crate::theme::set_zoom(
+                crate::theme::ThemeZoom {
+                    ui: settings.zoom.effective_ui(),
+                    editor: settings.zoom.effective_editor(),
+                },
+                cx,
             );
-            tracing::error!("{warning}");
-            settings_warning = Some(match settings_warning {
-                Some(existing) => format!("{existing}\n{warning}"),
-                None => warning,
-            });
-        }
-        if let Some(warning) = super::settings_actions::theme_catalog_warning(&settings) {
-            settings_warning = Some(match settings_warning {
-                Some(existing) => format!("{existing}\n{warning}"),
-                None => warning,
-            });
+            if let Some(css_source) = settings.theme.css_source.as_deref()
+                && let Err(error) = crate::theme::parse_and_apply(css_source, cx)
+            {
+                let warning = format!(
+                    "Stored CSS theme is invalid; the built-in theme is active and the stored source was left untouched: {error}"
+                );
+                tracing::error!("{warning}");
+                settings_warning = Some(match settings_warning {
+                    Some(existing) => format!("{existing}\n{warning}"),
+                    None => warning,
+                });
+            }
+            if let Some(warning) = super::settings_actions::theme_catalog_warning(&settings) {
+                settings_warning = Some(match settings_warning {
+                    Some(existing) => format!("{existing}\n{warning}"),
+                    None => warning,
+                });
+            }
         }
         let mut last_persisted_request_tabs = request_tabs.clone();
         let mut request_tabs = request_tabs;
         let request_tabs_changed =
             reconcile_restored_request_tabs(&mut request_tabs, &workspace, workspace_writable);
-        if request_tabs_changed && request_tabs_writable {
+        if !execution_only && request_tabs_changed && request_tabs_writable {
             match workspace_providers
                 .active()
                 .save_request_tabs(&request_tabs)
@@ -713,14 +750,16 @@ impl ApiTester {
             "failed to create the upstream request client",
             build_upstream_execution_client(),
         );
-        let runtime = Arc::new(startup_or_exit(
-            "failed to create the network runtime",
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .thread_name("api-tester-network")
-                .enable_all()
-                .build(),
-        ));
+        let runtime = execution_runtime.unwrap_or_else(|| {
+            Arc::new(startup_or_exit(
+                "failed to create the network runtime",
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .thread_name("api-tester-network")
+                    .enable_all()
+                    .build(),
+            ))
+        });
         let snippet_editor = Self::create_snippet_editor_session(
             &snippets,
             true,
@@ -883,7 +922,9 @@ impl ApiTester {
         let quit_subscription = cx.on_app_quit(|this, cx| {
             this.stop_realtime();
             this.stop_websocket();
-            this.flush_local_state(cx);
+            if this.mcp_execution_owner.is_none() {
+                this.flush_local_state(cx);
+            }
             async {}
         });
         let shortcut_target = cx.entity().downgrade();
@@ -961,6 +1002,11 @@ impl ApiTester {
             mcp_http_operation_id: None,
             mcp_http_request_id: None,
             mcp_http_exchange: None,
+            mcp_http_executions: HashMap::new(),
+            mcp_latest_http_execution: None,
+            mcp_http_console_execution_id: None,
+            mcp_execution_owner: None,
+            mcp_execution_history_ids: Vec::new(),
             mcp_scoped_local_workspace_id: None,
             mcp_request_sequence_generation: 0,
             mcp_request_sequence: None,
@@ -1150,8 +1196,10 @@ impl ApiTester {
         this.refresh_variable_intelligence(cx);
         this.loaded_request_baseline = this.request_template(cx);
         this.request_dirty.clear();
-        this.restore_active_request_tab(window, cx);
-        this.restore_selected_upstream(window, cx);
+        if !execution_only {
+            this.restore_active_request_tab(window, cx);
+            this.restore_selected_upstream(window, cx);
+        }
         this
     }
 }

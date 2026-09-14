@@ -366,8 +366,12 @@ impl ApiTester {
             .store(0, std::sync::atomic::Ordering::Relaxed);
         let chainer = self.build_inline_chainer(&environment_id);
         let preparation = self.prepare_execution(self.active_saved_request_id.as_deref());
+        // Every console invocation owns its upload scope. Never inherit the
+        // last visible Send's server target after a workspace/context switch.
+        self.request_history_target = self.active_upstream_workspace().ok();
         let previous_session_key = self.script_console_session_key.take();
         let session_tab_key = format!("{tab_id:?}");
+        let http_execution_id = self.mcp_http_console_execution_id.clone();
         let mut session = self.script_console_session.take();
         let runtime = self.runtime.clone();
         let task = self.runtime.spawn(async move {
@@ -376,7 +380,7 @@ impl ApiTester {
             // while identity and effective policy are unchanged.
             let session_key = (
                 generation,
-                serde_json::json!([session_tab_key, prepared.scope_key, prepared.limits])
+                serde_json::json!([session_tab_key, http_execution_id, prepared.scope_key, prepared.limits])
                     .to_string(),
             );
             if previous_session_key.as_ref() != Some(&session_key) {

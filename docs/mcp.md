@@ -203,8 +203,8 @@ does not make it temporarily active or replace the state shown in the UI.
 | `import_requests` | Parse request text without executing it and persist every discovered request | `collection_id`, `source`; optional `folder_id` |
 | `execute_http_request` | Start a saved HTTP request through the full application pipeline, optionally with ephemeral overrides | `request_id`; optional `overrides` |
 | `run_request_sequence` | Run 1–25 saved HTTP requests in order, stopping on the first failure | `request_ids` |
-| `cancel_http_request` | Cancel the active HTTP or script-console operation | None |
-| `run_script_console` | Evaluate JavaScript against the latest HTTP exchange | `source` |
+| `cancel_http_request` | Cancel one HTTP execution, or the active script console when no ID is supplied | Optional `operation_id` |
+| `run_script_console` | Evaluate JavaScript against an HTTP exchange in the active workspace | `source`; optional `http_operation_id` |
 | `connect_websocket` | Open a saved WebSocket request | `request_id` |
 | `send_websocket_message` | Send text, binary, a saved message, or a rendered template | `connection_id` and one message source |
 | `run_websocket_replay` | Send a saved replay with its recorded delays | `connection_id`, `replay_id` |
@@ -328,13 +328,67 @@ Export dialog, using stable snake-case names from its MCP schema.
 
 ### HTTP execution and script console
 
-`execute_http_request` opens the saved request in Resolved and starts the same
+`execute_http_request` starts an independent execution without changing the
+visible request tab. Each execution uses the same
 pipeline as Send in the UI: active-environment expansion, every HTTP method,
 raw, URL-encoded, and multipart bodies (including file fields), pre-request and
 post-response scripts, nested `api.requests.execute(...)` chains, cancellation,
 local or server execution policy, environment mutations, and history. The tool
 returns an `operation_id` immediately. Poll `get_http_exchange` with that ID
 until `state` is `completed` or `failed`.
+
+Repeated calls for the **same saved request can overlap**, including calls
+targeting different local or server `workspace_id` values. Up to eight MCP HTTP
+executions may be in flight; further starts return a capacity error rather than
+queuing or cancelling another request. Inactive server workspaces are
+authenticated and loaded asynchronously before the saved pipeline starts.
+The selected environment, request definition, scripts, and provider are captured
+for that run; changing the UI workspace does not retarget or cancel it.
+
+HTTP execution IDs are opaque **strings**, containing JSON with full, untruncated
+scope components and a fresh UUID v4, for example:
+
+```json
+{
+  "kind": "http_execution",
+  "scope": {
+    "kind": "upstream",
+    "server_id": "full-server-profile-id",
+    "workspace_id": "full-workspace-id"
+  },
+  "request_id": "full-saved-request-id",
+  "run_id": "f63ecf6e-6e88-456b-bd19-604e681817ce"
+}
+```
+
+The actual `operation_id` is the serialized string containing this object.
+Pass the exact returned string to `get_http_exchange`, `query_http_response`,
+or `cancel_http_request`; do not shorten it or reconstruct it from the request ID.
+Supplying a conflicting `workspace_id` is rejected. Omitting the ID selects the
+latest started MCP HTTP execution, not the last one to finish. Explicit IDs are
+recommended for parallel workflows.
+
+Results survive later runs, tab changes, and workspace changes **within the
+current app session**. Retention is bounded to at most 64 execution records and
+256 MiB of completed request/response body data; the oldest completed records
+are removed first, never a running sibling. A single oversized completed result
+can exceed this budget and expire immediately. Unknown, expired, and pre-restart
+IDs return an explicit not-found/expired error, never another run's response.
+The execution registry is not persisted. `history_entry_ids` links completed
+pipeline history entries to the existing persistent, secret-redacted local
+history (subject to its own retention policy); history is not a durable copy of
+the full raw MCP result or script reports.
+
+Runs use isolated, short-lived GPUI execution entities to reuse the existing
+pipeline, sharing the network runtime rather than implementing a second sender.
+Completed entities are released while their exchange snapshots remain available.
+Local script mutations merge into the latest source workspace instead of saving
+each run's stale workspace snapshot. Concurrent writes to the same environment
+variable locally follow application order (last applied wins); there is no
+transaction spanning multiple independent runs. Server mutations retain the existing
+asynchronous server-write behavior and can report a persistence warning after
+the HTTP response completes; concurrent remote writes can arrive in a different
+order and are not serialized across executions.
 
 The optional `overrides` object can replace the method, URL, structured query
 parameters, headers, body, body mode, raw-body language, or structured body
@@ -363,14 +417,25 @@ test, update the active environment, and execute saved request chains. A final
 expression is included in the console output, so
 `api.response.json().data.documents` can be queried directly. Poll
 `get_script_console` for structured reports and the copyable console transcript.
-`cancel_http_request` cancels either an active HTTP pipeline or console
-evaluation.
+For an isolated result, pass its string ID as `http_operation_id`; the source
+workspace must be active, since console scripts can mutate it. This explicit
+console action brings the saved request and captured response into the UI.
+Without that parameter, the existing visible MCP/sequence response is used,
+or the latest isolated result when no visible MCP response exists.
+`cancel_http_request` with an ID cancels only that HTTP pipeline; without an ID
+it first cancels an active console evaluation, otherwise the latest MCP HTTP
+execution. Cancellation before receiving a response retains the existing
+`state: "failed"` and `error: "Request cancelled"` representation. Cancellation
+during post-response scripting preserves the already received response and
+completed history.
 
 `run_request_sequence` is a bounded convenience for ordered agent workflows.
 It runs at most 25 saved HTTP requests, one at a time, through that same full
 pipeline and stops on the first failure. Poll `get_request_sequence` with the
 returned operation ID. Its `results` retain a bounded exchange for every
 finished item, while `current_request_id` identifies the visible request.
+Sequence, history-replay, and script-console IDs remain legacy numeric handles;
+they are separate from the new scoped string HTTP execution IDs.
 
 ### Snippets and history
 

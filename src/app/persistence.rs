@@ -31,6 +31,26 @@ impl ApiTester {
             .map(|error| format!("History could not be saved: {error}"));
     }
 
+    /// Isolated executions contribute entries, never a stale copy of the entire
+    /// history table (saving that copy would prune another run's entries).
+    pub(super) fn persist_execution_history(&mut self, cx: &mut Context<Self>) {
+        let Some(owner) = self.mcp_execution_owner.clone() else {
+            self.persist_history();
+            return;
+        };
+        let entries = self.history.entries().to_vec();
+        self.mcp_execution_history_ids
+            .extend(entries.iter().map(|entry| entry.id.clone()));
+        self.history.clear();
+        let _ = owner.update(cx, |owner, cx| {
+            for entry in entries.into_iter().rev() {
+                owner.history.push(entry);
+            }
+            owner.persist_history();
+            cx.notify();
+        });
+    }
+
     pub(super) fn persist_snippets(&mut self) -> Result<(), String> {
         self.database_store
             .save_snippets(&self.snippets)

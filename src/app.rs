@@ -289,6 +289,11 @@ pub struct ApiTester {
     mcp_http_operation_id: Option<u64>,
     mcp_http_request_id: Option<String>,
     mcp_http_exchange: Option<control::McpHttpExchangeSnapshot>,
+    mcp_http_executions: HashMap<String, control::McpHttpExecution>,
+    mcp_latest_http_execution: Option<String>,
+    mcp_http_console_execution_id: Option<String>,
+    mcp_execution_owner: Option<WeakEntity<ApiTester>>,
+    mcp_execution_history_ids: Vec<String>,
     mcp_scoped_local_workspace_id: Option<String>,
     mcp_request_sequence_generation: u64,
     mcp_request_sequence: Option<control::McpRequestSequence>,
@@ -457,5 +462,7 @@ enum RealtimeConnectionStatus {
     Unavailable,
 }
 
+#[cfg(test)]
+mod parallel_http_tests;
 #[cfg(test)]
 mod tests;

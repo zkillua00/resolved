@@ -208,7 +208,7 @@ pub(super) struct McpHttpRequestOverrides {
 }
 
 impl McpHttpRequestOverrides {
-    fn apply(self, request: &mut RequestDraft) {
+    pub(super) fn apply(self, request: &mut RequestDraft) {
         if let Some(method) = self.method {
             request.method = method;
         }
@@ -358,6 +358,7 @@ impl ApiTester {
         scope.script_timeout = self.settings.script.timeout();
         self.script_console_session = None;
         self.script_console_session_key = None;
+        self.mcp_http_console_execution_id = None;
         self.script_console_reports.clear();
         self.script_console_hidden_rows = 0;
         self.request_generation = self.request_generation.wrapping_add(1);
@@ -1033,7 +1034,7 @@ impl ApiTester {
         }
         self.sending = false;
         self.script_cancellation = None;
-        self.persist_history();
+        self.persist_execution_history(cx);
         if self.response_tab == ResponseTab::Preview
             && self.workspace_tabs.active() == ActiveWorkspaceTab::Request
             && self.sidebar_tab != SidebarTab::Environments
@@ -1150,7 +1151,7 @@ impl ApiTester {
         );
         self.history.push(history_entry);
         self.request_error = Some(message);
-        self.persist_history();
+        self.persist_execution_history(cx);
         self.upload_shared_history_entry(shared_history, cx);
         self.capture_mcp_http_exchange(self.request_generation);
         cx.notify();
@@ -1299,6 +1300,61 @@ impl ApiTester {
             );
             return Ok(());
         };
+        if self.workspace_writable
+            && let Some(owner) = self.mcp_execution_owner.clone()
+        {
+            let provider = self.workspace_providers.active_id().clone();
+            let updated = owner
+                .update(cx, |owner, cx| {
+                    let active = owner.workspace_providers.active_id() == &provider;
+                    let mut candidate = if active {
+                        owner.workspace.clone()
+                    } else {
+                        owner
+                            .workspace_providers
+                            .provider(&provider)
+                            .map_err(|error| error.to_string())?
+                            .load_workspace()
+                            .map_err(|error| error.to_string())?
+                    };
+                    crate::core::apply_environment_mutations_to_workspace(
+                        &mut candidate,
+                        environment_id,
+                        mutations,
+                    )?;
+                    owner
+                        .workspace_providers
+                        .provider(&provider)
+                        .map_err(|error| error.to_string())?
+                        .save_workspace(&candidate)
+                        .map_err(|error| error.to_string())?;
+                    if active {
+                        let reload_editor =
+                            owner.selected_environment_id.as_deref() == Some(environment_id)
+                                && !owner.environment_editor_is_dirty(cx);
+                        owner.replace_workspace(candidate.clone());
+                        owner.refresh_variable_intelligence(cx);
+                        if reload_editor {
+                            owner.reload_environment_editor(window, cx);
+                        }
+                        cx.notify();
+                    }
+                    Ok::<_, String>(candidate)
+                })
+                .map_err(|error| error.to_string())??;
+            // Only the mutated environment is refreshed in this run; request
+            // definitions and its selected environment remain dispatch snapshots.
+            if let Some(environment) = updated.environment(environment_id).cloned()
+                && let Some(target) = self
+                    .workspace
+                    .environments
+                    .iter_mut()
+                    .find(|item| item.id == environment_id)
+            {
+                *target = environment;
+            }
+            return Ok(());
+        }
         if !self.workspace_writable {
             return self.apply_environment_mutations_on_upstream(
                 environment_id,
@@ -1380,6 +1436,31 @@ impl ApiTester {
             self.reload_environment_editor(window, cx);
         }
 
+        if let Some(owner) = self.mcp_execution_owner.clone() {
+            let provider = self.workspace_providers.active_id().clone();
+            let _ = owner.update(cx, |owner, cx| {
+                if owner.workspace_providers.active_id() == &provider {
+                    let mut candidate = owner.workspace.clone();
+                    if crate::core::apply_environment_mutations_to_workspace(
+                        &mut candidate,
+                        environment_id,
+                        mutations,
+                    )
+                    .is_ok()
+                    {
+                        let reload_editor =
+                            owner.selected_environment_id.as_deref() == Some(environment_id)
+                                && !owner.environment_editor_is_dirty(cx);
+                        owner.replace_active_remote_workspace(candidate);
+                        owner.refresh_variable_intelligence(cx);
+                        if reload_editor {
+                            owner.reload_environment_editor(window, cx);
+                        }
+                        cx.notify();
+                    }
+                }
+            });
+        }
         let vault = self.credential_vault.clone();
         let client = self.upstream_client.clone();
         let runtime = Arc::clone(&self.runtime);
@@ -1405,10 +1486,19 @@ impl ApiTester {
             .map_err(|error| error.to_string())?;
             Ok(())
         });
-        cx.spawn_in(window, async move |this, cx| {
+        let owner = self
+            .mcp_execution_owner
+            .clone()
+            .unwrap_or_else(|| cx.entity().downgrade());
+        cx.spawn_in(window, async move |_, cx| {
             let result = task.await;
-            let _ = this.update_in(cx, |this, _, cx| {
-                if let Err(error) = result {
+            let _ = owner.update_in(cx, |this, _, cx| {
+                let error = match result {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(error),
+                    Err(error) => Some(error.to_string()),
+                };
+                if let Some(error) = error {
                     this.workspace_warning = Some(format!(
                         "Environment changes were applied locally but could not be saved to the server: {error}"
                     ));

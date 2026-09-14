@@ -69,6 +69,8 @@ enum ControlWebSocketIncoming {
 #[derive(Clone)]
 pub(super) struct McpHttpExchangeSnapshot {
     operation_id: u64,
+    history_entry_ids: Vec<String>,
+    sensitive_values: Vec<String>,
     state: &'static str,
     stage: Option<&'static str>,
     request: Option<RequestDraft>,
@@ -77,6 +79,17 @@ pub(super) struct McpHttpExchangeSnapshot {
     diagnostic: Option<ScriptDiagnostic>,
     pre_request_report: Option<ScriptReport>,
     post_response_report: Option<ScriptReport>,
+}
+
+/// The editor graph lives only while its isolated execution is in flight.
+/// Completed results are retained separately from tabs and workspace selection.
+pub(super) struct McpHttpExecution {
+    provider: WorkspaceProviderId,
+    request_id: String,
+    created_at: chrono::DateTime<Utc>,
+    runner: Option<Entity<ApiTester>>,
+    snapshot: Option<McpHttpExchangeSnapshot>,
+    subscription: Option<Subscription>,
 }
 
 pub(super) struct McpRequestSequence {
@@ -154,6 +167,21 @@ enum ControlWorkspaceTarget {
     Active,
     Local(String),
     Remote(ActiveUpstreamWorkspace),
+}
+
+fn http_execution_id(provider: &WorkspaceProviderId, request_id: &str) -> String {
+    let scope = match provider {
+        WorkspaceProviderId::Local(workspace_id) => {
+            json!({"kind": "local", "workspace_id": workspace_id})
+        }
+        WorkspaceProviderId::Upstream {
+            upstream_id,
+            workspace_id,
+        } => json!({"kind": "upstream", "server_id": upstream_id, "workspace_id": workspace_id}),
+    };
+    json!({"kind": "http_execution", "scope": scope, "request_id": request_id,
+        "run_id": uuid::Uuid::new_v4().to_string()})
+    .to_string()
 }
 
 struct RemoteControlPending {
@@ -720,12 +748,512 @@ impl ApiTester {
         }
     }
 
+    fn start_isolated_control_http_request(
+        &mut self,
+        request_id: &str,
+        overrides: Option<super::execution::McpHttpRequestOverrides>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        if self.mcp_scoped_local_workspace_id.is_none()
+            && self.active_environment_editor_is_dirty(cx)
+        {
+            return Err(
+                "Save or Revert the active environment before executing through MCP.".to_owned(),
+            );
+        }
+        self.collect_http_executions(cx);
+        if self
+            .mcp_http_executions
+            .values()
+            .filter(|run| run.runner.is_some())
+            .count()
+            >= 8
+        {
+            return Err(
+                "Eight MCP HTTP executions are already running; wait or cancel one.".to_owned(),
+            );
+        }
+        let (_, request) = self
+            .workspace
+            .saved_request(request_id)
+            .ok_or_else(|| format!("request '{request_id}' was not found"))?;
+        if request.definition.is_websocket() {
+            return Err("Use connect_websocket for WebSocket requests.".to_owned());
+        }
+        let mut template = request.definition.clone();
+        if let Some(overrides) = overrides {
+            overrides.apply(&mut template.request);
+        }
+        if template.request.method.trim().is_empty() {
+            return Err("HTTP method cannot be empty.".to_owned());
+        }
+        let provider = self.workspace_providers.active_id().clone();
+        let cookie_jar = if self.mcp_scoped_local_workspace_id.is_some() {
+            self.cookie_client_for(&provider, cx)
+                .map_err(|error| error.to_string())?
+                .0
+        } else {
+            self.cookie_jar.clone()
+        };
+        let id = http_execution_id(&provider, request_id);
+        let owner = cx.entity().downgrade();
+        let runner = cx.new(|cx| {
+            let mut runner = Self::new_with_database_store_mode(
+                Vec::new(),
+                self.database_store.clone(),
+                Some(self.runtime.clone()),
+                window,
+                cx,
+            );
+            runner.mcp_execution_owner = Some(owner);
+            runner.settings = self.settings.clone();
+            runner.workspace_providers = self.workspace_providers.clone();
+            runner.workspace_writable = self.workspace_writable;
+            runner.workspace = self.workspace.clone();
+            runner.history = RequestHistory::default();
+            runner.history_writable = self.history_writable;
+            runner.request_tabs_writable = false;
+            runner.cookie_jar = cookie_jar;
+            runner.upstream_client = self.upstream_client.clone();
+            runner.upstream_execution_client = self.upstream_execution_client.clone();
+            runner.request_namespace =
+                crate::core::RequestNamespaceCatalog::from_workspace(&runner.workspace);
+            runner.active_saved_request_id = Some(request_id.to_owned());
+            runner.response_tab = ResponseTab::Body;
+            let operation_id = runner.begin_request_template(template, window, cx);
+            runner.mcp_http_operation_id = Some(operation_id);
+            runner.mcp_http_request_id = Some(request_id.to_owned());
+            runner
+        });
+        let subscription = cx.observe(&runner, |this, _, cx| this.collect_http_executions(cx));
+        self.mcp_http_executions.insert(
+            id.clone(),
+            McpHttpExecution {
+                provider,
+                request_id: request_id.to_owned(),
+                created_at: Utc::now(),
+                runner: Some(runner),
+                snapshot: None,
+                subscription: Some(subscription),
+            },
+        );
+        self.mcp_latest_http_execution = Some(id.clone());
+        Ok(id)
+    }
+
+    fn start_background_control_http_request(
+        &mut self,
+        target: ActiveUpstreamWorkspace,
+        params: Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Params {
+            request_id: String,
+            #[serde(default)]
+            overrides: Option<super::execution::McpHttpRequestOverrides>,
+        }
+        let params: Params = decode(params)?;
+        if !self.settings.mcp.enabled
+            || !self.settings.mcp.tool_enabled("execute_http_request")
+            || !self.settings.mcp.allow_remote_workspaces
+        {
+            return Err("MCP HTTP execution on server workspaces is disabled.".to_owned());
+        }
+        self.collect_http_executions(cx);
+        if self
+            .mcp_http_executions
+            .values()
+            .filter(|run| run.runner.is_some())
+            .count()
+            >= 8
+        {
+            return Err(
+                "Eight MCP HTTP executions are already running; wait or cancel one.".to_owned(),
+            );
+        }
+        let provider = WorkspaceProviderId::Upstream {
+            upstream_id: target.upstream_id.clone(),
+            workspace_id: target.workspace_id.clone(),
+        };
+        let id = http_execution_id(&provider, &params.request_id);
+        let request_id = params.request_id.clone();
+        let cookie_jar = self
+            .cookie_client_for(&provider, cx)
+            .map_err(|error| error.to_string())?
+            .0;
+        let owner = cx.entity().downgrade();
+        let runner = cx.new(|cx| {
+            let mut runner = Self::new_with_database_store_mode(
+                Vec::new(),
+                self.database_store.clone(),
+                Some(self.runtime.clone()),
+                window,
+                cx,
+            );
+            runner.mcp_execution_owner = Some(owner);
+            runner.settings = self.settings.clone();
+            runner.workspace_providers = self.workspace_providers.clone();
+            runner.workspace = Workspace::default();
+            runner
+                .workspace_providers
+                .register(Arc::new(RemoteWorkspaceProvider::new(
+                    self.database_store.clone(),
+                    target.upstream_id.clone(),
+                    target.workspace_id.clone(),
+                    runner.workspace.clone(),
+                )));
+            let _ = runner.workspace_providers.switch(provider.clone());
+            runner.workspace_writable = false;
+            runner.request_tabs_writable = false;
+            runner.history = RequestHistory::default();
+            runner.history_writable = self.history_writable;
+            runner.cookie_jar = cookie_jar;
+            runner.upstream_client = self.upstream_client.clone();
+            runner.upstream_execution_client = self.upstream_execution_client.clone();
+            runner.active_saved_request_id = Some(params.request_id.clone());
+            runner.mcp_http_request_id = Some(params.request_id.clone());
+            runner.mcp_http_operation_id = Some(1);
+            runner.request_generation = 1;
+            runner.sending = true;
+            runner
+        });
+        let vault = self.credential_vault.clone();
+        let runtime = self.runtime.clone();
+        let client = self.upstream_client.clone();
+        let environment_id = self
+            .settings
+            .upstreams
+            .server(&target.upstream_id)
+            .and_then(|profile| profile.active_environment_id(&target.workspace_id))
+            .map(str::to_owned);
+        let task = self.runtime.spawn(async move {
+            let upstream_id = target.upstream_id.clone();
+            let credential = runtime
+                .spawn_blocking(move || vault.load_upstream(&upstream_id))
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Log in to this server again.".to_owned())?;
+            if credential.expires_at <= Utc::now() {
+                return Err("Log in to this server again.".to_owned());
+            }
+            let permissions =
+                get_upstream_user(&client, &target.base_url, credential.bearer_token())
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .permission_keys();
+            let remote =
+                reload_remote_workspace(&client, &target, credential.bearer_token()).await?;
+            if remote.id != target.workspace_id {
+                return Err("The server returned a different workspace.".to_owned());
+            }
+            let mut workspace = remote.into_local_workspace();
+            workspace.environments = if permissions.contains(ENVIRONMENTS_READ) {
+                reload_remote_environments(&client, &target, credential.bearer_token())
+                    .await?
+                    .into_iter()
+                    .map(UpstreamEnvironmentView::into_local)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            workspace.active_environment_id =
+                environment_id.filter(|id| workspace.environment(id).is_some());
+            workspace.validate().map_err(|error| error.to_string())?;
+            Ok::<_, String>((workspace, permissions))
+        });
+        runner.update(cx, |runner, cx| {
+            cx.spawn_in(window, async move |this, cx| {
+                let result = task.await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    if !this.sending || this.request_generation != 1 {
+                        return;
+                    }
+                    let result = result
+                        .map_err(|error| error.to_string())
+                        .and_then(|result| result)
+                        .and_then(|(workspace, permissions)| {
+                            if let WorkspaceProviderId::Upstream { upstream_id, .. } =
+                                this.workspace_providers.active_id()
+                                && let Some(profile) = this
+                                    .settings
+                                    .upstreams
+                                    .servers
+                                    .iter_mut()
+                                    .find(|profile| &profile.id == upstream_id)
+                            {
+                                profile.replace_permissions(permissions);
+                            }
+                            let (_, request) =
+                                workspace.saved_request(&params.request_id).ok_or_else(|| {
+                                    format!("request '{}' was not found", params.request_id)
+                                })?;
+                            if request.definition.is_websocket() {
+                                return Err(
+                                    "Use connect_websocket for WebSocket requests.".to_owned()
+                                );
+                            }
+                            let mut template = request.definition.clone();
+                            if let Some(overrides) = params.overrides {
+                                overrides.apply(&mut template.request);
+                            }
+                            if template.request.method.trim().is_empty() {
+                                return Err("HTTP method cannot be empty.".to_owned());
+                            }
+                            this.replace_active_remote_workspace(workspace);
+                            this.request_namespace =
+                                crate::core::RequestNamespaceCatalog::from_workspace(
+                                    &this.workspace,
+                                );
+                            this.request_generation = 0;
+                            this.begin_request_template(template, window, cx);
+                            Ok(())
+                        });
+                    if let Err(error) = result {
+                        this.sending = false;
+                        this.request_error = Some(error);
+                        this.capture_mcp_http_exchange(1);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+            let _ = runner;
+        });
+        let subscription = cx.observe(&runner, |this, _, cx| this.collect_http_executions(cx));
+        self.mcp_http_executions.insert(
+            id.clone(),
+            McpHttpExecution {
+                provider,
+                request_id,
+                created_at: Utc::now(),
+                runner: Some(runner),
+                snapshot: None,
+                subscription: Some(subscription),
+            },
+        );
+        self.mcp_latest_http_execution = Some(id.clone());
+        Ok(id)
+    }
+
+    fn restore_isolated_http_console_context(
+        &mut self,
+        params: &Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let explicit = params.get("http_operation_id");
+        let id = match explicit {
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .ok_or_else(|| "http_operation_id must be a string".to_owned())?
+                    .to_owned(),
+            ),
+            None if self.mcp_http_operation_id.is_none() => self.mcp_latest_http_execution.clone(),
+            None => None,
+        };
+        let Some(id) = id else {
+            return Ok(());
+        };
+        if self.sending || self.script_console_running {
+            return Err("The visible request or script console is already running.".to_owned());
+        }
+        let run = self
+            .mcp_http_executions
+            .get(&id)
+            .ok_or_else(|| "HTTP execution was not found or has expired.".to_owned())?;
+        if self.workspace_providers.active_id() != &run.provider {
+            return Err("Switch to the HTTP execution's workspace before running its script console; query_http_response works without switching.".to_owned());
+        }
+        let snapshot = run
+            .snapshot
+            .clone()
+            .or_else(|| {
+                run.runner
+                    .as_ref()
+                    .and_then(|runner| runner.read(cx).mcp_http_exchange.clone())
+            })
+            .filter(|snapshot| snapshot.state == "completed" && snapshot.response.is_some())
+            .ok_or_else(|| {
+                "A completed HTTP response is required for the script console.".to_owned()
+            })?;
+        let request_id = run.request_id.clone();
+        let collection_id = self
+            .workspace
+            .saved_request(&request_id)
+            .map(|(collection, _)| collection.id.clone())
+            .ok_or_else(|| format!("request '{request_id}' was not found"))?;
+        // Console evaluation is an explicit context switch, not optional
+        // activity following: its policy must belong to this saved request.
+        self.open_saved_request_tab(collection_id, request_id.clone(), window, cx);
+        self.mcp_http_console_execution_id = Some(id);
+        self.mcp_http_request_id = Some(request_id);
+        self.response_request = snapshot.request;
+        self.response = snapshot.response;
+        self.response_sensitive_values = snapshot.sensitive_values;
+        self.pre_script_report = snapshot.pre_request_report;
+        self.post_script_report = snapshot.post_response_report;
+        self.request_error = snapshot.error;
+        self.script_diagnostic = snapshot.diagnostic;
+        Ok(())
+    }
+
+    fn collect_http_executions(&mut self, cx: &mut Context<Self>) {
+        for run in self.mcp_http_executions.values_mut() {
+            if let Some(runner) = &run.runner {
+                let state = runner.read(cx);
+                if !state.sending
+                    && let Some(snapshot) = state.mcp_http_exchange.clone()
+                {
+                    run.snapshot = Some(snapshot);
+                    run.runner = None;
+                    run.subscription = None;
+                }
+            }
+        }
+        // Bound retained wire bodies as well as record count. Never evict a
+        // running execution merely to admit a newer request.
+        while self.mcp_http_executions.len() >= 64
+            || self
+                .mcp_http_executions
+                .values()
+                .filter_map(|run| run.snapshot.as_ref())
+                .map(|snapshot| {
+                    snapshot
+                        .response
+                        .as_ref()
+                        .map_or(0, |response| response.body.len())
+                        + snapshot
+                            .request
+                            .as_ref()
+                            .map_or(0, |request| request.body.len())
+                })
+                .sum::<usize>()
+                > 256 * 1024 * 1024
+        {
+            let oldest = self
+                .mcp_http_executions
+                .iter()
+                .filter(|(_, run)| run.runner.is_none())
+                .min_by_key(|(_, run)| run.created_at)
+                .map(|(id, _)| id.clone());
+            let Some(oldest) = oldest else { break };
+            self.mcp_http_executions.remove(&oldest);
+        }
+    }
+
+    fn control_http_execution_call(
+        &mut self,
+        method: &str,
+        mut params: Value,
+        cx: &mut Context<Self>,
+    ) -> Result<Value, String> {
+        if !self.settings.mcp.enabled || !self.settings.mcp.tool_enabled(method) {
+            return Err(format!("The MCP tool '{method}' is disabled."));
+        }
+        let id = params
+            .get("operation_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| self.mcp_latest_http_execution.clone())
+            .ok_or_else(|| "No MCP HTTP execution has been started.".to_owned())?;
+        let run = self
+            .mcp_http_executions
+            .get(&id)
+            .ok_or_else(|| format!("HTTP execution '{id}' was not found or has expired."))?;
+        if matches!(run.provider, WorkspaceProviderId::Upstream { .. })
+            && !self.settings.mcp.allow_remote_workspaces
+        {
+            return Err("MCP access to server workspaces is disabled.".to_owned());
+        }
+        if let Some(workspace_id) = params.get("workspace_id") {
+            let workspace_id = workspace_id
+                .as_str()
+                .ok_or_else(|| "workspace_id must be a string".to_owned())?;
+            if workspace_id != run.provider.to_string() {
+                return Err(
+                    "The execution does not belong to the supplied workspace_id.".to_owned(),
+                );
+            }
+        }
+        params
+            .as_object_mut()
+            .ok_or_else(|| "params must be an object".to_owned())?
+            .remove("workspace_id");
+        let private_id = run
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.operation_id)
+            .or_else(|| {
+                run.runner
+                    .as_ref()
+                    .and_then(|runner| runner.read(cx).mcp_http_operation_id)
+            })
+            .ok_or_else(|| "HTTP execution has no pipeline handle.".to_owned())?;
+        params["operation_id"] = json!(private_id);
+        if method == "cancel_http_request" && params.as_object().unwrap().len() != 1 {
+            return Err(
+                "cancel_http_request accepts only operation_id and workspace_id.".to_owned(),
+            );
+        }
+        let mut result = if let Some(runner) = &run.runner {
+            runner.update(cx, |runner, cx| match method {
+                "get_http_exchange" => runner.control_get_http_exchange(params),
+                "query_http_response" => runner.control_query_http_response(params),
+                "cancel_http_request" => runner.control_cancel_http_request(cx),
+                _ => unreachable!(),
+            })?
+        } else {
+            let snapshot = run
+                .snapshot
+                .as_ref()
+                .ok_or_else(|| "HTTP result is unavailable.".to_owned())?;
+            match method {
+                "get_http_exchange" => {
+                    if params
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .any(|key| !matches!(key.as_str(), "operation_id" | "max_body_bytes"))
+                    {
+                        return Err("get_http_exchange accepts only operation_id, workspace_id, and max_body_bytes.".to_owned());
+                    }
+                    let max = match params.get("max_body_bytes") {
+                        None => 256 * 1024,
+                        Some(value) => value.as_u64().ok_or_else(|| {
+                            "max_body_bytes must be a non-negative integer".to_owned()
+                        })?,
+                    };
+                    http_exchange_value(snapshot, max.min(512 * 1024) as usize)
+                }
+                "query_http_response" => Self::query_http_response_value(
+                    params,
+                    snapshot.operation_id,
+                    snapshot.response.as_ref(),
+                )?,
+                "cancel_http_request" => json!({"state": snapshot.state, "cancelled": false}),
+                _ => unreachable!(),
+            }
+        };
+        result["operation_id"] = json!(id);
+        result["workspace_id"] = json!(run.provider.to_string());
+        self.collect_http_executions(cx);
+        Ok(result)
+    }
+
     pub(super) fn capture_mcp_http_exchange(&mut self, operation_id: u64) {
         if self.mcp_http_operation_id != Some(operation_id) {
             return;
         }
         self.mcp_http_exchange = Some(McpHttpExchangeSnapshot {
             operation_id,
+            history_entry_ids: self.mcp_execution_history_ids.clone(),
+            sensitive_values: self.response_sensitive_values.clone(),
             state: if self.sending {
                 "running"
             } else if self.response.is_some() {
@@ -808,8 +1336,31 @@ impl ApiTester {
     }
 
     pub(super) fn stop_mcp_http_request(&mut self, cx: &mut Context<Self>) {
+        for run in self.mcp_http_executions.values() {
+            if let Some(runner) = &run.runner {
+                runner.update(cx, |runner, cx| {
+                    if runner.sending {
+                        runner.cancel_request(cx);
+                    }
+                });
+            }
+        }
         if self.sending && self.mcp_http_operation_id == Some(self.request_generation) {
             self.cancel_request(cx);
+        }
+    }
+
+    pub(super) fn stop_remote_mcp_http_executions(&mut self, cx: &mut Context<Self>) {
+        for run in self.mcp_http_executions.values() {
+            if matches!(run.provider, WorkspaceProviderId::Upstream { .. })
+                && let Some(runner) = &run.runner
+            {
+                runner.update(cx, |runner, cx| {
+                    if runner.sending {
+                        runner.cancel_request(cx);
+                    }
+                });
+            }
         }
     }
 
@@ -985,6 +1536,19 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ControlResponse {
+        if matches!(
+            method,
+            "get_http_exchange" | "query_http_response" | "cancel_http_request"
+        ) && (params.get("operation_id").is_some_and(Value::is_string)
+            || (params.get("operation_id").is_none()
+                && self.mcp_latest_http_execution.is_some()
+                && !(method == "cancel_http_request" && self.script_console_running)))
+        {
+            return match self.control_http_execution_call(method, params, cx) {
+                Ok(value) => ControlResponse::success(value),
+                Err(error) => ControlResponse::error(error),
+            };
+        }
         let target = match self.control_workspace_target(method, &mut params) {
             Ok(target) => target,
             Err(error) => return ControlResponse::error(error),
@@ -998,6 +1562,15 @@ impl ApiTester {
                     window,
                     cx,
                 );
+            }
+            ControlWorkspaceTarget::Remote(target) if method == "execute_http_request" => {
+                return match self.start_background_control_http_request(target, params, window, cx)
+                {
+                    Ok(id) => {
+                        ControlResponse::success(json!({"operation_id": id, "state": "running"}))
+                    }
+                    Err(error) => ControlResponse::error(error),
+                };
             }
             ControlWorkspaceTarget::Remote(_) => {
                 return ControlResponse::error(format!(
@@ -1025,7 +1598,7 @@ impl ApiTester {
                     overrides: Option<super::execution::McpHttpRequestOverrides>,
                 }
                 decode::<Params>(params).and_then(|params| {
-                    self.start_control_http_request(
+                    self.start_isolated_control_http_request(
                         &params.request_id,
                         params.overrides,
                         window,
@@ -1035,6 +1608,7 @@ impl ApiTester {
                 })
             }
             "run_script_console" => required_string(&params, "source").and_then(|source| {
+                self.restore_isolated_http_console_context(&params, window, cx)?;
                 if let Some(request_id) = self.mcp_http_request_id.clone() {
                     self.follow_mcp_request_context(&request_id, window, cx);
                 }
@@ -1281,9 +1855,32 @@ impl ApiTester {
         workspace_id: &str,
         method: &str,
         params: Value,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ControlResponse {
+        if method == "execute_http_request" {
+            let workspace = match self.database_store.load_workspace_for(workspace_id) {
+                Ok(workspace) => workspace,
+                Err(error) => return ControlResponse::error(error.to_string()),
+            };
+            let provider = WorkspaceProviderId::Local(workspace_id.to_owned());
+            self.workspace_providers
+                .register(Arc::new(LocalWorkspaceProvider::new(
+                    self.database_store.clone(),
+                    workspace_id,
+                )));
+            let visible_provider = self.workspace_providers.active_id().clone();
+            let visible_workspace = std::mem::replace(&mut self.workspace, workspace);
+            let visible_writable = std::mem::replace(&mut self.workspace_writable, true);
+            self.mcp_scoped_local_workspace_id = Some(workspace_id.to_owned());
+            let _ = self.workspace_providers.switch(provider);
+            let result = self.handle_window_control_call(method, params, window, cx);
+            let _ = self.workspace_providers.switch(visible_provider);
+            self.workspace = visible_workspace;
+            self.workspace_writable = visible_writable;
+            self.mcp_scoped_local_workspace_id = None;
+            return result;
+        }
         self.handle_scoped_local_control_call(workspace_id, method, params, cx)
     }
 
@@ -2911,7 +3508,7 @@ impl ApiTester {
             snippet_id: String,
             request_id: String,
             #[serde(default)]
-            operation_id: Option<u64>,
+            operation_id: Option<Value>,
         }
         let params: Params = decode(params)?;
         let snippet = self
@@ -2931,15 +3528,28 @@ impl ApiTester {
         self.follow_mcp_request_context(&params.request_id, window, cx);
         let mut context =
             crate::core::SnippetInvocationContext::new(snippet.category, &request.request);
+        let isolated_exchange = params.operation_id.as_ref().and_then(Value::as_str)
+            .map(|id| {
+                let run = self.mcp_http_executions.get(id)
+                    .filter(|run| run.provider == *self.workspace_providers.active_id()
+                        && run.request_id == params.request_id)
+                    .ok_or_else(|| "The HTTP execution does not match this request and workspace, or has expired.".to_owned())?;
+                run.snapshot.clone().or_else(|| run.runner.as_ref()
+                    .and_then(|runner| runner.read(cx).mcp_http_exchange.clone()))
+                    .ok_or_else(|| "The HTTP execution has not completed.".to_owned())
+            }).transpose()?;
         if snippet.category == SnippetCategory::PostResponse {
-            let exchange = self
-                .mcp_http_exchange
+            let exchange = isolated_exchange
                 .as_ref()
+                .or(self.mcp_http_exchange.as_ref())
                 .filter(|exchange| {
-                    params
-                        .operation_id
-                        .is_none_or(|id| id == exchange.operation_id)
-                        && self.mcp_http_request_id.as_deref() == Some(params.request_id.as_str())
+                    (isolated_exchange.is_some()
+                        || (params
+                            .operation_id
+                            .as_ref()
+                            .is_none_or(|id| id.as_u64() == Some(exchange.operation_id))
+                            && self.mcp_http_request_id.as_deref()
+                                == Some(params.request_id.as_str())))
                         && exchange.state == "completed"
                         && exchange.error.is_none()
                 })
@@ -2962,6 +3572,10 @@ impl ApiTester {
             .map(|variable| variable.value.as_str())
             .collect::<Vec<_>>();
         context = context.with_sensitive_values(sensitive);
+        if let Some(exchange) = &isolated_exchange {
+            context =
+                context.with_sensitive_values(exchange.sensitive_values.iter().map(String::as_str));
+        }
         let cancellation = SnippetCancellation::new();
         let generated = generate_snippet(&snippet, &context, &cancellation)
             .map_err(|error| error.to_string())?;
@@ -3018,6 +3632,8 @@ impl ApiTester {
         Ok(http_exchange_value(
             &McpHttpExchangeSnapshot {
                 operation_id,
+                history_entry_ids: self.mcp_execution_history_ids.clone(),
+                sensitive_values: self.response_sensitive_values.clone(),
                 state: if self.sending { "running" } else { "idle" },
                 stage: self.execution_stage.map(ExecutionStage::label),
                 request: self.response_request.clone(),
@@ -3032,6 +3648,30 @@ impl ApiTester {
     }
 
     pub(super) fn control_query_http_response(&self, params: Value) -> Result<Value, String> {
+        let operation_id = params
+            .get("operation_id")
+            .and_then(Value::as_u64)
+            .or(self.mcp_http_operation_id)
+            .unwrap_or(self.request_generation);
+        let response = self
+            .mcp_http_exchange
+            .as_ref()
+            .filter(|snapshot| snapshot.operation_id == operation_id)
+            .and_then(|snapshot| snapshot.response.as_ref())
+            .or_else(|| {
+                (self.mcp_http_operation_id == Some(operation_id)
+                    && self.request_generation == operation_id)
+                    .then_some(self.response.as_ref())
+                    .flatten()
+            });
+        Self::query_http_response_value(params, operation_id, response)
+    }
+
+    fn query_http_response_value(
+        params: Value,
+        operation_id: u64,
+        response: Option<&ResponseData>,
+    ) -> Result<Value, String> {
         #[derive(Deserialize)]
         #[serde(default, deny_unknown_fields)]
         struct Params {
@@ -3083,21 +3723,7 @@ impl ApiTester {
         if params.projection.len() > 100 {
             return Err("projection cannot contain more than 100 fields".to_owned());
         }
-        let operation_id = params
-            .operation_id
-            .or(self.mcp_http_operation_id)
-            .unwrap_or(self.request_generation);
-        let response = self
-            .mcp_http_exchange
-            .as_ref()
-            .filter(|snapshot| snapshot.operation_id == operation_id)
-            .and_then(|snapshot| snapshot.response.as_ref())
-            .or_else(|| {
-                (self.mcp_http_operation_id == Some(operation_id)
-                    && self.request_generation == operation_id)
-                    .then_some(self.response.as_ref())
-                    .flatten()
-            })
+        let response = response
             .ok_or_else(|| format!("HTTP operation {operation_id} has no response body yet"))?;
         let body: Value = serde_json::from_slice(&response.body)
             .map_err(|error| format!("HTTP response body is not valid JSON: {error}"))?;
@@ -4727,6 +5353,7 @@ fn variable_value(variable: &EnvironmentVariable) -> Value {
 fn http_exchange_value(snapshot: &McpHttpExchangeSnapshot, max_body_bytes: usize) -> Value {
     json!({
         "operation_id": snapshot.operation_id,
+        "history_entry_ids": snapshot.history_entry_ids,
         "state": snapshot.state,
         "stage": snapshot.stage,
         "request": snapshot.request,
@@ -4838,6 +5465,38 @@ mod remote_tests {
         net::{TcpListener, TcpStream},
         thread,
     };
+
+    #[test]
+    fn http_execution_ids_preserve_full_scope_and_have_fresh_uuids() {
+        let workspace_id = "workspace:with/long-scope-and-雪".repeat(5);
+        let server_id = "server:full/identifier".repeat(5);
+        let request_id = "same-request:with/quotes\"";
+        let provider = WorkspaceProviderId::Upstream {
+            upstream_id: server_id.clone(),
+            workspace_id: workspace_id.clone(),
+        };
+        let first = http_execution_id(&provider, request_id);
+        let second = http_execution_id(&provider, request_id);
+        assert_ne!(first, second);
+        let decoded: Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(decoded["scope"]["server_id"], server_id);
+        assert_eq!(decoded["scope"]["workspace_id"], workspace_id);
+        assert_eq!(decoded["request_id"], request_id);
+        assert_eq!(
+            uuid::Uuid::parse_str(decoded["run_id"].as_str().unwrap())
+                .unwrap()
+                .get_version_num(),
+            4
+        );
+        let local: Value = serde_json::from_str(&http_execution_id(
+            &WorkspaceProviderId::Local(workspace_id.clone()),
+            request_id,
+        ))
+        .unwrap();
+        assert_eq!(local["scope"]["kind"], "local");
+        assert_eq!(local["scope"]["workspace_id"], workspace_id);
+        assert!(local["scope"].get("server_id").is_none());
+    }
 
     #[test]
     fn remote_collection_mutation_uses_authenticated_api_and_refreshes_workspace() {

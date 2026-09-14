@@ -45,7 +45,7 @@ impl ApiTester {
         upload: SharedHistoryUpload,
         cx: &mut Context<Self>,
     ) {
-        let Some(target) = self.request_history_target.take() else {
+        let Some(target) = self.request_history_target.clone() else {
             return;
         };
         let vault = self.credential_vault.clone();
@@ -73,9 +73,13 @@ impl ApiTester {
             .map(|_| ())
             .map_err(|error| error.to_string())
         });
-        cx.spawn(async move |this, cx| {
+        let owner = self
+            .mcp_execution_owner
+            .clone()
+            .unwrap_or_else(|| cx.entity().downgrade());
+        cx.spawn(async move |_, cx| {
             let result = task.await;
-            let Some(this) = this.upgrade() else {
+            let Some(this) = owner.upgrade() else {
                 return;
             };
             this.update(cx, |this, cx| {

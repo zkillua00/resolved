@@ -969,7 +969,10 @@ fn mcp_http_execution_and_script_console_use_the_application_pipeline(
                 cx,
             );
             assert!(response.ok, "{:?}", response.error);
-            response.result.unwrap()["operation_id"].as_u64().unwrap()
+            response.result.unwrap()["operation_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
         })
     });
     cx.run_until_parked();
@@ -977,15 +980,44 @@ fn mcp_http_execution_and_script_console_use_the_application_pipeline(
     assert!(overridden_request.starts_with("PUT /items?scope=recent HTTP/1.1"));
     assert!(overridden_request.contains("x-agent: mcp"));
     assert!(overridden_request.contains("{\"probe\":true}"));
-    let selected = cx.update(|_, cx| {
-        app.read(cx)
-            .control_query_http_response(serde_json::json!({
-                "operation_id": override_operation_id,
-                "json_pointer": "/data/documents",
-                "projection": { "id": "/id", "title": "/title" },
-                "limit": 1
-            }))
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        cx.run_until_parked();
+        let done = cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.handle_window_control_call(
+                    "get_http_exchange",
+                    serde_json::json!({"operation_id": override_operation_id}),
+                    window,
+                    cx,
+                )
+                .result
+                .unwrap()["state"]
+                    == "completed"
+            })
+        });
+        if done {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let selected = cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.handle_window_control_call(
+                "query_http_response",
+                serde_json::json!({
+                    "operation_id": override_operation_id,
+                    "json_pointer": "/data/documents",
+                    "projection": { "id": "/id", "title": "/title" },
+                    "limit": 1
+                }),
+                window,
+                cx,
+            )
+            .result
             .unwrap()
+        })
     });
     assert_eq!(
         selected["value"],
@@ -1113,10 +1145,15 @@ fn mcp_websocket_connection_exposes_frames_and_runs_automation(cx: &mut gpui::Te
                 }
                 socket.close(None).await.unwrap();
                 let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
-                    .await.unwrap().unwrap();
+                    .await
+                    .unwrap()
+                    .unwrap();
                 let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
                 let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
-                    .await.unwrap().unwrap().unwrap();
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
                 socket.send(message).await.unwrap();
                 // Keep the reconnected socket open until the test disconnects.
                 let _ = tokio::time::timeout(Duration::from_secs(5), socket.next()).await;
@@ -1302,20 +1339,33 @@ fn mcp_websocket_connection_exposes_frames_and_runs_automation(cx: &mut gpui::Te
         std::thread::sleep(Duration::from_millis(10));
         cx.run_until_parked();
         reconnected = cx.update(|_, cx| {
-            let events = app.read(cx).control_get_websocket_events(
-                serde_json::json!({ "connection_id": connection_id }),
-            ).unwrap();
-            events["events"].as_array().unwrap().iter().any(|event| {
-                event["direction"] == "received" && event["payload"] == "reconnected"
-            })
+            let events = app
+                .read(cx)
+                .control_get_websocket_events(serde_json::json!({ "connection_id": connection_id }))
+                .unwrap();
+            events["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| event["direction"] == "received" && event["payload"] == "reconnected")
         });
-        if reconnected { break; }
+        if reconnected {
+            break;
+        }
     }
-    assert!(reconnected, "close automation should reconnect using the same MCP connection ID");
+    assert!(
+        reconnected,
+        "close automation should reconnect using the same MCP connection ID"
+    );
     let disconnected = cx.update(|window, cx| {
-        app.update(cx, |app, cx| app.handle_window_control_call(
-            "disconnect_websocket", serde_json::json!({ "connection_id": connection_id }), window, cx,
-        ))
+        app.update(cx, |app, cx| {
+            app.handle_window_control_call(
+                "disconnect_websocket",
+                serde_json::json!({ "connection_id": connection_id }),
+                window,
+                cx,
+            )
+        })
     });
     assert!(disconnected.ok, "{:?}", disconnected.error);
     server.join().unwrap();
@@ -1510,10 +1560,7 @@ fn params_editor_stays_in_sync_with_the_request_url(cx: &mut gpui::TestAppContex
             app.query_params[0].value.read(cx).value().as_ref(),
             "hello world"
         );
-        (
-            app.query_params[1].id,
-            app.query_params[1].value.clone(),
-        )
+        (app.query_params[1].id, app.query_params[1].value.clone())
     });
 
     cx.update(|window, cx| {
@@ -1530,11 +1577,14 @@ fn params_editor_stays_in_sync_with_the_request_url(cx: &mut gpui::TestAppContex
             "https://example.test/search?q=hello+world&page=3#results"
         );
         assert_eq!(
-            app.read(cx).documentation_intelligence.explanation(
-                app.read(cx).documentation.read(cx).value(cx).as_ref(),
-                crate::documentation_intelligence::TargetKind::Query,
-                "page",
-            ).as_deref(),
+            app.read(cx)
+                .documentation_intelligence
+                .explanation(
+                    app.read(cx).documentation.read(cx).value(cx).as_ref(),
+                    crate::documentation_intelligence::TargetKind::Query,
+                    "page",
+                )
+                .as_deref(),
             Some("Pagination cursor")
         );
     });
@@ -1553,11 +1603,13 @@ fn params_editor_stays_in_sync_with_the_request_url(cx: &mut gpui::TestAppContex
         );
         assert!(!app.draft(cx).query_params[1].enabled);
         assert_eq!(
-            app.documentation_intelligence.explanation(
-                app.documentation.read(cx).value(cx).as_ref(),
-                crate::documentation_intelligence::TargetKind::Query,
-                "page",
-            ).as_deref(),
+            app.documentation_intelligence
+                .explanation(
+                    app.documentation.read(cx).value(cx).as_ref(),
+                    crate::documentation_intelligence::TargetKind::Query,
+                    "page",
+                )
+                .as_deref(),
             Some("Pagination cursor")
         );
     });
@@ -1566,7 +1618,8 @@ fn params_editor_stays_in_sync_with_the_request_url(cx: &mut gpui::TestAppContex
     let documentation_input = cx.update(|window, cx| {
         app.update(cx, |app, cx| {
             app.request_pane = RequestPane::Documentation;
-            app.documentation.update(cx, |editor, cx| editor.set_value("", window, cx));
+            app.documentation
+                .update(cx, |editor, cx| editor.set_value("", window, cx));
             let input = app.documentation.read(cx).input_state();
             input.read(cx).focus_handle(cx).focus(window);
             cx.notify();
@@ -1586,11 +1639,13 @@ fn params_editor_stays_in_sync_with_the_request_url(cx: &mut gpui::TestAppContex
     cx.update(|_, cx| {
         let app = app.read(cx);
         assert_eq!(
-            app.documentation_intelligence.explanation(
-                app.documentation.read(cx).value(cx).as_ref(),
-                crate::documentation_intelligence::TargetKind::Query,
-                "page",
-            ).as_deref(),
+            app.documentation_intelligence
+                .explanation(
+                    app.documentation.read(cx).value(cx).as_ref(),
+                    crate::documentation_intelligence::TargetKind::Query,
+                    "page",
+                )
+                .as_deref(),
             Some("Pagination cursor"),
         );
     });

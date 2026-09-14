@@ -65,6 +65,7 @@ tokio-tungstenite = { version = "=0.30.0", default-features = false, features = 
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v4"] }
 tree-sitter = "=0.25.10"
 tree-sitter-c-sharp = "=0.23.5"
 tree-sitter-kotlin-ng = "=1.1.0"

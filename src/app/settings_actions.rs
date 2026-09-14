@@ -177,7 +177,14 @@ impl ApiTester {
                         WorkspaceProviderId::Upstream { .. }
                     )
                 {
-                    self.stop_mcp_runtime_operations(cx);
+                    self.stop_mcp_websocket();
+                    self.stop_mcp_script_console();
+                    if self.sending && self.mcp_http_operation_id == Some(self.request_generation) {
+                        self.cancel_request(cx);
+                    }
+                }
+                if !enabled {
+                    self.stop_remote_mcp_http_executions(cx);
                 }
                 self.settings_notice = Some(if enabled {
                     "MCP access to server workspaces enabled.".to_owned()
