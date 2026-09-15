@@ -82,6 +82,7 @@ pub use snippet::{
     SnippetSelection, SnippetSelectionArea, SnippetSelectionSource, SnippetTextRange,
     generate_snippet,
 };
+pub(crate) use template::{redact_secret_bytes, redact_secret_values};
 pub use template::{RequestTemplate, ResolvedRequest, resolve_request};
 #[allow(unused_imports)]
 pub use upstream::{

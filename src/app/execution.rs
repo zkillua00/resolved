@@ -1140,6 +1140,7 @@ impl ApiTester {
         self.execution_stage = None;
         self.abort_handle = None;
         self.script_cancellation = None;
+        self.response_sensitive_values = sensitive_values.to_vec();
         let history_entry =
             HistoryEntry::failed_with_secrets(request, message.clone(), sensitive_values);
         let shared_history = SharedHistoryUpload::failed(

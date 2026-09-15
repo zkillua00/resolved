@@ -1166,6 +1166,7 @@ impl ApiTester {
         };
         let resolved = resolve_request(&draft, self.workspace.active_environment())
             .map_err(|error| error.to_string())?;
+        self.remember_mcp_websocket_ui_secrets(resolved.sensitive_values);
         Ok(resolved.request.url)
     }
 

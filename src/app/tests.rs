@@ -932,6 +932,13 @@ fn mcp_http_execution_and_script_console_use_the_application_pipeline(
             app.settings.mcp.enabled = true;
             let mut workspace = app.workspace.clone();
             let collection_id = workspace.create_collection("HTTP").unwrap();
+            let environment_id = workspace.create_environment("Secrets").unwrap();
+            workspace
+                .add_environment_variable(&environment_id, "token", "hidden", true, true)
+                .unwrap();
+            workspace
+                .set_active_environment(Some(&environment_id))
+                .unwrap();
             let request_id = workspace
                 .create_saved_request(
                     &collection_id,
@@ -959,7 +966,10 @@ fn mcp_http_execution_and_script_console_use_the_application_pipeline(
                     "overrides": {
                         "method": "PUT",
                         "query_parameters": [{ "key": "scope", "value": "recent" }],
-                        "headers": [{ "name": "X-Agent", "value": "mcp" }],
+                        "headers": [
+                            { "name": "X-Agent", "value": "mcp" },
+                            { "name": "X-Secret", "value": "{{token}}" }
+                        ],
                         "body": "{\"probe\":true}",
                         "body_mode": "raw",
                         "raw_body_language": "json"
@@ -979,6 +989,7 @@ fn mcp_http_execution_and_script_console_use_the_application_pipeline(
     let overridden_request = requests_rx.recv().unwrap();
     assert!(overridden_request.starts_with("PUT /items?scope=recent HTTP/1.1"));
     assert!(overridden_request.contains("x-agent: mcp"));
+    assert!(overridden_request.contains("x-secret: hidden"));
     assert!(overridden_request.contains("{\"probe\":true}"));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
@@ -1027,6 +1038,26 @@ fn mcp_http_execution_and_script_console_use_the_application_pipeline(
     assert_eq!(selected["returned_items"], 1);
     assert_eq!(selected["items_truncated"], true);
     assert!(!selected.to_string().contains("hidden"));
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            // Retained executions must use their original secrets even after
+            // the active environment changes.
+            app.workspace.set_active_environment(None).unwrap();
+            for method in ["get_http_exchange", "query_http_response"] {
+                let result = app
+                    .handle_window_control_call(
+                        method,
+                        serde_json::json!({"operation_id": override_operation_id}),
+                        window,
+                        cx,
+                    )
+                    .result
+                    .unwrap();
+                assert!(!result.to_string().contains("hidden"));
+                assert!(result.to_string().contains("[REDACTED]"));
+            }
+        })
+    });
     cx.update(|_, cx| {
         let app = app.read(cx);
         let (_, saved) = app.workspace.saved_request(&request_id).unwrap();
@@ -1181,6 +1212,13 @@ fn mcp_websocket_connection_exposes_frames_and_runs_automation(cx: &mut gpui::Te
             app.settings.mcp.enabled = true;
             let mut workspace = app.workspace.clone();
             let collection_id = workspace.create_collection("Sockets").unwrap();
+            let environment_id = workspace.create_environment("Secrets").unwrap();
+            workspace
+                .add_environment_variable(&environment_id, "token", "automatic", true, true)
+                .unwrap();
+            workspace
+                .set_active_environment(Some(&environment_id))
+                .unwrap();
             let request_id = workspace
                 .create_saved_request(
                     &collection_id,
@@ -1195,7 +1233,7 @@ fn mcp_websocket_connection_exposes_frames_and_runs_automation(cx: &mut gpui::Te
                         automation_enabled: true,
                         automation_source:
                             "import { run } from './events.js'; run();".to_owned(),
-                        automation_modules: std::collections::BTreeMap::from([("events.js".into(), "export function run() { if (ws.event.eventType === 'open') ws.send('automatic'); }".into())]),
+                        automation_modules: std::collections::BTreeMap::from([("events.js".into(), "export function run() { if (ws.event.eventType === 'open') ws.send(api.environment.get('token')); }".into())]),
                         ..WebSocketWorkspace::default()
                     }),
                 )
@@ -1229,8 +1267,9 @@ fn mcp_websocket_connection_exposes_frames_and_runs_automation(cx: &mut gpui::Te
                         "connection_id": connection_id
                     }))
                     .unwrap();
+                assert!(!events.to_string().contains("automatic"));
                 events["events"].as_array().unwrap().iter().any(|event| {
-                    event["direction"] == "received" && event["payload"] == "automatic"
+                    event["direction"] == "received" && event["payload"] == "[REDACTED]"
                 })
             });
         if automatic_received {

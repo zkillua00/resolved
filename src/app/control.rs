@@ -54,6 +54,8 @@ pub(super) struct ControlWebSocketConnection {
     abort_handle: AbortHandle,
     events: Vec<ControlWebSocketEvent>,
     next_event_id: u64,
+    // Shared with automation so secrets are registered before sending wire commands.
+    sensitive_values: Arc<std::sync::Mutex<Vec<String>>>,
     automation_paused: Arc<std::sync::atomic::AtomicBool>,
     automation: Arc<std::sync::Mutex<ControlWebSocketAutomation>>,
 }
@@ -739,6 +741,14 @@ impl ApiTester {
         }
     }
 
+    pub(super) fn remember_mcp_websocket_ui_secrets(&self, values: Vec<String>) {
+        if let Some(connection) = &self.mcp_websocket
+            && self.websocket_workspace.mcp_connection_id == Some(connection.id)
+        {
+            remember_websocket_secrets(&connection.sensitive_values, values);
+        }
+    }
+
     pub(super) fn record_mcp_websocket_ui_text(&mut self, payload: String) {
         let Some(connection_id) = self.websocket_workspace.mcp_connection_id else {
             return;
@@ -1235,6 +1245,7 @@ impl ApiTester {
                     params,
                     snapshot.operation_id,
                     snapshot.response.as_ref(),
+                    &snapshot.sensitive_values,
                 )?,
                 "cancel_http_request" => json!({"state": snapshot.state, "cancelled": false}),
                 _ => unreachable!(),
@@ -3653,10 +3664,11 @@ impl ApiTester {
             .and_then(Value::as_u64)
             .or(self.mcp_http_operation_id)
             .unwrap_or(self.request_generation);
-        let response = self
+        let snapshot = self
             .mcp_http_exchange
             .as_ref()
-            .filter(|snapshot| snapshot.operation_id == operation_id)
+            .filter(|snapshot| snapshot.operation_id == operation_id);
+        let response = snapshot
             .and_then(|snapshot| snapshot.response.as_ref())
             .or_else(|| {
                 (self.mcp_http_operation_id == Some(operation_id)
@@ -3664,13 +3676,27 @@ impl ApiTester {
                     .then_some(self.response.as_ref())
                     .flatten()
             });
-        Self::query_http_response_value(params, operation_id, response)
+        let sensitive_values = snapshot
+            .map(|snapshot| snapshot.sensitive_values.as_slice())
+            .unwrap_or(&self.response_sensitive_values);
+        Self::query_http_response_value(params, operation_id, response, sensitive_values)
     }
 
     fn query_http_response_value(
         params: Value,
         operation_id: u64,
         response: Option<&ResponseData>,
+        sensitive_values: &[String],
+    ) -> Result<Value, String> {
+        Self::query_http_response_value_inner(params, operation_id, response, sensitive_values)
+            .map_err(|error| crate::core::redact_secret_values(&error, sensitive_values))
+    }
+
+    fn query_http_response_value_inner(
+        params: Value,
+        operation_id: u64,
+        response: Option<&ResponseData>,
+        sensitive_values: &[String],
     ) -> Result<Value, String> {
         #[derive(Deserialize)]
         #[serde(default, deny_unknown_fields)]
@@ -3734,7 +3760,7 @@ impl ApiTester {
             )
         })?;
         let limit = params.limit.min(1_000);
-        let (value, total_items, returned_items) = match selected {
+        let (mut value, total_items, returned_items) = match selected {
             Value::Array(items) => {
                 let values = items
                     .iter()
@@ -3752,6 +3778,7 @@ impl ApiTester {
             value if params.projection.is_empty() => (value.clone(), None, None),
             value => (project(value, &params.projection)?, None, None),
         };
+        redact_mcp_value(&mut value, sensitive_values);
         let output_bytes = serde_json::to_vec(&value)
             .map_err(|error| format!("selected response could not be encoded: {error}"))?
             .len();
@@ -3763,7 +3790,7 @@ impl ApiTester {
         }
         Ok(json!({
             "operation_id": operation_id,
-            "json_pointer": params.json_pointer,
+            "json_pointer": crate::core::redact_secret_values(&params.json_pointer, sensitive_values),
             "value": value,
             "output_bytes": output_bytes,
             "total_items": total_items,
@@ -3880,14 +3907,23 @@ impl ApiTester {
             ));
         }
         let model = self.visible_script_console_model();
-        Ok(json!({
+        let mut value = json!({
             "operation_id": self.mcp_script_console_operation_id,
             "state": if self.script_console_running { "running" } else { "idle" },
             "output": model.copy_all_text(),
             "diagnostic": self.script_diagnostic.as_ref().map(script_diagnostic_value),
             "pre_request_report": self.pre_script_report.as_ref().map(script_report_value),
             "post_response_report": self.post_script_report.as_ref().map(script_report_value)
-        }))
+        });
+        for field in [
+            "output",
+            "diagnostic",
+            "pre_request_report",
+            "post_response_report",
+        ] {
+            redact_mcp_value(&mut value[field], &self.response_sensitive_values);
+        }
+        Ok(value)
     }
 
     fn control_connect_websocket(
@@ -3931,6 +3967,11 @@ impl ApiTester {
         let (command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (wire_sender, mut wire_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (event_sender, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let sensitive_values = Arc::new(std::sync::Mutex::new(resolved.sensitive_values));
+        remember_websocket_environment_secrets(
+            &sensitive_values,
+            self.workspace.active_environment(),
+        );
         let url = resolved.request.url;
         let headers = resolved.request.headers;
         let connection_wire_sender = wire_sender.clone();
@@ -3978,6 +4019,7 @@ impl ApiTester {
         let task_automation_paused = automation_paused.clone();
         let automation_commands = command_sender.clone();
         let automation_events = event_sender.clone();
+        let automation_sensitive_values = sensitive_values.clone();
         self.runtime.spawn(async move {
             // Resolve once before any event scripts, including close/error handlers.
             automation_scope.execution_limits = snapshot_receiver.await.ok();
@@ -4054,6 +4096,18 @@ impl ApiTester {
                 }
                 match output {
                     Ok(Ok(output)) => {
+                        // Register each mutation, including intermediate values,
+                        // before emitting logs or already-expanded script sends.
+                        for mutation in &output.environment_mutations {
+                            if let EnvironmentMutation::Set { key, value } = mutation
+                                && automation_scope.environment.is_secret(key)
+                            {
+                                remember_websocket_secrets(
+                                    &automation_sensitive_values,
+                                    vec![value.clone()],
+                                );
+                            }
+                        }
                         let automation_environment = match automation_chainer
                             .apply_websocket_environment_mutations(&output.environment_mutations)
                         {
@@ -4064,6 +4118,10 @@ impl ApiTester {
                                 continue;
                             }
                         };
+                        remember_websocket_environment_secrets(
+                            &automation_sensitive_values,
+                            automation_environment.as_ref(),
+                        );
                         automation_scope
                             .environment
                             .apply_mutations(&output.environment_mutations);
@@ -4086,6 +4144,10 @@ impl ApiTester {
                             );
                             match resolved {
                                 Ok(resolved) => {
+                                    remember_websocket_secrets(
+                                        &automation_sensitive_values,
+                                        resolved.sensitive_values,
+                                    );
                                     let payload = resolved.request.url;
                                     if automation_commands
                                         .send(WebSocketCommand::SendText(payload.clone()))
@@ -4128,6 +4190,7 @@ impl ApiTester {
             abort_handle,
             events: Vec::new(),
             next_event_id: 1,
+            sensitive_values,
             automation_paused,
             automation,
         });
@@ -4222,6 +4285,7 @@ impl ApiTester {
         }
         let request_id = connection.request_id.clone();
         let sender = connection.sender.clone();
+        let sensitive_values = connection.sensitive_values.clone();
         let selected_sources = [
             params.text.is_some(),
             params.binary_base64.is_some(),
@@ -4245,7 +4309,10 @@ impl ApiTester {
                 },
                 self.workspace.active_environment(),
             )
-            .map(|resolved| resolved.request.url)
+            .map(|resolved| {
+                remember_websocket_secrets(&sensitive_values, resolved.sensitive_values);
+                resolved.request.url
+            })
             .map_err(|error| error.to_string())
         };
         let mut commands = if let Some(text) = params.text {
@@ -4278,7 +4345,8 @@ impl ApiTester {
                     .ok_or_else(|| format!("saved message '{message_id}' was not found"))?;
                 let payload = resolve_text(message.payload.clone())?;
                 if message.language == RawBodyLanguage::JsonLines {
-                    crate::core::parse_json_lines(&payload)?
+                    crate::core::parse_json_lines(&payload)
+                        .map_err(|error| redact_websocket_text(&error, &sensitive_values))?
                         .into_iter()
                         .map(|record| WebSocketCommand::SendText(payload[record.range].to_owned()))
                         .collect()
@@ -4357,6 +4425,10 @@ impl ApiTester {
                 params.connection_id.unwrap()
             ));
         }
+        let sensitive_values = connection
+            .sensitive_values
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut remaining_bytes = 512 * 1024;
         let mut events = Vec::new();
         for event in connection
@@ -4369,14 +4441,10 @@ impl ApiTester {
                 .max_payload_bytes
                 .min(256 * 1024)
                 .min(remaining_bytes);
-            events.push(control_websocket_event_value(event, event_limit));
-            let event_size = event
-                .payload
-                .as_ref()
-                .map(String::len)
-                .or_else(|| event.binary.as_ref().map(Vec::len))
-                .unwrap_or(0);
-            remaining_bytes = remaining_bytes.saturating_sub(event_size.min(event_limit));
+            let value = control_websocket_event_value(event, event_limit, &sensitive_values);
+            remaining_bytes = remaining_bytes
+                .saturating_sub(value["included_bytes"].as_u64().unwrap_or(0) as usize);
+            events.push(value);
             if remaining_bytes == 0 {
                 break;
             }
@@ -4385,7 +4453,8 @@ impl ApiTester {
             "connection_id": connection.id,
             "request_id": connection.request_id,
             "state": connection.status.as_str(),
-            "notice": connection.notice,
+            "notice": connection.notice.as_ref().map(|notice|
+                crate::core::redact_secret_values(notice, &sensitive_values)),
             "events": events,
             "last_event_id": connection.events.last().map(|event| event.id).unwrap_or(0)
         }))
@@ -4410,6 +4479,7 @@ impl ApiTester {
         let request_id = connection.request_id.clone();
         let sender = connection.sender.clone();
         let events = connection.event_sender.clone();
+        let sensitive_values = connection.sensitive_values.clone();
         let (_, saved) = self
             .workspace
             .saved_request(&request_id)
@@ -4435,6 +4505,7 @@ impl ApiTester {
                 environment,
             )
             .map_err(|error| error.to_string())?;
+            remember_websocket_secrets(&sensitive_values, resolved.sensitive_values);
             frames.push((frame.delay_ms, resolved.request.url));
         }
         self.runtime.spawn(async move {
@@ -5351,18 +5422,97 @@ fn variable_value(variable: &EnvironmentVariable) -> Value {
 }
 
 fn http_exchange_value(snapshot: &McpHttpExchangeSnapshot, max_body_bytes: usize) -> Value {
-    json!({
+    let request = snapshot.request.as_ref().map(|request| {
+        let mut request = request.clone();
+        request.body = String::from_utf8(redact_mcp_body(
+            request.body.as_bytes(),
+            &snapshot.sensitive_values,
+        ))
+        .expect("redacting UTF-8 preserves UTF-8");
+        request
+    });
+    let mut value = json!({
         "operation_id": snapshot.operation_id,
         "history_entry_ids": snapshot.history_entry_ids,
         "state": snapshot.state,
         "stage": snapshot.stage,
-        "request": snapshot.request,
-        "response": snapshot.response.as_ref().map(|response| response_value(response, max_body_bytes)),
+        "request": request,
         "error": snapshot.error,
         "diagnostic": snapshot.diagnostic.as_ref().map(script_diagnostic_value),
         "pre_request_report": snapshot.pre_request_report.as_ref().map(script_report_value),
         "post_response_report": snapshot.post_response_report.as_ref().map(script_report_value)
-    })
+    });
+    for field in [
+        "request",
+        "error",
+        "diagnostic",
+        "pre_request_report",
+        "post_response_report",
+    ] {
+        redact_mcp_value(&mut value[field], &snapshot.sensitive_values);
+    }
+    // Scrub the complete body before slicing or encoding it. Otherwise a byte
+    // limit can expose a secret prefix, and base64 can hide it from the scrubber.
+    value["response"] = snapshot.response.as_ref().map_or(Value::Null, |response| {
+        let mut response = response.clone();
+        response.body = redact_mcp_body(&response.body, &snapshot.sensitive_values).into();
+        let mut value = response_value(&response, max_body_bytes);
+        for field in [
+            "status_text",
+            "http_version",
+            "final_url",
+            "headers",
+            "content_type",
+        ] {
+            redact_mcp_value(&mut value[field], &snapshot.sensitive_values);
+        }
+        value
+    });
+    value
+}
+
+/// Scrub decoded JSON too: secrets may occur in object keys, escaped strings,
+/// or numeric response values, not just in the serialized text.
+fn redact_mcp_value(value: &mut Value, sensitive_values: &[String]) {
+    use crate::core::redact_secret_values;
+    match value {
+        Value::String(text) => *text = redact_secret_values(text, sensitive_values),
+        Value::Array(items) => {
+            for item in items {
+                redact_mcp_value(item, sensitive_values);
+            }
+        }
+        Value::Object(object) => {
+            *object = std::mem::take(object)
+                .into_iter()
+                .map(|(key, mut value)| {
+                    redact_mcp_value(&mut value, sensitive_values);
+                    (redact_secret_values(&key, sensitive_values), value)
+                })
+                .collect();
+        }
+        Value::Number(_) | Value::Bool(_) | Value::Null => {
+            let text = value.to_string();
+            let redacted = redact_secret_values(&text, sensitive_values);
+            if redacted != text {
+                *value = Value::String(redacted);
+            }
+        }
+    }
+}
+
+fn redact_mcp_body(body: &[u8], sensitive_values: &[String]) -> Vec<u8> {
+    if sensitive_values.iter().all(String::is_empty) {
+        return body.to_vec();
+    }
+    if let Ok(mut value) = serde_json::from_slice::<Value>(body) {
+        let original = value.clone();
+        redact_mcp_value(&mut value, sensitive_values);
+        if value != original {
+            return serde_json::to_vec(&value).expect("JSON value serializes");
+        }
+    }
+    crate::core::redact_secret_bytes(body, sensitive_values)
 }
 
 fn response_value(response: &ResponseData, max_body_bytes: usize) -> Value {
@@ -5400,9 +5550,55 @@ fn response_value(response: &ResponseData, max_body_bytes: usize) -> Value {
     })
 }
 
-fn control_websocket_event_value(event: &ControlWebSocketEvent, max_payload_bytes: usize) -> Value {
+fn remember_websocket_environment_secrets(
+    sensitive_values: &std::sync::Mutex<Vec<String>>,
+    environment: Option<&Environment>,
+) {
+    remember_websocket_secrets(
+        sensitive_values,
+        environment
+            .into_iter()
+            .flat_map(|environment| &environment.variables)
+            .filter(|variable| variable.enabled && variable.secret)
+            .map(|variable| variable.value.clone())
+            .collect(),
+    );
+}
+
+fn remember_websocket_secrets(
+    sensitive_values: &std::sync::Mutex<Vec<String>>,
+    values: Vec<String>,
+) {
+    let mut sensitive_values = sensitive_values
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for value in values {
+        if !value.is_empty() && !sensitive_values.contains(&value) {
+            sensitive_values.push(value);
+        }
+    }
+}
+
+fn redact_websocket_text(text: &str, sensitive_values: &std::sync::Mutex<Vec<String>>) -> String {
+    crate::core::redact_secret_values(
+        text,
+        &sensitive_values
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+    )
+}
+
+fn control_websocket_event_value(
+    event: &ControlWebSocketEvent,
+    max_payload_bytes: usize,
+    sensitive_values: &[String],
+) -> Value {
+    // Keep the timeline and actual wire frames intact; redact only the MCP projection,
+    // before clipping so a secret crossing the payload limit cannot leak a prefix.
     let (payload, binary_base64, size_bytes, included_bytes) = if let Some(payload) = &event.payload
     {
+        let payload = String::from_utf8(redact_mcp_body(payload.as_bytes(), sensitive_values))
+            .expect("redacting UTF-8 preserves UTF-8");
         let mut included = payload.len().min(max_payload_bytes);
         while !payload.is_char_boundary(included) {
             included -= 1;
@@ -5414,6 +5610,7 @@ fn control_websocket_event_value(event: &ControlWebSocketEvent, max_payload_byte
             included,
         )
     } else if let Some(binary) = &event.binary {
+        let binary = redact_mcp_body(binary, sensitive_values);
         let included = binary.len().min(max_payload_bytes);
         (
             None,
@@ -5455,6 +5652,98 @@ fn script_diagnostic_value(diagnostic: &ScriptDiagnostic) -> Value {
         "message": diagnostic.message,
         "stack": diagnostic.stack
     })
+}
+
+#[cfg(test)]
+mod redaction_tests;
+
+#[cfg(test)]
+mod websocket_redaction_tests {
+    use super::*;
+
+    fn event(payload: Option<String>, binary: Option<Vec<u8>>) -> ControlWebSocketEvent {
+        ControlWebSocketEvent {
+            id: 7,
+            at: Utc::now(),
+            direction: "received",
+            kind: if binary.is_some() { "binary" } else { "text" },
+            payload,
+            binary,
+        }
+    }
+
+    #[test]
+    fn websocket_text_is_redacted_before_truncation_without_changing_timeline() {
+        let event = event(Some("prefix private-token suffix".to_owned()), None);
+        let secrets = vec!["private-token".to_owned()];
+        let value = control_websocket_event_value(&event, 10, &secrets);
+        assert_eq!(value["payload"], "prefix [RE");
+        assert_eq!(value["size_bytes"], "prefix [REDACTED] suffix".len());
+        assert_eq!(value["included_bytes"], 10);
+        assert_eq!(value["truncated"], true);
+        assert_eq!(
+            event.payload.as_deref(),
+            Some("prefix private-token suffix")
+        );
+    }
+
+    #[test]
+    fn websocket_binary_is_redacted_before_base64_and_truncation() {
+        let bytes = b"\xffprivate-token\x00".to_vec();
+        let event = event(None, Some(bytes.clone()));
+        let secrets = vec!["private-token".to_owned()];
+        for limit in [4, usize::MAX] {
+            let value = control_websocket_event_value(&event, limit, &secrets);
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(value["binary_base64"].as_str().unwrap())
+                .unwrap();
+            let expected = b"\xff[REDACTED]\x00";
+            assert_eq!(decoded, expected[..limit.min(expected.len())]);
+            assert_eq!(value["size_bytes"], expected.len());
+        }
+        assert_eq!(event.binary, Some(bytes));
+    }
+
+    #[test]
+    fn websocket_retains_old_secrets_and_redacts_errors_and_encoded_values() {
+        let secrets = std::sync::Mutex::new(vec!["old-secret".to_owned()]);
+        remember_websocket_secrets(
+            &secrets,
+            vec!["a b/c".to_owned(), "old-secret".to_owned(), String::new()],
+        );
+        assert_eq!(secrets.lock().unwrap().len(), 2);
+        assert_eq!(
+            redact_websocket_text("failed old-secret a%20b%2Fc", &secrets),
+            "failed [REDACTED] [REDACTED]"
+        );
+        for kind in ["text", "close", "error", "script", "script_error"] {
+            let mut event = event(Some("old-secret a+b%2Fc".to_owned()), None);
+            event.kind = kind;
+            let value = control_websocket_event_value(&event, usize::MAX, &secrets.lock().unwrap());
+            assert_eq!(value["payload"], "[REDACTED] [REDACTED]");
+            assert_eq!(value["kind"], kind);
+        }
+    }
+
+    #[test]
+    fn websocket_projection_preserves_nonsecret_utf8_and_empty_events() {
+        let event = event(Some("雪abc".to_owned()), None);
+        let value = control_websocket_event_value(&event, 2, &[]);
+        assert_eq!(value["payload"], "");
+        assert_eq!(value["included_bytes"], 0);
+        assert_eq!(value["size_bytes"], 6);
+        let empty = control_websocket_event_value(
+            &ControlWebSocketEvent {
+                payload: None,
+                ..event
+            },
+            100,
+            &[],
+        );
+        assert!(empty["payload"].is_null());
+        assert!(empty["binary_base64"].is_null());
+        assert_eq!(empty["truncated"], false);
+    }
 }
 
 #[cfg(test)]
