@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+  <title>Resolved — Proxy management design preview</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #19191e;
+      --surface: #1e1e24;
+      --sidebar: #16161b;
+      --raised: #25252d;
+      --line: #303038;
+      --quiet-line: #282830;
+      --text: #eeedf3;
+      --muted: #a6a5b2;
+      --dim: #858491;
+      --accent: #a7a7ff;
+      --primary: #5055e7;
+      --selection: #292a45;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    button, input, select { font: inherit; }
+    button { color: inherit; cursor: pointer; }
+    button:disabled { cursor: default; opacity: .45; }
+    button, input, select { outline-offset: 3px; }
+    :focus-visible { outline: 2px solid var(--accent); }
+    button { border: 0; background: none; }
+    svg.icon { width: 17px; height: 17px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+    .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+    .app { height: 100dvh; min-height: 760px; display: flex; flex-direction: column; }
+    .row { display: flex; align-items: center; }
+    .grow { flex: 1; min-width: 0; }
+    .muted { color: var(--muted); }
+    .mono { font-family: var(--mono); font-size: 12px; }
+    .eyebrow { color: var(--dim); font-size: 10px; font-weight: 600; letter-spacing: 1.1px; }
+    .chrome { height: 44px; flex-shrink: 0; padding: 0 20px; gap: 28px; background: #202026; border-bottom: 1px solid var(--line); }
+    .traffic { display: flex; gap: 8px; }
+    .traffic i { width: 11px; height: 11px; border-radius: 50%; background: #595862; }
+    .brand { font: 600 18px Georgia, serif; letter-spacing: -.6px; }
+    .window-tab { align-self: stretch; display: flex; align-items: center; gap: 9px; margin-left: 8px; border-bottom: 2px solid #7c80f6; color: #dbdae3; font-size: 12px; }
+    .chrome-note { margin-left: auto; color: var(--dim); font-size: 11px; }
+    .topbar { height: 98px; flex-shrink: 0; padding: 0 28px; border-bottom: 1px solid var(--line); gap: 24px; }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 23px; font-weight: 600; letter-spacing: -.6px; line-height: 1.3; }
+    .server-name { gap: 7px; color: var(--muted); font-size: 12px; margin-top: 8px; }
+    .server-name .icon { width: 14px; height: 14px; }
+    .execution-control { gap: 15px; }
+    .execution-label { text-align: right; line-height: 1.6; }
+    .execution-label strong { display: block; font-weight: 500; font-size: 12px; }
+    .execution-label span { color: var(--muted); font-size: 11px; }
+    .button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 33px; padding: 0 12px; border: 1px solid #41414b; background: #25252d; border-radius: 6px; font-size: 12px; font-weight: 500; white-space: nowrap; }
+    .button:hover { background: #303039; }
+    .button.primary { background: var(--primary); border-color: #686cf0; color: #fff; }
+    .button.primary:hover { background: #6165ed; }
+    .button.ghost { border-color: transparent; background: transparent; color: var(--muted); }
+    .button.ghost:hover { background: var(--raised); color: var(--text); }
+    .icon-button { width: 30px; height: 30px; display: inline-flex; align-items: center; justify-content: center; border-radius: 5px; color: var(--muted); flex-shrink: 0; }
+    .icon-button:hover { background: var(--raised); color: var(--text); }
+    .refresh { margin-left: 0; padding-left: 22px; border-left: 1px solid var(--line); }
+    .workspace { flex: 1; min-height: 0; display: flex; }
+    .sidebar { width: 228px; flex-shrink: 0; background: var(--sidebar); border-right: 1px solid var(--line); padding: 18px 12px 12px; display: flex; flex-direction: column; }
+    .nav-heading { padding: 0 8px 12px; gap: 7px; }
+    .count { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px; background: #2b2b34; border-radius: 4px; color: var(--muted); font-size: 10px; line-height: 1; font-variant-numeric: tabular-nums; }
+    .nav-heading .icon-button { margin: -6px -5px -6px auto; }
+    .search { display: flex; gap: 8px; align-items: center; border: 1px solid var(--line); border-radius: 6px; color: var(--dim); padding: 0 10px; height: 33px; }
+    .search input { width: 100%; min-width: 0; padding: 0; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 12px; }
+    .search:focus-within { border-color: #8689ef; outline: 1px solid #8689ef; }
+    .search input::placeholder { color: var(--dim); }
+    .search .icon { width: 14px; height: 14px; }
+    .proxy-item { position: relative; width: 100%; padding: 13px 12px; margin-top: 14px; display: flex; gap: 11px; border-radius: 6px; text-align: left; background: var(--selection); }
+    .proxy-item::before { content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 2px; background: #9396ff; border-radius: 2px; }
+    .proxy-item > .icon { color: var(--accent); margin-top: 3px; }
+    .proxy-name { font-weight: 600; font-size: 12px; }
+    .proxy-meta { color: #aaaac3; font-size: 11px; margin-top: 4px; }
+    .new-proxy { justify-content: flex-start; margin-top: 10px; width: 100%; }
+    .nav-bottom { margin-top: auto; padding: 15px 2px 0; border-top: 1px solid var(--quiet-line); }
+    .nav-bottom .button { width: 100%; justify-content: flex-start; font-size: 11px; }
+    .detail { min-width: 0; flex: 1; display: flex; flex-direction: column; }
+    .detail-heading { padding: 23px 26px 20px; gap: 14px; }
+    .detail-heading h2 { font-size: 22px; line-height: 1.3; font-weight: 600; letter-spacing: -.45px; }
+    .detail-description { color: var(--muted); font-size: 12px; margin-top: 7px; }
+    .scope-tag { display: inline-flex; gap: 5px; align-items: center; color: #b7b6c3; font-size: 10px; border: 1px solid #3e3e49; padding: 2px 7px; border-radius: 4px; margin-left: 12px; vertical-align: middle; }
+    .scope-tag .icon { width: 11px; height: 11px; }
+    .tabs { height: 44px; flex-shrink: 0; display: flex; gap: 26px; padding: 0 26px; border-bottom: 1px solid var(--line); }
+    .tab { display: flex; align-items: center; gap: 7px; padding: 0; border-bottom: 2px solid transparent; color: var(--muted); font-size: 12px; }
+    .tab[aria-selected="true"] { color: var(--text); border-bottom-color: #9295ff; }
+    .tab[aria-selected="true"] .count { background: #30314f; color: #babcff; }
+    .panel { min-height: 0; flex: 1; display: flex; }
+    [hidden] { display: none !important; }
+    .rules-pane { min-width: 0; flex: 1; display: flex; flex-direction: column; }
+    .list-toolbar { padding: 21px 24px 19px; gap: 16px; }
+    .list-toolbar .search { width: 238px; border-color: transparent; padding-left: 0; }
+    .list-toolbar .button { margin-left: auto; }
+    .rule-table { margin: 0 24px; }
+    .rule-grid { display: grid; grid-template-columns: minmax(133px, .94fr) 28px minmax(180px, 1.2fr) 99px 26px; gap: 6px; align-items: center; }
+    .table-heading { height: 32px; color: var(--dim); font-size: 10px; font-weight: 500; border-bottom: 1px solid var(--line); padding: 0 12px; }
+    .rule-row { width: 100%; min-height: 72px; border-bottom: 1px solid var(--quiet-line); padding: 12px; text-align: left; border-radius: 0; }
+    .rule-row:hover { background: #222229; }
+    .rule-row[aria-pressed="true"] { background: #25263a; border-bottom-color: #393b59; box-shadow: inset 2px 0 #9396ff; }
+    .rule-row .arrow { color: #737384; width: 15px; height: 15px; }
+    .rule-row .source { font-weight: 500; color: #e7e6ef; overflow-wrap: anywhere; }
+    .target-text { color: #dfdee8; overflow-wrap: anywhere; font-size: 11px; }
+    .target-kind { font-size: 10px; color: var(--dim); margin-top: 4px; display: flex; align-items: center; gap: 5px; }
+    .target-kind .icon { width: 11px; height: 11px; }
+    .host-behavior { font-size: 11px; color: #b7b6c5; }
+    .host-behavior.keep { color: #b3baff; }
+    .row-chevron { width: 14px !important; height: 14px !important; justify-self: end; color: #767586; }
+    .list-summary { padding: 13px 36px; color: var(--dim); font-size: 11px; }
+    .no-results { padding: 28px 12px; color: var(--muted); text-align: center; }
+    .resolution { margin: auto 24px 21px; border-top: 1px solid var(--quiet-line); padding-top: 17px; }
+    .resolution-header { gap: 8px; margin-bottom: 9px; }
+    .resolution-header .icon { height: 13px; width: 13px; color: var(--dim); }
+    .resolution-order { display: flex; align-items: center; gap: 10px; color: #bbb9c8; font-size: 11px; }
+    .resolution-order .icon { width: 12px; height: 12px; color: #656473; }
+    .resolution-order strong { font-weight: 500; color: var(--accent); }
+    .resolution p { color: var(--dim); font-size: 11px; margin-top: 9px; }
+    .inspector { width: 312px; flex-shrink: 0; border-left: 1px solid var(--line); background: #1d1d24; display: flex; flex-direction: column; overflow-y: auto; }
+    .inspector-top { flex-shrink: 0; padding: 23px 22px 0; }
+    .inspector-title { margin: 18px 0 7px; font-size: 17px; font-weight: 500; letter-spacing: -.2px; overflow-wrap: anywhere; }
+    .type-label { display: inline-flex; align-items: center; gap: 5px; color: #b4b3c3; font-size: 11px; }
+    .type-label .icon { height: 12px; width: 12px; }
+    .inspector-section { padding: 23px 22px 0; }
+    .route { position: relative; padding-left: 20px; }
+    .route::before { content: ""; position: absolute; left: 3px; top: 10px; bottom: 22px; width: 1px; background: #414151; }
+    .route-point { position: relative; }
+    .route-point::before { content: ""; position: absolute; width: 7px; height: 7px; border-radius: 50%; top: 6px; left: -20px; background: #727285; box-shadow: 0 0 0 4px #1d1d24; }
+    .route-point:last-child { margin-top: 21px; }
+    .route-point:last-child::before { background: #a7a7ff; }
+    .route-label { color: var(--dim); font-size: 11px; margin-bottom: 5px; }
+    .route-value { overflow-wrap: anywhere; }
+    .outgoing { padding-top: 21px; margin-top: 1px; border-top: 1px solid var(--line); }
+    .property { display: flex; justify-content: space-between; gap: 12px; margin-top: 13px; font-size: 11px; align-items: baseline; }
+    .property dt { color: var(--muted); flex-shrink: 0; }
+    .property dd { margin: 0; text-align: right; overflow-wrap: anywhere; font-size: 11px; }
+    .behavior-note { margin-top: 17px; color: var(--muted); font-size: 11px; line-height: 1.65; }
+    .inspector-actions { padding: 23px 22px; margin-top: auto; }
+    .inspector-actions .button { width: 100%; }
+    .field { display: block; margin-bottom: 20px; color: #c9c7d3; font-size: 12px; }
+    .field input, .field select { width: 100%; margin-top: 8px; padding: 9px 10px; border: 1px solid #444450; border-radius: 6px; background: #18181e; color: var(--text); font-size: 12px; }
+    .field small { display: block; margin-top: 6px; color: var(--dim); font-size: 10px; line-height: 1.6; }
+    .edit-form { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+    .edit-form .inspector-section { flex: 1; min-height: 0; overflow-y: auto; padding-top: 19px; padding-bottom: 18px; }
+    .edit-form .field { margin-bottom: 16px; }
+    .derived { padding: 14px; border: 1px solid #3b3c54; border-radius: 6px; background: #252534; }
+    .derived .row { color: #c5c5ff; font-size: 11px; font-weight: 500; gap: 7px; margin-bottom: 8px; }
+    .derived .icon { width: 14px; height: 14px; }
+    .derived p { font-size: 11px; color: #b1afc3; line-height: 1.7; overflow-wrap: anywhere; }
+    .edit-form .inspector-actions { flex-shrink: 0; margin-top: 0; padding-top: 15px; padding-bottom: 15px; border-top: 1px solid var(--line); }
+    .edit-form .inspector-actions .row { gap: 8px; }
+    .save-note { color: var(--dim); font-size: 10px; margin-bottom: 13px; line-height: 1.65; }
+    .form-error { font-size: 11px; color: #f6b2b2; margin: 0 22px 14px; }
+    .unsaved { color: #d6bc84; font-size: 10px; display: flex; align-items: center; gap: 6px; }
+    .unsaved::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+    .scope-page { width: 100%; padding: 25px 26px; overflow: auto; }
+    .scope-page h3 { font-size: 15px; font-weight: 500; }
+    .scope-page p { color: var(--muted); font-size: 12px; margin-top: 6px; max-width: 630px; }
+    .scope-toolbar { margin-bottom: 25px; gap: 24px; }
+    .assignment-row { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 20px 12px; gap: 15px; }
+    .assignment-icon { width: 35px; height: 35px; border: 1px solid #3c3c49; border-radius: 7px; justify-content: center; color: var(--muted); }
+    .assignment-row small { display: block; color: var(--muted); margin-top: 3px; font-size: 11px; }
+    .scope-helper { margin-top: 20px !important; font-size: 11px !important; }
+    .empty { display: flex; align-items: center; flex-direction: column; padding: 72px 24px; text-align: center; border-top: 1px solid var(--line); }
+    .empty > .icon { width: 28px; height: 28px; margin-bottom: 17px; color: var(--dim); }
+    .empty h3 { font-size: 14px; }
+    .empty p { max-width: 340px; line-height: 1.75; }
+    .empty .button { margin-top: 19px; }
+    .preview-footer { flex-shrink: 0; height: 31px; padding: 0 15px; gap: 8px; background: #15151a; border-top: 1px solid var(--line); font-size: 10px; color: var(--dim); }
+    .preview-footer strong { font-weight: 500; color: #bbbbcb; }
+    .preview-footer button { color: var(--muted); font-size: 10px; padding: 2px 4px; }
+    .preview-footer .hint { margin-left: auto; }
+    .client-notice { padding: 9px 26px; font-size: 12px; border-bottom: 1px solid #514832; background: #2d2920; color: #d7c598; }
+    .popover { position: absolute; top: 33px; right: 0; z-index: 3; min-width: 166px; padding: 5px; background: #2a2a33; border: 1px solid #474752; border-radius: 7px; box-shadow: 0 10px 35px #0006; }
+    .popover button { display: block; width: 100%; text-align: left; font-size: 12px; padding: 8px 10px; border-radius: 4px; }
+    .popover button:hover { background: #363640; }
+    .danger { color: #eda4aa !important; }
+    .menu-anchor { position: relative; }
+    dialog { background: #222229; color: var(--text); border: 1px solid #494953; border-radius: 12px; padding: 26px; width: 460px; max-width: calc(100% - 40px); box-shadow: 0 24px 100px #0008; }
+    dialog::backdrop { background: #09091199; }
+    dialog h3 { font-size: 19px; font-weight: 600; letter-spacing: -.3px; padding-right: 28px; }
+    dialog p { font-size: 12px; color: var(--muted); line-height: 1.8; margin-top: 12px; }
+    dialog .dialog-close { position: absolute; right: 17px; top: 18px; }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; }
+    .mode-options { display: flex; gap: 12px; margin-top: 22px; }
+    .mode-option { flex: 1; padding: 16px 14px; text-align: left; border: 1px solid #494953; border-radius: 7px; background: #1c1c23; }
+    .mode-option[aria-pressed="true"] { border-color: #9598ff; background: #2b2c45; }
+    .mode-option .row { gap: 8px; margin-bottom: 5px; font-weight: 500; }
+    .mode-option small { font-size: 11px; color: var(--muted); line-height: 1.6; display: block; }
+    .dialog-note { border-left: 2px solid #8184d9; padding-left: 12px; margin-top: 20px !important; }
+    .dialog-field { margin-top: 20px; margin-bottom: 0; }
+    .toast { position: fixed; z-index: 5; bottom: 48px; left: 50%; transform: translateX(-50%); background: #353540; border: 1px solid #535363; color: var(--text); padding: 11px 17px; border-radius: 7px; box-shadow: 0 8px 40px #0005; font-size: 12px; max-width: 90vw; }
+    @media (min-width: 1500px) { .inspector { width: 342px; } .sidebar { width: 244px; } .target-text { font-size: 12px; } }
+    @media (max-width: 1240px) {
+      .sidebar { width: 195px; }
+      .inspector { width: 278px; }
+      .rule-grid { grid-template-columns: minmax(116px, 1fr) 19px minmax(165px, 1.25fr) 20px; }
+      .host-behavior, .behavior-heading { display: none; }
+      .rule-table { margin: 0 18px; }
+      .list-toolbar { padding-left: 18px; padding-right: 18px; gap: 6px; }
+      .list-toolbar .search { width: 170px; }
+      .resolution-order { gap: 6px; font-size: 10px; }
+      .inspector-section, .inspector-actions { padding-left: 18px; padding-right: 18px; }
+    }
+    @media (max-width: 1000px) {
+      .sidebar { width: 180px; }
+      .rules-pane { min-width: 330px; }
+      .panel { overflow-x: auto; }
+      .rule-grid { grid-template-columns: minmax(100px, .8fr) 16px minmax(154px, 1.2fr); gap: 4px; }
+      .row-chevron { display: none; }
+      .inspector { width: 258px; }
+      .rule-table { margin: 0 12px; }
+      .rule-row, .table-heading { padding-left: 8px; padding-right: 8px; }
+      .rule-row .mono { font-size: 10px; }
+      .topbar { padding: 0 22px; }
+      .preview-footer .hint { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <!-- Design-only, offline prototype. No app code, API calls, or persistent storage. -->
+  <svg class="sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-route" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="M6 7.5v8a3.5 3.5 0 0 0 3.5 3.5h6M18 16.5v-8A3.5 3.5 0 0 0 14.5 5H12m2-2-2 2 2 2"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M11 6.5h6M11 17.5h6"/></symbol>
+    <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8m-4-5v5"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7a8.5 8.5 0 1 0 .3 9M20 3v5h-5"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h15m-5-5 5 5-5 5"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="19" cy="12" r="1" fill="currentColor"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="m14 5 5 5M4 20l5-1L20 8a2.8 2.8 0 0 0-4-4L5 15l-1 5Z"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10h.01"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2m1-14a3 3 0 0 1 0 6m3 8v-2a6 6 0 0 0-2-4"/></symbol>
+    <symbol id="i-limits" viewBox="0 0 24 24"><path d="M5 5h14M5 12h14M5 19h14"/><circle cx="9" cy="5" r="2" fill="#16161b"/><circle cx="15" cy="12" r="2" fill="#16161b"/><circle cx="8" cy="19" r="2" fill="#16161b"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/></symbol>
+  </svg>
+  <div class="app">
+    <div class="chrome row">
+      <span class="traffic" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span class="brand">Resolved</span>
+      <span class="window-tab"><svg class="icon"><use href="#i-route"/></svg> Request proxies</span>
+      <span class="chrome-note">Design study / 01</span>
+    </div>
+    <header class="topbar row">
+      <div class="grow">
+        <h1>Request proxies</h1>
+        <div class="server-name row"><svg class="icon"><use href="#i-server"/></svg>resolved.killua.com.tr</div>
+      </div>
+      <div class="execution-control row">
+        <div class="execution-label"><strong>Execution location</strong><span>All server workspaces</span></div>
+        <button class="button" id="execution-button"><svg class="icon"><use href="#i-server"/></svg><span id="execution-label">Server</span><svg class="icon"><use href="#i-down"/></svg></button>
+      </div>
+      <div class="refresh"><button class="icon-button" id="refresh" aria-label="Refresh proxy settings" title="Refresh"><svg class="icon"><use href="#i-refresh"/></svg></button></div>
+    </header>
+    <div class="workspace">
+      <nav class="sidebar" aria-label="Proxies">
+        <div class="nav-heading row"><span class="eyebrow">PROXIES</span><span class="count">1</span><button class="icon-button" data-placeholder="New proxy" aria-label="New proxy"><svg class="icon"><use href="#i-plus"/></svg></button></div>
+        <label class="search"><svg class="icon"><use href="#i-search"/></svg><input id="proxy-search" aria-label="Find a proxy" placeholder="Find a proxy…"></label>
+        <button class="proxy-item" id="proxy-item" aria-current="true">
+          <svg class="icon"><use href="#i-route"/></svg>
+          <span><span class="proxy-name" id="sidebar-proxy-name">Server default</span><span class="proxy-meta" style="display:block">Server-wide <span aria-hidden="true">·</span> <span id="sidebar-rule-count">3 rules</span></span></span>
+        </button>
+        <p id="proxy-no-results" class="no-results" hidden>No matching proxies</p>
+        <button class="button ghost new-proxy" data-placeholder="New proxy"><svg class="icon"><use href="#i-plus"/></svg>New proxy</button>
+        <div class="nav-bottom">
+          <button class="button ghost" data-placeholder="Execution limits"><svg class="icon"><use href="#i-limits"/></svg>Execution limits</button>
+          <button class="button ghost" id="routing-help"><svg class="icon"><use href="#i-info"/></svg>How routing works</button>
+        </div>
+      </nav>
+      <main class="detail">
+        <div class="client-notice" id="client-notice" hidden>Requests run locally on each user's device. These server proxy rules are saved, but are not applied.</div>
+        <div class="detail-heading row">
+          <div class="grow">
+            <div class="row"><h2 id="proxy-title">Server default</h2><span class="scope-tag"><svg class="icon"><use href="#i-globe"/></svg>Server-wide</span></div>
+            <p class="detail-description">Default host overrides for this server.</p>
+          </div>
+          <div class="menu-anchor">
+            <button class="icon-button" id="proxy-menu-button" aria-label="Proxy actions" aria-expanded="false"><svg class="icon"><use href="#i-more"/></svg></button>
+            <div class="popover" id="proxy-menu" hidden><button id="rename-proxy">Rename proxy…</button><button class="danger" data-placeholder="Delete proxy">Delete proxy…</button></div>
+          </div>
+        </div>
+        <div class="tabs" role="tablist" aria-label="Proxy settings">
+          <button class="tab" id="tab-rules" role="tab" aria-selected="true" aria-controls="panel-rules" data-tab="rules">Rules<span class="count" id="tab-rule-count">3</span></button>
+          <button class="tab" id="tab-assignments" role="tab" aria-selected="false" aria-controls="panel-assignments" tabindex="-1" data-tab="assignments">Assignments<span class="count">1</span></button>
+          <button class="tab" id="tab-exclusions" role="tab" aria-selected="false" aria-controls="panel-exclusions" tabindex="-1" data-tab="exclusions">Exclusions<span class="count">0</span></button>
+        </div>
+        <section class="panel" id="panel-rules" role="tabpanel" aria-labelledby="tab-rules">
+          <div class="rules-pane">
+            <div class="list-toolbar row">
+              <label class="search"><svg class="icon"><use href="#i-search"/></svg><input id="rule-search" aria-label="Filter rules" placeholder="Filter by hostname or target…"></label>
+              <button class="button primary" id="add-rule"><svg class="icon"><use href="#i-plus"/></svg>Add rule</button>
+            </div>
+            <div class="rule-table" aria-label="Host override rules">
+              <div class="table-heading rule-grid" aria-hidden="true"><span>Request hostname</span><span></span><span>Connect to</span><span class="behavior-heading">Host / SNI</span><span></span></div>
+              <div id="rule-list"></div>
+              <p class="no-results" id="no-results" hidden>No matching rules</p>
+            </div>
+            <div class="list-summary" id="list-summary">3 rules · Exact hostnames only</div>
+            <div class="resolution">
+              <div class="resolution-header row"><span class="eyebrow">MATCH PRIORITY</span><svg class="icon"><use href="#i-info"/></svg></div>
+              <div class="resolution-order"><span>Request</span><svg class="icon"><use href="#i-chevron"/></svg><span>Collection</span><svg class="icon"><use href="#i-chevron"/></svg><span>Workspace</span><svg class="icon"><use href="#i-chevron"/></svg><strong>Server</strong></div>
+              <p>First matching hostname wins. No matching rule? Normal DNS.</p>
+            </div>
+          </div>
+          <aside class="inspector" id="inspector" aria-label="Selected rule"></aside>
+        </section>
+        <section class="panel" id="panel-assignments" role="tabpanel" aria-labelledby="tab-assignments" hidden>
+          <div class="scope-page">
+            <div class="scope-toolbar row"><div class="grow"><h3>Where this proxy applies</h3><p>Assign to a server, workspace, collection, or saved request.</p></div><button class="button" data-placeholder="Edit assignments"><svg class="icon"><use href="#i-edit"/></svg>Edit assignments</button></div>
+            <div class="table-heading row">ASSIGNED SCOPE</div>
+            <div class="assignment-row row"><div class="assignment-icon row"><svg class="icon"><use href="#i-globe"/></svg></div><div class="grow">Server-wide<small>All workspaces on resolved.killua.com.tr</small></div><span class="muted" style="font-size:11px">Fallback for each hostname</span></div>
+            <p class="scope-helper">More specific rules take precedence per hostname. Removing an assignment restores inheritance; it does not force direct routing.</p>
+          </div>
+        </section>
+        <section class="panel" id="panel-exclusions" role="tabpanel" aria-labelledby="tab-exclusions" hidden>
+          <div class="scope-page">
+            <div class="scope-toolbar row"><div class="grow"><h3>Who skips this proxy</h3><p>Excluded users and roles fall through to the next applicable scope.</p></div><button class="button" data-placeholder="Edit exclusions"><svg class="icon"><use href="#i-plus"/></svg>Add exclusion</button></div>
+            <div class="empty"><svg class="icon"><use href="#i-users"/></svg><h3>No exclusions</h3><p>Everyone in the assigned scopes uses these rules, unless a more specific rule takes precedence.</p><p>Exclusions change routing, not permissions. They do not block requests.</p></div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <footer class="preview-footer row"><strong>DESIGN PREVIEW</strong><span>·</span><span>3 sample rules from your screenshot. No live data or server changes.</span><span class="hint">Select a rule to inspect. Edit to try the panel.</span><button id="reset-preview">Reset preview</button></footer>
+  </div>
+  <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+  <div class="toast" id="toast" role="status" hidden></div>
+  <script>
+    // All changes are deliberately in-memory. Reloading resets this design study.
+    const $ = (selector) => document.querySelector(selector);
+    const icon = (name, extra = "") => `<svg class="icon ${extra}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+    const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+    const rules = [
+      { host: "backend.demo", target: "ai-chat-api.yeva.app", scheme: "" },
+      { host: "chat.demo", target: "ai-livechat.yeva.app", scheme: "" },
+      { host: "db.demo", target: "194.104.235.243", scheme: "" },
+    ];
+    let selected = 2;
+    let editing = false;
+    let proxyName = "Server default";
+    let mode = "server";
+    let toastTimer;
+    const isIp = (target) => target.includes(":") || /^\d+\.\d+\.\d+\.\d+$/.test(target);
+
+    function toast(message) {
+      clearTimeout(toastTimer);
+      $("#toast").textContent = message;
+      $("#toast").hidden = false;
+      toastTimer = setTimeout(() => { $("#toast").hidden = true; }, 4000);
+    }
+
+    function renderRules() {
+      const query = $("#rule-search").value.toLowerCase();
+      let visible = 0;
+      $("#rule-list").innerHTML = rules.map((rule, index) => {
+        if (!`${rule.host} ${rule.target}`.toLowerCase().includes(query)) return "";
+        visible++;
+        const ip = isIp(rule.target);
+        return `<button class="rule-row rule-grid" data-rule="${index}" aria-pressed="${index === selected}" aria-label="${escapeHtml(rule.host)} connects to ${escapeHtml(rule.target)}. ${ip ? "Preserves original host." : "Uses target host."}">
+          <span class="source mono">${escapeHtml(rule.host)}</span>${icon("arrow", "arrow")}
+          <span><span class="target-text mono">${escapeHtml(rule.target)}</span><span class="target-kind">${icon(ip ? "server" : "globe")}${ip ? "IP address" : "Hostname"}${rule.scheme ? " · " + rule.scheme.toUpperCase() : ""}</span></span>
+          <span class="host-behavior ${ip ? "keep" : ""}">${ip ? "Keep original" : "Use target"}</span>${icon("chevron", "row-chevron")}
+        </button>`;
+      }).join("");
+      $("#no-results").hidden = visible > 0;
+      $("#list-summary").textContent = `${query ? `${visible} of ` : ""}${rules.length} rules · Exact hostnames only`;
+      $("#sidebar-rule-count").textContent = `${rules.length} rules`;
+      $("#tab-rule-count").textContent = rules.length;
+      document.querySelectorAll("[data-rule]").forEach((button) => {
+        button.addEventListener("click", () => {
+          if (!discardDraft()) return;
+          selected = Number(button.dataset.rule);
+          renderRules();
+          renderInspector();
+        });
+      });
+    }
+
+    function renderInspector() {
+      editing = false;
+      const rule = rules[selected];
+      const ip = isIp(rule.target);
+      const wireHost = ip ? rule.host : rule.target;
+      $("#inspector").innerHTML = `
+        <div class="inspector-top"><div class="row"><div class="eyebrow grow">RULE DETAILS</div><div class="menu-anchor"><button class="icon-button" id="rule-menu-button" aria-label="Rule actions" aria-expanded="false">${icon("more")}</button><div class="popover" id="rule-menu" hidden><button class="danger" id="delete-rule">Delete rule…</button></div></div></div><h3 class="inspector-title mono">${escapeHtml(rule.host)}</h3><div class="type-label">${icon(ip ? "server" : "globe")}${ip ? "IP target" : "Hostname target"}</div></div>
+        <div class="inspector-section"><div class="route"><div class="route-point"><div class="route-label">Match exact hostname</div><div class="route-value mono">${escapeHtml(rule.host)}</div></div><div class="route-point"><div class="route-label">Connect to</div><div class="route-value mono">${escapeHtml(rule.target)}</div></div></div></div>
+        <div class="inspector-section"><div class="outgoing"><div class="eyebrow">OUTGOING REQUEST</div><dl>
+          <div class="property"><dt>HTTP Host</dt><dd class="mono">${escapeHtml(wireHost)}</dd></div>
+          <div class="property"><dt>HTTPS SNI</dt><dd class="mono">${escapeHtml(wireHost)}</dd></div>
+          <div class="property"><dt>Scheme</dt><dd>${rule.scheme ? rule.scheme.toUpperCase() : "From request"}</dd></div>
+          <div class="property"><dt>Port</dt><dd>From request</dd></div>
+        </dl><p class="behavior-note">${ip ? "An IP target changes the connection address. The original hostname is preserved." : "A hostname target replaces the outgoing URL host, HTTP Host, and HTTPS SNI."} Host includes the request port when required; SNI applies to HTTPS only.</p></div></div>
+        <div class="inspector-actions"><button class="button" id="edit-rule">${icon("edit")}Edit rule</button></div>`;
+      $("#edit-rule").addEventListener("click", () => renderEditor(selected));
+      $("#rule-menu-button").addEventListener("click", () => {
+        $("#rule-menu").hidden = !$("#rule-menu").hidden;
+        $("#rule-menu-button").setAttribute("aria-expanded", String(!$("#rule-menu").hidden));
+      });
+      $("#delete-rule").addEventListener("click", () => {
+        $("#rule-menu").hidden = true;
+        $("#rule-menu-button").setAttribute("aria-expanded", "false");
+        showDialog("Delete rule", `<p>The implemented confirmation would remove <strong>${escapeHtml(rule.host)}</strong> from <strong>${escapeHtml(proxyName)}</strong>. This hostname would fall through to the next applicable rule, or normal DNS if none matches.</p><p class="dialog-note">Design-only placeholder. Nothing is deleted in this preview.</p>`);
+      });
+    }
+
+    function discardDraft() {
+      return !editing || window.confirm("Discard this preview draft?");
+    }
+
+    function renderEditor(index) {
+      editing = true;
+      const rule = index === null ? { host: "", target: "", scheme: "" } : rules[index];
+      $("#inspector").innerHTML = `
+        <div class="inspector-top"><div class="row"><span class="eyebrow grow">${index === null ? "NEW RULE" : "EDIT RULE"}</span><span class="unsaved">Draft</span></div><h3 class="inspector-title">${index === null ? "Add host override" : escapeHtml(rule.host)}</h3><div class="muted" style="font-size:11px">in ${escapeHtml(proxyName)}</div></div>
+        <form class="edit-form" id="edit-form">
+          <div class="inspector-section">
+            <label class="field">Request hostname<input class="mono" id="edit-host" name="host" value="${escapeHtml(rule.host)}" placeholder="api.example.com" required autocomplete="off" spellcheck="false"><small>Exact hostname. No scheme, path, or wildcards.</small></label>
+            <label class="field">Connect to<input class="mono" id="edit-target" name="target" value="${escapeHtml(rule.target)}" placeholder="Hostname or IP address" required autocomplete="off" spellcheck="false"><small>Hostname or IP only. The request port is kept.</small></label>
+            <label class="field">Outgoing scheme<select id="edit-scheme" name="scheme"><option value="">Keep request scheme</option><option value="https">HTTPS</option><option value="http">HTTP</option></select></label>
+            <div class="derived"><div class="row">${icon("route")}Derived host behavior</div><p id="derived-copy"></p></div>
+          </div>
+          <div class="form-error" id="form-error" role="alert" hidden></div>
+          <div class="inspector-actions"><p class="save-note">Saving updates this proxy for its assigned scopes. This preview never contacts the server.</p><div class="row"><button class="button" type="button" id="cancel-edit">Cancel</button><button class="button primary" type="submit">Save rule</button></div></div>
+        </form>`;
+      $("#edit-scheme").value = rule.scheme;
+      const updateDerived = () => {
+        const host = $("#edit-host").value.trim() || "the request hostname";
+        const target = $("#edit-target").value.trim();
+        $("#derived-copy").textContent = !target ? "Enter a target to see the HTTP Host and HTTPS SNI behavior." : isIp(target) ? `Keep ${host} as HTTP Host and HTTPS SNI.` : `Use ${target} as the outgoing URL host, HTTP Host, and HTTPS SNI.`;
+      };
+      $("#edit-host").addEventListener("input", updateDerived);
+      $("#edit-target").addEventListener("input", updateDerived);
+      updateDerived();
+      $("#cancel-edit").addEventListener("click", renderInspector);
+      $("#edit-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const host = $("#edit-host").value.trim().toLowerCase();
+        const target = $("#edit-target").value.trim().toLowerCase();
+        const validHostname = (value) => value.length <= 253 && value.split(".").every((part) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(part));
+        let error = "";
+        if (!validHostname(host) || isIp(host)) error = "Use an exact DNS hostname for the request.";
+        else if (!validHostname(target) && !/^[0-9a-f:]+$/i.test(target)) error = "Use a hostname or IP address without a scheme, port, or path.";
+        else if (rules.some((existing, i) => i !== index && existing.host === host)) error = "This proxy already has a rule for that hostname.";
+        if (error) { $("#form-error").textContent = error; $("#form-error").hidden = false; return; }
+        const next = { host, target, scheme: $("#edit-scheme").value };
+        if (index === null) { rules.push(next); selected = rules.length - 1; } else { rules[index] = next; selected = index; }
+        $("#rule-search").value = "";
+        renderRules();
+        renderInspector();
+        toast("Preview updated in this tab only. No server changes.");
+      });
+    }
+
+    function selectTab(name) {
+      if (!discardDraft()) return;
+      if (editing) renderInspector();
+      document.querySelectorAll("[data-tab]").forEach((tab) => {
+        const active = tab.dataset.tab === name;
+        tab.setAttribute("aria-selected", String(active));
+        tab.tabIndex = active ? 0 : -1;
+        $(`#panel-${tab.dataset.tab}`).hidden = !active;
+      });
+    }
+
+    function showDialog(title, content, actions = "") {
+      $("#dialog").innerHTML = `<button class="icon-button dialog-close" aria-label="Close dialog">${icon("close")}</button><h3 id="dialog-title">${escapeHtml(title)}</h3>${content}<div class="dialog-actions">${actions || '<button class="button primary" id="dialog-done">Got it</button>'}</div>`;
+      $(".dialog-close").addEventListener("click", () => $("#dialog").close());
+      $("#dialog-done")?.addEventListener("click", () => $("#dialog").close());
+      $("#dialog").showModal();
+    }
+
+    document.querySelectorAll("[data-tab]").forEach((tab, index, tabs) => {
+      tab.addEventListener("click", () => selectTab(tab.dataset.tab));
+      tab.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+        selectTab(tabs[next].dataset.tab);
+        tabs[next].focus();
+      });
+    });
+    $("#rule-search").addEventListener("input", renderRules);
+    $("#proxy-search").addEventListener("input", () => {
+      const matches = proxyName.toLowerCase().includes($("#proxy-search").value.toLowerCase());
+      $("#proxy-item").hidden = !matches;
+      $("#proxy-no-results").hidden = matches;
+    });
+    $("#proxy-item").addEventListener("click", () => selectTab("rules"));
+    $("#add-rule").addEventListener("click", () => { if (discardDraft()) renderEditor(null); });
+    $("#refresh").addEventListener("click", () => toast("Offline design preview — no server is connected."));
+    $("#reset-preview").addEventListener("click", () => { if (discardDraft()) location.href = location.pathname; });
+    $("#routing-help").addEventListener("click", () => showDialog("How routing works", "<p>For each hostname, use the first matching rule in this order: saved request → collection (inner to outer) → workspace → server-wide. With no matching rule, use normal DNS.</p><p>An excluded user or role skips that proxy and falls through to the next scope. Exclusion does not force direct routing.</p><p>Request and collection scopes apply when execution includes an accessible saved request. Ad-hoc requests use workspace and server scopes.</p><p>Hostname targets rewrite the outgoing host. IP targets preserve it. These are host overrides, not HTTP or SOCKS proxy endpoints.</p>"));
+    $("#proxy-menu-button").addEventListener("click", () => {
+      $("#proxy-menu").hidden = !$("#proxy-menu").hidden;
+      $("#proxy-menu-button").setAttribute("aria-expanded", String(!$("#proxy-menu").hidden));
+    });
+    document.addEventListener("click", (event) => {
+      if (!event.target.closest(".menu-anchor")) {
+        $("#proxy-menu").hidden = true;
+        $("#proxy-menu-button").setAttribute("aria-expanded", "false");
+        if ($("#rule-menu")) {
+          $("#rule-menu").hidden = true;
+          $("#rule-menu-button").setAttribute("aria-expanded", "false");
+        }
+      }
+    });
+    $("#rename-proxy").addEventListener("click", () => {
+      $("#proxy-menu").hidden = true;
+      showDialog("Rename proxy", `<label class="field dialog-field">Proxy name<input id="rename-input" value="${escapeHtml(proxyName)}" maxlength="100"></label>`, '<button class="button" id="dialog-done">Cancel</button><button class="button primary" id="save-name">Save name</button>');
+      $("#save-name").addEventListener("click", () => {
+        const value = $("#rename-input").value.trim();
+        if (!value) return;
+        proxyName = value;
+        $("#proxy-title").textContent = value;
+        $("#sidebar-proxy-name").textContent = value;
+        $("#dialog").close();
+        toast("Preview renamed. No server changes.");
+      });
+    });
+    document.querySelectorAll("[data-placeholder]").forEach((button) => {
+      button.addEventListener("click", () => {
+        $("#proxy-menu").hidden = true;
+        const messages = {
+          "New proxy": "The implemented flow would ask for a name, then open an empty rules view. No proxy is created by this design study.",
+          "Execution limits": "Execution limits remain accessible here, separately from host routing. The limits editor is outside this layout study.",
+          "Delete proxy": "The implemented confirmation would name the proxy and show its assignments before deletion. Nothing can be deleted in this preview.",
+          "Edit assignments": "The implemented editor would show server, workspace, collection, and saved-request scopes with Save and Cancel. Each scope can have one proxy; occupied scopes must be identified. No workspace data is loaded in this preview.",
+          "Edit exclusions": "The implemented editor would let you select users and roles, then save the complete exclusion list. They skip this proxy and inherit the next applicable scope. No user or role data is loaded in this preview.",
+        };
+        showDialog(button.dataset.placeholder, `<p>${messages[button.dataset.placeholder]}</p><p class="dialog-note">Design-only placeholder. Try rule selection, filtering, editing, and the execution-location control for interactive states.</p>`);
+      });
+    });
+    $("#execution-button").addEventListener("click", () => {
+      let nextMode = mode;
+      showDialog("Where requests run", `<p>This setting applies to HTTP requests and WebSockets in every workspace on <strong>resolved.killua.com.tr</strong>, not just this proxy.</p><div class="mode-options"><button class="mode-option" data-mode="server" aria-pressed="${mode === "server"}"><span class="row">${icon("server")}Server</span><small>Run on the server.<br>Apply assigned proxy rules.</small></button><button class="mode-option" data-mode="local" aria-pressed="${mode === "local"}"><span class="row">${icon("monitor")}Local</span><small>Run on each user's device.<br>Keep rules, but do not apply them.</small></button></div><p class="dialog-note">Changing execution location affects subsequent requests across all server workspaces. Local workspaces are unaffected.</p>`, '<button class="button" id="dialog-done">Cancel</button><button class="button primary" id="save-mode">Apply in preview</button>');
+      document.querySelectorAll("[data-mode]").forEach((button) => {
+        button.addEventListener("click", () => {
+          nextMode = button.dataset.mode;
+          document.querySelectorAll("[data-mode]").forEach((option) => option.setAttribute("aria-pressed", String(option.dataset.mode === nextMode)));
+        });
+      });
+      $("#save-mode").addEventListener("click", () => {
+        mode = nextMode;
+        $("#execution-label").textContent = mode === "server" ? "Server" : "Local";
+        $("#execution-button use").setAttribute("href", mode === "server" ? "#i-server" : "#i-monitor");
+        $("#client-notice").hidden = mode === "server";
+        $("#dialog").close();
+        toast("Preview only. The server execution setting has not changed.");
+      });
+    });
+
+    renderRules();
+    renderInspector();
+    const initialView = new URLSearchParams(location.search).get("view");
+    if (initialView === "edit") renderEditor(selected);
+    if (initialView === "assignments" || initialView === "exclusions") selectTab(initialView);
+  </script>
+</body>
+</html>

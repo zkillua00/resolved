@@ -1,6 +1,147 @@
 use super::*;
+use gpui_component::Icon;
+
+use super::proxy_rule_editor::parse_proxy_rule_target;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ProxyTab {
+    #[default]
+    Rules,
+    Assignments,
+    Exclusions,
+}
+
+/// This view belongs to the server, not the currently open request workspace.
+/// Inputs and selection survive same-server refreshes, but never a server switch.
+#[derive(Clone, Default)]
+pub(super) struct RequestProxyState {
+    pub(super) selected_proxy_id: Option<String>,
+    pub(super) selected_rule_hostname: Option<String>,
+    tab: ProxyTab,
+    show_limits: bool,
+    proxy_search: Option<Entity<InputState>>,
+    rule_search: Option<Entity<InputState>>,
+    subscriptions: Rc<Vec<gpui::Subscription>>,
+}
+
+impl std::fmt::Debug for RequestProxyState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestProxyState")
+            .field("selected_proxy_id", &self.selected_proxy_id)
+            .field("selected_rule_hostname", &self.selected_rule_hostname)
+            .field("tab", &self.tab)
+            .field("show_limits", &self.show_limits)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RequestProxyState {
+    pub(super) fn select_proxy(&mut self, proxy: &ManagementProxy) {
+        self.selected_proxy_id = Some(proxy.id.clone());
+        self.selected_rule_hostname = proxy.rules.first().map(|rule| rule.hostname.clone());
+        self.tab = ProxyTab::Rules;
+        self.show_limits = false;
+    }
+
+    pub(super) fn select_proxy_by_id(&mut self, id: &str, proxies: Option<&[ManagementProxy]>) {
+        if let Some(proxy) = proxies
+            .unwrap_or_default()
+            .iter()
+            .find(|proxy| proxy.id == id)
+        {
+            self.select_proxy(proxy);
+        }
+    }
+
+    fn selected_proxy<'a>(&self, proxies: &'a [ManagementProxy]) -> Option<&'a ManagementProxy> {
+        proxies
+            .iter()
+            .find(|proxy| Some(&proxy.id) == self.selected_proxy_id.as_ref())
+    }
+
+    fn selected_rule<'a>(&self, proxy: &'a ManagementProxy) -> Option<&'a HostnameOverride> {
+        proxy
+            .rules
+            .iter()
+            .find(|rule| Some(&rule.hostname) == self.selected_rule_hostname.as_ref())
+    }
+
+    pub(super) fn reconcile(&mut self, snapshot: &UpstreamManagementSnapshot) {
+        let proxies = snapshot.proxies.as_deref().unwrap_or_default();
+        if self.selected_proxy(proxies).is_none() {
+            if let Some(proxy) = proxies.first() {
+                self.select_proxy(proxy);
+            } else {
+                self.selected_proxy_id = None;
+                self.selected_rule_hostname = None;
+            }
+        }
+        if let Some(proxy) = self.selected_proxy(proxies)
+            && self.selected_rule(proxy).is_none()
+        {
+            self.selected_rule_hostname = proxy.rules.first().map(|rule| rule.hostname.clone());
+        }
+    }
+}
+
+fn filter_matches(query: &str, values: &[&str]) -> bool {
+    let query = query.trim().to_lowercase();
+    query.is_empty()
+        || values
+            .iter()
+            .any(|value| value.to_lowercase().contains(&query))
+}
+
+fn proxy_scope_summary(proxy: &ManagementProxy) -> String {
+    match proxy.assignments.as_slice() {
+        [] => "Unassigned".to_owned(),
+        [assignment] => match assignment.scope_kind {
+            ProxyScopeKind::Server => "Server-wide".to_owned(),
+            ProxyScopeKind::Workspace => "1 workspace".to_owned(),
+            ProxyScopeKind::Collection => "1 collection".to_owned(),
+            ProxyScopeKind::Request => "1 saved request".to_owned(),
+        },
+        assignments => format!("{} scopes", assignments.len()),
+    }
+}
+
+fn count_label(count: usize, noun: &str) -> String {
+    format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
+}
 
 impl ApiTester {
+    pub(super) fn ensure_proxy_workspace_inputs(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .server_management
+            .proxy_workspace
+            .proxy_search
+            .is_some()
+        {
+            return;
+        }
+        let proxy_search = cx.new(|cx| InputState::new(window, cx).placeholder("Find a proxy…"));
+        let rule_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Filter hostname or target…"));
+        let subscriptions = vec![
+            cx.observe(&proxy_search, |_, _, cx| cx.notify()),
+            cx.observe(&rule_search, |_, _, cx| cx.notify()),
+        ];
+        let state = &mut self.server_management.proxy_workspace;
+        state.proxy_search = Some(proxy_search);
+        state.rule_search = Some(rule_search);
+        state.subscriptions = Rc::new(subscriptions);
+    }
+
+    fn proxy_navigation_locked(&self) -> bool {
+        self.server_management.status.busy()
+            || self.server_management.proxy_rule_editor.is_editing()
+            || self.server_management.proxy_scope_editor.is_editing()
+    }
+
     pub(in crate::app) fn render_request_proxy_title_bar(
         &self,
         window: &Window,
@@ -24,7 +165,7 @@ impl ApiTester {
                         .px_1()
                         .text_sm()
                         .font_semibold()
-                        .child("Request proxy"),
+                        .child("Request proxies"),
                 ),
             )
             .child(window_chrome::caption_drag_region())
@@ -37,43 +178,62 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let management = &self.server_management;
-        let active_upstream_id = self.settings.upstreams.active_upstream_id.clone();
         let server_label = self
             .settings
             .upstreams
             .active()
             .map(UpstreamProfile::display_label)
             .unwrap_or_else(|| "No server selected".to_owned());
-        let busy = management.status.busy();
-        let refresh_this = cx.entity().downgrade();
-
-        let content = if let Some(status) = management_status_element(
+        let status = management_status_element(
             &management.status,
             management.upstream_id.as_deref(),
             management.snapshot.is_some(),
-            active_upstream_id.as_deref(),
+            self.settings.upstreams.active_upstream_id.as_deref(),
             cx,
-        ) {
-            v_flex()
-                .w_full()
-                .min_h(px(260.))
-                .rounded_lg()
-                .border_1()
-                .border_color(cx.api_outline_variant())
-                .bg(cx.api_surface_low())
-                .child(status)
+        );
+        let content = if let Some(status) = status {
+            div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_h_0()
+                .child(div().flex_1().min_w_0().p_6().child(status))
+                .children(self.render_active_proxy_rule_editor(cx))
+                .when(
+                    matches!(management.status, ServerManagementStatus::Error(_)),
+                    |body| body.children(self.render_orphaned_proxy_scope_editor(cx)),
+                )
                 .into_any_element()
         } else if let Some(snapshot) = management.snapshot.as_ref() {
-            if snapshot.request_execution_settings.is_some() || snapshot.proxies.is_some() {
-                render_request_proxy_settings(&cx.entity().downgrade(), management, snapshot, busy, cx)
-            } else {
-                request_proxy_empty(
-                    "You do not have permission to view request proxy settings.",
-                    cx,
-                )
-            }
+            div().flex().flex_row().flex_1().min_h_0().w_full()
+                .child(self.render_proxy_sidebar(snapshot, cx))
+                .child(if management.proxy_workspace.show_limits {
+                    v_flex().id("request-proxy-limits").flex_1().min_w_0().min_h_0()
+                        .overflow_y_scroll().p_6().child(self.render_execution_limits(cx)).into_any_element()
+                } else if let Some(proxy) = snapshot.proxies.as_deref()
+                    .and_then(|proxies| management.proxy_workspace.selected_proxy(proxies))
+                {
+                    self.render_proxy_detail(proxy, snapshot, cx)
+                } else if let Some(editor) = self.render_orphaned_proxy_scope_editor(cx) {
+                    editor
+                } else {
+                    let (title, message) = match snapshot.proxies.as_deref() {
+                        Some([]) => ("No proxies yet", "Create a proxy, add host overrides, then assign it to a scope. Until then, requests use normal DNS."),
+                        Some(_) => ("Select a proxy", "The previously selected proxy is no longer available. Choose another proxy from the list."),
+                        None => ("Proxy settings unavailable", "Viewing proxies requires proxies.read. Execution location and execution limits have separate permissions."),
+                    };
+                    div().flex().flex_row().flex_1().min_w_0().min_h_0()
+                        .child(proxy_empty(title, message, cx))
+                        .children(self.render_active_proxy_rule_editor(cx))
+                        .into_any_element()
+                })
+                .into_any_element()
         } else {
-            request_proxy_empty("Request proxy settings are unavailable.", cx)
+            proxy_empty(
+                "Proxy settings unavailable",
+                "Refresh to load this server's settings.",
+                cx,
+            )
         };
 
         v_flex()
@@ -81,6 +241,7 @@ impl ApiTester {
             .debug_selector(|| "request-proxy-workspace".to_owned())
             .size_full()
             .min_h_0()
+            .overflow_hidden()
             .bg(cx.theme().background)
             .when_some(self.settings_warning.clone(), |this, warning| {
                 this.child(super::super::settings_page::dismissible_settings_message(
@@ -99,1501 +260,816 @@ impl ApiTester {
                 ))
             })
             .child(
+                h_flex()
+                    .w_full()
+                    .flex_shrink_0()
+                    .px_6()
+                    .py_5()
+                    .gap_5()
+                    .border_b_1()
+                    .border_color(cx.api_outline_variant())
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(px(22.))
+                                    .font_semibold()
+                                    .child("Request proxies"),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(Icon::new(IconName::Globe).with_size(px(13.)))
+                                    .child(div().truncate().child(server_label)),
+                            ),
+                    )
+                    .child(self.render_proxy_execution_control(cx))
+                    .child(
+                        Button::new("refresh-request-proxy-settings")
+                            .icon(IconName::Redo2)
+                            .small()
+                            .ghost()
+                            .tooltip("Refresh proxy settings")
+                            .disabled(
+                                management.status.busy()
+                                    || self.settings.upstreams.active().is_none(),
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.refresh_server_management(window, cx)
+                            })),
+                    ),
+            )
+            .child(content)
+            .into_any_element()
+    }
+
+    fn render_proxy_execution_control(&self, cx: &mut Context<Self>) -> AnyElement {
+        let snapshot = self.server_management.snapshot.as_ref();
+        let settings = snapshot.and_then(|snapshot| snapshot.request_execution_settings.as_ref());
+        let mode = settings.map(|settings| settings.mode);
+        let can_update =
+            snapshot.is_some_and(|snapshot| snapshot.has_permission(SERVER_SETTINGS_UPDATE));
+        let disabled = !can_update || mode.is_none() || self.proxy_navigation_locked();
+        let this = cx.entity().downgrade();
+        h_flex().gap_3()
+            .child(v_flex().items_end()
+                .child(div().text_xs().child("Execution location"))
+                .child(div().text_size(px(10.)).text_color(cx.theme().muted_foreground).child("All server workspaces")))
+            .child(div().debug_selector(|| "proxy-execution-location".to_owned()).child(
+                Button::new("proxy-execution-location")
+                    .label(match mode {
+                        Some(RequestExecutionMode::Server) => "Server",
+                        Some(RequestExecutionMode::Local) => "Local",
+                        None => "Unavailable",
+                    })
+                    .small().outline().disabled(disabled)
+                    .tooltip(if settings.is_none() {
+                        "Viewing execution location requires server_settings.read."
+                    } else if !can_update {
+                        "Read-only: changing execution location requires server_settings.update."
+                    } else if self.proxy_navigation_locked() {
+                        "Finish the current edit before changing execution location."
+                    } else {
+                        "Choose where HTTP requests and WebSockets run for all server workspaces."
+                    })
+                    .dropdown_menu(move |menu, _, _| {
+                        [
+                            (RequestExecutionMode::Server, "Server — apply assigned proxies"),
+                            (RequestExecutionMode::Local, "Local — each user's device"),
+                        ].into_iter().fold(menu, |menu, (next, label)| {
+                            let this = this.clone();
+                            menu.item(PopupMenuItem::new(label).checked(mode == Some(next))
+                                .disabled(disabled || mode == Some(next))
+                                .on_click(move |_, window, cx| {
+                                    if let Some(this) = this.upgrade() {
+                                        this.update(cx, |this, cx| this.confirm_proxy_execution_mode(next, window, cx));
+                                    }
+                                }))
+                        })
+                    }),
+            ))
+            .into_any_element()
+    }
+
+    fn confirm_proxy_execution_mode(
+        &mut self,
+        mode: RequestExecutionMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.proxy_navigation_locked() {
+            return;
+        }
+        let upstream_id = self.server_management.upstream_id.clone();
+        let server = self
+            .settings
+            .upstreams
+            .active()
+            .map(UpstreamProfile::display_label)
+            .unwrap_or_default();
+        let this = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let this = this.clone();
+            let upstream_id = upstream_id.clone();
+            dialog.title("Change execution location?").w(px(480.)).confirm()
+                .button_props(DialogButtonProps::default().ok_text(match mode {
+                    RequestExecutionMode::Server => "Run on server",
+                    RequestExecutionMode::Local => "Run locally",
+                }))
+                .child(div().text_sm().text_color(cx.theme().muted_foreground).child(format!(
+                    "This affects HTTP requests and WebSockets in every workspace on {server}. {} Local workspaces are unaffected.",
+                    match mode {
+                        RequestExecutionMode::Server => "Subsequent requests run on the server and apply assigned proxy rules.",
+                        RequestExecutionMode::Local => "Subsequent requests run on each user's device. Proxy rules stay configured but are not applied.",
+                    },
+                )))
+                .on_ok(move |_, window, cx| {
+                    if let Some(this) = this.upgrade() {
+                        this.update(cx, |this, cx| {
+                            if this.server_management.upstream_id != upstream_id
+                                || this.settings.upstreams.active_upstream_id != upstream_id
+                                || this.proxy_navigation_locked()
+                            {
+                                return;
+                            }
+                            let Some(snapshot) = this.server_management.snapshot.as_ref()
+                                .filter(|snapshot| snapshot.has_permission(SERVER_SETTINGS_UPDATE))
+                            else { return; };
+                            if let Some(mut settings) = snapshot.request_execution_settings.clone() {
+                                settings.mode = mode;
+                                this.run_management_mutation(
+                                    ManagementMutation::UpdateRequestExecutionSettings { settings }, window, cx,
+                                );
+                            }
+                        });
+                    }
+                    true
+                })
+        });
+    }
+
+    fn render_proxy_sidebar(
+        &self,
+        snapshot: &UpstreamManagementSnapshot,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let state = &self.server_management.proxy_workspace;
+        let proxies = snapshot.proxies.as_deref().unwrap_or_default();
+        let query = state
+            .proxy_search
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_default();
+        let locked = self.proxy_navigation_locked();
+        let can_create = snapshot.has_permission(PROXIES_CREATE);
+        let mut rows = Vec::new();
+        for proxy in proxies
+            .iter()
+            .filter(|proxy| filter_matches(&query, &[&proxy.name]))
+        {
+            let id = proxy.id.clone();
+            let selected = !state.show_limits && state.selected_proxy_id.as_deref() == Some(&id);
+            let selector = format!("proxy-list-{}", proxy.id);
+            rows.push(
                 v_flex()
-                    .id("request-proxy-scroll")
+                    .id(SharedString::from(selector.clone()))
+                    .debug_selector(move || selector.clone())
+                    .w_full()
+                    .px_3()
+                    .py_3()
+                    .gap_1()
+                    .rounded_md()
+                    .border_l_2()
+                    .border_color(if selected {
+                        cx.theme().primary
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .bg(if selected {
+                        cx.theme().primary.opacity(0.12)
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .when(!locked, |row| {
+                        row.cursor_pointer()
+                            .hover(|style| style.bg(cx.api_surface_high()))
+                    })
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(Icon::new(IconName::Globe).with_size(px(14.)).text_color(
+                                if selected {
+                                    cx.theme().primary
+                                } else {
+                                    cx.theme().muted_foreground
+                                },
+                            ))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .font_semibold()
+                                    .child(proxy.name.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .pl_5()
+                            .text_size(px(10.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "{} · {}",
+                                proxy_scope_summary(proxy),
+                                count_label(proxy.rules.len(), "rule")
+                            )),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if this.proxy_navigation_locked() {
+                            return;
+                        }
+                        if let Some(proxy) = this.management_proxy(&id).cloned() {
+                            this.server_management.proxy_workspace.select_proxy(&proxy);
+                            if let Some(search) =
+                                &this.server_management.proxy_workspace.rule_search
+                            {
+                                search.update(cx, |search, cx| search.set_value("", window, cx));
+                            }
+                            cx.notify();
+                        }
+                    }))
+                    .into_any_element(),
+            );
+        }
+        let no_matches = rows.is_empty() && !proxies.is_empty();
+        v_flex()
+            .debug_selector(|| "proxy-sidebar".to_owned())
+            .w(px(220.))
+            .flex_shrink_0()
+            .h_full()
+            .min_h_0()
+            .p_3()
+            .gap_3()
+            .bg(cx.api_surface_low())
+            .border_r_1()
+            .border_color(cx.api_outline_variant())
+            .child(
+                h_flex()
+                    .px_2()
+                    .gap_2()
+                    .child(proxy_eyebrow("PROXIES", cx))
+                    .when(snapshot.proxies.is_some(), |row| {
+                        row.child(proxy_count(proxies.len(), cx))
+                    }),
+            )
+            .child(proxy_search(
+                state.proxy_search.as_ref(),
+                "Find a proxy…",
+                cx,
+            ))
+            .child(
+                v_flex()
+                    .id("proxy-list-scroll")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .items_center()
-                    .p_6()
+                    .gap_1()
+                    .children(rows)
+                    .when(no_matches, |list| {
+                        list.child(
+                            div()
+                                .p_3()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("No matching proxies"),
+                        )
+                    })
+                    .when(snapshot.proxies.is_none(), |list| {
+                        list.child(
+                            div()
+                                .p_3()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Proxy list unavailable"),
+                        )
+                    })
                     .child(
-                        v_flex()
-                            .w_full()
-                            .max_w(px(1_080.))
-                            .gap_6()
-                            .child(
-                                h_flex()
-                                    .w_full()
-                                    .items_start()
-                                    .justify_between()
-                                    .gap_4()
-                                    .child(
-                                        v_flex()
-                                            .min_w_0()
-                                            .flex_1()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .text_size(px(22.))
-                                                    .font_semibold()
-                                                    .child("Server request proxy"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .max_w(px(720.))
-                                                    .text_sm()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child(
-                                                        "Control where server-workspace requests run and how the server resolves request hostnames.",
-                                                    ),
-                                            )
-                                            .child(
-                                                h_flex()
-                                                    .gap_2()
-                                                    .text_xs()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child("Managing")
-                                                    .child(
-                                                        div()
-                                                            .px_2()
-                                                            .py_1()
-                                                            .rounded_md()
-                                                            .bg(cx.api_surface_low())
-                                                            .font_semibold()
-                                                            .text_color(cx.theme().foreground)
-                                                            .child(server_label),
-                                                    ),
-                                            ),
-                                    )
-                                    .child(
-                                        Button::new("refresh-request-proxy-settings")
-                                            .icon(IconName::Redo2)
-                                            .label("Refresh")
-                                            .small()
-                                            .outline()
-                                            .disabled(busy || active_upstream_id.is_none())
-                                            .on_click(move |_, window, cx| {
-                                                if let Some(this) = refresh_this.upgrade() {
-                                                    this.update(cx, |this, cx| {
-                                                        this.refresh_server_management(window, cx);
-                                                    });
-                                                }
-                                            }),
-                                    ),
-                            )
-                            .child(content)
-                            .child(self.render_execution_limits(cx)),
+                        div().debug_selector(|| "new-proxy".to_owned()).child(
+                            Button::new("new-proxy")
+                                .icon(IconName::Plus)
+                                .label("New proxy")
+                                .small()
+                                .ghost()
+                                .disabled(!can_create || locked)
+                                .tooltip(if !can_create {
+                                    "Requires proxies.create"
+                                } else {
+                                    "Create a named set of host overrides"
+                                })
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_proxy_name_dialog(None, window, cx)
+                                })),
+                        ),
+                    ),
+            )
+            .when(
+                self.server_management.proxy_rule_editor.is_editing()
+                    || self.server_management.proxy_scope_editor.is_editing(),
+                |sidebar| {
+                    sidebar.child(
+                        div()
+                            .px_2()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Save or cancel your edit before switching proxies or tabs."),
+                    )
+                },
+            )
+            .child(
+                v_flex()
+                    .flex_shrink_0()
+                    .pt_3()
+                    .gap_1()
+                    .border_t_1()
+                    .border_color(cx.api_outline_variant())
+                    .child(
+                        Button::new("proxy-execution-limits")
+                            .icon(IconName::Settings2)
+                            .label("Execution limits")
+                            .small()
+                            .ghost()
+                            .selected(state.show_limits)
+                            .disabled(locked)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.server_management.proxy_workspace.show_limits = true;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("proxy-routing-help")
+                            .icon(IconName::Info)
+                            .label("How routing works")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_proxy_routing_help(window, cx)
+                            })),
                     ),
             )
             .into_any_element()
     }
-}
 
-fn render_request_proxy_settings(
-    this: &WeakEntity<ApiTester>,
-    management: &ServerManagementState,
-    snapshot: &UpstreamManagementSnapshot,
-    busy: bool,
-    cx: &mut App,
-) -> AnyElement {
-    v_flex()
-        .w_full()
-        .gap_6()
-        .child(match snapshot.request_execution_settings.as_ref() {
-            Some(settings) => render_execution_location_card(
-                this,
-                settings,
-                snapshot.has_permission(SERVER_SETTINGS_UPDATE),
-                busy,
-                cx,
+    fn render_proxy_detail(
+        &self,
+        proxy: &ManagementProxy,
+        snapshot: &UpstreamManagementSnapshot,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let state = &self.server_management.proxy_workspace;
+        let locked = self.proxy_navigation_locked();
+        let can_update = snapshot.has_permission(PROXIES_UPDATE);
+        let can_delete = snapshot.has_permission(PROXIES_DELETE);
+        let menu_this = cx.entity().downgrade();
+        let menu_proxy = proxy.clone();
+        let mut tabs = h_flex()
+            .px_6()
+            .gap_5()
+            .flex_shrink_0()
+            .border_b_1()
+            .border_color(cx.api_outline_variant());
+        for (tab, label, count) in [
+            (ProxyTab::Rules, "Rules", proxy.rules.len()),
+            (
+                ProxyTab::Assignments,
+                "Assignments",
+                proxy.assignments.len(),
             ),
-            None => request_proxy_permission_note(
-                "Viewing the execution location requires the server_settings.read permission.",
-                cx,
+            (
+                ProxyTab::Exclusions,
+                "Exclusions",
+                proxy.excluded_user_ids.len() + proxy.excluded_role_ids.len(),
             ),
-        })
-        .child(match snapshot.proxies.as_ref() {
-            Some(proxies) => render_proxies_section(this, management, snapshot, proxies, busy, cx),
-            None => request_proxy_permission_note(
-                "Viewing proxies requires the proxies.read permission.",
-                cx,
-            ),
-        })
-        .child(
-            h_flex()
-                .w_full()
-                .items_start()
-                .gap_4()
-                .child(request_proxy_behavior_card(
-                    "Hostname to IP",
-                    "The server connects to the IP while preserving the requested hostname for HTTP Host and HTTPS SNI. This behaves like a private DNS answer.",
-                    cx,
-                ))
-                .child(request_proxy_behavior_card(
-                    "Hostname to hostname",
-                    "The target hostname becomes the outgoing URL host, HTTP Host, and HTTPS SNI. The original request hostname is not sent upstream.",
-                    cx,
-                ))
-                .child(request_proxy_behavior_card(
-                    "Scopes and exclusions",
-                    "The most specific assigned proxy wins per hostname: request, then collection, then workspace, then server-wide. Excluded users and roles fall through to the next scope.",
-                    cx,
-                )),
-        )
-        .into_any_element()
-}
+        ] {
+            let selected = state.tab == tab;
+            let selector = format!("proxy-tab-{}", label.to_lowercase());
+            tabs = tabs.child(
+                div()
+                    .debug_selector(move || selector.clone())
+                    .py_1()
+                    .border_b_2()
+                    .border_color(if selected {
+                        cx.theme().primary
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .child(
+                        Button::new(SharedString::from(format!("proxy-tab-{label}")))
+                            .label(format!("{label}  {count}"))
+                            .small()
+                            .ghost()
+                            .selected(selected)
+                            .disabled(locked)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.server_management.proxy_workspace.tab = tab;
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+        let content = match state.tab {
+            ProxyTab::Rules => self.render_proxy_rules(proxy, snapshot, cx),
+            ProxyTab::Assignments => self.render_proxy_assignments_tab(proxy, snapshot, cx),
+            ProxyTab::Exclusions => self.render_proxy_exclusions_tab(proxy, snapshot, cx),
+        };
+        v_flex().debug_selector(|| "proxy-detail".to_owned()).flex_1().min_w_0().min_h_0()
+            .when(snapshot.request_execution_settings.as_ref().is_some_and(|settings| settings.mode == RequestExecutionMode::Local), |detail| {
+                detail.child(div().debug_selector(|| "proxy-local-execution-notice".to_owned())
+                    .px_6().py_2().flex_shrink_0().text_xs()
+                    .bg(cx.theme().warning.opacity(0.08)).text_color(cx.theme().warning)
+                    .child("Requests run on each user's device. These server proxy rules are saved, but are not applied."))
+            })
+            .child(h_flex().px_6().py_5().gap_3().flex_shrink_0()
+                .child(v_flex().flex_1().min_w_0().gap_2()
+                    .child(h_flex().gap_3()
+                        .child(div().min_w_0().truncate().text_size(px(21.)).font_semibold().child(proxy.name.clone()))
+                        .child(div().px_2().py_0p5().rounded_md().border_1().border_color(cx.api_outline_variant())
+                            .text_size(px(10.)).text_color(cx.theme().muted_foreground).child(proxy_scope_summary(proxy))))
+                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(if proxy.assignments.is_empty() {
+                        "Not assigned yet. Add a scope to apply these host overrides."
+                    } else { "Host overrides for this proxy's assigned scopes." })))
+                .child(Button::new("proxy-actions").icon(IconName::EllipsisVertical).small().ghost()
+                    .tooltip("Proxy actions").disabled(locked || (!can_update && !can_delete))
+                    .dropdown_menu(move |menu, _, _| {
+                        let rename_this = menu_this.clone();
+                        let rename_proxy = menu_proxy.clone();
+                        let delete_this = menu_this.clone();
+                        let delete_proxy = menu_proxy.clone();
+                        menu.item(PopupMenuItem::new("Rename proxy…").disabled(!can_update).on_click(move |_, window, cx| {
+                            if let Some(this) = rename_this.upgrade() {
+                                this.update(cx, |this, cx| this.open_proxy_name_dialog(Some(rename_proxy.clone()), window, cx));
+                            }
+                        }))
+                        .item(PopupMenuItem::new("Delete proxy…").disabled(!can_delete).on_click(move |_, window, cx| {
+                            if let Some(this) = delete_this.upgrade() {
+                                this.update(cx, |this, cx| this.request_delete_proxy(delete_proxy.id.clone(), delete_proxy.name.clone(), window, cx));
+                            }
+                        }))
+                    })))
+            .child(tabs).child(content).into_any_element()
+    }
 
-fn render_execution_location_card(
-    this: &WeakEntity<ApiTester>,
-    settings: &RequestExecutionSettings,
-    can_update: bool,
-    busy: bool,
-    cx: &mut App,
-) -> AnyElement {
-    let server_mode = settings.mode == RequestExecutionMode::Server;
-    let mode_this = this.clone();
-    let mode_settings = settings.clone();
-
-    v_flex()
-        .w_full()
-        .rounded_lg()
-        .border_1()
-        .border_color(cx.api_outline_variant())
-        .bg(cx.api_surface())
-        .overflow_hidden()
-        .child(
-            h_flex()
-                .w_full()
-                .items_start()
-                .justify_between()
-                .gap_5()
-                .p_5()
-                .child(
-                    v_flex()
-                        .min_w_0()
-                        .flex_1()
-                        .gap_2()
-                        .child(
-                            h_flex()
+    fn render_proxy_rules(
+        &self,
+        proxy: &ManagementProxy,
+        snapshot: &UpstreamManagementSnapshot,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let state = &self.server_management.proxy_workspace;
+        let query = state
+            .rule_search
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_default();
+        let rules = proxy
+            .rules
+            .iter()
+            .filter(|rule| filter_matches(&query, &[&rule.hostname, &rule.target]))
+            .collect::<Vec<_>>();
+        let locked = self.proxy_navigation_locked();
+        let proxy_id = proxy.id.clone();
+        let rows = rules
+            .iter()
+            .map(|rule| self.render_proxy_rule_row(proxy, rule, cx))
+            .collect::<Vec<_>>();
+        let list = v_flex()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .child(
+                h_flex()
+                    .px_5()
+                    .py_4()
+                    .gap_3()
+                    .flex_shrink_0()
+                    .child(div().flex_1().min_w_0().max_w(px(300.)).child(proxy_search(
+                        state.rule_search.as_ref(),
+                        "Filter hostname or target…",
+                        cx,
+                    )))
+                    .child(div().flex_1())
+                    .child(
+                        div().debug_selector(|| "add-proxy-rule".to_owned()).child(
+                            Button::new("add-proxy-rule")
+                                .icon(IconName::Plus)
+                                .label("Add rule")
+                                .small()
+                                .primary()
+                                .disabled(locked || !snapshot.has_permission(PROXIES_UPDATE))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.open_proxy_rule_editor(proxy_id.clone(), None, window, cx)
+                                })),
+                        ),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .id("proxy-rules-scroll")
+                    .debug_selector(|| "proxy-rule-list".to_owned())
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_5()
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .px_3()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(cx.api_outline_variant())
+                            .text_size(px(10.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(div().flex_1().min_w_0().child("Request hostname"))
+                            .child(div().w(px(16.)).flex_shrink_0())
+                            .child(div().flex_1().min_w_0().child("Connect to"))
+                            .child(div().w(px(92.)).flex_shrink_0().child("Host / SNI")),
+                    )
+                    .children(rows)
+                    .when(rules.is_empty(), |list| {
+                        list.child(
+                            v_flex()
+                                .py_8()
                                 .gap_2()
+                                .items_center()
+                                .child(div().text_sm().child(if proxy.rules.is_empty() {
+                                    "No rules yet"
+                                } else {
+                                    "No matching rules"
+                                }))
                                 .child(
                                     div()
-                                        .text_base()
-                                        .font_semibold()
-                                        .child("Execution location"),
-                                )
-                                .child(request_proxy_badge(
-                                    if server_mode { "SERVER" } else { "LOCAL" },
-                                    if server_mode {
-                                        cx.theme().success
-                                    } else {
-                                        cx.theme().muted_foreground
-                                    },
-                                )),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(if server_mode {
-                                    "Requests in every workspace on this server originate from the server. Assigned proxies apply before it connects."
-                                } else {
-                                    "Requests continue to originate from each user's computer. Proxies stay configured but are inactive."
-                                }),
-                        ),
-                )
-                .child(
-                    v_flex()
-                        .items_end()
-                        .gap_2()
-                        .child(
-                            div()
-                                .debug_selector(|| {
-                                    "server-request-execution-enabled".to_owned()
-                                })
-                                .child(
-                                    Switch::new("server-request-execution-enabled")
-                                        .checked(server_mode)
-                                        .disabled(!can_update || busy)
-                                        .on_click(move |checked, window, cx| {
-                                            if let Some(this) = mode_this.upgrade() {
-                                                let mut settings = mode_settings.clone();
-                                                settings.mode = if *checked {
-                                                    RequestExecutionMode::Server
-                                                } else {
-                                                    RequestExecutionMode::Local
-                                                };
-                                                this.update(cx, |this, cx| {
-                                                    this.run_management_mutation(
-                                                        ManagementMutation::UpdateRequestExecutionSettings {
-                                                            settings: settings.clone(),
-                                                        },
-                                                        window,
-                                                        cx,
-                                                    );
-                                                });
-                                            }
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(if proxy.rules.is_empty() {
+                                            "Add an exact hostname and its connection target."
+                                        } else {
+                                            "Try another hostname or target."
                                         }),
                                 ),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(if server_mode { "Enabled" } else { "Disabled" }),
-                        ),
-                ),
-        )
-        .when(!can_update, |this| {
-            this.child(
-                div()
-                    .w_full()
-                    .px_5()
-                    .py_3()
+                    })
+                    .child(
+                        div()
+                            .px_3()
+                            .py_3()
+                            .text_size(px(10.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(if query.trim().is_empty() {
+                                format!(
+                                    "{} · Exact hostnames only",
+                                    count_label(proxy.rules.len(), "rule")
+                                )
+                            } else {
+                                format!(
+                                    "{} of {} rules · Exact hostnames only",
+                                    rules.len(),
+                                    proxy.rules.len()
+                                )
+                            }),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .mx_5()
+                    .py_4()
+                    .gap_2()
+                    .flex_shrink_0()
                     .border_t_1()
                     .border_color(cx.api_outline_variant())
-                    .bg(cx.api_surface_low())
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("You can inspect this configuration, but only a server administrator can change it."),
-            )
-        })
-        .into_any_element()
-}
-
-/// One assignable scope node, flattened from the workspace trees with the
-/// server-wide scope first.
-struct ProxyScopeOption {
-    kind: ProxyScopeKind,
-    scope_id: Option<String>,
-    label: String,
-    detail: String,
-    depth: usize,
-}
-
-fn proxy_scope_options(workspaces: Option<&[UpstreamWorkspaceView]>) -> Vec<ProxyScopeOption> {
-    let mut options = vec![ProxyScopeOption {
-        kind: ProxyScopeKind::Server,
-        scope_id: None,
-        label: "Entire server".to_owned(),
-        detail: "Every workspace on this server".to_owned(),
-        depth: 0,
-    }];
-    for workspace in workspaces.unwrap_or_default() {
-        options.push(ProxyScopeOption {
-            kind: ProxyScopeKind::Workspace,
-            scope_id: Some(workspace.id.clone()),
-            label: workspace.name.clone(),
-            detail: "Workspace".to_owned(),
-            depth: 0,
-        });
-        for collection in &workspace.collections {
-            push_collection_scope_options(&mut options, collection, &workspace.name, 1);
-        }
-    }
-    options
-}
-
-fn push_collection_scope_options(
-    options: &mut Vec<ProxyScopeOption>,
-    collection: &UpstreamCollectionView,
-    path: &str,
-    depth: usize,
-) {
-    options.push(ProxyScopeOption {
-        kind: ProxyScopeKind::Collection,
-        scope_id: Some(collection.id.clone()),
-        label: collection.name.clone(),
-        detail: format!("Collection · {path}"),
-        depth,
-    });
-    let nested_path = format!("{path} / {}", collection.name);
-    for request in &collection.requests {
-        options.push(ProxyScopeOption {
-            kind: ProxyScopeKind::Request,
-            scope_id: Some(request.id.clone()),
-            label: request.name.clone(),
-            detail: format!("Request · {nested_path}"),
-            depth: depth + 1,
-        });
-    }
-    for sub_collection in &collection.sub_collections {
-        push_collection_scope_options(options, sub_collection, &nested_path, depth + 1);
-    }
-}
-
-fn scope_owner_key(kind: ProxyScopeKind, scope_id: Option<&str>) -> (ProxyScopeKind, String) {
-    (kind, scope_id.unwrap_or_default().to_owned())
-}
-
-fn proxy_scope_kind_noun(kind: ProxyScopeKind) -> &'static str {
-    match kind {
-        ProxyScopeKind::Server => "server",
-        ProxyScopeKind::Workspace => "workspace",
-        ProxyScopeKind::Collection => "collection",
-        ProxyScopeKind::Request => "request",
-    }
-}
-
-fn proxy_assignment_label(
-    assignment: &ProxyAssignment,
-    options: &[ProxyScopeOption],
-) -> String {
-    if assignment.scope_kind == ProxyScopeKind::Server {
-        return "Server-wide".to_owned();
-    }
-    options
-        .iter()
-        .find(|option| {
-            option.kind == assignment.scope_kind
-                && option.scope_id.as_deref() == assignment.scope_id.as_deref()
-        })
-        .map(|option| {
-            format!(
-                "{} {}",
-                capitalized_scope_noun(assignment.scope_kind),
-                option.label
-            )
-        })
-        .unwrap_or_else(|| {
-            format!(
-                "Inaccessible {}",
-                proxy_scope_kind_noun(assignment.scope_kind)
-            )
-        })
-}
-
-fn capitalized_scope_noun(kind: ProxyScopeKind) -> &'static str {
-    match kind {
-        ProxyScopeKind::Server => "Server",
-        ProxyScopeKind::Workspace => "Workspace:",
-        ProxyScopeKind::Collection => "Collection:",
-        ProxyScopeKind::Request => "Request:",
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_proxies_section(
-    this: &WeakEntity<ApiTester>,
-    management: &ServerManagementState,
-    snapshot: &UpstreamManagementSnapshot,
-    proxies: &[ManagementProxy],
-    busy: bool,
-    cx: &mut App,
-) -> AnyElement {
-    let can_create = snapshot.has_permission(PROXIES_CREATE);
-    let add_this = this.clone();
-    let scope_options = Rc::new(proxy_scope_options(snapshot.workspaces.as_deref()));
-    let mut scope_owners: BTreeMap<(ProxyScopeKind, String), (String, String)> = BTreeMap::new();
-    for proxy in proxies {
-        for assignment in &proxy.assignments {
-            scope_owners.insert(
-                scope_owner_key(assignment.scope_kind, assignment.scope_id.as_deref()),
-                (proxy.id.clone(), proxy.name.clone()),
-            );
-        }
-    }
-    let scope_owners = Rc::new(scope_owners);
-
-    let cards = proxies
-        .iter()
-        .map(|proxy| {
-            render_proxy_card(
-                this,
-                management,
-                snapshot,
-                proxy,
-                &scope_options,
-                &scope_owners,
-                busy,
-                cx,
-            )
-        })
-        .collect::<Vec<_>>();
-
-    v_flex()
-        .w_full()
-        .gap_4()
-        .child(
-            v_flex()
-                .w_full()
-                .rounded_lg()
-                .border_1()
-                .border_color(cx.api_outline_variant())
-                .bg(cx.api_surface())
-                .overflow_hidden()
-                .child(
-                    h_flex()
-                        .w_full()
-                        .items_start()
-                        .justify_between()
-                        .gap_5()
-                        .p_5()
-                        .child(
-                            v_flex()
-                                .min_w_0()
-                                .flex_1()
-                                .gap_2()
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .child(div().text_base().font_semibold().child("Proxies"))
-                                        .child(request_proxy_badge(
-                                            format!("{} PROXIES", cards.len()),
-                                            cx.theme().primary,
-                                        )),
-                                )
-                                .child(
-                                    div()
-                                        .max_w(px(720.))
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(
-                                            "Group host override rules into named proxies, then assign each proxy server-wide or to a workspace, collection, or request. Opt users or roles out of a proxy to make their requests fall through to the next scope.",
-                                        ),
-                                ),
-                        )
-                        .child(
-                            div().debug_selector(|| "new-proxy".to_owned()).child(
-                                Button::new("new-proxy")
-                                    .icon(IconName::Plus)
-                                    .label("New proxy")
-                                    .small()
-                                    .primary()
-                                    .disabled(!can_create || busy)
-                                    .on_click(move |_, window, cx| {
-                                        if let Some(this) = add_this.upgrade() {
-                                            this.update(cx, |this, cx| {
-                                                this.open_proxy_name_dialog(None, window, cx);
-                                            });
-                                        }
-                                    }),
-                            ),
-                        ),
-                )
-                .when(cards.is_empty(), |this| {
-                    this.child(
-                        v_flex()
-                            .w_full()
-                            .min_h(px(140.))
-                            .items_center()
-                            .justify_center()
-                            .gap_2()
-                            .p_6()
-                            .border_t_1()
-                            .border_color(cx.api_outline_variant())
-                            .child(div().text_sm().font_semibold().child("No proxies"))
-                            .child(
-                                div()
-                                    .max_w(px(480.))
-                                    .text_center()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Requests use normal DNS resolution until a proxy with host override rules is assigned."),
-                            ),
+                    .child(proxy_eyebrow("MATCH PRIORITY", cx))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Request  ›  Collection  ›  Workspace  ›  Server"),
                     )
-                }),
-        )
-        .children(cards)
-        .into_any_element()
-}
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child("First matching hostname wins. No matching rule? Normal DNS."),
+                    ),
+            );
+        div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .child(list)
+            .child(self.render_proxy_rule_inspector(proxy, state.selected_rule(proxy), cx))
+            .into_any_element()
+    }
 
-#[allow(clippy::too_many_arguments)]
-fn render_proxy_card(
-    this: &WeakEntity<ApiTester>,
-    management: &ServerManagementState,
-    snapshot: &UpstreamManagementSnapshot,
-    proxy: &ManagementProxy,
-    scope_options: &Rc<Vec<ProxyScopeOption>>,
-    scope_owners: &Rc<BTreeMap<(ProxyScopeKind, String), (String, String)>>,
-    busy: bool,
-    cx: &mut App,
-) -> AnyElement {
-    let can_update = snapshot.has_permission(PROXIES_UPDATE);
-    let can_delete = snapshot.has_permission(PROXIES_DELETE);
-    let can_assign = snapshot.has_permission(PROXIES_ASSIGN);
-
-    let rename_this = this.clone();
-    let rename_proxy = proxy.clone();
-    let delete_this = this.clone();
-    let delete_proxy_id = proxy.id.clone();
-    let delete_proxy_name = proxy.name.clone();
-    let add_rule_this = this.clone();
-    let add_rule_proxy_id = proxy.id.clone();
-
-    let rule_rows = proxy
-        .rules
-        .iter()
-        .map(|entry| render_proxy_rule_row(this, &proxy.id, entry, can_update, busy, cx))
-        .collect::<Vec<_>>();
-
-    let card_selector = format!("request-proxy-card-{}", proxy.id);
-    let exclusion_count = proxy.excluded_user_ids.len() + proxy.excluded_role_ids.len();
-
-    v_flex()
-        .debug_selector(move || card_selector.clone())
-        .w_full()
-        .rounded_lg()
-        .border_1()
-        .border_color(cx.api_outline_variant())
-        .bg(cx.api_surface())
-        .overflow_hidden()
-        .child(
-            h_flex()
-                .w_full()
-                .items_start()
-                .justify_between()
-                .gap_5()
-                .p_5()
-                .child(
-                    v_flex()
-                        .min_w_0()
-                        .flex_1()
-                        .gap_2()
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(div().text_base().font_semibold().child(proxy.name.clone()))
-                                .child(request_proxy_badge(
-                                    format!("{} RULES", proxy.rules.len()),
-                                    cx.theme().primary,
-                                ))
-                                .when(exclusion_count > 0, |row| {
-                                    row.child(request_proxy_badge(
-                                        format!("{exclusion_count} EXCLUDED"),
-                                        cx.theme().warning,
-                                    ))
-                                }),
-                        )
-                        .child(render_proxy_assignment_chips(proxy, scope_options, cx)),
-                )
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .child(
-                            Button::new(SharedString::from(format!("rename-proxy-{}", proxy.id)))
-                                .icon(IconName::Settings2)
-                                .label("Rename")
-                                .xsmall()
-                                .outline()
-                                .disabled(!can_update || busy)
-                                .on_click(move |_, window, cx| {
-                                    if let Some(this) = rename_this.upgrade() {
-                                        this.update(cx, |this, cx| {
-                                            this.open_proxy_name_dialog(
-                                                Some(rename_proxy.clone()),
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    }
-                                }),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!("delete-proxy-{}", proxy.id)))
-                                .icon(IconName::Delete)
-                                .label("Delete")
-                                .xsmall()
-                                .ghost()
-                                .danger()
-                                .disabled(!can_delete || busy)
-                                .on_click(move |_, window, cx| {
-                                    if let Some(this) = delete_this.upgrade() {
-                                        this.update(cx, |this, cx| {
-                                            this.request_delete_proxy(
-                                                delete_proxy_id.clone(),
-                                                delete_proxy_name.clone(),
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    }
-                                }),
-                        ),
-                ),
-        )
-        .child(
-            h_flex()
-                .w_full()
-                .gap_4()
-                .px_5()
-                .py_2()
-                .border_y_1()
-                .border_color(cx.api_outline_variant())
-                .bg(cx.api_surface_low())
-                .text_size(px(10.))
-                .font_semibold()
-                .text_color(cx.theme().muted_foreground)
-                .child(div().w(px(220.)).child("REQUEST HOST"))
-                .child(div().w(px(220.)).child("CONNECT TO / SCHEME"))
-                .child(div().min_w_0().flex_1().child("ORIGIN BEHAVIOR"))
-                .child(div().w(px(152.)).text_right().child("ACTIONS")),
-        )
-        .child(if rule_rows.is_empty() {
-            v_flex()
-                .w_full()
-                .items_center()
-                .justify_center()
-                .gap_1()
-                .p_5()
-                .child(div().text_sm().font_semibold().child("No rules yet"))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("This proxy has no effect until a host override rule is added."),
-                )
-                .into_any_element()
-        } else {
-            v_flex().w_full().children(rule_rows).into_any_element()
-        })
-        .child(
-            h_flex()
-                .w_full()
-                .justify_between()
-                .gap_2()
-                .px_5()
-                .py_3()
-                .border_t_1()
-                .border_color(cx.api_outline_variant())
-                .child(
-                    Button::new(SharedString::from(format!("add-proxy-rule-{}", proxy.id)))
-                        .icon(IconName::Plus)
-                        .label("Add rule")
-                        .xsmall()
-                        .outline()
-                        .disabled(!can_update || busy)
-                        .on_click(move |_, window, cx| {
-                            if let Some(this) = add_rule_this.upgrade() {
-                                this.update(cx, |this, cx| {
-                                    this.open_proxy_rule_dialog(
-                                        add_rule_proxy_id.clone(),
-                                        None,
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }
-                        }),
-                )
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .child(render_proxy_panel_toggle(
-                            this,
-                            proxy,
-                            ProxyEditorPanel::Assignments,
-                            management
-                                .expanded_proxy_assignments
-                                .contains(&proxy.id),
-                            can_assign,
-                            busy,
-                        ))
-                        .child(render_proxy_panel_toggle(
-                            this,
-                            proxy,
-                            ProxyEditorPanel::Exclusions,
-                            management.expanded_proxy_exclusions.contains(&proxy.id),
-                            can_assign,
-                            busy,
-                        )),
-                ),
-        )
-        .when(
-            management.expanded_proxy_assignments.contains(&proxy.id),
-            |card| {
-                card.child(render_proxy_assignment_editor(
-                    this,
-                    proxy,
-                    scope_options,
-                    scope_owners,
-                    can_assign,
-                    busy,
-                    cx,
-                ))
-            },
-        )
-        .when(
-            management.expanded_proxy_exclusions.contains(&proxy.id),
-            |card| {
-                card.child(render_proxy_exclusion_editor(
-                    this, snapshot, proxy, can_assign, busy, cx,
-                ))
-            },
-        )
-        .into_any_element()
-}
-
-#[derive(Copy, Clone, PartialEq, Eq)]
-enum ProxyEditorPanel {
-    Assignments,
-    Exclusions,
-}
-
-fn render_proxy_panel_toggle(
-    this: &WeakEntity<ApiTester>,
-    proxy: &ManagementProxy,
-    panel: ProxyEditorPanel,
-    expanded: bool,
-    can_assign: bool,
-    busy: bool,
-) -> AnyElement {
-    let (id_prefix, label) = match panel {
-        ProxyEditorPanel::Assignments => ("manage-proxy-assignments", "Assignments"),
-        ProxyEditorPanel::Exclusions => ("manage-proxy-exclusions", "Exclusions"),
-    };
-    let toggle_this = this.clone();
-    let proxy_id = proxy.id.clone();
-    let selector = format!("{id_prefix}-{}", proxy.id);
-    let button = Button::new(SharedString::from(selector.clone()))
-        .label(if expanded {
-            format!("Hide {}", label.to_ascii_lowercase())
-        } else {
-            format!("Manage {}", label.to_ascii_lowercase())
-        })
-        .xsmall()
-        .outline()
-        .disabled(!can_assign || busy)
-        .on_click(move |_, _, cx| {
-            if let Some(this) = toggle_this.upgrade() {
-                this.update(cx, |this, cx| match panel {
-                    ProxyEditorPanel::Assignments => {
-                        this.toggle_proxy_assignments_editor(&proxy_id, cx);
+    fn render_proxy_rule_row(
+        &self,
+        proxy: &ManagementProxy,
+        rule: &HostnameOverride,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (target, kind, behavior) = match parse_proxy_rule_target(&rule.target) {
+            Ok(target) => {
+                let kind = match &target.scheme {
+                    Some(scheme) => format!(
+                        "{} · {}",
+                        if target.is_ip {
+                            "IP address"
+                        } else {
+                            "Hostname"
+                        },
+                        scheme.to_uppercase()
+                    ),
+                    None => if target.is_ip {
+                        "IP address"
+                    } else {
+                        "Hostname"
                     }
-                    ProxyEditorPanel::Exclusions => {
-                        this.toggle_proxy_exclusions_editor(&proxy_id, cx);
-                    }
-                });
+                    .to_owned(),
+                };
+                (
+                    target.hostname,
+                    kind,
+                    if target.is_ip {
+                        "Keep original"
+                    } else {
+                        "Use target"
+                    },
+                )
             }
+            Err(_) => (
+                rule.target.clone(),
+                "Invalid target".to_owned(),
+                "Unavailable",
+            ),
+        };
+        let selected = self
+            .server_management
+            .proxy_workspace
+            .selected_rule_hostname
+            .as_deref()
+            == Some(&rule.hostname);
+        let locked = self.proxy_navigation_locked();
+        let hostname = rule.hostname.clone();
+        let selector = format!("proxy-rule-{}-{}", proxy.id, rule.hostname);
+        h_flex()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector.clone())
+            .w_full()
+            .min_h(px(66.))
+            .px_3()
+            .py_3()
+            .gap_3()
+            .border_l_2()
+            .border_b_1()
+            .border_color(if selected {
+                cx.theme().primary.opacity(0.6)
+            } else {
+                cx.api_outline_variant()
+            })
+            .bg(if selected {
+                cx.theme().primary.opacity(0.10)
+            } else {
+                gpui::transparent_black()
+            })
+            .when(!locked, |row| {
+                row.cursor_pointer()
+                    .hover(|style| style.bg(cx.api_surface_high()))
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .child(rule.hostname.clone()),
+            )
+            .child(
+                Icon::new(IconName::ChevronRight)
+                    .with_size(px(16.))
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_xs()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .child(target),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(kind),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(92.))
+                    .flex_shrink_0()
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(behavior),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.proxy_navigation_locked() {
+                    this.server_management
+                        .proxy_workspace
+                        .selected_rule_hostname = Some(hostname.clone());
+                    cx.notify();
+                }
+            }))
+            .into_any_element()
+    }
+
+    fn open_proxy_routing_help(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.open_dialog(cx, |dialog, _, cx| {
+            dialog.title("How routing works").w(px(540.)).child(
+                v_flex().gap_4().text_sm().text_color(cx.theme().muted_foreground)
+                    .child("Proxies are named sets of exact hostname overrides, not HTTP or SOCKS proxy endpoints.")
+                    .child("For each hostname, the first matching rule wins: saved request → collection (inner to outer) → workspace → server-wide. Without a matching rule, the server uses normal DNS.")
+                    .child("Request and collection scopes apply when execution includes an accessible saved request. Ad-hoc requests use workspace and server scopes.")
+                    .child("Excluded users and roles skip that proxy and fall through to the next scope. Exclusions are not permissions or deny rules, and do not force direct routing.")
+                    .child("IP targets preserve the original HTTP Host and HTTPS SNI. Hostname targets replace them. An explicit target scheme overrides the request scheme; the request port is kept."),
+            )
         });
-    div()
-        .debug_selector(move || selector.clone())
-        .child(button)
-        .into_any_element()
+    }
 }
 
-fn render_proxy_assignment_chips(
-    proxy: &ManagementProxy,
-    scope_options: &[ProxyScopeOption],
-    cx: &mut App,
-) -> AnyElement {
-    if proxy.assignments.is_empty() {
-        return div()
+fn proxy_search(input: Option<&Entity<InputState>>, placeholder: &str, cx: &mut App) -> AnyElement {
+    match input {
+        Some(input) => Input::new(input)
+            .small()
+            .prefix(IconName::Search)
+            .into_any_element(),
+        None => div()
+            .px_2()
+            .py_2()
             .text_xs()
             .text_color(cx.theme().muted_foreground)
-            .child("Not assigned anywhere — this proxy is inactive.")
-            .into_any_element();
+            .child(placeholder.to_owned())
+            .into_any_element(),
     }
-    h_flex()
-        .flex_wrap()
-        .gap_1()
-        .children(proxy.assignments.iter().map(|assignment| {
-            let label = proxy_assignment_label(assignment, scope_options);
-            div()
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .bg(cx.api_surface_low())
-                .border_1()
-                .border_color(cx.api_outline_variant())
-                .text_xs()
-                .child(label)
-        }))
-        .into_any_element()
 }
 
-fn render_proxy_assignment_editor(
-    this: &WeakEntity<ApiTester>,
-    proxy: &ManagementProxy,
-    scope_options: &Rc<Vec<ProxyScopeOption>>,
-    scope_owners: &Rc<BTreeMap<(ProxyScopeKind, String), (String, String)>>,
-    can_assign: bool,
-    busy: bool,
-    cx: &mut App,
-) -> AnyElement {
-    let assignments = Rc::new(proxy.assignments.clone());
-    let rows = scope_options
-        .iter()
-        .map(|option| {
-            let assigned_here = assignments.iter().any(|assignment| {
-                assignment.scope_kind == option.kind
-                    && assignment.scope_id.as_deref() == option.scope_id.as_deref()
-            });
-            let owner = scope_owners
-                .get(&scope_owner_key(option.kind, option.scope_id.as_deref()))
-                .filter(|(owner_id, _)| owner_id != &proxy.id);
-            let taken_by = owner.map(|(_, name)| name.clone());
-            let toggle_this = this.clone();
-            let toggle_proxy_id = proxy.id.clone();
-            let toggle_assignments = assignments.clone();
-            let toggle_assignment = ProxyAssignment {
-                scope_kind: option.kind,
-                scope_id: option.scope_id.clone(),
-            };
-            let scope_selector = format!(
-                "proxy-scope-{}-{}",
-                proxy.id,
-                option.scope_id.as_deref().unwrap_or("server")
-            );
-            h_flex()
-                .debug_selector({
-                    let scope_selector = scope_selector.clone();
-                    move || scope_selector.clone()
-                })
-                .w_full()
-                .gap_3()
-                .px_5()
-                .py_2p5()
-                .border_t_1()
-                .border_color(cx.api_outline_variant())
-                .child(
-                    v_flex()
-                        .min_w_0()
-                        .flex_1()
-                        .pl(px(16. * option.depth as f32))
-                        .gap_0p5()
-                        .child(div().text_sm().font_semibold().child(option.label.clone()))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(match taken_by.as_deref() {
-                                    Some(other) => format!("{} · assigned to {other}", option.detail),
-                                    None => option.detail.clone(),
-                                }),
-                        ),
-                )
-                .child(
-                    Switch::new(SharedString::from(scope_selector))
-                        .checked(assigned_here)
-                        .disabled(!can_assign || busy || taken_by.is_some())
-                        .on_click(move |checked, window, cx| {
-                            if let Some(this) = toggle_this.upgrade() {
-                                let mut next = toggle_assignments.as_ref().clone();
-                                next.retain(|assignment| assignment != &toggle_assignment);
-                                if *checked {
-                                    next.push(toggle_assignment.clone());
-                                }
-                                this.update(cx, |this, cx| {
-                                    this.run_management_mutation(
-                                        ManagementMutation::ReplaceProxyAssignments {
-                                            proxy_id: toggle_proxy_id.clone(),
-                                            assignments: next,
-                                        },
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }
-                        }),
-                )
-                .into_any_element()
-        })
-        .collect::<Vec<_>>();
-
-    v_flex()
-        .w_full()
-        .child(
-            div()
-                .w_full()
-                .px_5()
-                .py_2()
-                .border_t_1()
-                .border_color(cx.api_outline_variant())
-                .bg(cx.api_surface_low())
-                .text_size(px(10.))
-                .font_semibold()
-                .text_color(cx.theme().muted_foreground)
-                .child("ASSIGN THIS PROXY TO"),
-        )
-        .children(rows)
-        .into_any_element()
-}
-
-fn render_proxy_exclusion_editor(
-    this: &WeakEntity<ApiTester>,
-    snapshot: &UpstreamManagementSnapshot,
-    proxy: &ManagementProxy,
-    can_assign: bool,
-    busy: bool,
-    cx: &mut App,
-) -> AnyElement {
-    let excluded_users = Rc::new(proxy.excluded_user_ids.clone());
-    let excluded_roles = Rc::new(proxy.excluded_role_ids.clone());
-
-    let mut rows: Vec<AnyElement> = Vec::new();
-    if let Some(roles) = snapshot.roles.as_ref() {
-        for role in roles {
-            rows.push(render_proxy_exclusion_row(
-                this,
-                proxy,
-                &excluded_users,
-                &excluded_roles,
-                ProxyExclusionSubject::Role,
-                &role.id,
-                &role.name,
-                "Role",
-                can_assign,
-                busy,
-                cx,
-            ));
-        }
-    }
-    if let Some(users) = snapshot.users.as_ref() {
-        for user in users {
-            rows.push(render_proxy_exclusion_row(
-                this,
-                proxy,
-                &excluded_users,
-                &excluded_roles,
-                ProxyExclusionSubject::User,
-                &user.id,
-                &user.display_name,
-                "User",
-                can_assign,
-                busy,
-                cx,
-            ));
-        }
-    }
-
-    v_flex()
-        .w_full()
-        .child(
-            div()
-                .w_full()
-                .px_5()
-                .py_2()
-                .border_t_1()
-                .border_color(cx.api_outline_variant())
-                .bg(cx.api_surface_low())
-                .text_size(px(10.))
-                .font_semibold()
-                .text_color(cx.theme().muted_foreground)
-                .child("OPT OUT USERS AND ROLES"),
-        )
-        .child(
-            div()
-                .w_full()
-                .px_5()
-                .py_2()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(
-                    "Excluded users and roles skip this proxy; their requests fall through to the next scope or normal DNS resolution. Everyone else with access uses it automatically.",
-                ),
-        )
-        .child(if rows.is_empty() {
-            div()
-                .w_full()
-                .px_5()
-                .py_3()
-                .border_t_1()
-                .border_color(cx.api_outline_variant())
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child("Viewing users and roles requires the users.read and roles.read permissions.")
-                .into_any_element()
-        } else {
-            v_flex().w_full().children(rows).into_any_element()
-        })
-        .into_any_element()
-}
-
-#[derive(Copy, Clone, PartialEq, Eq)]
-enum ProxyExclusionSubject {
-    User,
-    Role,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_proxy_exclusion_row(
-    this: &WeakEntity<ApiTester>,
-    proxy: &ManagementProxy,
-    excluded_users: &Rc<Vec<String>>,
-    excluded_roles: &Rc<Vec<String>>,
-    subject: ProxyExclusionSubject,
-    subject_id: &str,
-    subject_label: &str,
-    subject_detail: &'static str,
-    can_assign: bool,
-    busy: bool,
-    cx: &mut App,
-) -> AnyElement {
-    let excluded = match subject {
-        ProxyExclusionSubject::User => excluded_users.iter().any(|id| id == subject_id),
-        ProxyExclusionSubject::Role => excluded_roles.iter().any(|id| id == subject_id),
-    };
-    let toggle_this = this.clone();
-    let toggle_proxy_id = proxy.id.clone();
-    let toggle_subject_id = subject_id.to_owned();
-    let toggle_users = excluded_users.clone();
-    let toggle_roles = excluded_roles.clone();
-    let subject_kind = match subject {
-        ProxyExclusionSubject::User => "user",
-        ProxyExclusionSubject::Role => "role",
-    };
-    let selector = format!("proxy-exclusion-{}-{subject_kind}-{subject_id}", proxy.id);
-
-    h_flex()
-        .debug_selector({
-            let selector = selector.clone();
-            move || selector.clone()
-        })
-        .w_full()
-        .gap_3()
-        .px_5()
-        .py_2p5()
-        .border_t_1()
-        .border_color(cx.api_outline_variant())
-        .child(
-            v_flex()
-                .min_w_0()
-                .flex_1()
-                .gap_0p5()
-                .child(div().text_sm().font_semibold().child(subject_label.to_owned()))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(if excluded {
-                            format!("{subject_detail} · excluded from this proxy")
-                        } else {
-                            format!("{subject_detail} · uses this proxy")
-                        }),
-                ),
-        )
-        .child(
-            Switch::new(SharedString::from(selector))
-                .checked(excluded)
-                .disabled(!can_assign || busy)
-                .on_click(move |checked, window, cx| {
-                    if let Some(this) = toggle_this.upgrade() {
-                        let mut users = toggle_users.as_ref().clone();
-                        let mut roles = toggle_roles.as_ref().clone();
-                        let list = match subject {
-                            ProxyExclusionSubject::User => &mut users,
-                            ProxyExclusionSubject::Role => &mut roles,
-                        };
-                        list.retain(|id| id != &toggle_subject_id);
-                        if *checked {
-                            list.push(toggle_subject_id.clone());
-                        }
-                        this.update(cx, |this, cx| {
-                            this.run_management_mutation(
-                                ManagementMutation::ReplaceProxyExclusions {
-                                    proxy_id: toggle_proxy_id.clone(),
-                                    excluded_user_ids: users,
-                                    excluded_role_ids: roles,
-                                },
-                                window,
-                                cx,
-                            );
-                        });
-                    }
-                }),
-        )
-        .into_any_element()
-}
-
-fn render_proxy_rule_row(
-    this: &WeakEntity<ApiTester>,
-    proxy_id: &str,
-    entry: &HostnameOverride,
-    can_update: bool,
-    busy: bool,
-    cx: &mut App,
-) -> AnyElement {
-    let parsed_target = url::Url::parse(&entry.target).ok().filter(|target| {
-        matches!(target.scheme(), "http" | "https") && target.host_str().is_some()
-    });
-    let target_host = parsed_target
-        .as_ref()
-        .and_then(url::Url::host_str)
-        .unwrap_or(entry.target.as_str())
-        .to_owned();
-    let target_scheme = parsed_target
-        .as_ref()
-        .map(|target| target.scheme().to_ascii_uppercase());
-    let target_is_ip = target_host.parse::<std::net::IpAddr>().is_ok();
-    let target_badge = match (&target_scheme, target_is_ip) {
-        (Some(scheme), true) => format!("{scheme} · IP TARGET"),
-        (Some(scheme), false) => format!("{scheme} · HOST TARGET"),
-        (None, true) => "IP TARGET".to_owned(),
-        (None, false) => "HOST TARGET".to_owned(),
-    };
-    let scheme_behavior = target_scheme
-        .as_deref()
-        .map(|scheme| format!(" Use {scheme}; matching requests may omit their scheme."))
-        .unwrap_or_default();
-    let edit_this = this.clone();
-    let edit_entry = entry.clone();
-    let edit_proxy_id = proxy_id.to_owned();
-    let delete_this = this.clone();
-    let delete_hostname = entry.hostname.clone();
-    let delete_proxy_id = proxy_id.to_owned();
-    let row_selector = format!("proxy-rule-{proxy_id}-{}", entry.hostname);
-    let edit_selector = format!("edit-proxy-rule-{proxy_id}-{}", entry.hostname);
-    let delete_selector = format!("delete-proxy-rule-{proxy_id}-{}", entry.hostname);
-
-    h_flex()
-        .debug_selector(move || row_selector.clone())
-        .w_full()
-        .items_start()
-        .gap_4()
-        .px_5()
-        .py_4()
-        .border_b_1()
-        .border_color(cx.api_outline_variant())
-        .child(
-            v_flex()
-                .w(px(220.))
-                .min_w_0()
-                .gap_1()
-                .child(
-                    div()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_sm()
-                        .font_semibold()
-                        .child(entry.hostname.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Exact hostname"),
-                ),
-        )
-        .child(
-            v_flex()
-                .w(px(220.))
-                .min_w_0()
-                .gap_1()
-                .child(
-                    div()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_sm()
-                        .font_semibold()
-                        .child(entry.target.clone()),
-                )
-                .child(request_proxy_badge(
-                    target_badge,
-                    if target_is_ip {
-                        cx.theme().blue
-                    } else {
-                        cx.theme().primary
-                    },
-                )),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(if target_is_ip {
-                    format!(
-                        "Connect to {}; keep {} as HTTP Host and HTTPS SNI.{}",
-                        target_host, entry.hostname, scheme_behavior
-                    )
-                } else {
-                    format!(
-                        "Connect to {}; use it as HTTP Host and HTTPS SNI.{}",
-                        target_host, scheme_behavior
-                    )
-                }),
-        )
-        .child(
-            h_flex()
-                .w(px(152.))
-                .justify_end()
-                .gap_1()
-                .child(
-                    div().debug_selector({
-                        let edit_selector = edit_selector.clone();
-                        move || edit_selector.clone()
-                    }).child(
-                        Button::new(SharedString::from(edit_selector))
-                            .icon(IconName::Settings2)
-                            .label("Edit")
-                            .xsmall()
-                            .outline()
-                            .tooltip("Edit rule")
-                            .disabled(!can_update || busy)
-                            .on_click(move |_, window, cx| {
-                                if let Some(this) = edit_this.upgrade() {
-                                    this.update(cx, |this, cx| {
-                                        this.open_proxy_rule_dialog(
-                                            edit_proxy_id.clone(),
-                                            Some(edit_entry.clone()),
-                                            window,
-                                            cx,
-                                        );
-                                    });
-                                }
-                            }),
-                    ),
-                )
-                .child(
-                    div().debug_selector({
-                        let delete_selector = delete_selector.clone();
-                        move || delete_selector.clone()
-                    }).child(
-                        Button::new(SharedString::from(delete_selector))
-                            .icon(IconName::Delete)
-                            .label("Delete")
-                            .xsmall()
-                            .ghost()
-                            .danger()
-                            .tooltip("Delete rule")
-                            .disabled(!can_update || busy)
-                            .on_click(move |_, window, cx| {
-                                if let Some(this) = delete_this.upgrade() {
-                                    this.update(cx, |this, cx| {
-                                        this.request_delete_proxy_rule(
-                                            delete_proxy_id.clone(),
-                                            delete_hostname.clone(),
-                                            window,
-                                            cx,
-                                        );
-                                    });
-                                }
-                            }),
-                    ),
-                ),
-        )
-        .into_any_element()
-}
-
-fn request_proxy_permission_note(message: impl Into<SharedString>, cx: &mut App) -> AnyElement {
+fn proxy_eyebrow(label: &'static str, cx: &mut App) -> AnyElement {
     div()
-        .w_full()
-        .p_4()
-        .rounded_lg()
-        .border_1()
-        .border_color(cx.api_outline_variant())
-        .bg(cx.api_surface_low())
-        .text_xs()
-        .text_color(cx.theme().muted_foreground)
-        .child(message.into())
-        .into_any_element()
-}
-
-fn request_proxy_behavior_card(
-    title: &'static str,
-    description: &'static str,
-    cx: &mut App,
-) -> AnyElement {
-    v_flex()
-        .min_w_0()
-        .flex_1()
-        .gap_2()
-        .p_4()
-        .rounded_lg()
-        .border_1()
-        .border_color(cx.api_outline_variant())
-        .bg(cx.api_surface_low())
-        .child(div().text_sm().font_semibold().child(title))
-        .child(
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(description),
-        )
-        .into_any_element()
-}
-
-fn request_proxy_badge(label: impl Into<SharedString>, color: Hsla) -> AnyElement {
-    div()
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .bg(color.opacity(0.12))
         .text_size(px(10.))
         .font_semibold()
-        .text_color(color)
-        .child(label.into())
+        .text_color(cx.theme().muted_foreground)
+        .child(label)
         .into_any_element()
 }
 
-fn request_proxy_empty(message: impl Into<SharedString>, cx: &mut App) -> AnyElement {
+fn proxy_count(count: usize, cx: &mut App) -> AnyElement {
+    div()
+        .px_1p5()
+        .rounded_sm()
+        .bg(cx.api_surface_high())
+        .text_size(px(10.))
+        .text_color(cx.theme().muted_foreground)
+        .child(count.to_string())
+        .into_any_element()
+}
+
+fn proxy_empty(title: &str, message: &str, cx: &mut App) -> AnyElement {
     v_flex()
-        .w_full()
-        .min_h(px(260.))
+        .flex_1()
+        .min_w_0()
+        .p_8()
         .items_center()
         .justify_center()
         .gap_2()
-        .rounded_lg()
-        .border_1()
-        .border_color(cx.api_outline_variant())
-        .bg(cx.api_surface_low())
+        .child(div().text_base().font_semibold().child(title.to_owned()))
         .child(
             div()
+                .max_w(px(460.))
+                .text_center()
                 .text_sm()
-                .font_semibold()
-                .child("Request proxy unavailable"),
-        )
-        .child(
-            div()
-                .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .child(message.into()),
+                .child(message.to_owned()),
         )
         .into_any_element()
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
-
-    use gpui::{TestAppContext, px, size};
-
-    use super::*;
-    use crate::core::{ManagementPermission, PROXIES_READ};
-
-    #[gpui::test]
-    fn request_proxy_renders_as_a_full_workspace_tool(cx: &mut TestAppContext) {
-        let directory = tempfile::tempdir().expect("create temporary database directory");
-        let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
-        store.initialize().expect("initialize test database");
-
-        let mut app = None;
-        let (_, cx) = cx.add_window_view(|window, cx| {
-            gpui_component::init(cx);
-            let base_key_bindings = shortcuts::capture_base_key_bindings(cx);
-            crate::theme::configure(cx);
-            let view = cx
-                .new(|cx| ApiTester::new_with_database_store(base_key_bindings, store, window, cx));
-            crate::register_app_action_handlers(&view, cx);
-            app = Some(view.clone());
-            gpui_component::Root::new(view, window, cx)
-        });
-        let app = app.expect("capture app entity");
-        cx.update(|window, _| window.activate_window());
-        cx.simulate_resize(size(px(1_300.), px(900.)));
-
-        cx.update(|_, cx| {
-            app.update(cx, |app, cx| {
-                let now = Utc::now();
-                let permissions = [
-                    SERVER_SETTINGS_UPDATE,
-                    PROXIES_READ,
-                    PROXIES_CREATE,
-                    PROXIES_UPDATE,
-                    PROXIES_DELETE,
-                    PROXIES_ASSIGN,
-                ]
-                .into_iter()
-                .map(|key| ManagementPermission {
-                    key: key.to_owned(),
-                    description: key.to_owned(),
-                })
-                .collect::<Vec<_>>();
-                let role = ManagementRole {
-                    id: "owner".to_owned(),
-                    name: "Owner".to_owned(),
-                    description: "Server owner".to_owned(),
-                    system: true,
-                    permissions,
-                    created_by: None,
-                    created_at: now,
-                    updated_at: now,
-                };
-                let current_user = ManagementUser {
-                    id: "user-1".to_owned(),
-                    email: "owner@example.com".to_owned(),
-                    display_name: "Owner".to_owned(),
-                    active: true,
-                    roles: vec![role],
-                    created_by: None,
-                    created_at: now,
-                    updated_at: now,
-                };
-                app.settings.upstreams.upsert(UpstreamProfile {
-                    id: "server-1".to_owned(),
-                    base_url: "https://resolved.example.com/".to_owned(),
-                    user_id: current_user.id.clone(),
-                    email: current_user.email.clone(),
-                    display_name: current_user.display_name.clone(),
-                    session_expires_at: now + chrono::Duration::hours(1),
-                    connected_at: now,
-                    permission_keys: BTreeSet::from([SERVER_SETTINGS_UPDATE.to_owned()]),
-                    workspaces: Vec::new(),
-                    active_workspace_id: None,
-                    active_environment_ids: BTreeMap::new(),
-                    extra: BTreeMap::new(),
-                });
-                assert!(app.settings.upstreams.select("server-1"));
-                app.server_management.upstream_id = Some("server-1".to_owned());
-                app.server_management.status = ServerManagementStatus::Ready;
-                app.server_management
-                    .set_snapshot(UpstreamManagementSnapshot {
-                        profiles: vec![crate::core::ProfileView {
-                            id: current_user.id.clone(),
-                            email: current_user.email.clone(),
-                            display_name: current_user.display_name.clone(),
-                            active: true,
-                        }],
-                        current_user,
-                        users: None,
-                        roles: None,
-                        permissions: None,
-                        workspaces: None,
-                        request_execution_settings: Some(RequestExecutionSettings {
-                            mode: RequestExecutionMode::Server,
-                        }),
-                        proxies: Some(vec![ManagementProxy {
-                            id: "proxy-1".to_owned(),
-                            name: "Internal routing".to_owned(),
-                            rules: vec![
-                                HostnameOverride {
-                                    hostname: "api.internal".to_owned(),
-                                    target: "10.0.0.25".to_owned(),
-                                },
-                                HostnameOverride {
-                                    hostname: "legacy.internal".to_owned(),
-                                    target: "https://gateway.internal".to_owned(),
-                                },
-                            ],
-                            assignments: vec![crate::core::ProxyAssignment {
-                                scope_kind: crate::core::ProxyScopeKind::Server,
-                                scope_id: None,
-                            }],
-                            excluded_user_ids: Vec::new(),
-                            excluded_role_ids: Vec::new(),
-                            created_at: now,
-                            updated_at: now,
-                        }]),
-                    });
-                app.workspace_tabs.open_tool(WorkspaceToolTab::RequestProxy);
-                cx.notify();
-            });
-        });
-        cx.run_until_parked();
-
-        assert!(cx.debug_bounds("request-proxy-workspace").is_some());
-        assert!(cx.debug_bounds("workspace-request-proxy-tab").is_some());
-        assert!(
-            cx.debug_bounds("server-request-execution-enabled")
-                .is_some()
-        );
-        assert!(cx.debug_bounds("new-proxy").is_some());
-        assert!(cx.debug_bounds("request-proxy-card-proxy-1").is_some());
-        assert!(
-            cx.debug_bounds("proxy-rule-proxy-1-api.internal")
-                .is_some()
-        );
-        assert!(
-            cx.debug_bounds("proxy-rule-proxy-1-legacy.internal")
-                .is_some()
-        );
-        assert!(
-            cx.debug_bounds("edit-proxy-rule-proxy-1-api.internal")
-                .is_some()
-        );
-        assert!(
-            cx.debug_bounds("delete-proxy-rule-proxy-1-api.internal")
-                .is_some()
-        );
-        assert!(
-            cx.debug_bounds("manage-proxy-assignments-proxy-1")
-                .is_some()
-        );
-        assert!(
-            cx.debug_bounds("manage-proxy-exclusions-proxy-1")
-                .is_some()
-        );
-    }
-}
+mod tests;

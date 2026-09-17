@@ -9,10 +9,9 @@ use gpui_component::switch::Switch;
 use zeroize::Zeroizing;
 
 use crate::core::{
-    COLLECTIONS_ASSIGN_USERS, HISTORY_READ_OTHERS, ManagementProxy, ManagementRole,
-    ManagementUser, PROXIES_ASSIGN, PROXIES_CREATE, PROXIES_DELETE, PROXIES_UPDATE,
-    ProxyAssignment, ProxyScopeKind, ROLES_ASSIGN_PERMISSIONS, ROLES_CREATE, ROLES_UPDATE,
-    SharedHistoryEntry,
+    COLLECTIONS_ASSIGN_USERS, HISTORY_READ_OTHERS, ManagementProxy, ManagementRole, ManagementUser,
+    PROXIES_ASSIGN, PROXIES_CREATE, PROXIES_DELETE, PROXIES_UPDATE, ProxyAssignment,
+    ProxyScopeKind, ROLES_ASSIGN_PERMISSIONS, ROLES_CREATE, ROLES_UPDATE, SharedHistoryEntry,
     SharedHistoryResponse, USERS_ASSIGN_ROLES, USERS_CREATE, USERS_UPDATE, UpstreamCollectionView,
     UpstreamManagementSnapshot, UpstreamSavedRequestView, UpstreamUserSummary,
     UpstreamWorkspaceView, WORKSPACES_ASSIGN_USERS, create_management_proxy,
@@ -31,6 +30,8 @@ mod discord_views;
 mod execution_limit_views;
 mod network_views;
 mod profile_views;
+mod proxy_rule_editor;
+mod proxy_scope_views;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) enum ServerManagementStatus {
@@ -146,10 +147,9 @@ pub(super) struct ServerManagementState {
     role_permission_drafts: BTreeMap<String, RolePermissionDraft>,
     selected_resource: Option<ManagementResourceSelection>,
     realtime_refresh_pending: bool,
-    /// Proxy IDs whose assignment editor is expanded on the request-proxy page.
-    pub(super) expanded_proxy_assignments: BTreeSet<String>,
-    /// Proxy IDs whose exclusion editor is expanded on the request-proxy page.
-    pub(super) expanded_proxy_exclusions: BTreeSet<String>,
+    proxy_workspace: network_views::RequestProxyState,
+    proxy_rule_editor: proxy_rule_editor::ProxyRuleEditorState,
+    proxy_scope_editor: proxy_scope_views::ProxyScopeEditorState,
     execution_limits: execution_limit_views::ExecutionLimitState,
 }
 
@@ -173,8 +173,9 @@ impl Default for ServerManagementState {
             role_permission_drafts: BTreeMap::new(),
             selected_resource: None,
             realtime_refresh_pending: false,
-            expanded_proxy_assignments: BTreeSet::new(),
-            expanded_proxy_exclusions: BTreeSet::new(),
+            proxy_workspace: network_views::RequestProxyState::default(),
+            proxy_rule_editor: proxy_rule_editor::ProxyRuleEditorState::default(),
+            proxy_scope_editor: proxy_scope_views::ProxyScopeEditorState::default(),
             execution_limits: execution_limit_views::ExecutionLimitState::default(),
         }
     }
@@ -268,6 +269,11 @@ impl ServerManagementState {
 
     fn set_snapshot(&mut self, snapshot: UpstreamManagementSnapshot) {
         self.reconcile_role_permission_drafts(&snapshot);
+        self.proxy_rule_editor.reconcile(&snapshot);
+        self.proxy_scope_editor.reconcile(&snapshot);
+        if !self.proxy_rule_editor.is_editing() && !self.proxy_scope_editor.is_editing() {
+            self.proxy_workspace.reconcile(&snapshot);
+        }
         if !snapshot.has_permission(crate::core::AUDIT_READ) {
             self.audit_log = ActivityLogFeed::default();
         }
@@ -416,14 +422,20 @@ enum ManagementMutation {
     },
 }
 
+struct ManagementMutationResult {
+    notice: String,
+    created_proxy_id: Option<String>,
+}
+
 impl ManagementMutation {
     async fn execute(
         self,
         client: &Client,
         base_url: &url::Url,
         bearer_token: &str,
-    ) -> Result<String, String> {
-        match self {
+    ) -> Result<ManagementMutationResult, String> {
+        let mut created_proxy_id = None;
+        let notice: Result<String, String> = match self {
             Self::CreateUser {
                 login,
                 display_name,
@@ -564,6 +576,7 @@ impl ManagementMutation {
                 let proxy = create_management_proxy(client, base_url, bearer_token, &name, &[])
                     .await
                     .map_err(|error| error.to_string())?;
+                created_proxy_id = Some(proxy.id);
                 Ok(format!("Created proxy {}.", proxy.name))
             }
             Self::RenameProxy { proxy_id, name } => {
@@ -630,7 +643,11 @@ impl ManagementMutation {
                 .map_err(|error| error.to_string())?;
                 Ok(format!("Updated exclusions for {}.", proxy.name))
             }
-        }
+        };
+        Ok(ManagementMutationResult {
+            notice: notice?,
+            created_proxy_id,
+        })
     }
 }
 
@@ -680,6 +697,7 @@ impl ApiTester {
         {
             self.refresh_server_management(window, cx);
         }
+        self.ensure_proxy_workspace_inputs(window, cx);
     }
 
     pub(super) fn refresh_server_management_realtime(
@@ -726,25 +744,26 @@ impl ApiTester {
             return;
         };
         let upstream_id = profile.id.clone();
-        if profile.session_expired(Utc::now()) {
+        // Early errors must preserve edits just like an ordinary failed refresh.
+        // A different server, however, must start with completely separate state.
+        if self.server_management.upstream_id.as_deref() != Some(&upstream_id) {
             self.server_management = ServerManagementState {
-                upstream_id: Some(upstream_id),
-                status: ServerManagementStatus::Error(
-                    "Log in to this server again to manage it.".to_owned(),
-                ),
-                snapshot: None,
+                upstream_id: Some(upstream_id.clone()),
                 ..ServerManagementState::default()
             };
+        }
+        if profile.session_expired(Utc::now()) {
+            self.server_management.status = ServerManagementStatus::Error(
+                "Log in to this server again to manage it.".to_owned(),
+            );
+            self.server_management.snapshot = None;
             cx.notify();
             return;
         }
         let Some(base_url) = profile.parsed_base_url() else {
-            self.server_management = ServerManagementState {
-                upstream_id: Some(upstream_id),
-                status: ServerManagementStatus::Error("The server URL is invalid.".to_owned()),
-                snapshot: None,
-                ..ServerManagementState::default()
-            };
+            self.server_management.status =
+                ServerManagementStatus::Error("The server URL is invalid.".to_owned());
+            self.server_management.snapshot = None;
             cx.notify();
             return;
         };
@@ -768,6 +787,18 @@ impl ApiTester {
             == Some(&upstream_id))
         .then(|| self.server_management.selected_role_id.clone())
         .flatten();
+        // Keep in-progress proxy work through same-server refreshes, including
+        // realtime updates. A server switch must never carry a draft across.
+        let same_server = self.server_management.upstream_id.as_deref() == Some(&upstream_id);
+        let proxy_workspace = same_server
+            .then(|| self.server_management.proxy_workspace.clone())
+            .unwrap_or_default();
+        let proxy_rule_editor = same_server
+            .then(|| self.server_management.proxy_rule_editor.clone())
+            .unwrap_or_default();
+        let proxy_scope_editor = same_server
+            .then(|| self.server_management.proxy_scope_editor.clone())
+            .unwrap_or_default();
         let execution_limits =
             if self.server_management.upstream_id.as_deref() == Some(&upstream_id) {
                 self.server_management.execution_limits.clone()
@@ -783,8 +814,12 @@ impl ApiTester {
             selected_role_id,
             role_permission_drafts,
             execution_limits,
+            proxy_workspace,
+            proxy_rule_editor,
+            proxy_scope_editor,
             ..ServerManagementState::default()
         };
+        self.ensure_proxy_workspace_inputs(window, cx);
         let vault = self.credential_vault.clone();
         let runtime = Arc::clone(&self.runtime);
         let client = self.upstream_client.clone();
@@ -861,11 +896,13 @@ impl ApiTester {
             return;
         }
         let Some(profile) = self.settings.upstreams.active().cloned() else {
+            self.finish_proxy_editor_save(false, Some("Select a server first.".to_owned()));
             self.settings_notice = Some("Select a server first.".to_owned());
             cx.notify();
             return;
         };
         let Some(base_url) = profile.parsed_base_url() else {
+            self.finish_proxy_editor_save(false, Some("The server URL is invalid.".to_owned()));
             self.settings_notice = Some("The server URL is invalid.".to_owned());
             cx.notify();
             return;
@@ -888,13 +925,13 @@ impl ApiTester {
                 .map_err(|error| format!("Could not open the saved session: {error}"))?
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| "Log in to this server again.".to_owned())?;
-            let notice = mutation
+            let outcome = mutation
                 .execute(&client, &base_url, credential.bearer_token())
                 .await?;
             let snapshot = load_upstream_management(&client, &base_url, credential.bearer_token())
                 .await
                 .map_err(|error| error.to_string())?;
-            Ok::<_, String>((notice, snapshot))
+            Ok::<_, String>((outcome, snapshot))
         });
         self.server_management_abort_handle = Some(task.abort_handle());
         cx.notify();
@@ -909,7 +946,13 @@ impl ApiTester {
                 }
                 this.server_management_abort_handle = None;
                 match result {
-                    Ok(Ok((notice, snapshot))) => {
+                    Ok(Ok((outcome, snapshot))) => {
+                        this.finish_proxy_editor_save(true, None);
+                        if let Some(proxy_id) = &outcome.created_proxy_id {
+                            this.server_management
+                                .proxy_workspace
+                                .select_proxy_by_id(proxy_id, snapshot.proxies.as_deref());
+                        }
                         if let Some(abort_handle) = this.profile_history_abort_handle.take() {
                             abort_handle.abort();
                         }
@@ -923,17 +966,19 @@ impl ApiTester {
                         );
                         this.server_management.status = ServerManagementStatus::Ready;
                         this.server_management.set_snapshot(snapshot);
-                        this.settings_notice = Some(notice);
+                        this.settings_notice = Some(outcome.notice);
                     }
                     Ok(Err(error)) => {
                         this.server_management.status = ServerManagementStatus::Ready;
+                        this.finish_proxy_editor_save(false, Some(error.clone()));
                         this.settings_notice = Some(error);
                     }
                     Err(error) if error.is_cancelled() => return,
                     Err(error) => {
                         this.server_management.status = ServerManagementStatus::Ready;
-                        this.settings_notice =
-                            Some(format!("The server change could not be saved: {error}"));
+                        let error = format!("The server change could not be saved: {error}");
+                        this.finish_proxy_editor_save(false, Some(error.clone()));
+                        this.settings_notice = Some(error);
                     }
                 }
                 let realtime_refresh_pending =
@@ -945,6 +990,30 @@ impl ApiTester {
             });
         })
         .detach();
+    }
+
+    fn finish_proxy_editor_save(&mut self, success: bool, error: Option<String>) {
+        if let Some((proxy_id, hostname)) = self
+            .server_management
+            .proxy_rule_editor
+            .finish_save(success)
+        {
+            self.server_management.proxy_workspace.selected_proxy_id = Some(proxy_id);
+            self.server_management
+                .proxy_workspace
+                .selected_rule_hostname = Some(hostname);
+        }
+        self.server_management
+            .proxy_scope_editor
+            .finish_save(success);
+        if let Some(error) = error {
+            self.server_management
+                .proxy_rule_editor
+                .set_save_error(error.clone());
+            self.server_management
+                .proxy_scope_editor
+                .set_save_error(error);
+        }
     }
 
     fn save_role_permission_draft(
@@ -1607,109 +1676,10 @@ impl ApiTester {
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
                         .child(format!(
-                            "‘{proxy_name}’ and its rules, assignments, and exclusions will be removed. Hostnames it covered return to normal DNS resolution."
+                            "‘{proxy_name}’ and its rules, assignments, and exclusions will be removed. Requests fall through to the next applicable proxy rule, or normal DNS if none matches."
                         )),
                 )
         });
-    }
-
-    fn open_proxy_rule_dialog(
-        &mut self,
-        proxy_id: String,
-        existing: Option<HostnameOverride>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let hostname = cx.new(|cx| {
-            let input = InputState::new(window, cx).placeholder("api.internal");
-            if let Some(existing) = existing.as_ref() {
-                input.default_value(existing.hostname.clone())
-            } else {
-                input
-            }
-        });
-        let target = cx.new(|cx| {
-            let input = InputState::new(window, cx)
-                .placeholder("10.0.0.25, gateway.internal, or https://gateway.internal");
-            if let Some(existing) = existing.as_ref() {
-                input.default_value(existing.target.clone())
-            } else {
-                input
-            }
-        });
-        let original_hostname = existing.as_ref().map(|entry| entry.hostname.clone());
-        let title = if existing.is_some() {
-            "Edit host override rule"
-        } else {
-            "New host override rule"
-        };
-        let this = cx.entity().downgrade();
-        let dialog_hostname = hostname.clone();
-        let dialog_target = target.clone();
-        window.open_dialog(cx, move |dialog, _, cx| {
-            let save_this = this.clone();
-            let save_hostname = dialog_hostname.clone();
-            let save_target = dialog_target.clone();
-            let save_original = original_hostname.clone();
-            let save_proxy_id = proxy_id.clone();
-            dialog
-                .title(title)
-                .w(px(480.))
-                .confirm()
-                .button_props(DialogButtonProps::default().ok_text("Save rule"))
-                .on_ok(move |_, window, cx| {
-                    let hostname = save_hostname.read(cx).value().trim().to_owned();
-                    let target = save_target.read(cx).value().trim().to_owned();
-                    if hostname.is_empty() || target.is_empty() {
-                        return false;
-                    }
-                    if let Some(this) = save_this.upgrade() {
-                        this.update(cx, |this, cx| {
-                            let Some(proxy) = this.management_proxy(&save_proxy_id) else {
-                                return;
-                            };
-                            let mut rules = proxy.rules.clone();
-                            if let Some(original) = save_original.as_deref() {
-                                rules.retain(|entry| entry.hostname != original);
-                            }
-                            rules.push(HostnameOverride {
-                                hostname: hostname.clone(),
-                                target: target.clone(),
-                            });
-                            this.run_management_mutation(
-                                ManagementMutation::UpdateProxyRules {
-                                    proxy_id: save_proxy_id.clone(),
-                                    rules,
-                                },
-                                window,
-                                cx,
-                            );
-                        });
-                    }
-                    true
-                })
-                .child(
-                    v_flex()
-                        .gap_4()
-                        .child(management_dialog_field(
-                            "REQUEST HOSTNAME",
-                            Input::new(&dialog_hostname),
-                        ))
-                        .child(management_dialog_field(
-                            "TARGET HOSTNAME OR IP",
-                            Input::new(&dialog_target),
-                        ))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(
-                                    "An IP target keeps the request hostname for HTTP Host and HTTPS SNI. A hostname target replaces both. Prefix the target with http:// or https:// to define its scheme and allow matching request URLs to omit one.",
-                                ),
-                        ),
-                )
-        });
-        hostname.read(cx).focus_handle(cx).focus(window);
     }
 
     fn request_delete_proxy_rule(
@@ -1762,22 +1732,6 @@ impl ApiTester {
                         )),
                 )
         });
-    }
-
-    pub(super) fn toggle_proxy_assignments_editor(&mut self, proxy_id: &str, cx: &mut Context<Self>) {
-        let expanded = &mut self.server_management.expanded_proxy_assignments;
-        if !expanded.remove(proxy_id) {
-            expanded.insert(proxy_id.to_owned());
-        }
-        cx.notify();
-    }
-
-    pub(super) fn toggle_proxy_exclusions_editor(&mut self, proxy_id: &str, cx: &mut Context<Self>) {
-        let expanded = &mut self.server_management.expanded_proxy_exclusions;
-        if !expanded.remove(proxy_id) {
-            expanded.insert(proxy_id.to_owned());
-        }
-        cx.notify();
     }
 }
 
