@@ -80,7 +80,7 @@ pub const CONTROL_TOOL_GROUPS: &[ControlToolGroupDescriptor] = &[
     ControlToolGroupDescriptor {
         id: "websocket",
         label: "WebSocket",
-        description: "Connect, exchange frames, inspect events, and run saved replays.",
+        description: "Connect independent WebSocket sessions, exchange frames, inspect events, and run saved replays.",
         tools: &[
             "connect_websocket",
             "send_websocket_message",
@@ -302,31 +302,31 @@ pub const CONTROL_TOOLS: &[ControlToolDescriptor] = &[
     ControlToolDescriptor {
         name: "connect_websocket",
         label: "Connect WebSocket",
-        description: "Open a saved WebSocket request through Resolved, using the active environment and remote execution policy.",
+        description: "Open a saved WebSocket request as an independent session. Repeated connects may overlap; retain the returned connection_id. Up to eight live MCP WebSocket connections are allowed.",
         read_only: false,
     },
     ControlToolDescriptor {
         name: "send_websocket_message",
         label: "Send WebSocket message",
-        description: "Send a text or base64-encoded binary message on the active MCP WebSocket connection.",
+        description: "Send a text or base64-encoded binary message on one MCP WebSocket connection by connection_id without affecting concurrent siblings.",
         read_only: false,
     },
     ControlToolDescriptor {
         name: "get_websocket_events",
         label: "Get WebSocket events",
-        description: "Read connection, frame, error, and automation events from the active MCP WebSocket session.",
+        description: "Read connection, frame, error, and automation events from one MCP WebSocket session by connection_id. Omitted ID selects the latest started MCP WebSocket connection.",
         read_only: true,
     },
     ControlToolDescriptor {
         name: "run_websocket_replay",
         label: "Run WebSocket replay",
-        description: "Run a saved replay on the active MCP WebSocket connection with its recorded delays.",
+        description: "Run a saved replay on one MCP WebSocket connection by connection_id with its recorded delays, without affecting concurrent siblings.",
         read_only: false,
     },
     ControlToolDescriptor {
         name: "disconnect_websocket",
         label: "Disconnect WebSocket",
-        description: "Close the active MCP WebSocket connection.",
+        description: "Close one MCP WebSocket connection by connection_id without affecting concurrent siblings.",
         read_only: false,
     },
     ControlToolDescriptor {

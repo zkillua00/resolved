@@ -155,9 +155,10 @@ The optional field is available on these tool families:
   `delete_environment_variable`;
 - interchange: `import_requests` and `export_request`.
 
-Execution, WebSocket, environment selection, history, and snippet tools continue
-to use the active application context and do not accept a background workspace
-target.
+WebSocket, environment selection, history, and snippet tools continue to use the
+active application context and do not accept a background workspace target.
+HTTP execution can target another workspace through `workspace_id` without
+switching the UI.
 
 An explicit local target uses that local workspace's normal SQLite persistence.
 An explicit server target requires **Allow server workspaces**, a valid saved
@@ -181,7 +182,7 @@ does not make it temporarily active or replace the state shown in the UI.
 | `list_request_history` | List secret-redacted request history and response summaries | Optional `limit` |
 | `get_history_entry` | Read one secret-redacted history entry | `history_id` |
 | `get_script_console` | Read the latest structured script reports and console output | Optional `operation_id` |
-| `get_websocket_events` | Poll connection, frame, automation, and error events | Optional `connection_id`, `after_event_id`, `limit` |
+| `get_websocket_events` | Poll one session's connection, frame, automation, and error events | Optional `connection_id`, `after_event_id`, `limit` |
 | `list_environments` | List environments and their redacted variables | None |
 | `get_environment` | Read one environment and its redacted variables | `environment_id` |
 | `export_request` | Export an HTTP request to any supported command, specification, or client-code format | `request_id`, `format` |
@@ -205,10 +206,10 @@ does not make it temporarily active or replace the state shown in the UI.
 | `run_request_sequence` | Run 1–25 saved HTTP requests in order, stopping on the first failure | `request_ids` |
 | `cancel_http_request` | Cancel one HTTP execution, or the active script console when no ID is supplied | Optional `operation_id` |
 | `run_script_console` | Evaluate JavaScript against an HTTP exchange in the active workspace | `source`; optional `http_operation_id` |
-| `connect_websocket` | Open a saved WebSocket request | `request_id` |
+| `connect_websocket` | Open a saved WebSocket request as an independent session | `request_id` |
 | `send_websocket_message` | Send text, binary, a saved message, or a rendered template | `connection_id` and one message source |
 | `run_websocket_replay` | Send a saved replay with its recorded delays | `connection_id`, `replay_id` |
-| `disconnect_websocket` | Close the MCP WebSocket session | `connection_id` |
+| `disconnect_websocket` | Close one MCP WebSocket session | `connection_id` |
 | `create_environment` | Create an environment | `name` |
 | `rename_environment` | Rename an environment | `environment_id`, `name` |
 | `delete_environment` | Delete an environment | `environment_id` |
@@ -465,6 +466,16 @@ HTTP, and `clear_websocket: true` explicitly removes a WebSocket document.
 
 `connect_websocket` returns a `connection_id` immediately and honors active
 environment variables plus the server's local-versus-proxied execution policy.
+Repeated calls can overlap, including repeated connects of the same saved
+request. Up to eight MCP WebSocket sessions may be live; further connects return
+a capacity error rather than closing a sibling. Pass the returned ID to
+`send_websocket_message`, `get_websocket_events`, `run_websocket_replay`, or
+`disconnect_websocket`. Omitting `connection_id` on `get_websocket_events`
+selects the latest started MCP WebSocket connection, not the last one to close.
+Disconnecting one session does not close concurrent siblings. Closed sessions
+remain pollable until retention evicts them: at most 64 connection records, with
+the oldest disconnected or failed records removed first, never a live sibling.
+
 Poll `get_websocket_events`; use `after_event_id` to read only newer bounded
 events and `max_payload_bytes` to cap each projected payload. One call includes
 at most 512 KiB of raw event payload before base64 expansion. Text, binary, ping,
@@ -476,11 +487,12 @@ payloads use base64, and every event reports its original and included sizes.
 saved JSONL messages produce one frame per record. `run_websocket_replay`
 resolves environment placeholders and preserves recorded frame delays. Enabled
 automation runs on open and message events and its sends and logs appear in the
-same MCP event stream and in the native WebSocket timeline in real time. The
-visible session is labeled **MCP controlled**; user-sent frames on that shared
-connection are also retained in the MCP event stream. Switching workspaces, disabling MCP, disabling
-`connect_websocket`, or revoking server-workspace MCP access closes the MCP
-connection.
+same MCP event stream and, when that session is followed, in the native
+WebSocket timeline in real time. The followed visible session is labeled **MCP
+controlled**; user-sent frames on that shared connection are also retained in the
+MCP event stream. Concurrent MCP sessions keep independent event streams.
+Switching workspaces, disabling MCP, disabling `connect_websocket`, or revoking
+server-workspace MCP access closes every MCP WebSocket connection.
 
 ## Environment workflows
 

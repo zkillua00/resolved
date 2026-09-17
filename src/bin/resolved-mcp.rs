@@ -568,7 +568,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "connect_websocket",
-            "Open a saved WebSocket request through Resolved.",
+            "Open a saved WebSocket request as an independent session. Repeated connects may overlap; retain the returned connection_id. Up to eight live MCP WebSocket connections are allowed.",
             object_schema(
                 json!({ "request_id": { "type": "string" } }),
                 &["request_id"],
@@ -577,7 +577,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "send_websocket_message",
-            "Send text or binary data on the active MCP WebSocket connection.",
+            "Send a text or base64-encoded binary message on one MCP WebSocket connection by connection_id without affecting concurrent siblings.",
             object_schema(
                 json!({
                     "connection_id": { "type": "integer", "minimum": 1 },
@@ -596,7 +596,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "get_websocket_events",
-            "Read new events from the active MCP WebSocket connection.",
+            "Read connection, frame, error, and automation events from one MCP WebSocket session by connection_id. Omitted ID selects the latest started MCP WebSocket connection.",
             object_schema(
                 json!({
                     "connection_id": { "type": "integer", "minimum": 1 },
@@ -610,7 +610,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "run_websocket_replay",
-            "Run a saved replay on the active MCP WebSocket connection.",
+            "Run a saved replay on one MCP WebSocket connection by connection_id with its recorded delays, without affecting concurrent siblings.",
             object_schema(
                 json!({
                     "connection_id": { "type": "integer", "minimum": 1 },
@@ -622,7 +622,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "disconnect_websocket",
-            "Close the active MCP WebSocket connection.",
+            "Close one MCP WebSocket connection by connection_id without affecting concurrent siblings.",
             object_schema(
                 json!({
                     "connection_id": { "type": "integer", "minimum": 1 }
@@ -1155,6 +1155,26 @@ mod tests {
                 .unwrap()
                 .contains("operation_id")
         );
+        assert!(
+            definition("connect_websocket")["description"]
+                .as_str()
+                .unwrap()
+                .contains("connection_id")
+        );
+        for name in [
+            "send_websocket_message",
+            "get_websocket_events",
+            "run_websocket_replay",
+            "disconnect_websocket",
+        ] {
+            assert!(
+                definition(name)["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("connection_id"),
+                "{name} must address a specific MCP WebSocket session"
+            );
+        }
         for name in [
             "get_active_context",
             "switch_workspace",

@@ -55,10 +55,10 @@ use the desktop persistence path. Workspace-scoped calls may include an optional
 provider ID returned by `list_workspaces`; the desktop resolves that local or
 remote provider for the call without changing the registry's visible active
 provider or the user's editor context. HTTP execution enters the same request,
-script, chain, and history pipeline as the UI. MCP WebSocket sessions use the
-shared local or server-proxied wire implementation and the same bounded
-automation runtime and mirror their event stream into the visible WebSocket
-console when follow-agent activity is enabled. Workspace/resource lifecycle,
+script, chain, and history pipeline as the UI. Independent MCP WebSocket sessions
+use the shared local or server-proxied wire implementation and the same bounded
+automation runtime; the followed session's event stream is mirrored into the
+visible WebSocket console when follow-agent activity is enabled. Workspace/resource lifecycle,
 interchange, snippet, history, and ordered-execution tools similarly delegate to
 the existing application and provider rules. See the [local MCP guide](mcp.md)
 for its contract and security boundary.

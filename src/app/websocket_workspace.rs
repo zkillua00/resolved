@@ -717,8 +717,8 @@ impl ApiTester {
     }
 
     fn connect_websocket(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.websocket_workspace.mcp_connection_id.is_some() {
-            self.stop_mcp_websocket();
+        if let Some(connection_id) = self.websocket_workspace.mcp_connection_id {
+            self.stop_mcp_websocket_connection(connection_id, "MCP session stopped");
         } else {
             self.stop_websocket();
         }
@@ -2109,8 +2109,13 @@ impl ApiTester {
                                 if this.websocket_workspace.status
                                     != WebSocketConnectionStatus::Disconnected
                                 {
-                                    if this.websocket_workspace.mcp_connection_id.is_some() {
-                                        this.stop_mcp_websocket();
+                                    if let Some(connection_id) =
+                                        this.websocket_workspace.mcp_connection_id
+                                    {
+                                        this.stop_mcp_websocket_connection(
+                                            connection_id,
+                                            "MCP session stopped",
+                                        );
                                     } else {
                                         this.stop_websocket();
                                     }

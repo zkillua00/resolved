@@ -25,6 +25,10 @@ impl ControlWebSocketStatus {
             Self::Failed => "failed",
         }
     }
+
+    fn is_live(self) -> bool {
+        matches!(self, Self::Connecting | Self::Connected | Self::Closing)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -742,9 +746,10 @@ impl ApiTester {
     }
 
     pub(super) fn remember_mcp_websocket_ui_secrets(&self, values: Vec<String>) {
-        if let Some(connection) = &self.mcp_websocket
-            && self.websocket_workspace.mcp_connection_id == Some(connection.id)
-        {
+        let Some(connection_id) = self.websocket_workspace.mcp_connection_id else {
+            return;
+        };
+        if let Some(connection) = self.mcp_websockets.get(&connection_id) {
             remember_websocket_secrets(&connection.sensitive_values, values);
         }
     }
@@ -1323,11 +1328,60 @@ impl ApiTester {
         Ok(())
     }
 
-    pub(super) fn stop_mcp_websocket(&mut self) {
-        if let Some(connection) = self.mcp_websocket.take() {
+    pub(super) fn stop_mcp_websocket_connection(&mut self, connection_id: u64, reason: &str) {
+        if let Some(connection) = self.mcp_websockets.remove(&connection_id) {
             let _ = connection.sender.send(WebSocketCommand::Close);
             connection.abort_handle.abort();
-            self.detach_mcp_websocket_ui(connection.id, "MCP session stopped");
+            self.detach_mcp_websocket_ui(connection.id, reason);
+            if self.mcp_latest_websocket_id == Some(connection_id) {
+                self.mcp_latest_websocket_id = self.mcp_websockets.keys().copied().max();
+            }
+        }
+    }
+
+    pub(super) fn stop_mcp_websocket(&mut self) {
+        let ids: Vec<_> = self.mcp_websockets.keys().copied().collect();
+        for id in ids {
+            self.stop_mcp_websocket_connection(id, "MCP session stopped");
+        }
+        self.mcp_latest_websocket_id = None;
+    }
+
+    fn prune_mcp_websockets(&mut self) {
+        while self.mcp_websockets.len() >= 64 {
+            let oldest = self
+                .mcp_websockets
+                .iter()
+                .filter(|(_, connection)| !connection.status.is_live())
+                .min_by_key(|(id, _)| *id)
+                .map(|(id, _)| *id);
+            let Some(oldest) = oldest else {
+                break;
+            };
+            self.stop_mcp_websocket_connection(oldest, "MCP session expired");
+        }
+    }
+
+    fn live_mcp_websocket_count(&self) -> usize {
+        self.mcp_websockets
+            .values()
+            .filter(|connection| connection.status.is_live())
+            .count()
+    }
+
+    fn resolve_mcp_websocket_id(&self, requested: Option<u64>) -> Result<u64, String> {
+        match requested {
+            Some(id) => {
+                if self.mcp_websockets.contains_key(&id) {
+                    Ok(id)
+                } else {
+                    Err(format!("WebSocket connection {id} was not found"))
+                }
+            }
+            None => self
+                .mcp_latest_websocket_id
+                .filter(|id| self.mcp_websockets.contains_key(id))
+                .ok_or_else(|| "No MCP WebSocket connection exists.".to_owned()),
         }
     }
 
@@ -1722,27 +1776,28 @@ impl ApiTester {
             return;
         }
         let requested_id = params.get("connection_id").and_then(Value::as_u64);
-        let context = self.mcp_websocket.as_ref().and_then(|connection| {
-            requested_id
-                .is_none_or(|id| id == connection.id)
-                .then(|| (connection.id, connection.request_id.clone()))
-        });
-        if let Some((connection_id, request_id)) = context {
-            self.follow_mcp_request_context(&request_id, window, cx);
-            self.attach_mcp_websocket_context(connection_id);
-        }
+        let Some(connection_id) = requested_id.or(self.mcp_latest_websocket_id) else {
+            return;
+        };
+        let Some(request_id) = self
+            .mcp_websockets
+            .get(&connection_id)
+            .map(|connection| connection.request_id.clone())
+        else {
+            return;
+        };
+        self.follow_mcp_request_context(&request_id, window, cx);
+        self.attach_mcp_websocket_context(connection_id);
     }
 
     fn attach_mcp_websocket_context(&mut self, connection_id: u64) {
-        let context = self.mcp_websocket.as_ref().and_then(|connection| {
-            (connection.id == connection_id).then(|| {
-                (
-                    connection.request_id.clone(),
-                    connection.status.as_str(),
-                    connection.sender.clone(),
-                    connection.events.clone(),
-                )
-            })
+        let context = self.mcp_websockets.get(&connection_id).map(|connection| {
+            (
+                connection.request_id.clone(),
+                connection.status.as_str(),
+                connection.sender.clone(),
+                connection.events.clone(),
+            )
         });
         let Some((request_id, status, sender, events)) = context else {
             return;
@@ -2801,6 +2856,12 @@ impl ApiTester {
             self.workspace_providers.active_id(),
             WorkspaceProviderId::Upstream { .. }
         );
+        let mut websockets: Vec<_> = self.mcp_websockets.values().collect();
+        websockets.sort_by_key(|connection| connection.id);
+        let websockets = websockets
+            .into_iter()
+            .map(mcp_websocket_status_value)
+            .collect::<Vec<_>>();
         Ok(json!({
             "product": PRODUCT_NAME,
             "version": env!("RESOLVED_BUILD_VERSION"),
@@ -2814,11 +2875,10 @@ impl ApiTester {
             },
             "remote_workspace_access": self.settings.mcp.allow_remote_workspaces,
             "follow_agent_activity": self.settings.mcp.follow_agent_activity,
-            "mcp_websocket": self.mcp_websocket.as_ref().map(|connection| json!({
-                "connection_id": connection.id,
-                "request_id": connection.request_id,
-                "state": connection.status.as_str()
-            })),
+            "mcp_websocket": self.mcp_latest_websocket_id.and_then(|id| {
+                self.mcp_websockets.get(&id).map(mcp_websocket_status_value)
+            }),
+            "mcp_websockets": websockets,
             "enabled_tools": crate::control_tools::CONTROL_TOOLS
                 .iter()
                 .filter(|tool| self.control_tool_advertised(tool.name))
@@ -3961,7 +4021,12 @@ impl ApiTester {
         let preparation = self.prepare_execution(Some(&request_id));
         let (snapshot_sender, snapshot_receiver) = tokio::sync::oneshot::channel();
 
-        self.stop_mcp_websocket();
+        self.prune_mcp_websockets();
+        if self.live_mcp_websocket_count() >= 8 {
+            return Err(
+                "Eight MCP WebSocket connections are already open; disconnect one.".to_owned(),
+            );
+        }
         self.mcp_websocket_generation = self.mcp_websocket_generation.wrapping_add(1).max(1);
         let connection_id = self.mcp_websocket_generation;
         let (command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -4180,20 +4245,24 @@ impl ApiTester {
             }
         });
 
-        self.mcp_websocket = Some(ControlWebSocketConnection {
-            id: connection_id,
-            request_id,
-            status: ControlWebSocketStatus::Connecting,
-            notice: None,
-            sender: command_sender,
-            event_sender,
-            abort_handle,
-            events: Vec::new(),
-            next_event_id: 1,
-            sensitive_values,
-            automation_paused,
-            automation,
-        });
+        self.mcp_websockets.insert(
+            connection_id,
+            ControlWebSocketConnection {
+                id: connection_id,
+                request_id: request_id.clone(),
+                status: ControlWebSocketStatus::Connecting,
+                notice: None,
+                sender: command_sender,
+                event_sender,
+                abort_handle,
+                events: Vec::new(),
+                next_event_id: 1,
+                sensitive_values,
+                automation_paused,
+                automation,
+            },
+        );
+        self.mcp_latest_websocket_id = Some(connection_id);
         cx.spawn(async move |weak_this, cx| {
             while let Some(event) = event_receiver.recv().await {
                 let Some(this) = weak_this.upgrade() else {
@@ -4206,26 +4275,23 @@ impl ApiTester {
                         if let Some(handle) =
                             cx.active_window().or_else(|| cx.windows().first().copied())
                         {
-                            let _ =
-                                handle.update(cx, |_, window, cx| {
-                                    this.update(cx, |this, cx| {
-                                        if this.mcp_websocket.as_ref().is_some_and(|connection| {
-                                            connection.id == connection_id
-                                        }) {
-                                            if let Err(error) = this.apply_environment_mutations(
-                                                environment_id.as_deref(),
-                                                mutations,
-                                                window,
-                                                cx,
-                                            ) {
-                                                this.handle_control_websocket_event(
-                                                    connection_id,
-                                                    ControlWebSocketIncoming::ScriptError(error),
-                                                );
-                                            }
+                            let _ = handle.update(cx, |_, window, cx| {
+                                this.update(cx, |this, cx| {
+                                    if this.mcp_websockets.contains_key(&connection_id) {
+                                        if let Err(error) = this.apply_environment_mutations(
+                                            environment_id.as_deref(),
+                                            mutations,
+                                            window,
+                                            cx,
+                                        ) {
+                                            this.handle_control_websocket_event(
+                                                connection_id,
+                                                ControlWebSocketIncoming::ScriptError(error),
+                                            );
                                         }
-                                    })
-                                });
+                                    }
+                                })
+                            });
                         }
                     });
                     continue;
@@ -4240,7 +4306,7 @@ impl ApiTester {
         cx.notify();
         Ok(json!({
             "connection_id": connection_id,
-            "request_id": self.mcp_websocket.as_ref().map(|connection| &connection.request_id),
+            "request_id": request_id,
             "state": "connecting"
         }))
     }
@@ -4267,15 +4333,14 @@ impl ApiTester {
         }
         let params: Params = decode(params)?;
         let connection = self
-            .mcp_websocket
-            .as_ref()
-            .ok_or_else(|| "No MCP WebSocket connection exists.".to_owned())?;
-        if connection.id != params.connection_id {
-            return Err(format!(
-                "WebSocket connection {} is no longer current",
-                params.connection_id
-            ));
-        }
+            .mcp_websockets
+            .get(&params.connection_id)
+            .ok_or_else(|| {
+                format!(
+                    "WebSocket connection {} was not found",
+                    params.connection_id
+                )
+            })?;
         if connection.status != ControlWebSocketStatus::Connected {
             return Err(format!(
                 "WebSocket connection {} is {}",
@@ -4415,16 +4480,11 @@ impl ApiTester {
             }
         }
         let params: Params = decode(params)?;
+        let connection_id = self.resolve_mcp_websocket_id(params.connection_id)?;
         let connection = self
-            .mcp_websocket
-            .as_ref()
-            .ok_or_else(|| "No MCP WebSocket connection exists.".to_owned())?;
-        if params.connection_id.is_some_and(|id| id != connection.id) {
-            return Err(format!(
-                "WebSocket connection {} is no longer current",
-                params.connection_id.unwrap()
-            ));
-        }
+            .mcp_websockets
+            .get(&connection_id)
+            .expect("resolved MCP WebSocket connection exists");
         let sensitive_values = connection
             .sensitive_values
             .lock()
@@ -4576,16 +4636,9 @@ impl ApiTester {
         &mut self,
         connection_id: u64,
     ) -> Result<&mut ControlWebSocketConnection, String> {
-        let connection = self
-            .mcp_websocket
-            .as_mut()
-            .ok_or_else(|| "No MCP WebSocket connection exists.".to_owned())?;
-        if connection.id != connection_id {
-            return Err(format!(
-                "WebSocket connection {connection_id} is no longer current"
-            ));
-        }
-        Ok(connection)
+        self.mcp_websockets
+            .get_mut(&connection_id)
+            .ok_or_else(|| format!("WebSocket connection {connection_id} was not found"))
     }
 
     fn handle_control_websocket_event(
@@ -4596,11 +4649,15 @@ impl ApiTester {
         if matches!(
             &incoming,
             ControlWebSocketIncoming::Wire(WebSocketSignal::Reconnecting(_))
-        ) && self.mcp_websocket.as_ref().is_some_and(|connection| {
-            connection
-                .automation_paused
-                .load(std::sync::atomic::Ordering::SeqCst)
-        }) {
+        ) && self
+            .mcp_websockets
+            .get(&connection_id)
+            .is_some_and(|connection| {
+                connection
+                    .automation_paused
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            })
+        {
             return;
         }
         if matches!(&incoming, ControlWebSocketIncoming::Wire(WebSocketSignal::Reconnecting(options)) if options.clear_console)
@@ -4609,12 +4666,9 @@ impl ApiTester {
             self.clear_websocket_timeline();
         }
         let mirrored = {
-            let Some(connection) = self.mcp_websocket.as_mut() else {
+            let Some(connection) = self.mcp_websockets.get_mut(&connection_id) else {
                 return;
             };
-            if connection.id != connection_id {
-                return;
-            }
             match incoming {
                 ControlWebSocketIncoming::Wire(WebSocketSignal::Reconnecting(options)) => {
                     connection.status = ControlWebSocketStatus::Connecting;
@@ -5082,6 +5136,14 @@ fn control_interchange_format(value: &str) -> Result<InterchangeFormat, String> 
 fn control_revision_matches(current: chrono::DateTime<Utc>, expected: &str) -> bool {
     chrono::DateTime::parse_from_rfc3339(expected)
         .is_ok_and(|expected| expected.with_timezone(&Utc) == current)
+}
+
+fn mcp_websocket_status_value(connection: &ControlWebSocketConnection) -> Value {
+    json!({
+        "connection_id": connection.id,
+        "request_id": connection.request_id,
+        "state": connection.status.as_str()
+    })
 }
 
 impl ControlWebSocketConnection {

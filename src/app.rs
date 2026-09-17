@@ -340,7 +340,8 @@ pub struct ApiTester {
     database_store: DatabaseStore,
     _control_server: Option<crate::control_server::ControlServer>,
     mcp_websocket_generation: u64,
-    mcp_websocket: Option<control::ControlWebSocketConnection>,
+    mcp_websockets: HashMap<u64, control::ControlWebSocketConnection>,
+    mcp_latest_websocket_id: Option<u64>,
     workspace_providers: WorkspaceProviderRegistry,
     local_workspaces: Vec<LocalWorkspace>,
     credential_vault: CredentialVault,
@@ -464,5 +465,7 @@ enum RealtimeConnectionStatus {
 
 #[cfg(test)]
 mod parallel_http_tests;
+#[cfg(test)]
+mod parallel_websocket_tests;
 #[cfg(test)]
 mod tests;
