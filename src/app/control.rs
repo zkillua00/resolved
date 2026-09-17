@@ -4200,20 +4200,16 @@ impl ApiTester {
                                 automation_events.send(ControlWebSocketIncoming::ScriptLog(log));
                         }
                         for payload in output.sends {
-                            let resolved = resolve_request(
-                                &RequestDraft {
-                                    url: payload,
-                                    ..RequestDraft::default()
-                                },
+                            let resolved = crate::core::resolve_template_text(
+                                &payload,
                                 automation_environment.as_ref(),
                             );
                             match resolved {
-                                Ok(resolved) => {
+                                Ok((payload, sensitive_values)) => {
                                     remember_websocket_secrets(
                                         &automation_sensitive_values,
-                                        resolved.sensitive_values,
+                                        sensitive_values,
                                     );
-                                    let payload = resolved.request.url;
                                     if automation_commands
                                         .send(WebSocketCommand::SendText(payload.clone()))
                                         .is_ok()
@@ -4367,18 +4363,12 @@ impl ApiTester {
             );
         }
         let resolve_text = |text: String| -> Result<String, String> {
-            resolve_request(
-                &RequestDraft {
-                    url: text,
-                    ..RequestDraft::default()
-                },
-                self.workspace.active_environment(),
-            )
-            .map(|resolved| {
-                remember_websocket_secrets(&sensitive_values, resolved.sensitive_values);
-                resolved.request.url
-            })
-            .map_err(|error| error.to_string())
+            crate::core::resolve_template_text(&text, self.workspace.active_environment())
+                .map(|(text, secrets)| {
+                    remember_websocket_secrets(&sensitive_values, secrets);
+                    text
+                })
+                .map_err(|error| error.to_string())
         };
         let mut commands = if let Some(text) = params.text {
             vec![WebSocketCommand::SendText(resolve_text(text)?)]
@@ -4557,16 +4547,11 @@ impl ApiTester {
         let environment = self.workspace.active_environment();
         let mut frames = Vec::with_capacity(replay.frames.len());
         for frame in &replay.frames {
-            let resolved = resolve_request(
-                &RequestDraft {
-                    url: frame.payload.clone(),
-                    ..RequestDraft::default()
-                },
-                environment,
-            )
-            .map_err(|error| error.to_string())?;
-            remember_websocket_secrets(&sensitive_values, resolved.sensitive_values);
-            frames.push((frame.delay_ms, resolved.request.url));
+            let (payload, secrets) =
+                crate::core::resolve_template_text(&frame.payload, environment)
+                    .map_err(|error| error.to_string())?;
+            remember_websocket_secrets(&sensitive_values, secrets);
+            frames.push((frame.delay_ms, payload));
         }
         self.runtime.spawn(async move {
             for (delay_ms, payload) in frames {

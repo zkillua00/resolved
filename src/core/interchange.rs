@@ -202,6 +202,35 @@ pub fn export_request(
     name: &str,
     template: &RequestTemplate,
 ) -> Result<String, InterchangeError> {
+    if !matches!(
+        format,
+        InterchangeFormat::OpenApi | InterchangeFormat::AsyncApi
+    ) && !super::path_variable_names(&template.request.url).is_empty()
+    {
+        // There is no active environment in this text-only API. Resolve a URL-only
+        // draft so unrelated header/body environment templates stay untouched.
+        let mut url_request = RequestDraft::new("GET", &template.request.url);
+        url_request.path_variables = template.request.path_variables.clone();
+        let resolved = super::resolve_request(&url_request, None)
+            .map_err(|error| InterchangeError::Export(error.to_string()))?;
+        let mut effective = template.clone();
+        effective.request.url = resolved.request.url;
+        effective.request.path_variables.clear();
+        let name = normalized_name(name, &template.request);
+        let output = export_prepared_request(format, &name, &effective)?;
+        return Ok(output.replace(
+            &metadata(&name, &effective, ""),
+            &metadata(&name, template, ""),
+        ));
+    }
+    export_prepared_request(format, name, template)
+}
+
+fn export_prepared_request(
+    format: InterchangeFormat,
+    name: &str,
+    template: &RequestTemplate,
+) -> Result<String, InterchangeError> {
     let name = normalized_name(name, &template.request);
     match format {
         InterchangeFormat::Curl => Ok(export_curl(&name, template)),
@@ -316,6 +345,10 @@ fn metadata(name: &str, template: &RequestTemplate, prefix: &str) -> String {
 /// seemingly ordinary code sample.
 fn portable_template(template: &RequestTemplate) -> RequestTemplate {
     let mut request = template.request.clone();
+    let path_names = super::path_variable_names(&request.url);
+    request
+        .path_variables
+        .retain(|name, _| path_names.contains(name));
     request
         .headers
         .retain(|header| header.enabled && !header.name.trim().is_empty());
@@ -718,7 +751,20 @@ fn export_openapi(name: &str, template: &RequestTemplate) -> Result<String, Inte
         .map_or((raw_path.as_str(), None), |(path, query)| {
             (path, Some(query))
         });
-    let path = openapi_export_path(raw_path);
+    let local_names = super::path_variable_names(&request.url);
+    for environment in raw_path.split("{{").skip(1) {
+        if let Some((name, _)) = environment.split_once("}}")
+            && local_names.iter().any(|local| local == name.trim())
+        {
+            return Err(InterchangeError::Export(format!(
+                "OpenAPI has one path-parameter namespace; rename either {{{name}}} or {{{{{name}}}}} before exporting"
+            )));
+        }
+    }
+    // Keep the existing OpenAPI representation of environment references in
+    // paths. The extension preserves their original scope on re-import; raw
+    // double braces would otherwise create invalid OpenAPI path templates.
+    let path = raw_path.replace("{{", "{").replace("}}", "}");
     let operation_key = request_method.to_ascii_lowercase();
     let mut operation = Map::new();
     operation.insert("summary".to_owned(), Value::String(name.to_owned()));
@@ -760,12 +806,16 @@ fn export_openapi(name: &str, template: &RequestTemplate) -> Result<String, Inte
         );
     }
     parameters.extend(openapi_path_parameters(&path).into_iter().map(|name| {
-        json!({
+        let mut parameter = json!({
             "name": name,
             "in": "path",
             "required": true,
             "schema": { "type": "string" },
-        })
+        });
+        if let Some(value) = request.path_variables.get(&name) {
+            parameter["example"] = Value::String(value.clone());
+        }
+        parameter
     }));
     if !parameters.is_empty() {
         operation.insert("parameters".to_owned(), Value::Array(parameters));
@@ -930,6 +980,22 @@ fn export_asyncapi(name: &str, template: &RequestTemplate) -> Result<String, Int
 }
 
 fn spec_url_parts(value: &str) -> (String, String) {
+    // URL parsers percent-encode literal braces. Keep the template's raw path.
+    let raw = value.trim().split('#').next().unwrap_or("");
+    if let Some(scheme_end) = raw.find("://") {
+        let authority_end = raw[scheme_end + 3..]
+            .find(['/', '?'])
+            .map_or(raw.len(), |offset| scheme_end + 3 + offset);
+        let suffix = &raw[authority_end..];
+        return (
+            raw[..authority_end].to_owned(),
+            if suffix.starts_with('/') {
+                suffix.to_owned()
+            } else {
+                format!("/{suffix}")
+            },
+        );
+    }
     if let Ok(url) = Url::parse(value.trim()) {
         let mut server = format!(
             "{}://{}",
@@ -951,10 +1017,6 @@ fn spec_url_parts(value: &str) -> (String, String) {
     } else {
         ("https://example.com".to_owned(), value.trim().to_owned())
     }
-}
-
-fn openapi_export_path(path: &str) -> String {
-    path.replace("{{", "{").replace("}}", "}")
 }
 
 fn openapi_path_parameters(path: &str) -> Vec<String> {
@@ -2115,12 +2177,13 @@ fn import_openapi(source: &str) -> Result<ImportBundle, InterchangeError> {
                 .unwrap_or(server);
             let mut request = RequestDraft::new(
                 method_name.to_ascii_uppercase(),
-                join_server_path(
-                    &openapi_import_template(operation_server),
-                    &openapi_import_template(path),
-                ),
+                join_server_path(&openapi_import_template(operation_server), path),
             );
             let mut parameters = Vec::new();
+            request.path_variables = super::path_variable_names(&request.url)
+                .into_iter()
+                .map(|name| (name, String::new()))
+                .collect();
             if let Some(values) = path_item.get("parameters").and_then(Value::as_array) {
                 parameters.extend(values.iter());
             }
@@ -2144,6 +2207,12 @@ fn import_openapi(source: &str) -> Result<ImportBundle, InterchangeError> {
                 match parameter.get("in").and_then(Value::as_str) {
                     Some("header") => request.headers.push(HeaderEntry::new(name, value)),
                     Some("query") => query.push((name.to_owned(), value)),
+                    Some("path") if request.path_variables.contains_key(name) => {
+                        request.path_variables.insert(
+                            name.to_owned(),
+                            openapi_parameter_example(parameter).unwrap_or_default(),
+                        );
+                    }
                     _ => {}
                 }
             }
@@ -2189,6 +2258,10 @@ fn operation_name(operation: &Map<String, Value>, method: &str, path: &str) -> S
 }
 
 fn openapi_parameter_value(parameter: &Map<String, Value>, name: &str) -> String {
+    openapi_parameter_example(parameter).unwrap_or_else(|| format!("{{{{{name}}}}}"))
+}
+
+fn openapi_parameter_example(parameter: &Map<String, Value>) -> Option<String> {
     parameter
         .get("example")
         .or_else(|| parameter.get("default"))
@@ -2203,7 +2276,6 @@ fn openapi_parameter_value(parameter: &Map<String, Value>, name: &str) -> String
                 .and_then(|schema| schema.get("default"))
         })
         .and_then(value_as_text)
-        .unwrap_or_else(|| format!("{{{{{name}}}}}"))
 }
 
 fn append_query_parameters(url: &mut String, parameters: &[(String, String)]) {
@@ -3760,11 +3832,93 @@ mod tests {
     use super::*;
     use crate::core::RequestScripts;
 
+    #[test]
+    fn native_request_json_keeps_local_values_and_defaults_older_requests() {
+        let mut template = RequestTemplate::new(RequestDraft::new("GET", "/users/{id}"));
+        template
+            .request
+            .path_variables
+            .insert("id".into(), "{{user_id}}".into());
+        let encoded = serde_json::to_value(&template).unwrap();
+        let decoded: RequestTemplate = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded, template);
+        let mut older = encoded;
+        older["request"]
+            .as_object_mut()
+            .unwrap()
+            .remove("path_variables");
+        let decoded: RequestTemplate = serde_json::from_value(older).unwrap();
+        assert!(decoded.request.path_variables.is_empty());
+    }
+
+    #[test]
+    fn local_path_variables_export_effective_urls_and_round_trip_templates() {
+        let mut template =
+            RequestTemplate::new(RequestDraft::new("GET", "https://example.test/users/{id}"));
+        template
+            .request
+            .path_variables
+            .insert("id".into(), "a/b ?#".into());
+        for format in InterchangeFormat::ALL {
+            let output = export_request(*format, "User", &template).unwrap();
+            let imported = import_requests(&output).unwrap();
+            assert_eq!(imported.requests[0].template.request, template.request);
+            if *format == InterchangeFormat::Curl {
+                assert!(output.contains("/users/a%2Fb%20%3F%23"));
+            }
+        }
+        template
+            .request
+            .path_variables
+            .insert("id".into(), "{{user_id}}".into());
+        assert!(export_request(InterchangeFormat::Curl, "User", &template).is_err());
+        assert!(export_request(InterchangeFormat::OpenApi, "User", &template).is_ok());
+    }
+
+    #[test]
+    fn openapi_keeps_environment_templates_separate_from_local_path_parameters() {
+        let source = r#"{"openapi":"3.1.0","info":{"title":"Users","version":"1"},"servers":[{"url":"https://example.test"}],"paths":{"/{{tenant}}/users/{id}":{"get":{"parameters":[{"in":"path","name":"id","schema":{"type":"string","default":"{{user_id}}"}}],"responses":{"200":{"description":"ok"}}}}}}"#;
+        let bundle = import_requests(source).unwrap();
+        let template = &bundle.requests[0].template;
+        assert_eq!(
+            template.request.url,
+            "https://example.test/{{tenant}}/users/{id}"
+        );
+        assert_eq!(template.request.path_variables["id"], "{{user_id}}");
+        assert_eq!(template.request.path_variables.len(), 1);
+        let exported = export_request(InterchangeFormat::OpenApi, "User", template).unwrap();
+        let document: Value = serde_yaml::from_str(&exported).unwrap();
+        let parameters = document["paths"]["/{tenant}/users/{id}"]["get"]["parameters"]
+            .as_array()
+            .unwrap();
+        assert_eq!(parameters.len(), 2);
+        assert_eq!(parameters[0]["name"], "tenant");
+        assert!(parameters[0].get("example").is_none());
+        assert_eq!(parameters[1]["name"], "id");
+        assert_eq!(parameters[1]["example"], "{{user_id}}");
+        assert_eq!(
+            import_requests(&exported).unwrap().requests[0]
+                .template
+                .request,
+            template.request
+        );
+
+        let collision =
+            RequestTemplate::new(RequestDraft::new("GET", "https://example.test/{{id}}/{id}"));
+        assert!(
+            export_request(InterchangeFormat::OpenApi, "User", &collision)
+                .unwrap_err()
+                .to_string()
+                .contains("one path-parameter namespace")
+        );
+    }
+
     fn sample_template() -> RequestTemplate {
         RequestTemplate {
             request: RequestDraft {
                 method: "POST".to_owned(),
                 url: "https://api.example.com/v1/users?dry_run=true".to_owned(),
+                path_variables: Default::default(),
                 query_params: crate::core::query_params_from_url(
                     "https://api.example.com/v1/users?dry_run=true",
                 ),
@@ -3972,7 +4126,7 @@ paths:
         assert_eq!(bundle.requests.len(), 2);
         assert_eq!(
             bundle.requests[0].template.request.url,
-            "https://api.example.com/users/{{userId}}?limit=25"
+            "https://api.example.com/users/{userId}?limit=25"
         );
         assert_eq!(bundle.requests[1].name, "Create user");
         assert_eq!(

@@ -34,7 +34,7 @@ use super::{
 #[cfg(test)]
 use super::request_tabs::RequestTabGroupColor;
 
-const CURRENT_SCHEMA_VERSION: i64 = 12;
+const CURRENT_SCHEMA_VERSION: i64 = 13;
 static NEXT_LOCAL_WORKSPACE_ID: AtomicU64 = AtomicU64::new(0);
 const LEGACY_HISTORY_FILE_VERSION: u32 = 1;
 const LEGACY_HISTORY_IMPORT_MARKER: &str = "history-json-v1";
@@ -406,6 +406,14 @@ ADD COLUMN websocket_json TEXT NOT NULL DEFAULT 'null';
 const MIGRATION_12: &str = r#"
 ALTER TABLE saved_requests
 ADD COLUMN documentation TEXT NOT NULL DEFAULT '';
+"#;
+
+const MIGRATION_13: &str = r#"
+ALTER TABLE saved_requests
+ADD COLUMN path_variables_json TEXT NOT NULL DEFAULT '{}';
+
+ALTER TABLE history_entries
+ADD COLUMN path_variables_json TEXT NOT NULL DEFAULT '{}';
 "#;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1297,6 +1305,7 @@ fn migrate(connection: &mut Connection) -> Result<(), DatabaseError> {
             10 => transaction.execute_batch(MIGRATION_10)?,
             11 => transaction.execute_batch(MIGRATION_11)?,
             12 => transaction.execute_batch(MIGRATION_12)?,
+            13 => transaction.execute_batch(MIGRATION_13)?,
             _ => {
                 return Err(DatabaseError::UnsupportedSchemaVersion {
                     found: next,
@@ -1435,9 +1444,9 @@ fn save_workspace_tx(
                 "INSERT INTO saved_requests(
                     id, collection_id, folder_id, name, position, method, url, query_params_json, body,
                     body_mode, raw_body_language, pre_request, post_response, websocket_json,
-                    created_at, updated_at, version, documentation
+                    created_at, updated_at, version, documentation, path_variables_json
                  ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 1, ?17
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 1, ?17, ?18
                  )
                  ON CONFLICT(id) DO UPDATE SET
                     collection_id = excluded.collection_id,
@@ -1454,6 +1463,7 @@ fn save_workspace_tx(
                     post_response = excluded.post_response,
                     websocket_json = excluded.websocket_json,
                     documentation = excluded.documentation,
+                    path_variables_json = excluded.path_variables_json,
                     created_at = excluded.created_at,
                     updated_at = excluded.updated_at,
                     version = saved_requests.version + 1",
@@ -1475,6 +1485,7 @@ fn save_workspace_tx(
                     saved_request.created_at.timestamp_micros(),
                     saved_request.updated_at.timestamp_micros(),
                     &saved_request.definition.documentation,
+                    serialize_path_variables(&request.path_variables)?,
                 ],
             )?;
             sync_saved_request_headers(transaction, &saved_request.id, &request.headers, saved_at)?;
@@ -1620,6 +1631,24 @@ fn deserialize_request_tabs(state_json: Option<String>) -> Result<RequestTabs, D
         }
         None => Ok(RequestTabs::default()),
     }
+}
+
+fn serialize_path_variables(
+    variables: &std::collections::BTreeMap<String, String>,
+) -> Result<String, DatabaseError> {
+    serde_json::to_string(variables).map_err(|error| DatabaseError::CorruptData {
+        field: "request path variables",
+        value: error.to_string(),
+    })
+}
+
+fn deserialize_path_variables(
+    state_json: &str,
+) -> Result<std::collections::BTreeMap<String, String>, DatabaseError> {
+    serde_json::from_str(state_json).map_err(|error| DatabaseError::CorruptData {
+        field: "request path variables",
+        value: error.to_string(),
+    })
 }
 
 fn serialize_query_params(params: &[QueryParamEntry]) -> Result<String, DatabaseError> {
@@ -2072,7 +2101,7 @@ fn load_workspace_tx(
                 "SELECT
                     id, folder_id, name, method, url, query_params_json, body, body_mode,
                     raw_body_language, pre_request, post_response, websocket_json,
-                    created_at, updated_at, documentation
+                    created_at, updated_at, documentation, path_variables_json
                  FROM saved_requests
                  WHERE collection_id = ?1
                  ORDER BY position ASC, id ASC",
@@ -2095,6 +2124,7 @@ fn load_workspace_tx(
                         row.get::<_, i64>(12)?,
                         row.get::<_, i64>(13)?,
                         row.get::<_, String>(14)?,
+                        row.get::<_, String>(15)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?
@@ -2117,6 +2147,7 @@ fn load_workspace_tx(
             created_at,
             updated_at,
             documentation,
+            path_variables_json,
         ) in request_rows
         {
             let headers = load_headers(
@@ -2148,6 +2179,7 @@ fn load_workspace_tx(
                         method,
                         url,
                         query_params: deserialize_query_params(&query_params_json)?,
+                        path_variables: deserialize_path_variables(&path_variables_json)?,
                         headers,
                         body,
                         body_mode: enum_from_db(&body_mode, "saved request body_mode")?,
@@ -2286,9 +2318,9 @@ fn save_history_tx(
                 id, position, created_at, method, url, query_params_json, body,
                 body_mode, raw_body_language, error,
                 response_status, response_status_text, response_duration_ms,
-                response_size_bytes, response_content_type, updated_at, version
+                response_size_bytes, response_content_type, updated_at, version, path_variables_json
              ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 1
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 1, ?17
              )
              ON CONFLICT(id) DO UPDATE SET
                 position = excluded.position,
@@ -2306,6 +2338,7 @@ fn save_history_tx(
                 response_size_bytes = excluded.response_size_bytes,
                 response_content_type = excluded.response_content_type,
                 updated_at = excluded.updated_at,
+                path_variables_json = excluded.path_variables_json,
                 version = history_entries.version + 1",
             params![
                 &entry.id,
@@ -2324,6 +2357,7 @@ fn save_history_tx(
                 response_size_bytes,
                 response_content_type,
                 saved_at,
+                serialize_path_variables(&entry.request.path_variables)?,
             ],
         )?;
         sync_history_headers(transaction, &entry.id, &entry.request.headers, saved_at)?;
@@ -2380,7 +2414,7 @@ fn load_history_tx(
             "SELECT
                 id, created_at, method, url, query_params_json, body, body_mode, raw_body_language, error,
                 response_status, response_status_text, response_duration_ms,
-                response_size_bytes, response_content_type
+                response_size_bytes, response_content_type, path_variables_json
              FROM history_entries
              ORDER BY position ASC, id ASC
              LIMIT ?1",
@@ -2402,6 +2436,7 @@ fn load_history_tx(
                     response_duration_ms: row.get(11)?,
                     response_size_bytes: row.get(12)?,
                     response_content_type: row.get(13)?,
+                    path_variables_json: row.get(14)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -2470,6 +2505,7 @@ fn load_history_tx(
                 method: raw.method,
                 url: raw.url,
                 query_params: deserialize_query_params(&raw.query_params_json)?,
+                path_variables: deserialize_path_variables(&raw.path_variables_json)?,
                 headers,
                 body: raw.body,
                 body_mode: enum_from_db(&raw.body_mode, "history body_mode")?,
@@ -2488,6 +2524,7 @@ fn load_history_tx(
 }
 
 struct RawHistoryEntry {
+    path_variables_json: String,
     id: String,
     created_at: i64,
     method: String,
@@ -2874,6 +2911,7 @@ mod tests {
                         request: RequestDraft {
                             method: "POST".to_owned(),
                             url: "{{base_url}}/users?expand=roles".to_owned(),
+                            path_variables: std::collections::BTreeMap::from([("id".into(), "{{user_id}}".into())]),
                             query_params: vec![
                                 QueryParamEntry::new("expand", "roles"),
                                 QueryParamEntry {
@@ -2989,6 +3027,10 @@ mod tests {
                     request: RequestDraft {
                         method: "POST".to_owned(),
                         url: "https://example.test/users?notify=true".to_owned(),
+                        path_variables: std::collections::BTreeMap::from([(
+                            "id".into(),
+                            "Ada/東京".into(),
+                        )]),
                         query_params: vec![QueryParamEntry::new("notify", "true")],
                         headers: vec![
                             HeaderEntry::new("Content-Type", "application/json"),
@@ -3019,6 +3061,7 @@ mod tests {
                     request: RequestDraft {
                         method: "GET".to_owned(),
                         url: "https://example.test/failed".to_owned(),
+                        path_variables: Default::default(),
                         query_params: Vec::new(),
                         headers: vec![],
                         body: String::new(),
@@ -3274,6 +3317,7 @@ mod tests {
             .definition
             .request;
         assert_eq!(migrated_request.method, "POST");
+        assert!(migrated_request.path_variables.is_empty());
         assert_eq!(migrated_request.body, r#"{"legacy":true}"#);
         assert_eq!(migrated_request.body_mode, BodyMode::Raw);
         assert_eq!(migrated_request.raw_body_language, RawBodyLanguage::Json);
@@ -3299,6 +3343,7 @@ mod tests {
             RawBodyLanguage::Json
         );
         assert!(migrated_history.request.body_fields.is_empty());
+        assert!(migrated_history.request.path_variables.is_empty());
         assert_eq!(
             migrated_history
                 .response
@@ -3911,6 +3956,13 @@ mod tests {
     }
 
     #[test]
+    fn path_variable_json_rejects_invalid_map_shapes() {
+        assert!(deserialize_path_variables("[]").is_err());
+        assert!(deserialize_path_variables(r#"{"id":42}"#).is_err());
+        assert!(deserialize_path_variables("{}").unwrap().is_empty());
+    }
+
+    #[test]
     fn workspace_and_history_round_trip_as_one_aggregate() {
         let (_directory, store) = database();
         let workspace = sample_workspace();
@@ -3920,6 +3972,9 @@ mod tests {
         let loaded = store.load_state().unwrap();
         assert_eq!(loaded.workspace, workspace);
         assert_history_eq(&loaded.history, &history);
+        let reopened = DatabaseStore::new(store.path()).load_state().unwrap();
+        assert_eq!(reopened.workspace, workspace);
+        assert_history_eq(&reopened.history, &history);
 
         store.save_state(&workspace, &history).unwrap();
         let connection = store.open_connection().unwrap();

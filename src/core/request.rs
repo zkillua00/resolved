@@ -364,6 +364,8 @@ impl BodyField {
 pub struct RequestDraft {
     pub method: String,
     pub url: String,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub path_variables: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub query_params: Vec<QueryParamEntry>,
     #[serde(default)]
@@ -383,6 +385,7 @@ impl Default for RequestDraft {
         Self {
             method: "GET".to_owned(),
             url: String::new(),
+            path_variables: Default::default(),
             query_params: Vec::new(),
             headers: Vec::new(),
             body: String::new(),
@@ -1201,7 +1204,30 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
 
-    fn send_and_capture(mut request: RequestDraft) -> Vec<u8> {
+    fn send_and_capture(request: RequestDraft) -> Vec<u8> {
+        send_and_capture_at(request, "/capture")
+    }
+
+    #[test]
+    fn local_path_variables_reach_the_wire_as_encoded_segment_data() {
+        let mut request = RequestDraft::new("GET", "http://placeholder/users/{id}/{id}?fixed=1");
+        request
+            .path_variables
+            .insert("id".into(), "a/b ?#%雪".into());
+        let resolved = super::super::resolve_request(&request, None).unwrap();
+        let target = resolved
+            .request
+            .url
+            .strip_prefix("http://placeholder")
+            .unwrap()
+            .to_owned();
+        let wire = send_and_capture_at(resolved.request, &target);
+        assert!(String::from_utf8(wire).unwrap().starts_with(
+            "GET /users/a%2Fb%20%3F%23%25%E9%9B%AA/a%2Fb%20%3F%23%25%E9%9B%AA?fixed=1 HTTP/1.1\r\n"
+        ));
+    }
+
+    fn send_and_capture_at(mut request: RequestDraft, target: &str) -> Vec<u8> {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
         let address = listener.local_addr().unwrap();
         let (request_tx, request_rx) = mpsc::channel();
@@ -1260,7 +1286,7 @@ mod tests {
                 .expect("write test response");
         });
 
-        request.url = format!("http://{address}/capture");
+        request.url = format!("http://{address}{target}");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

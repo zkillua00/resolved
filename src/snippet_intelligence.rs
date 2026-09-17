@@ -631,6 +631,13 @@ const SYMBOLS: &[SymbolSpec] = &[
     ),
     symbol(
         API_REQUEST,
+        "pathVariables",
+        CompletionItemKind::FIELD,
+        "Readonly<Record<string, string>>",
+        "Read-only local URL path values in the request snapshot.",
+    ),
+    symbol(
+        API_REQUEST,
         "headers",
         CompletionItemKind::FIELD,
         "Resolved.ReadonlyHeaders",

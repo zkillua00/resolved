@@ -1,5 +1,10 @@
 use super::drag_drop::WorkspaceTabDrag;
+use super::path_variables_editor::{
+    PathVariableRow, path_variable_values, reconcile_path_variable_rows,
+    render_path_variables_editor,
+};
 use super::*;
+use std::collections::BTreeMap;
 
 /// One full request-editor session attached to a secondary workspace pane.
 ///
@@ -23,6 +28,8 @@ pub(in crate::app) struct PaneEditorState {
     response_editor: Entity<CodeEditor>,
     query_params: Vec<QueryParamRow>,
     next_query_param_id: usize,
+    path_variables: Vec<PathVariableRow>,
+    template_variable_catalog: TemplateVariableCatalogHandle,
     headers: Vec<HeaderRow>,
     next_header_id: usize,
     body_mode: BodyMode,
@@ -58,6 +65,7 @@ impl PaneEditorState {
     fn new(
         pane_id: PaneId,
         active_tab_id: RequestTabId,
+        template_variable_catalog: TemplateVariableCatalogHandle,
         window: &mut Window,
         cx: &mut Context<ApiTester>,
     ) -> Self {
@@ -76,6 +84,7 @@ impl PaneEditorState {
         let url_subscription = cx.subscribe_in(&url, window, move |this, _, event, window, cx| {
             if matches!(event, InputEvent::Change) {
                 this.pane_sync_query_params_from_url(pane_id, window, cx);
+                this.pane_sync_path_variables_from_url(pane_id, window, cx);
             }
         });
         let (documentation, documentation_intelligence) = documentation::new_editor(window, cx);
@@ -172,6 +181,8 @@ impl PaneEditorState {
             response_editor,
             query_params: Vec::new(),
             next_query_param_id: 0,
+            path_variables: Vec::new(),
+            template_variable_catalog,
             headers: Vec::new(),
             next_header_id: 0,
             body_mode: BodyMode::Raw,
@@ -213,6 +224,40 @@ impl PaneEditorState {
         let language = code_language_for_raw_body(self.raw_body_language);
         self.body
             .update(cx, |editor, cx| editor.set_language(language, cx));
+    }
+
+    fn reconcile_path_variables(
+        &mut self,
+        pane_id: PaneId,
+        initial_values: &BTreeMap<String, String>,
+        window: &mut Window,
+        cx: &mut Context<ApiTester>,
+    ) {
+        let url = self.url.read(cx).value().to_string();
+        let catalog = self.template_variable_catalog.clone();
+        reconcile_path_variable_rows(&mut self.path_variables, &url, |name| {
+            let value = cx.new(|cx| {
+                template_input_state(
+                    window,
+                    cx,
+                    catalog.clone(),
+                    "Value",
+                    initial_values.get(name).cloned().unwrap_or_default(),
+                )
+            });
+            let subscription = cx.subscribe(&value, move |this, input, event, cx| {
+                this.track_template_input_focus(&input, event);
+                if matches!(event, InputEvent::Change) {
+                    this.schedule_template_input_refresh(&input, cx);
+                    this.pane_request_edited(pane_id, cx);
+                }
+            });
+            PathVariableRow {
+                name: name.to_owned(),
+                value,
+                _subscription: subscription,
+            }
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -341,6 +386,9 @@ impl PaneEditorState {
         self.url.update(cx, |state, cx| {
             state.set_value(template.request.url.clone(), window, cx);
         });
+        // Template loads are authoritative; URL edits alone retain live values.
+        self.path_variables.clear();
+        self.reconcile_path_variables(pane_id, &template.request.path_variables, window, cx);
         self.body.update(cx, |state, cx| {
             state.set_value(template.request.body.clone(), window, cx);
         });
@@ -450,6 +498,7 @@ impl PaneEditorState {
                 method: self.method.read(cx).value().to_string(),
                 url,
                 query_params,
+                path_variables: path_variable_values(&self.path_variables, cx),
                 headers: self
                     .headers
                     .iter()
@@ -709,7 +758,13 @@ impl ApiTester {
                 self.request_tab_runtime
                     .insert(old_id.as_str().to_owned(), runtime);
             }
-            let mut session = PaneEditorState::new(pane_id, tab_id.clone(), window, cx);
+            let mut session = PaneEditorState::new(
+                pane_id,
+                tab_id.clone(),
+                self.template_variable_catalog.clone(),
+                window,
+                cx,
+            );
             session.load_template(
                 pane_id,
                 record.template(),
@@ -878,6 +933,7 @@ impl ApiTester {
                             .px_4()
                             .children([
                                 format!("Params ({query_param_count})"),
+                                format!("Path Variables ({})", session.path_variables.len()),
                                 format!("Headers ({header_count})"),
                                 "Body".to_owned(),
                                 "Pre-request".to_owned(),
@@ -902,7 +958,10 @@ impl ApiTester {
                     .bg(
                         if matches!(
                             session.request_pane,
-                            RequestPane::Params | RequestPane::Headers | RequestPane::Cookies
+                            RequestPane::Params
+                                | RequestPane::PathVariables
+                                | RequestPane::Headers
+                                | RequestPane::Cookies
                         ) {
                             cx.api_surface_low()
                         } else {
@@ -914,6 +973,13 @@ impl ApiTester {
                     })
                     .when(session.request_pane == RequestPane::Params, |this| {
                         this.child(self.render_pane_query_params_editor(session, pane_id, cx))
+                    })
+                    .when(session.request_pane == RequestPane::PathVariables, |this| {
+                        this.child(render_path_variables_editor(
+                            &session.path_variables,
+                            format!("{key}-path-variables").into(),
+                            cx,
+                        ))
                     })
                     .when(session.request_pane == RequestPane::Headers, |this| {
                         this.child(self.render_pane_headers_editor(session, pane_id, cx))
@@ -2135,7 +2201,35 @@ impl ApiTester {
         if let Some(session) = self.pane_editor_mut(pane_id) {
             session.request_pane = pane;
         }
+        self.pane_request_edited(pane_id, cx);
+    }
+
+    fn pane_request_edited(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
+        if let Some(session) = self.pane_editors.get(&pane_id)
+            && let Some(tab_id) = session.active_tab_id.clone()
+        {
+            let template = session.snapshot_template(cx);
+            let runtime = session.runtime_snapshot();
+            if let Some(record) = self.request_tabs.get_mut(&tab_id) {
+                record.set_template(template);
+            }
+            self.request_tab_runtime
+                .insert(tab_id.as_str().to_owned(), runtime);
+            self.schedule_request_tabs_persist(cx);
+        }
         cx.notify();
+    }
+
+    fn pane_sync_path_variables_from_url(
+        &mut self,
+        pane_id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = self.pane_editors.get_mut(&pane_id) {
+            session.reconcile_path_variables(pane_id, &BTreeMap::new(), window, cx);
+        }
+        self.pane_request_edited(pane_id, cx);
     }
 
     fn pane_push_query_param(
@@ -2525,6 +2619,7 @@ mod tests {
                 let session = PaneEditorState::new(
                     secondary,
                     app.request_tabs.active_tab_id().clone(),
+                    app.template_variable_catalog.clone(),
                     window,
                     cx,
                 );
@@ -2643,7 +2738,13 @@ mod tests {
                     .split_off_pane(primary_id, SplitDirection::Vertical, true)
                     .expect("split primary pane");
                 let tab_id = app.request_tabs.active_tab_id().clone();
-                let session = PaneEditorState::new(secondary_id, tab_id, window, cx);
+                let session = PaneEditorState::new(
+                    secondary_id,
+                    tab_id,
+                    app.template_variable_catalog.clone(),
+                    window,
+                    cx,
+                );
                 let source = r#"{"name":"{{name}}"}"#;
                 app.body
                     .update(cx, |editor, cx| editor.set_value(source, window, cx));
@@ -2691,12 +2792,87 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn docked_path_variables_reconcile_and_load_authoritatively(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+        store.initialize().unwrap();
+        let mut app = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            crate::theme::configure(cx);
+            let bindings = shortcuts::capture_base_key_bindings(cx);
+            let view = cx.new(|cx| ApiTester::new_with_database_store(bindings, store, window, cx));
+            app = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app = app.unwrap();
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                let primary = app.panes.panes()[0].id();
+                let pane = app
+                    .panes
+                    .split_off_pane(primary, SplitDirection::Vertical, true)
+                    .unwrap();
+                let mut session = PaneEditorState::new(
+                    pane,
+                    app.request_tabs.active_tab_id().clone(),
+                    app.template_variable_catalog.clone(),
+                    window,
+                    cx,
+                );
+                let mut template = template_with_content();
+                template.request.url = "https://{{host}}/{id}/{id}/{other}".into();
+                template.request.path_variables = BTreeMap::from([("id".into(), " saved ".into())]);
+                session.load_template(
+                    pane,
+                    &template,
+                    &RequestTabRuntime::default(),
+                    &app.settings.formatter,
+                    window,
+                    cx,
+                );
+                assert_eq!(session.path_variables.len(), 2);
+                let id_input = session.path_variables[0].value.clone();
+                id_input.update(cx, |state, cx| state.set_value("{{local}}", window, cx));
+                session.url.update(cx, |state, cx| {
+                    state.set_value("https://{{host}}/{renamed}/{id}/{id}", window, cx)
+                });
+                session.reconcile_path_variables(pane, &BTreeMap::new(), window, cx);
+                assert_eq!(
+                    session
+                        .path_variables
+                        .iter()
+                        .map(|row| row.name.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["renamed", "id"],
+                );
+                assert_eq!(session.path_variables[1].value, id_input);
+                assert_eq!(
+                    session.snapshot_template(cx).request.path_variables,
+                    BTreeMap::from([("id".into(), "{{local}}".into())]),
+                );
+                session.load_template(
+                    pane,
+                    &template,
+                    &RequestTabRuntime::default(),
+                    &app.settings.formatter,
+                    window,
+                    cx,
+                );
+                assert_ne!(session.path_variables[0].value, id_input);
+                assert_eq!(session.snapshot_template(cx).request, template.request);
+            });
+        });
+    }
+
     fn template_with_content() -> RequestTemplate {
         RequestTemplate {
             request: RequestDraft {
                 method: "POST".to_owned(),
                 url: "https://example.com/submit".to_owned(),
                 query_params: Vec::new(),
+                path_variables: BTreeMap::new(),
                 headers: vec![
                     HeaderEntry {
                         enabled: true,
@@ -2840,7 +3016,9 @@ mod tests {
         // Give the second tab a known template so the round-trip is meaningful,
         // and pin the pane tree to the two open tabs with the first tab active
         // so the freshly created pane is the genuine secondary pane.
-        let tmpl = template_with_content();
+        let mut tmpl = template_with_content();
+        tmpl.request.url = "https://example.com/submit/{id}/{id}".into();
+        tmpl.request.path_variables = BTreeMap::from([("id".into(), "docked value".into())]);
         let (_primary_id, secondary_id) = cx.update(|window, cx| {
             app.update(cx, |app, cx| {
                 let _ = app.request_tabs.activate(&first);
@@ -2923,6 +3101,46 @@ mod tests {
                     .map(|response| response.status),
                 Some(200),
                 "the secondary pane must render its stored response",
+            );
+        });
+
+        // Editing the docked value must persist its own tab, not the primary
+        // request, before any tab switch takes a fallback snapshot.
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                let input = app.pane_editors[&secondary_id].path_variables[0]
+                    .value
+                    .clone();
+                input.update(cx, |state, cx| {
+                    state.set_value("local docked edit", window, cx);
+                    cx.emit(InputEvent::Change);
+                });
+            });
+        });
+        cx.run_until_parked();
+        tmpl.request
+            .path_variables
+            .insert("id".into(), "local docked edit".into());
+        cx.update(|_, cx| {
+            let app = app.read(cx);
+            assert_eq!(
+                app.request_tabs
+                    .get(&second)
+                    .unwrap()
+                    .template()
+                    .request
+                    .path_variables,
+                tmpl.request.path_variables,
+            );
+            assert!(
+                app.request_tabs
+                    .get(&first)
+                    .unwrap()
+                    .template()
+                    .request
+                    .path_variables
+                    .is_empty(),
+                "docked edits must not leak into the primary tab",
             );
         });
 

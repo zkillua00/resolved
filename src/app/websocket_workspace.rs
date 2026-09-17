@@ -1160,14 +1160,11 @@ impl ApiTester {
     }
 
     fn resolve_websocket_text(&self, text: &str) -> Result<String, String> {
-        let draft = RequestDraft {
-            url: text.to_owned(),
-            ..RequestDraft::default()
-        };
-        let resolved = resolve_request(&draft, self.workspace.active_environment())
-            .map_err(|error| error.to_string())?;
-        self.remember_mcp_websocket_ui_secrets(resolved.sensitive_values);
-        Ok(resolved.request.url)
+        let (text, secrets) =
+            crate::core::resolve_template_text(text, self.workspace.active_environment())
+                .map_err(|error| error.to_string())?;
+        self.remember_mcp_websocket_ui_secrets(secrets);
+        Ok(text)
     }
 
     fn send_websocket_payload(

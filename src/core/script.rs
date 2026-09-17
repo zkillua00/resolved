@@ -201,9 +201,12 @@ const PRELUDE: &str = r#"
     return rows;
   }
 
+  const pathVariables = Object.assign(Object.create(null), input.request.path_variables ?? {});
+  if (!mutableRequest) Object.freeze(pathVariables);
   const requestState = {
     method: String(input.request.method),
     url: String(input.request.url),
+    pathVariables,
     body: String(input.request.body),
     bodyMode: String(input.request.body_mode ?? "raw"),
     rawBodyLanguage: String(input.request.raw_body_language ?? "json"),
@@ -498,6 +501,9 @@ const PRELUDE: &str = r#"
         request: {
         method: String(request.method),
         url: String(request.url),
+        path_variables: Object.fromEntries(
+          Object.entries(request.pathVariables ?? {}).map(([key, value]) => [key, String(value)])
+        ),
         headers: request.headers.toArray(),
         body: String(request.body),
         body_mode: String(request.bodyMode),
@@ -2621,6 +2627,28 @@ mod tests {
             super::super::HeaderEntry::new("X-Repeat", "two"),
         ];
         request
+    }
+
+    #[test]
+    fn pre_request_scripts_preserve_and_can_edit_local_path_variables() {
+        let mut original = RequestDraft::new("GET", "https://example.test/{id}/{__proto__}");
+        original
+            .path_variables
+            .insert("id".into(), "original".into());
+        original
+            .path_variables
+            .insert("__proto__".into(), "safe".into());
+        let result = execute_pre_request(
+            r#"api.request.pathVariables.id = "next/{{env}}";"#,
+            &original,
+            &ScriptScope::default(),
+            &RequestNamespaceCatalog::default(),
+            &ScriptCancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(result.request.path_variables["id"], "next/{{env}}");
+        assert_eq!(result.request.path_variables["__proto__"], "safe");
+        assert_eq!(original.path_variables["id"], "original");
     }
 
     #[test]

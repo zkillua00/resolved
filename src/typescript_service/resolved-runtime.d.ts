@@ -79,6 +79,8 @@ declare namespace Resolved {
   interface MutableRequest {
     method: HttpMethod;
     url: string;
+    /** Local `{name}` path data; environment templates are expanded before segment encoding. */
+    pathVariables: Record<string, string>;
     body: string;
     bodyMode: BodyMode;
     rawBodyLanguage: RawBodyLanguage;
@@ -89,6 +91,8 @@ declare namespace Resolved {
   interface ReadonlyRequest {
     readonly method: HttpMethod;
     readonly url: string;
+    /** Empty on resolved sent snapshots: values have been incorporated into the URL. */
+    readonly pathVariables: Readonly<Record<string, string>>;
     readonly body: string;
     readonly bodyMode: BodyMode;
     readonly rawBodyLanguage: RawBodyLanguage;

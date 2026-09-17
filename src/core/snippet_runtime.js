@@ -91,6 +91,7 @@
     return Object.freeze({
       method: String(source.method),
       url: String(source.url),
+      pathVariables: Object.freeze(Object.assign(Object.create(null), source.pathVariables ?? {})),
       headers: makeHeaders(source.headers),
       body: String(source.body),
       bodyMode: String(source.bodyMode),

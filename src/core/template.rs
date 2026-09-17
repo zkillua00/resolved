@@ -103,6 +103,14 @@ impl fmt::Display for TemplateField {
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum VariableResolutionError {
+    #[error("path variable '{name}' has no value; enter a non-empty value in Path Variables")]
+    MissingPathVariable { name: String },
+
+    #[error(
+        "path variable '{name}' produces a '.' or '..' path segment; choose a non-traversal value"
+    )]
+    DotPathVariable { name: String },
+
     #[error("environment has more than one enabled variable named '{name}'")]
     DuplicateVariable { name: String },
 
@@ -200,6 +208,7 @@ fn replace_bytes(bytes: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
 
 fn secret_spellings(value: &str) -> Vec<String> {
     let mut spellings = vec![value.to_owned()];
+    spellings.push(super::path_variables::encode(value));
     spellings.push(url::form_urlencoded::byte_serialize(value.as_bytes()).collect());
 
     let mut path_url = url::Url::parse("https://redaction.invalid/").expect("static URL is valid");
@@ -234,7 +243,10 @@ pub fn resolve_request(
     let mut resolver = Resolver::new(environment)?;
     let mut request = template.clone();
 
-    request.url = resolver.resolve_text(&request.url, TemplateField::Url)?;
+    request.url = resolver.resolve_url(template)?;
+    // These are editor inputs, not a second copy of the sent data. In
+    // particular, never retain expanded secrets in a history/proxy snapshot.
+    request.path_variables.clear();
     for (index, param) in request.query_params.iter_mut().enumerate() {
         if !param.enabled {
             continue;
@@ -274,6 +286,17 @@ pub fn resolve_request(
     })
 }
 
+/// Expand environment templates in non-URL text (for example WebSocket
+/// payloads), returning the expanded text and secrets needed for redaction.
+pub fn resolve_template_text(
+    text: &str,
+    environment: Option<&Environment>,
+) -> Result<(String, Vec<String>), VariableResolutionError> {
+    let mut resolver = Resolver::new(environment)?;
+    let text = resolver.resolve_text(text, TemplateField::Body)?;
+    Ok((text, resolver.sensitive_values))
+}
+
 struct Resolver<'a> {
     enabled: HashMap<String, &'a super::workspace::EnvironmentVariable>,
     disabled: HashSet<String>,
@@ -284,6 +307,63 @@ struct Resolver<'a> {
 }
 
 impl<'a> Resolver<'a> {
+    fn resolve_url(&mut self, request: &RequestDraft) -> Result<String, VariableResolutionError> {
+        let mut output = String::new();
+        let mut cursor = 0;
+        let mut injected = Vec::new();
+        for span in super::path_variables::spans(&request.url) {
+            let name = &request.url[span.start + 1..span.end - 1];
+            let missing = || VariableResolutionError::MissingPathVariable {
+                name: name.to_owned(),
+            };
+            let value = request
+                .path_variables
+                .get(name)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(missing)?;
+            // Expand each original fragment exactly once. Injected local data
+            // is encoded separately, never scanned again as URL/template syntax.
+            output.push_str(
+                &self.resolve_text(&request.url[cursor..span.start], TemplateField::Url)?,
+            );
+            let value = self.resolve_text(value, TemplateField::Url)?;
+            if value.is_empty() {
+                return Err(missing());
+            }
+            // Preserve the name-based privacy rule before the local map is
+            // cleared from the wire snapshot and only the URL value remains.
+            if super::history::is_sensitive_field(name) && self.sensitive_set.insert(value.clone())
+            {
+                self.sensitive_values.push(value.clone());
+            }
+            let start = output.len();
+            output.push_str(&super::path_variables::encode(&value));
+            injected.push((start, output.len(), name));
+            cursor = span.end;
+        }
+        output.push_str(&self.resolve_text(&request.url[cursor..], TemplateField::Url)?);
+        for (start, end, name) in injected {
+            let segment_start = output[..start]
+                .rfind(['/', '\\', '?', '#'])
+                .map_or(0, |i| i + 1);
+            let segment_end = output[end..]
+                .find(['/', '\\', '?', '#'])
+                .map_or(output.len(), |i| end + i);
+            let segment = &output[segment_start..segment_end];
+            let segment = if segment_end == output.len() {
+                segment.trim_end_matches(|c: char| c.is_ascii() && c <= ' ')
+            } else {
+                segment
+            };
+            if super::path_variables::is_dot_segment(segment) {
+                return Err(VariableResolutionError::DotPathVariable {
+                    name: name.to_owned(),
+                });
+            }
+        }
+        Ok(output)
+    }
+
     fn new(environment: Option<&'a Environment>) -> Result<Self, VariableResolutionError> {
         let mut enabled = HashMap::new();
         let mut disabled = HashSet::new();
@@ -434,6 +514,146 @@ mod tests {
     use super::*;
     use crate::core::request::{BodyField, BodyFieldKind, BodyMode, HeaderEntry, QueryParamEntry};
     use crate::core::workspace::EnvironmentVariable;
+
+    #[test]
+    fn local_path_values_are_encoded_once_without_reinterpreting_injected_tokens() {
+        let mut request = RequestDraft::new(
+            "GET",
+            "https://u:pw@[::1]:8080/a-{id}/{id}/{{legacy}}?q={id}#{id}",
+        );
+        request
+            .path_variables
+            .insert("id".into(), "{{secret}}/{other}%?#雪".into());
+        request
+            .path_variables
+            .insert("other".into(), "must-not-expand".into());
+        let env = environment(vec![
+            variable("secret", "private ~/", true, true),
+            variable("legacy", "{id}", true, false),
+        ]);
+        let resolved = resolve_request(&request, Some(&env)).unwrap();
+        let data = "private%20~%2F%2F%7Bother%7D%25%3F%23%E9%9B%AA";
+        assert_eq!(
+            resolved.request.url,
+            format!("https://u:pw@[::1]:8080/a-{data}/{data}/{{id}}?q={{id}}#{{id}}")
+        );
+        assert!(resolved.request.path_variables.is_empty());
+        assert_eq!(request.path_variables["id"], "{{secret}}/{other}%?#雪");
+        assert_eq!(resolved.used_variables, ["secret", "legacy"]);
+        assert!(
+            !resolved
+                .redact_secrets(&resolved.request.url)
+                .contains("private")
+        );
+        assert!(
+            resolved
+                .redact_secrets(&resolved.request.url)
+                .contains("[REDACTED]")
+        );
+    }
+
+    #[test]
+    fn locals_work_with_base_url_templates_and_keep_raw_spelling() {
+        let mut request = RequestDraft::new("GET", "{{base_url}}/users/{id}?q={{q}}#raw");
+        request
+            .path_variables
+            .insert("id".into(), "{{item}}".into());
+        let env = environment(vec![
+            variable("base_url", "HTTPS://example.test:443/api", true, false),
+            variable("item", "a/b", true, false),
+            variable("q", "a&b", true, false),
+        ]);
+        assert_eq!(
+            resolve_request(&request, Some(&env)).unwrap().request.url,
+            "HTTPS://example.test:443/api/users/a%2Fb?q=a&b#raw"
+        );
+        let legacy: RequestDraft =
+            serde_json::from_str(r#"{"method":"GET","url":"https://host/{{item}}"}"#).unwrap();
+        assert!(legacy.path_variables.is_empty());
+        assert!(
+            serde_json::to_value(&legacy)
+                .unwrap()
+                .get("path_variables")
+                .is_none()
+        );
+        assert_eq!(
+            resolve_request(&legacy, Some(&env)).unwrap().request.url,
+            "https://host/a/b"
+        );
+    }
+
+    #[test]
+    fn missing_and_empty_locals_fail_before_sending() {
+        let mut request = RequestDraft::new("GET", "https://host/{id}");
+        let env = environment(vec![variable("empty", "", true, false)]);
+        for value in [None, Some(""), Some("{{empty}}")] {
+            request.path_variables.clear();
+            if let Some(value) = value {
+                request.path_variables.insert("id".into(), value.into());
+            }
+            assert_eq!(
+                resolve_request(&request, Some(&env)),
+                Err(VariableResolutionError::MissingPathVariable { name: "id".into() })
+            );
+        }
+        // Unused stale editor values do not block sending.
+        request.url = "https://host/ordinary".into();
+        request
+            .path_variables
+            .insert("unused".into(), "{{undefined}}".into());
+        assert!(resolve_request(&request, None).is_ok());
+    }
+
+    #[test]
+    fn rejects_dot_segments_including_prefix_suffix_and_env_contributions() {
+        let env = environment(vec![variable("dot", ".", true, false)]);
+        for (path, value) in [
+            ("{id}", "."),
+            ("{id}", ".."),
+            (".{id}", "."),
+            ("{id}.", "."),
+            ("%2e{id}", "."),
+            ("{id}%2E", "."),
+            ("{{dot}}{id}", "."),
+            ("{id}{{dot}}", "."),
+            ("{id} ", "."),
+            ("{id}\t.", "."),
+        ] {
+            let mut request = RequestDraft::new("GET", format!("https://host/keep/{path}"));
+            request.path_variables.insert("id".into(), value.into());
+            assert!(
+                matches!(
+                    resolve_request(&request, Some(&env)),
+                    Err(VariableResolutionError::DotPathVariable { .. })
+                ),
+                "{path}"
+            );
+        }
+        for value in ["%2e", "../admin", "a..", " ."] {
+            let mut request = RequestDraft::new("GET", "https://host/keep/{id}");
+            request.path_variables.insert("id".into(), value.into());
+            let resolved = resolve_request(&request, None).unwrap();
+            assert!(
+                url::Url::parse(&resolved.request.url)
+                    .unwrap()
+                    .path()
+                    .starts_with("/keep/")
+            );
+        }
+    }
+
+    #[test]
+    fn non_url_text_expansion_does_not_interpret_path_variables() {
+        assert_eq!(
+            resolve_template_text(
+                "{id}/{{env}}",
+                Some(&environment(vec![variable("env", "ok", true, false),]))
+            )
+            .unwrap()
+            .0,
+            "{id}/ok"
+        );
+    }
 
     fn environment(variables: Vec<EnvironmentVariable>) -> Environment {
         Environment {

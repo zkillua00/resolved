@@ -197,6 +197,7 @@ impl ApiTester {
                 self.format_script_editor(editor, "post-response", window, cx);
             }
             RequestPane::Params
+            | RequestPane::PathVariables
             | RequestPane::Headers
             | RequestPane::Cookies
             | RequestPane::Documentation => {

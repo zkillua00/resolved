@@ -38,6 +38,9 @@ impl ApiTester {
             inputs.push(row.name.clone());
             inputs.push(row.value.clone());
         }
+        for row in &self.path_variables {
+            inputs.push(row.value.clone());
+        }
         for input in inputs {
             self.refresh_template_input(&input, cx);
         }

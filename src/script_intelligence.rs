@@ -886,6 +886,11 @@ const REQUEST_MEMBERS_PRE: &[CompletionSpec] = &[
         "Request URL. Assignments are converted to text before sending.",
     ),
     field(
+        "pathVariables",
+        "Record<string, string>",
+        "Local `{name}` URL path values. Values support environment templates and are encoded as segment data.",
+    ),
+    field(
         "body",
         "string",
         "Raw request body. Assignments are converted to text before sending.",
@@ -915,6 +920,11 @@ const REQUEST_MEMBERS_PRE: &[CompletionSpec] = &[
 const REQUEST_MEMBERS_POST: &[CompletionSpec] = &[
     field("method", "string", "HTTP method that was sent. Read-only."),
     field("url", "string", "Request URL that was sent. Read-only."),
+    field(
+        "pathVariables",
+        "Readonly<Record<string, string>>",
+        "Read-only local path values. Empty on sent snapshots because values are already in the URL.",
+    ),
     field(
         "body",
         "string",

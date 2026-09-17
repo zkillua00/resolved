@@ -516,6 +516,7 @@ impl ApiTester {
 
         let mut draft = RequestDraft::new(method, self.url.read(cx).value().to_string());
         draft.query_params = self.normalized_query_params(cx);
+        draft.path_variables = path_variables_editor::path_variable_values(&self.path_variables, cx);
         draft.headers = self.normalized_header_entries(cx);
         draft.body = self.body.read(cx).value(cx).to_string();
         draft.body_mode = self.body_mode;
@@ -567,6 +568,7 @@ impl ApiTester {
             RequestDirtyPart::Method,
             RequestDirtyPart::Url,
             RequestDirtyPart::Params,
+            RequestDirtyPart::PathVariables,
             RequestDirtyPart::Headers,
             RequestDirtyPart::RawBody,
             RequestDirtyPart::BodyMode,
@@ -600,6 +602,10 @@ impl ApiTester {
                     baseline.request.query_params.clone()
                 };
                 self.normalized_query_params(cx) != baseline_params
+            }
+            RequestDirtyPart::PathVariables => {
+                path_variables_editor::path_variable_values(&self.path_variables, cx)
+                    != baseline.request.path_variables
             }
             RequestDirtyPart::Headers => {
                 self.normalized_header_entries(cx) != baseline.request.headers
@@ -824,6 +830,8 @@ impl ApiTester {
         if self.query_params.is_empty() {
             self.push_query_param_row("", "", true, window, cx);
         }
+
+        self.load_path_variables(&request.path_variables, window, cx);
 
         self.headers.clear();
         for header in request.headers {

@@ -127,6 +127,7 @@ mod local_execution_limits;
 mod navigation_rail;
 mod pane_editor;
 mod pane_tree;
+mod path_variables_editor;
 mod pending_delete;
 mod persistence;
 mod query_params_editor;
@@ -181,6 +182,7 @@ use execution_stage::*;
 use headers_editor::HeaderRow;
 use pane_editor::*;
 use pane_tree::*;
+use path_variables_editor::PathVariableRow;
 use pending_delete::*;
 use query_params_editor::QueryParamRow;
 use request_interchange::RequestInterchangeState;
@@ -272,6 +274,7 @@ pub struct ApiTester {
     query_params: Vec<QueryParamRow>,
     next_query_param_id: usize,
     syncing_query_params: bool,
+    path_variables: Vec<PathVariableRow>,
     headers: Vec<HeaderRow>,
     next_header_id: usize,
     body_mode: BodyMode,

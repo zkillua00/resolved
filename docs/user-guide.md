@@ -6,6 +6,48 @@ storage behavior. For an overview and quick start,
 see the [README](../README.md). For builds and packaging, see
 [Building and packaging](building.md).
 
+## Request-local path variables
+
+Use single braces in the URL path, for example
+`https://api.example.com/users/{user_id}`. The **Path Variables** tab discovers
+these names automatically; enter their values there. Values belong to this
+request and are saved with it, not to an environment. A repeated name uses the
+same value everywhere in the path.
+
+Names are case-sensitive ASCII identifiers: start with a letter or `_`, followed
+by letters, digits, `_`, `.`, or `-`. Only the raw URL path is scanned—not the
+scheme, host, query, or fragment. `{{name}}` remains an environment reference,
+not a path variable. For literal braces use `%7B` and `%7D`; encoded braces are
+not interpreted as placeholders.
+
+A local value may contain `{{environment_variable}}`. Before sending, Resolved
+expands those references and percent-encodes the result as one path segment.
+For example, `a/b` becomes `a%2Fb`, rather than adding another path component.
+Enter raw values, not already percent-encoded values. Missing or empty local
+values prevent sending; there is no implicit fallback to a same-named environment
+variable. Values that form `.` or `..` path segments are rejected rather than
+silently changing the target path. Keep secrets in secret environment variables and reference them here:
+literal local values are ordinary saved request data.
+
+Pre-request scripts can read and update `api.request.pathVariables`, a string
+key/value object (for example, `api.request.pathVariables.user_id = "42"`).
+Post-request scripts see the resolved sent request: its path-variable map is
+read-only and empty because the values are already encoded in the URL. Snippet
+request snapshots expose a read-only map.
+
+OpenAPI imports keep `{name}` paths and use path-parameter examples/defaults when
+available. Postman imports convert `:name` path segments only when the URL has an
+explicit matching variable definition. OpenAPI exports include local path
+parameters and values. Environment references in paths retain their existing
+OpenAPI parameter representation; Resolved metadata preserves the distinction on
+re-import. A local and an environment reference with the same name in the path
+must be renamed before OpenAPI export because that format has only one namespace.
+
+Command and code exports use an encoded effective URL and preserve the template in Resolved
+metadata. If a URL or local value requires an environment, these text-only exports
+report an error rather than guessing its value; use an OpenAPI export to preserve
+the unresolved template.
+
 ## Request documentation annotations
 
 Write explanations in the request's **Documentation** tab. Start a line with `@`

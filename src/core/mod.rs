@@ -7,6 +7,7 @@ pub(crate) use chain::drive_inline_with_budget;
 mod format;
 mod history;
 mod interchange;
+mod path_variables;
 mod realtime;
 mod request;
 mod request_namespace;
@@ -35,6 +36,7 @@ pub use format::{
     format_body, format_raw_source, format_script_source, is_probably_text, parse_json_lines,
 };
 pub use history::{HistoryEntry, REDACTED_VALUE, RequestHistory};
+pub use path_variables::path_variable_names;
 pub use interchange::{
     ImportBundle, InterchangeFormat, MAX_INTERCHANGE_BYTES, export_request, import_requests,
 };
@@ -83,7 +85,7 @@ pub use snippet::{
     generate_snippet,
 };
 pub(crate) use template::{redact_secret_bytes, redact_secret_values};
-pub use template::{RequestTemplate, ResolvedRequest, resolve_request};
+pub use template::{RequestTemplate, ResolvedRequest, resolve_request, resolve_template_text};
 #[allow(unused_imports)]
 pub use upstream::{
     LoginPermission, LoginRole, LoginUser, ProxyExecutionPolicy, UpstreamCollectionView,

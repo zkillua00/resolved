@@ -777,6 +777,9 @@ impl ApiTester {
                 if !this.syncing_query_params {
                     this.sync_query_params_from_url(window, cx);
                 }
+                if !this.request_dirty.is_hydrating() {
+                    this.sync_path_variables_from_url(window, cx);
+                }
                 this.refresh_request_dirty_part(RequestDirtyPart::Url, cx);
             }
             if matches!(event, InputEvent::PressEnter { secondary: false }) {
@@ -985,6 +988,7 @@ impl ApiTester {
             query_params: Vec::new(),
             next_query_param_id: 0,
             syncing_query_params: false,
+            path_variables: Vec::new(),
             headers: Vec::new(),
             next_header_id: 0,
             body_mode: BodyMode::Raw,

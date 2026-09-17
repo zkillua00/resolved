@@ -1110,6 +1110,12 @@ fn make_group_members_contiguous(tabs: &mut Vec<RequestTabRecord>) {
 }
 
 fn canonical_request_template(mut template: RequestTemplate) -> RequestTemplate {
+    // The URL owns local names. Empty values are unset, just like the editor's
+    // empty cells; imports may explicitly include them without changing meaning.
+    template
+        .request
+        .path_variables
+        .retain(|_, value| !value.is_empty());
     template
         .request
         .headers

@@ -812,6 +812,7 @@ pub struct SnippetBodyField {
 pub struct SnippetRequest {
     method: String,
     url: String,
+    path_variables: std::collections::BTreeMap<String, String>,
     headers: Vec<SnippetRequestHeader>,
     body: String,
     body_mode: &'static str,
@@ -859,9 +860,25 @@ impl SnippetRequest {
         } else {
             Vec::new()
         };
+        let path_variables =
+            if budget.reserve_rows("request path variable", request.path_variables.len()) {
+                request
+                    .path_variables
+                    .iter()
+                    .map(|(name, value)| {
+                        (
+                            budget.copy("request path-variable name", name),
+                            budget.copy("request path-variable value", value),
+                        )
+                    })
+                    .collect()
+            } else {
+                Default::default()
+            };
         Self {
             method: budget.copy("request method", &request.method),
             url: budget.copy("request URL", &request.url),
+            path_variables,
             headers,
             body,
             body_mode: request.body_mode.as_db_str(),
@@ -2659,6 +2676,22 @@ return snippet.result(
             "GET:200:application/json:true:true:false:false"
         );
         assert_eq!(generated.cursor, Some(3));
+    }
+
+    #[test]
+    fn snippet_request_preserves_local_path_values_as_frozen_data() {
+        let mut request = request();
+        request
+            .path_variables
+            .insert("id".into(), "{{env}}/data".into());
+        let context = SnippetInvocationContext::new(SnippetCategory::PreRequest, &request);
+        let value = snippet(
+            SnippetCategory::PreRequest,
+            SnippetKind::Executable,
+            r#"return `${api.request.pathVariables.id}:${Object.isFrozen(api.request.pathVariables)}`;"#,
+        );
+        let generated = generate_snippet(&value, &context, &SnippetCancellation::new()).unwrap();
+        assert_eq!(generated.text, "{{env}}/data:true");
     }
 
     #[test]

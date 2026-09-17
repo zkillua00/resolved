@@ -1490,7 +1490,7 @@ mod tests {
         );
         assert_eq!(
             workspace.collections[1].requests[0].definition.request.url,
-            "https://example.test/pets/{{id}}"
+            "https://example.test/pets/{id}"
         );
     }
 

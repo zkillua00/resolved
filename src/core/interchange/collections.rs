@@ -191,19 +191,50 @@ fn postman_request(
             url.push_str(&hash);
         }
     }
-    // Postman's colon path parameters are placeholders, not literal wire paths.
-    let mut segments = url.split('/').map(str::to_owned).collect::<Vec<_>>();
-    for segment in &mut segments {
-        if let Some(name) = segment.strip_prefix(':') {
-            let end = name.find(['?', '#']).unwrap_or(name.len());
-            *segment = format!("{{{{{}}}}}{}", &name[..end], &name[end..]);
+    // Only explicitly declared URL variables define Postman placeholders.
+    // Restrict conversion to complete path segments, never authority or query.
+    let mut path_variables = std::collections::BTreeMap::new();
+    if let Some(variables) = url_value.get("variable").and_then(Value::as_array) {
+        let path_start = url.find("://").map_or(0, |scheme| {
+            url[scheme + 3..]
+                .find('/')
+                .map_or(url.len(), |offset| scheme + 3 + offset)
+        });
+        let path_end = url.find(['?', '#']).unwrap_or(url.len()).max(path_start);
+        let mut segments = url[path_start..path_end]
+            .split('/')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        for variable in variables {
+            let name = text(variable, "key");
+            if crate::core::path_variable_names(&format!("/{{{name}}}")) != vec![name.clone()] {
+                warn(
+                    bundle,
+                    "A Postman URL variable has an unsupported name and was not converted.",
+                );
+                continue;
+            }
+            let mut used = false;
+            for segment in &mut segments {
+                if *segment == format!(":{name}") {
+                    *segment = format!("{{{name}}}");
+                    used = true;
+                }
+            }
+            if used {
+                path_variables.insert(name, text(variable, "value"));
+            }
         }
+        url.replace_range(path_start..path_end, &segments.join("/"));
     }
-    url = segments.join("/");
     let method = text(value, "method");
     let mut request = RequestDraft::new(if method.is_empty() { "GET" } else { &method }, url);
+    request.path_variables = path_variables;
     if let Some(query) = url_value.get("query").and_then(Value::as_array) {
-        if query.iter().any(|row| row.get("description").is_some_and(|value| !value.is_null())) {
+        if query
+            .iter()
+            .any(|row| row.get("description").is_some_and(|value| !value.is_null()))
+        {
             warn(
                 bundle,
                 "Postman query descriptions are not imported. Author explanations with @param annotations in Documentation.",
@@ -322,16 +353,6 @@ fn postman_request(
         }
     }
     apply_content_type_language(&mut request);
-    if url_value
-        .get("variable")
-        .and_then(Value::as_array)
-        .is_some_and(|v| !v.is_empty())
-    {
-        warn(
-            bundle,
-            "URL variable placeholders are preserved. Add their values to a Resolved environment.",
-        );
-    }
     Ok(request)
 }
 
@@ -575,11 +596,39 @@ mod tests {
             vec![vec!["Users"], vec!["Users", "Empty"]]
         );
         let request = &bundle.requests[0].template.request;
-        assert_eq!(request.url, "https://example.test/users/{{id}}?q=a%26b");
+        assert_eq!(request.url, "https://example.test/users/:id?q=a%26b");
         assert!(!request.query_params[0].enabled);
         assert!(!request.headers[0].enabled);
         assert_eq!(request.headers[1].value, "Bearer {{token}}");
         assert_eq!(request.body, "{\"name\":\"Ada\"}");
+    }
+
+    #[test]
+    fn postman_path_locals_require_definitions_and_leave_query_colons_untouched() {
+        let source = collection(json!([{
+            "name": "User",
+            "request": {
+                "method": "GET",
+                "url": {
+                    "raw": "https://example.test:8443/users/:id/:literal?q=/:id#/:id",
+                    "variable": [{"key":"id","value":"{{user_id}}"}]
+                }
+            }
+        }]));
+        let bundle = import_requests(&source).unwrap();
+        let template = &bundle.requests[0].template;
+        assert_eq!(
+            template.request.url,
+            "https://example.test:8443/users/{id}/:literal?q=/:id#/:id"
+        );
+        assert_eq!(template.request.path_variables["id"], "{{user_id}}");
+        let exported = export_request(InterchangeFormat::OpenApi, "User", template).unwrap();
+        assert_eq!(
+            import_requests(&exported).unwrap().requests[0]
+                .template
+                .request,
+            template.request
+        );
     }
 
     #[test]
@@ -594,8 +643,16 @@ mod tests {
             }
         }]));
         let bundle = import_requests(&source).unwrap();
-        assert!(bundle.warnings.iter().any(|warning| warning.contains("query descriptions")));
-        assert_eq!(bundle.requests[0].template.request.query_params[0], QueryParamEntry::new("limit", "25"));
+        assert!(
+            bundle
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("query descriptions"))
+        );
+        assert_eq!(
+            bundle.requests[0].template.request.query_params[0],
+            QueryParamEntry::new("limit", "25")
+        );
     }
 
     #[test]
@@ -640,7 +697,7 @@ paths:
         assert_eq!(bundle.source_format, "Swagger 2.0");
         assert_eq!(bundle.collections[0].requests[0].1, vec!["Users"]);
         let request = &bundle.requests[0].template.request;
-        assert_eq!(request.url, "https://example.test/v1/users/{{id}}?q=a%26b");
+        assert_eq!(request.url, "https://example.test/v1/users/{id}?q=a%26b");
         assert_eq!(
             serde_json::from_str::<Value>(&request.body).unwrap(),
             json!({"name":"Ada"})

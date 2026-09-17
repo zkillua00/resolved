@@ -65,6 +65,7 @@ impl ApiTester {
                             .px_4()
                             .children([
                                 format!("Params ({query_param_count})"),
+                                format!("Path Variables ({})", self.path_variables.len()),
                                 format!("Headers ({header_count})"),
                                 "Body".to_owned(),
                                 "Pre-request".to_owned(),
@@ -86,7 +87,10 @@ impl ApiTester {
                     .bg(
                         if matches!(
                             self.request_pane,
-                            RequestPane::Params | RequestPane::Headers | RequestPane::Cookies
+                            RequestPane::Params
+                                | RequestPane::PathVariables
+                                | RequestPane::Headers
+                                | RequestPane::Cookies
                         ) {
                             cx.api_surface_low()
                         } else {
@@ -103,6 +107,13 @@ impl ApiTester {
                     })
                     .when(self.request_pane == RequestPane::Params, |this| {
                         this.child(self.render_query_params_editor(cx))
+                    })
+                    .when(self.request_pane == RequestPane::PathVariables, |this| {
+                        this.child(path_variables_editor::render_path_variables_editor(
+                            &self.path_variables,
+                            "path-variable-rows".into(),
+                            cx,
+                        ))
                     })
                     .when(self.request_pane == RequestPane::Headers, |this| {
                         this.child(self.render_headers_editor(cx))

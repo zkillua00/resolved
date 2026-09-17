@@ -6,6 +6,7 @@ declare namespace ResolvedSnippet {
   interface Request {
     readonly method: Resolved.HttpMethod;
     readonly url: string;
+    readonly pathVariables: Readonly<Record<string, string>>;
     readonly body: string;
     readonly bodyMode: Resolved.BodyMode;
     readonly rawBodyLanguage: Resolved.RawBodyLanguage;

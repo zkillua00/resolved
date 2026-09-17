@@ -352,6 +352,11 @@ fn request_sensitive_values(
     include_unshared: bool,
 ) -> Vec<String> {
     let mut known_secrets = sensitive_values.to_vec();
+    for (name, value) in &request.path_variables {
+        if is_sensitive_field(name) && !value.is_empty() {
+            known_secrets.push(value.clone());
+        }
+    }
     for header in &request.headers {
         if (is_sensitive_header(&header.name) || include_unshared && !header.shared)
             && !header.value.is_empty()
@@ -381,6 +386,18 @@ fn redact_request_with_known_secrets(
 ) -> RequestDraft {
     let mut redacted = request.clone();
 
+    redacted.path_variables = redacted
+        .path_variables
+        .into_iter()
+        .map(|(name, value)| {
+            let value = if is_sensitive_field(&name) {
+                REDACTED_VALUE.to_owned()
+            } else {
+                redact_secret_values(&value, known_secrets)
+            };
+            (redact_secret_values(&name, known_secrets), value)
+        })
+        .collect();
     redacted.query_params = redacted
         .query_params
         .into_iter()
@@ -549,7 +566,7 @@ fn is_sensitive_header(name: &str) -> bool {
         || normalized.ends_with("-api-key")
 }
 
-fn is_sensitive_field(name: &str) -> bool {
+pub(super) fn is_sensitive_field(name: &str) -> bool {
     let normalized = name.trim().to_ascii_lowercase().replace('-', "_");
     matches!(
         normalized.as_str(),
@@ -586,6 +603,51 @@ mod tests {
             body: br#"{"ok":true}"#.to_vec().into(),
             duration: Duration::from_millis(42),
         }
+    }
+
+    #[test]
+    fn history_redacts_local_values_in_unresolved_and_resolved_snapshots() {
+        let mut request = RequestDraft::new("GET", "https://host/{id}");
+        request
+            .path_variables
+            .insert("id".into(), "private ~/".into());
+        request
+            .path_variables
+            .insert("access_token".into(), "credential".into());
+        let redacted = redact_request(&request, &["private ~/".into()]);
+        assert_eq!(redacted.path_variables["id"], REDACTED_VALUE);
+        assert_eq!(redacted.path_variables["access_token"], REDACTED_VALUE);
+        let resolved = super::super::resolve_request(&request, None).unwrap();
+        let redacted = redact_request(&resolved.request, &["private ~/".into()]);
+        assert!(redacted.path_variables.is_empty());
+        assert!(!redacted.url.contains("private"));
+        let (shared, _) = request_for_shared_history(&request, &["private ~/".into()]);
+        assert_eq!(shared.path_variables["id"], REDACTED_VALUE);
+    }
+
+    #[test]
+    fn resolved_sensitive_path_variables_are_redacted_without_an_environment() {
+        let mut request = RequestDraft::new("GET", "https://host/{access_token}/{access_token}");
+        request
+            .path_variables
+            .insert("access_token".into(), "credential /?#".into());
+        let resolved = super::super::resolve_request(&request, None).unwrap();
+        assert_eq!(resolved.sensitive_values, ["credential /?#"]);
+        assert!(resolved.request.path_variables.is_empty());
+        let redacted = redact_request(&resolved.request, &resolved.sensitive_values);
+        assert!(!redacted.url.contains("credential"));
+        let (shared, _) = request_for_shared_history(&resolved.request, &resolved.sensitive_values);
+        assert!(!shared.url.contains("credential"));
+        let failure = HistoryEntry::failed_with_secrets(
+            &resolved.request,
+            &format!("failed at {}", resolved.request.url),
+            &resolved.sensitive_values,
+        );
+        assert!(
+            !serde_json::to_string(&failure)
+                .unwrap()
+                .contains("credential")
+        );
     }
 
     #[test]
