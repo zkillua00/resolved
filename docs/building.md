@@ -78,6 +78,67 @@ override requires a Developer ID signature and notarization. TypeScript's Apache
 2.0 license and third-party notice are copied to
 `Resolved.app/Contents/Resources/ThirdPartyLicenses/TypeScript-6.0.2/`.
 
+### Signed macOS releases outside the App Store
+
+Developer ID signing and notarization distribute Resolved directly; they do not
+create an App Store listing or submit the app for App Review.
+
+Install a **Developer ID Application** certificate with its private key in your
+login keychain. Store notarization credentials once, interactively:
+
+```sh
+xcrun notarytool store-credentials resolved-notary --team-id YOUR_TEAM_ID
+```
+
+Enter your Developer Apple ID and an app-specific password at the prompts.
+Create that password at [Apple Account](https://account.apple.com/) under
+Sign-In and Security → App-Specific Passwords. Do not put passwords in source
+files or command history. An existing API-key-backed notarytool profile also
+works; select it with `RESOLVED_NOTARY_PROFILE`.
+
+Then each local direct-download release uses:
+
+```sh
+scripts/release-macos.sh
+```
+
+The wrapper selects the sole installed Developer ID Application identity; if
+there are multiple, set `API_TESTER_CODESIGN_IDENTITY` to the desired certificate
+SHA-1 identity. It defaults to the `resolved-notary` Keychain profile. Set
+`RESOLVED_NOTARY_KEYCHAIN` only when the profile lives in a custom keychain.
+The release checks credentials before compiling, signs with hardened runtime
+and a secure timestamp, submits to Apple, waits for explicit acceptance, staples
+the app, recreates its ZIP, and checks the extracted app with stapler and
+Gatekeeper. No additional sandbox or Keychain entitlements are granted by this
+workflow. Biometric storage still requires its separate authorized provisioning.
+
+Submission responses are saved under `target/notarization/`. The default wait
+is 30 minutes (`RESOLVED_NOTARY_TIMEOUT` overrides it). If Apple rejects a
+submission, retrieve details with `xcrun notarytool log SUBMISSION_ID
+--keychain-profile resolved-notary`. A timeout stops packaging; the submission
+may still be processing at Apple, so inspect it before submitting again.
+
+For GitHub nightly and version releases, configure these repository Actions
+secrets before enabling the updated workflow:
+
+| Secret | Value |
+| --- | --- |
+| `MACOS_CERTIFICATE_P12_BASE64` | Base64 of the password-protected `.p12` exported from Keychain Access → My Certificates, including the private key |
+| `MACOS_CERTIFICATE_PASSWORD` | Password chosen when exporting the `.p12` |
+| `MACOS_SIGNING_IDENTITY` | Developer ID Application certificate SHA-1 identity from `security find-identity -v -p codesigning` |
+| `APPLE_ID` | Developer account login email |
+| `APPLE_TEAM_ID` | Developer team ID |
+| `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password for that Apple ID |
+
+Credentials are imported into a temporary runner keychain, validated, and removed
+in an always-run cleanup step. Missing credentials fail releases; cache warm-up
+jobs do not need secrets. Both macOS architectures are signed and notarized.
+The standalone MCP ZIP is also submitted to Apple; bare executables cannot be
+stapled, so their first Gatekeeper check requires network access. The desktop ZIP
+contains a stapled app for offline verification.
+
+See [Apple's notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow).
+
 ### Linux
 
 Linux runs through X11, including XWayland on Wayland desktops, because Wry's

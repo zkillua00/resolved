@@ -11,5 +11,6 @@ concurrency:
 jobs:
   build:
     uses: ./.github/workflows/build-release.yml
+    secrets: inherit
     with:
       channel: nightly

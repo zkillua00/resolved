@@ -143,6 +143,16 @@ jobs:
         run: |
           & ./scripts/cargo.ps1 build --release --locked
           if ($LASTEXITCODE -ne 0) { throw 'Windows cache warm-up failed' }
+      - name: Configure Developer ID signing and notarization
+        if: runner.os == 'macOS' && !inputs.cache-only
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: scripts/setup-macos-signing-ci.sh
       - name: Build and package macOS
         if: runner.os == 'macOS' && !inputs.cache-only
         env:
@@ -206,6 +216,13 @@ jobs:
           ARCH: ${{ matrix.arch }}
         shell: bash
         run: python scripts/package-mcp.py "$PLATFORM" "$ARCH" "$RESOLVED_BUILD_VERSION"
+      - name: Remove macOS signing credentials
+        if: always() && runner.os == 'macOS' && !inputs.cache-only
+        run: |
+          if [ -f "$RUNNER_TEMP/resolved-signing.keychain-db" ]; then
+            security delete-keychain "$RUNNER_TEMP/resolved-signing.keychain-db"
+          fi
+          rm -f "$RUNNER_TEMP/resolved-signing.p12"
       - uses: actions/upload-artifact@v4
         if: ${{ !inputs.cache-only }}
         with:
@@ -244,11 +261,11 @@ jobs:
 
           Commit: $RELEASE_SHA
 
-          macOS: Apple Silicon and Intel application archives, ad-hoc signed (not notarized).
+          macOS: Apple Silicon and Intel application archives, Developer ID signed and Apple notarized, with stapled tickets for direct download outside the App Store.
           Windows: x64 MSIX with a per-build self-signed public certificate. Import the matching .cer into Local Machine / Trusted People before installing. Windows may require the WebView2 Evergreen Runtime.
           Linux: ARM64 and x64 Debian/RPM packages and tar.xz archives built on Ubuntu 24.04. Install packages with a package manager, or extract an archive and run its resolved launcher. Archives bundle application libraries and WebKit helpers; compatible host libraries, X11/XWayland and Vulkan are still required.
 
-          MCP: Standalone resolved-mcp archives for all five targets. Extract the adapter and configure your MCP client with its absolute path (resolved-mcp.exe on Windows). Run the matching Resolved desktop with Settings -> MCP enabled.
+          MCP: Standalone resolved-mcp archives for all five targets. Extract the adapter and configure your MCP client with its absolute path (resolved-mcp.exe on Windows). Run the matching Resolved desktop with Settings -> MCP enabled. macOS adapters are Developer ID signed and notarized; their first Gatekeeper verification requires internet access because bare executables cannot carry stapled tickets.
 
           Verify downloads against SHA256SUMS.txt.
           EOF

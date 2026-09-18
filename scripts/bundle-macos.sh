@@ -19,8 +19,6 @@ case "$profile" in
         ;;
 esac
 
-"$project_dir/scripts/cargo.sh" build --locked --profile "$cargo_profile"
-
 bundle_dir="$project_dir/target/$binary_dir/Resolved.app"
 contents_dir="$bundle_dir/Contents"
 executable_dir="$contents_dir/MacOS"
@@ -31,6 +29,18 @@ build_number="${API_TESTER_BUILD_NUMBER:-}"
 codesign_identity="${API_TESTER_CODESIGN_IDENTITY:--}"
 codesign_entitlements="${API_TESTER_CODESIGN_ENTITLEMENTS:-}"
 provisioning_profile="${API_TESTER_PROVISIONING_PROFILE:-}"
+notary_profile="${RESOLVED_NOTARY_PROFILE:-}"
+if [ -n "$notary_profile" ]; then
+    if [ "$profile" != release ] || [ "$codesign_identity" = "-" ]; then
+        echo "error: notarization requires a release build and Developer ID signing identity" >&2
+        exit 2
+    fi
+    set -- --keychain-profile "$notary_profile"
+    if [ -n "${RESOLVED_NOTARY_KEYCHAIN:-}" ]; then
+        set -- "$@" --keychain "$RESOLVED_NOTARY_KEYCHAIN"
+    fi
+    xcrun notarytool history "$@" >/dev/null
+fi
 
 if [ -n "$codesign_entitlements" ] || [ -n "$provisioning_profile" ]; then
     if [ "$codesign_identity" = "-" ]; then
@@ -68,6 +78,8 @@ if [ "$build_number" -lt 1 ]; then
     exit 2
 fi
 
+"$project_dir/scripts/cargo.sh" build --locked --profile "$cargo_profile"
+
 install -d "$executable_dir" "$resources_dir" "$typescript_notices_dir"
 install -m 755 "$project_dir/target/$binary_dir/api-tester" "$executable_dir/api-tester"
 install -m 644 "$project_dir/macos/Resolved.icns" "$resources_dir/Resolved.icns"
@@ -95,12 +107,16 @@ fi
 # are regenerated locally by macOS and cannot be cleared, so the archive step
 # below also excludes all source extended attributes and ACLs.
 xattr -cr "$bundle_dir"
-if [ -n "$codesign_entitlements" ]; then
-    codesign --force --deep --sign "$codesign_identity" \
-        --entitlements "$codesign_entitlements" "$bundle_dir"
-else
-    codesign --force --deep --sign "$codesign_identity" "$bundle_dir"
+set -- --force --sign "$codesign_identity"
+if [ "$codesign_identity" != "-" ]; then
+    set -- "$@" --options runtime --timestamp
 fi
+if [ -n "$codesign_entitlements" ]; then
+    set -- "$@" --entitlements "$codesign_entitlements"
+fi
+# This bundle contains one Mach-O executable and resources, with no nested code.
+codesign "$@" "$bundle_dir"
+codesign --verify --deep --strict "$bundle_dir"
 
 echo "$bundle_dir ($package_version, build $build_number)"
 
@@ -123,6 +139,16 @@ if [ "$profile" = "release" ]; then
         "$bundle_dir" \
         "$archive_staging_path"
 
+    if [ -n "$notary_profile" ]; then
+        "$project_dir/scripts/notarize-macos.sh" "$archive_staging_path"
+        xcrun stapler staple "$bundle_dir"
+        xcrun stapler validate "$bundle_dir"
+        # ZIPs cannot be stapled: repackage the app containing the ticket.
+        rm "$archive_staging_path"
+        ditto -c -k --norsrc --noextattr --noacl --keepParent \
+            "$bundle_dir" "$archive_staging_path"
+    fi
+
     # Exercise the same archive boundary recipients use. A locally valid bundle
     # is not sufficient if extraction drops the main executable's +x bits.
     install -d "$archive_check_dir"
@@ -139,6 +165,11 @@ if [ "$profile" = "release" ]; then
         exit 1
     fi
     codesign --verify --deep --strict "$archived_bundle_dir"
+
+    if [ -n "$notary_profile" ]; then
+        xcrun stapler validate "$archived_bundle_dir"
+        spctl --assess --type execute --verbose=2 "$archived_bundle_dir"
+    fi
 
     mv -f "$archive_staging_path" "$archive_path"
     trap - EXIT HUP INT TERM
