@@ -444,31 +444,19 @@ impl ApiTester {
                     .py_3()
                     .gap_1()
                     .rounded_md()
-                    .border_l_2()
-                    .border_color(if selected {
-                        cx.theme().primary
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .bg(if selected {
-                        cx.theme().primary.opacity(0.12)
-                    } else {
-                        gpui::transparent_black()
-                    })
+                    .when(selected, |row| row.bg(cx.theme().sidebar_accent))
                     .when(!locked, |row| {
                         row.cursor_pointer()
-                            .hover(|style| style.bg(cx.api_surface_high()))
+                            .hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.62)))
                     })
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(Icon::new(IconName::Globe).with_size(px(14.)).text_color(
-                                if selected {
-                                    cx.theme().primary
-                                } else {
-                                    cx.theme().muted_foreground
-                                },
-                            ))
+                            .child(
+                                Icon::new(IconName::Globe)
+                                    .with_size(px(14.))
+                                    .text_color(cx.theme().muted_foreground),
+                            )
                             .child(
                                 div()
                                     .min_w_0()
