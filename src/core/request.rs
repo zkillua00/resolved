@@ -571,7 +571,8 @@ pub enum RequestError {
     ProxyDestinationBlocked {
         request: String,
         address: String,
-        reason: String,
+        /// Safe display text, separate from the exact URL needed by allowlisting.
+        diagnostic: String,
     },
     Transport(reqwest::Error),
     Upstream(String),
@@ -619,13 +620,8 @@ impl fmt::Display for RequestError {
                 )
             }
             Self::ProxyDestinationBlocked {
-                request,
-                address,
-                reason,
-            } => write!(
-                formatter,
-                "proxy blocked {request} because {address} is not allowed ({reason})"
-            ),
+                diagnostic, ..
+            } => formatter.write_str(diagnostic),
             Self::Transport(error) => write!(formatter, "{error}"),
             Self::Upstream(message) => formatter.write_str(message),
             Self::Cancelled => formatter.write_str("request cancelled"),

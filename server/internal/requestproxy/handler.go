@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -23,6 +23,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/adaptor"
+	"github.com/gofiber/fiber/v3/middleware/requestid"
 	gorillaWebsocket "github.com/gorilla/websocket"
 	"github.com/valyala/fasthttp"
 )
@@ -44,12 +45,15 @@ type websocketExecutionContext struct {
 	workspaceID  string
 	collectionID string
 	snapshot     executionlimits.Snapshot
+	requestID    string
 }
 
 type websocketOpenResponse struct {
-	Type        string `json:"type"`
-	Message     string `json:"message,omitempty"`
-	Subprotocol string `json:"subprotocol,omitempty"`
+	Type        string             `json:"type"`
+	Message     string             `json:"message,omitempty"`
+	Subprotocol string             `json:"subprotocol,omitempty"`
+	RequestID   string             `json:"request_id,omitempty"`
+	Error       *httpkit.ErrorBody `json:"error,omitempty"`
 }
 
 type ExecuteRequest struct {
@@ -89,7 +93,7 @@ func (request *ExecuteRequest) BindFiber(c fiber.Ctx) error {
 	request.WorkspaceID = c.Params("workspace_id")
 	snapshot, ok := c.Context().Value(executionSnapshotKey{}).(executionSnapshot)
 	if !ok {
-		return fiber.ErrInternalServerError
+		return problem.Wrap(nil, "execution context unavailable")
 	}
 	var reader io.Reader = c.Request().BodyStream()
 	if reader == nil {
@@ -97,7 +101,8 @@ func (request *ExecuteRequest) BindFiber(c fiber.Ctx) error {
 	}
 	body, tooLarge, err := readLimited(reader, snapshot.snapshot.Effective["http.envelope_bytes"])
 	if err != nil {
-		return err
+		return executionProblem(problem.KindBadRequest, "invalid_body",
+			"could not read the complete execution envelope", "binding", "body_read_failed", nil)
 	}
 	if tooLarge {
 		return fiber.NewError(fiber.StatusRequestEntityTooLarge, "execution envelope exceeds http.envelope_bytes")
@@ -116,13 +121,16 @@ func (request *ExecuteRequest) BindFiber(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusRequestEntityTooLarge, "decoded execution envelope exceeds http.envelope_bytes")
 	}
 	if errors.Is(err, fasthttp.ErrContentEncodingUnsupported) {
-		return fiber.ErrUnsupportedMediaType
+		return fiber.NewError(fiber.StatusUnsupportedMediaType,
+			"execution envelope uses an unsupported Content-Encoding; send a supported encoding or an uncompressed JSON body")
 	}
 	if err != nil {
-		return fiber.ErrBadRequest
+		return executionProblem(problem.KindBadRequest, "invalid_body",
+			"could not decompress the execution envelope", "binding", "invalid_content_encoding",
+			map[string]string{"body": "expected a body matching Content-Encoding; received invalid or truncated compressed data"})
 	}
-	if err := json.Unmarshal(body, request); err != nil {
-		return fiber.ErrBadRequest
+	if err := decodeExecutionDescriptor(body, request, "binding"); err != nil {
+		return err
 	}
 	if request.CollectionID != "" && request.CollectionID != snapshot.collectionID {
 		return invalidField("collection_id", "must match the query scope")
@@ -286,6 +294,7 @@ func (h *Handler) WebSocketController() fiber.Handler {
 			workspaceID:  workspaceID,
 			collectionID: collectionID,
 			snapshot:     snapshot,
+			requestID:    requestid.FromContext(c),
 		})
 		c.SetContext(ctx)
 		return adaptor.HTTPHandlerWithContext(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -303,12 +312,20 @@ func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	route, ok := fiberContext.Value(websocketExecutionContextKey{}).(websocketExecutionContext)
 	if !ok {
-		http.Error(w, "execution context unavailable", http.StatusInternalServerError)
+		writeWebSocketHTTPError(w, "", problem.Wrap(nil, "execution context unavailable"))
 		return
 	}
 	outer, err := (&gorillaWebsocket.Upgrader{
 		HandshakeTimeout: limitDuration(route.snapshot.Effective["websocket.handshake_timeout_ms"]),
 		CheckOrigin:      func(*http.Request) bool { return true },
+		Error: func(w http.ResponseWriter, _ *http.Request, status int, _ error) {
+			if status >= http.StatusInternalServerError {
+				writeWebSocketHTTPError(w, route.requestID, problem.Wrap(nil, "WebSocket upgrade unavailable"), status)
+				return
+			}
+			writeWebSocketHTTPError(w, route.requestID, executionProblem(problem.KindBadRequest, "websocket_upgrade_failed",
+				"expected a WebSocket upgrade request with version 13 and a valid key", "websocket_opening", "invalid_upgrade", nil), status)
+		},
 	}).Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -322,26 +339,40 @@ func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	messageType, payload, err := outer.ReadMessage()
 	_ = outer.SetReadDeadline(time.Time{})
 	if exceeds(route.snapshot.Effective["websocket.opening_bytes"], int64(len(payload))) {
+		writeWebSocketOpenError(outer, executionProblem(problem.KindPayloadTooLarge, "payload_too_large", "WebSocket execution descriptor exceeds websocket.opening_bytes", "websocket_opening", "opening_too_large", nil), route.requestID)
 		return
 	}
 	if err != nil || messageType != gorillaWebsocket.TextMessage {
-		_ = outer.WriteJSON(websocketOpenResponse{Type: "error", Message: "the first frame must be a WebSocket execution descriptor"})
+		reason, message := "unexpected_frame", "expected a text frame containing a WebSocket execution descriptor; received a binary frame"
+		if err != nil {
+			reason, message = "opening_read_failed", "could not read the WebSocket execution descriptor"
+			var networkError net.Error
+			if errors.As(err, &networkError) && networkError.Timeout() {
+				reason, message = "opening_timeout", "timed out waiting for a text frame containing the WebSocket execution descriptor"
+			}
+		}
+		writeWebSocketOpenError(outer, executionProblem(problem.KindBadRequest, "invalid_body", message, "websocket_opening", reason, nil), route.requestID)
 		return
 	}
 	var input WebSocketOpenInput
-	if err := json.Unmarshal(payload, &input); err != nil {
-		_ = outer.WriteJSON(websocketOpenResponse{Type: "error", Message: "the WebSocket execution descriptor is invalid"})
+	if err := decodeExecutionDescriptor(payload, &input, "websocket_opening"); err != nil {
+		writeWebSocketOpenError(outer, err, route.requestID)
+		return
+	}
+	if failures := httpkit.DefaultValidation(&input); len(failures) > 0 {
+		writeWebSocketOpenError(outer, executionProblem(problem.KindInvalid, "validation_failed",
+			"request validation failed", "validation", "invalid_field", httpkit.ValidationFields(failures)), route.requestID)
 		return
 	}
 	if input.CollectionID != "" && input.CollectionID != route.collectionID {
-		_ = outer.WriteJSON(websocketOpenResponse{Type: "error", Message: "collection_id must match the query scope"})
+		writeWebSocketOpenError(outer, invalidField("collection_id", "must match the query scope"), route.requestID)
 		return
 	}
 	input.CollectionID = route.collectionID
 	startedAt := time.Now()
 	upstream, target, err := h.service.OpenWebSocket(fiberContext, route.actor, route.workspaceID, input)
 	if err != nil {
-		writeWebSocketOpenError(outer, err)
+		writeWebSocketOpenError(outer, err, route.requestID)
 		return
 	}
 	defer upstream.Close()
@@ -365,14 +396,33 @@ func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	<-errors
 }
 
-func writeWebSocketOpenError(connection *gorillaWebsocket.Conn, err error) {
-	var requestError *problem.Error
-	if !errors.As(err, &requestError) || requestError.Kind == problem.KindInternal {
-		log.Printf("open proxied websocket: %v", err)
-		_ = connection.WriteJSON(websocketOpenResponse{Type: "error", Message: "the server could not open the WebSocket connection"})
-		return
+func writeWebSocketOpenError(connection *gorillaWebsocket.Conn, err error, requestID string) {
+	response := httpkit.NewErrorResponse[any](err)
+	httpkit.LogInternalError(response, requestID)
+	if response.Error.Phase == "" {
+		response.Error.Phase = "websocket_opening"
 	}
-	_ = connection.WriteJSON(websocketOpenResponse{Type: "error", Message: requestError.Message})
+	if response.Error.Reason == "" {
+		response.Error.Reason = response.Error.Code
+	}
+	_ = connection.WriteJSON(websocketOpenResponse{Type: "error", Message: response.Error.Message, RequestID: requestID, Error: response.Error})
+}
+
+func writeWebSocketHTTPError(w http.ResponseWriter, requestID string, err error, statusOverride ...int) {
+	response := httpkit.NewErrorResponse[any](err)
+	httpkit.LogInternalError(response, requestID)
+	response.SetRequestID(requestID)
+	response.Error.Phase = "websocket_opening"
+	if response.Error.Reason == "" {
+		response.Error.Reason = response.Error.Code
+	}
+	w.Header().Set("Content-Type", "application/json")
+	status := response.StatusCode()
+	if len(statusOverride) > 0 {
+		status = statusOverride[0]
+	}
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 func bridgeWebSocketControlFrames(source, destination *gorillaWebsocket.Conn) {

@@ -23,6 +23,8 @@ type Error struct {
 	Code    string
 	Message string
 	Fields  map[string]string
+	Phase   string
+	Reason  string
 	Cause   error
 }
 

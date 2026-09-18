@@ -4,15 +4,17 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
-	"net/textproto"
 	"net/url"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	gorillaWebsocket "github.com/gorilla/websocket"
@@ -62,9 +64,9 @@ type ExecuteInput struct {
 }
 
 type WebSocketOpenInput struct {
-	RequestID    string   `json:"request_id"`
+	RequestID    string   `json:"request_id" validate:"omitempty,uuid"`
 	CollectionID string   `json:"collection_id,omitempty"`
-	URL          string   `json:"url"`
+	URL          string   `json:"url" validate:"required"`
 	Headers      []Header `json:"headers"`
 }
 
@@ -578,8 +580,13 @@ func (s *Service) OpenWebSocket(
 	dialer.Proxy = webSocketProxySelector(transport.Proxy)
 	dialer.NetDialContext = transport.DialContext
 	dialer.TLSClientConfig = webSocketTLSClientConfig(transport.TLSClientConfig)
-	connection, _, err := dialer.DialContext(request.Context(), request.URL.String(), request.Header)
+	connection, response, err := dialer.DialContext(request.Context(), request.URL.String(), request.Header)
 	if err != nil {
+		if response != nil && errors.Is(err, gorillaWebsocket.ErrBadHandshake) {
+			return nil, nil, executionProblem(problem.KindBadGateway, "proxy_websocket_handshake_failed",
+				fmt.Sprintf("expected HTTP 101 Switching Protocols with valid WebSocket upgrade headers; received HTTP %d", response.StatusCode),
+				"upstream", "invalid_handshake", nil)
+		}
 		return nil, nil, proxyTransportError(err)
 	}
 	return connection, &originalTarget, nil
@@ -783,13 +790,16 @@ func normalizedHostname(hostname string) string {
 }
 
 func applyHeaders(request *http.Request, headers []Header) error {
-	for _, header := range headers {
+	for index, header := range headers {
 		name := strings.TrimSpace(header.Name)
 		if name == "" {
 			continue
 		}
-		if textproto.CanonicalMIMEHeaderKey(name) == "" || strings.ContainsAny(header.Value, "\r\n") {
-			return invalidField("headers", fmt.Sprintf("contains an invalid %q header", header.Name))
+		if !validHeaderName(name) {
+			return invalidField(fmt.Sprintf("headers[%d].name", index), "expected a valid HTTP header name")
+		}
+		if !validHeaderValue(header.Value) {
+			return invalidField(fmt.Sprintf("headers[%d].value", index), "expected a valid HTTP header value without control characters")
 		}
 		switch strings.ToLower(name) {
 		case "connection", "proxy-connection", "keep-alive", "transfer-encoding", "upgrade", "te", "trailer":
@@ -809,6 +819,24 @@ func applyHeaders(request *http.Request, headers []Header) error {
 	return nil
 }
 
+func validHeaderName(name string) bool {
+	for _, char := range name {
+		if char > 127 || !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || strings.ContainsRune("!#$%&'*+-.^_`|~", char)) {
+			return false
+		}
+	}
+	return name != ""
+}
+
+func validHeaderValue(value string) bool {
+	for _, char := range []byte(value) {
+		if char == 127 || char < 32 && char != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
 func responseHeaders(headers http.Header) []Header {
 	result := make([]Header, 0, len(headers))
 	for name, values := range headers {
@@ -822,22 +850,81 @@ func responseHeaders(headers http.Header) []Header {
 func proxyTransportError(err error) error {
 	var blocked *blockedDestinationError
 	if errors.As(err, &blocked) {
-		return problem.WithFields(
+		return executionProblem(problem.KindInvalid,
 			"proxy_destination_blocked",
 			"the proxied request was blocked because its destination is not allowed",
+			"upstream", "destination_blocked",
 			map[string]string{
 				"request": blocked.Request, "address": blocked.Address, "reason": blocked.Reason,
 			},
 		)
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return problem.New(problem.KindGatewayTimeout, "proxy_timeout", "the proxied request timed out")
+		return executionProblem(problem.KindGatewayTimeout, "proxy_timeout", "the proxied request timed out", "upstream", "timeout", nil)
 	}
 	var networkError net.Error
 	if errors.As(err, &networkError) && networkError.Timeout() {
-		return problem.New(problem.KindGatewayTimeout, "proxy_timeout", "the proxied request timed out")
+		return executionProblem(problem.KindGatewayTimeout, "proxy_timeout", "the proxied request timed out", "upstream", "timeout", nil)
 	}
-	return problem.New(problem.KindBadGateway, "proxy_request_failed", fmt.Sprintf("the proxied request failed: %v", err))
+	if errors.Is(err, context.Canceled) {
+		return upstreamTransportProblem(err, "canceled", "the proxied request was canceled")
+	}
+	var dnsError *net.DNSError
+	if errors.As(err, &dnsError) {
+		if dnsError.IsNotFound {
+			return upstreamTransportProblem(err, "dns_not_found", "the destination hostname was not found")
+		}
+		if dnsError.IsTemporary {
+			return upstreamTransportProblem(err, "dns_temporary", "the destination resolver encountered a temporary problem")
+		}
+		return upstreamTransportProblem(err, "dns_failed", "could not resolve the destination hostname")
+	}
+	var unknownAuthority x509.UnknownAuthorityError
+	var hostnameError x509.HostnameError
+	var invalidCertificate x509.CertificateInvalidError
+	switch {
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return upstreamTransportProblem(err, "connection_refused", "the upstream connection was refused")
+	case errors.Is(err, syscall.ECONNRESET):
+		return upstreamTransportProblem(err, "connection_reset", "the upstream connection was reset")
+	case errors.Is(err, syscall.ECONNABORTED):
+		return upstreamTransportProblem(err, "connection_aborted", "the upstream connection was aborted")
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return upstreamTransportProblem(err, "unexpected_eof", "the upstream connection ended before the response was complete")
+	case errors.Is(err, io.EOF):
+		return upstreamTransportProblem(err, "eof", "the upstream connection closed without completing the request")
+	case errors.As(err, &unknownAuthority):
+		return upstreamTransportProblem(err, "tls_untrusted", "the upstream TLS certificate is not trusted")
+	case errors.As(err, &hostnameError):
+		return upstreamTransportProblem(err, "tls_hostname_mismatch", "the upstream TLS certificate does not match the destination hostname")
+	case errors.As(err, &invalidCertificate):
+		if invalidCertificate.Reason == x509.Expired {
+			return upstreamTransportProblem(err, "tls_certificate_expired", "the upstream TLS certificate has expired or is not yet valid")
+		}
+		return upstreamTransportProblem(err, "tls_certificate_invalid", "the upstream TLS certificate is invalid")
+	}
+	var certificateError *tls.CertificateVerificationError
+	if errors.As(err, &certificateError) {
+		return upstreamTransportProblem(err, "tls_certificate_invalid", "the upstream TLS certificate could not be verified; check its trust chain and hostname")
+	}
+	var recordError tls.RecordHeaderError
+	if errors.As(err, &recordError) {
+		return upstreamTransportProblem(err, "invalid_tls_response", "expected a TLS handshake; the upstream did not provide a valid TLS record")
+	}
+	return upstreamTransportProblem(err, "connection_failed",
+		"the upstream connection failed; check destination availability, TLS configuration, and proxy settings")
+}
+
+func upstreamTransportProblem(err error, reason, message string) error {
+	var fields map[string]string
+	var operation *net.OpError
+	if errors.As(err, &operation) {
+		switch operation.Op {
+		case "dial", "read", "write":
+			fields = map[string]string{"operation": operation.Op}
+		}
+	}
+	return executionProblem(problem.KindBadGateway, "proxy_request_failed", message, "upstream", reason, fields)
 }
 
 // recordExecution writes an audit entry for a proxied request: actor, method,
@@ -883,9 +970,10 @@ func proxyResponseTooLarge() error {
 }
 
 func invalidField(field, message string) error {
-	return problem.WithFields(
+	return executionProblem(problem.KindInvalid,
 		"validation_failed",
 		"request validation failed",
+		"validation", "invalid_field",
 		map[string]string{field: message},
 	)
 }

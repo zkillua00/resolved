@@ -14,6 +14,8 @@ type ErrorBody struct {
 	Code    string            `json:"code"`
 	Message string            `json:"message"`
 	Fields  map[string]string `json:"fields,omitempty"`
+	Phase   string            `json:"phase,omitempty"`
+	Reason  string            `json:"reason,omitempty"`
 }
 
 type Envelope[ReturnType any] struct {
@@ -28,6 +30,14 @@ type Envelope[ReturnType any] struct {
 func (response *Envelope[ReturnType]) StatusCode() int        { return response.status }
 func (response *Envelope[ReturnType]) SetRequestID(id string) { response.RequestID = id }
 func (response *Envelope[ReturnType]) internalError() error   { return response.internal }
+
+// LogInternalError is shared by HTTP and WebSocket writers; internal causes
+// belong in the server log, never in a public error envelope.
+func LogInternalError(response interface{ internalError() error }, requestID string) {
+	if err := response.internalError(); err != nil {
+		slog.Error("request failed", "request_id", requestID, "error", err)
+	}
+}
 
 func NewSuccessResponse[ReturnType any](status int, data ReturnType) *Envelope[ReturnType] {
 	return &Envelope[ReturnType]{
@@ -48,11 +58,13 @@ func NewErrorResponse[ReturnType any](err error) *Envelope[ReturnType] {
 }
 
 func NewValidationErrorResponse[ReturnType any](fields map[string]string) *Envelope[ReturnType] {
-	return NewErrorResponse[ReturnType](problem.WithFields(
+	err := problem.WithFields(
 		"validation_failed",
 		"request validation failed",
 		fields,
-	))
+	)
+	err.Phase, err.Reason = "validation", "invalid_field"
+	return NewErrorResponse[ReturnType](err)
 }
 
 func ErrorHandler(c fiber.Ctx, err error) error {
@@ -62,9 +74,7 @@ func ErrorHandler(c fiber.Ctx, err error) error {
 func sendResponse[ReturnType any](c fiber.Ctx, response Response[ReturnType]) error {
 	requestID := requestid.FromContext(c)
 	response.SetRequestID(requestID)
-	if err := response.internalError(); err != nil {
-		slog.Error("request failed", "request_id", requestID, "error", err)
-	}
+	LogInternalError(response, requestID)
 	return c.Status(response.StatusCode()).JSON(response)
 }
 
@@ -79,6 +89,8 @@ func responseError(err error) (int, ErrorBody, error) {
 			Code:    appError.Code,
 			Message: appError.Message,
 			Fields:  appError.Fields,
+			Phase:   appError.Phase,
+			Reason:  appError.Reason,
 		}, nil
 	}
 

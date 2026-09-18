@@ -21,6 +21,10 @@ use zeroize::Zeroizing;
 use super::{
     BodyFieldKind, BodyMode, Collection, Environment, RequestDraft, RequestError, ResourceCreator,
     ResponseData, Workspace,
+    execution_diagnostics::{
+        ErrorEnvelope, ResponseContext, ServerError, invalid_response, json_error_reason,
+        transport_failure,
+    },
     execution_limits::ExecutionLimits,
     request::ResponseHeader,
     template::RequestTemplate,
@@ -32,6 +36,9 @@ const LOGIN_RESPONSE_LIMIT_BYTES: usize = 64 * 1024;
 const WORKSPACE_RESPONSE_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(20);
 const PROXY_POLICY_RESPONSE_LIMIT_BYTES: usize = 64 * 1024;
+const PROXY_RESPONSE_SCHEMA: &str = r#"HTTP 2xx with JSON {"success":true,"data":{"status":number,"status_text":string,"http_version":string,"final_url":string,"headers":[{"name":string,"value":string}],"body_base64":base64 string,"duration_micros":number}}, or {"success":false,"error":{"code":string,"message":string,"fields":object}}"#;
+const PROXY_POLICY_SCHEMA: &str = r#"HTTP 2xx with JSON {"success":true,"data":{"mode":"local"|"server","limits":object}}, or {"success":false,"error":{"code":string,"message":string,"fields":object}}"#;
+const PROXY_ALLOWLIST_SCHEMA: &str = r#"HTTP 2xx with JSON {"success":true,"data":...}, or {"success":false,"error":{"code":string,"message":string,"fields":object}}"#;
 static NEXT_UPSTREAM_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Persisted connection metadata for every self-hosted Resolved server.
@@ -600,14 +607,7 @@ struct LoginData {
     user: LoginUser,
 }
 
-#[derive(Deserialize)]
-struct LoginErrorBody {
-    #[serde(default)]
-    code: String,
-    message: String,
-    #[serde(default)]
-    fields: BTreeMap<String, String>,
-}
+type LoginErrorBody = ServerError;
 
 #[derive(Deserialize)]
 struct WorkspaceEnvelope<T> {
@@ -617,18 +617,7 @@ struct WorkspaceEnvelope<T> {
 }
 
 fn format_upstream_error(error: LoginErrorBody) -> String {
-    let mut fields = error
-        .fields
-        .into_iter()
-        .filter(|(_, message)| !message.trim().is_empty())
-        .map(|(field, message)| format!("{field}: {message}"))
-        .collect::<Vec<_>>();
-    fields.sort();
-    if fields.is_empty() {
-        error.message
-    } else {
-        format!("{} ({})", error.message, fields.join(", "))
-    }
+    error.summary()
 }
 
 pub fn build_upstream_client() -> Result<Client, UpstreamLoginError> {
@@ -708,18 +697,15 @@ pub async fn get_upstream_execution_policy_for_scope(
     if let Some(id) = collection_id {
         endpoint.query_pairs_mut().append_pair("collection_id", id);
     }
-    let mut response = client
+    let response = client
         .get(endpoint)
         .timeout(LOGIN_TIMEOUT)
         .bearer_auth(bearer_token)
         .send()
         .await
-        .map_err(RequestError::Transport)?;
-    if response.status().is_redirection() {
-        return Err(RequestError::Upstream(
-            "the server redirected the request execution policy".to_owned(),
-        ));
-    }
+        .map_err(|error| {
+            RequestError::Upstream(transport_failure("loading proxy execution policy", error))
+        })?;
     let status = response.status();
     // Legacy unscoped callers may probe older servers without a policy route.
     // A scoped 404 can instead mean deleted/inaccessible ancestry and must
@@ -731,44 +717,27 @@ pub async fn get_upstream_execution_policy_for_scope(
             limits: ExecutionLimits::default(),
         });
     }
-    if response
-        .content_length()
-        .is_some_and(|length| length > PROXY_POLICY_RESPONSE_LIMIT_BYTES as u64)
-    {
-        return Err(RequestError::Upstream(
-            "the server returned an oversized request execution policy".to_owned(),
-        ));
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(RequestError::Transport)? {
-        if body.len().saturating_add(chunk.len()) > PROXY_POLICY_RESPONSE_LIMIT_BYTES {
-            return Err(RequestError::Upstream(
-                "the server returned an oversized request execution policy".to_owned(),
-            ));
-        }
-        body.extend_from_slice(&chunk);
-    }
-
-    let envelope: WorkspaceEnvelope<ProxyExecutionPolicy> =
-        serde_json::from_slice(&body).map_err(|error| {
-            RequestError::Upstream(format!(
-                "the server returned an invalid request execution policy: {error}"
-            ))
-        })?;
-    if !status.is_success() || !envelope.success {
-        let message = envelope
-            .error
-            .map(format_upstream_error)
-            .filter(|message| !message.trim().is_empty())
-            .unwrap_or_else(|| format!("could not load server execution policy: HTTP {status}"));
-        return Err(RequestError::Upstream(message));
-    }
-    let policy = envelope.data.ok_or_else(|| {
-        RequestError::Upstream(
-            "the server response did not include its request execution policy".to_owned(),
-        )
+    let (context, body) = read_execution_response(
+        response,
+        Some(PROXY_POLICY_RESPONSE_LIMIT_BYTES),
+        "proxy execution policy",
+        "policy response budget",
+    )
+    .await?;
+    let policy: ProxyExecutionPolicy = decode_execution_envelope(
+        &context,
+        &body,
+        "proxy execution policy",
+        PROXY_POLICY_SCHEMA,
+    )?;
+    policy.limits.validate().map_err(|reason| {
+        RequestError::Upstream(context.invalid(
+            "proxy execution policy",
+            "valid execution limits (nonnegative values, or unlimited)",
+            &body,
+            Some(&reason),
+        ))
     })?;
-    policy.limits.validate().map_err(RequestError::Upstream)?;
     Ok(policy)
 }
 
@@ -790,42 +759,28 @@ pub async fn add_upstream_proxy_allowlist_entry(
         .map_err(|error| {
             RequestError::Upstream(format!("the proxy allowlist URL is invalid: {error}"))
         })?;
-    let mut response = client
+    let response = client
         .post(endpoint)
         .bearer_auth(bearer_token)
         .json(&ProxyAllowlistEntry { kind, value })
         .send()
         .await
-        .map_err(RequestError::Transport)?;
-    if response.status().is_redirection() {
-        return Err(RequestError::Upstream(
-            "the server redirected the proxy allowlist endpoint".to_owned(),
-        ));
-    }
-    let status = response.status();
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(RequestError::Transport)? {
-        if body.len().saturating_add(chunk.len()) > PROXY_POLICY_RESPONSE_LIMIT_BYTES {
-            return Err(RequestError::Upstream(
-                "the server returned an oversized proxy allowlist response".to_owned(),
-            ));
-        }
-        body.extend_from_slice(&chunk);
-    }
-    let envelope: WorkspaceEnvelope<serde_json::Value> =
-        serde_json::from_slice(&body).map_err(|error| {
-            RequestError::Upstream(format!(
-                "the server returned an invalid proxy allowlist response: {error}"
-            ))
+        .map_err(|error| {
+            RequestError::Upstream(transport_failure("updating proxy allowlist", error))
         })?;
-    if !status.is_success() || !envelope.success {
-        let message = envelope
-            .error
-            .map(format_upstream_error)
-            .filter(|message| !message.trim().is_empty())
-            .unwrap_or_else(|| format!("could not update the proxy allowlist: HTTP {status}"));
-        return Err(RequestError::Upstream(message));
-    }
+    let (context, body) = read_execution_response(
+        response,
+        Some(PROXY_POLICY_RESPONSE_LIMIT_BYTES),
+        "proxy allowlist",
+        "allowlist response budget",
+    )
+    .await?;
+    decode_execution_envelope::<serde_json::Value>(
+        &context,
+        &body,
+        "proxy allowlist",
+        PROXY_ALLOWLIST_SCHEMA,
+    )?;
     Ok(())
 }
 
@@ -871,12 +826,7 @@ pub async fn send_request_for_upstream_workspace_with_scope(
             let result =
                 super::request::send_request_with_limits(local_client, request, &policy.limits)
                     .await;
-            jar.synchronized().await.map_err(|e| {
-                RequestError::Upstream(format!(
-                    "Request completed, but cookie synchronization failed: {e}"
-                ))
-            })?;
-            result
+            finish_cookie_sync(result, jar.synchronized().await, "cookie synchronization")
         }
         RequestExecutionMode::Server => {
             if jar.enabled() && !policy.cookie_jar {
@@ -896,13 +846,35 @@ pub async fn send_request_for_upstream_workspace_with_scope(
                 &policy.limits,
             )
             .await;
-            jar.refresh().await.map_err(|e| {
-                RequestError::Upstream(format!(
-                    "Request may have been sent, but cookie refresh failed: {e}"
-                ))
-            })?;
-            result
+            finish_cookie_sync(result, jar.refresh().await, "cookie refresh")
         }
+    }
+}
+
+fn finish_cookie_sync(
+    result: Result<ResponseData, RequestError>,
+    synchronization: Result<(), String>,
+    operation: &str,
+) -> Result<ResponseData, RequestError> {
+    let Err(sync_error) = synchronization else {
+        return result;
+    };
+    match result {
+        Err(RequestError::ProxyDestinationBlocked {
+            request,
+            address,
+            diagnostic,
+        }) => Err(RequestError::ProxyDestinationBlocked {
+            request,
+            address,
+            diagnostic: format!("{diagnostic}; {operation} also failed: {sync_error}"),
+        }),
+        Err(error) => Err(RequestError::Upstream(format!(
+            "{error}; {operation} also failed: {sync_error}"
+        ))),
+        Ok(_) => Err(RequestError::Upstream(format!(
+            "Request completed, but {operation} failed: {sync_error}"
+        ))),
     }
 }
 
@@ -1028,10 +1000,11 @@ pub async fn execute_upstream_request_with_scope(
         .get("http.envelope_bytes")
         .as_usize()
         .map_err(RequestError::Upstream)?;
-    if envelope_limit.is_some_and(|limit| encoded.len() > limit) {
-        return Err(RequestError::Upstream(
-            "request envelope exceeds http.envelope_bytes".into(),
-        ));
+    if let Some(limit) = envelope_limit.filter(|limit| encoded.len() > *limit) {
+        return Err(RequestError::Upstream(format!(
+            "proxy request validation failed: request envelope exceeds http.envelope_bytes; expected at most {limit} bytes, received {} bytes",
+            encoded.len()
+        )));
     }
 
     let mut endpoint = base_url
@@ -1049,7 +1022,9 @@ pub async fn execute_upstream_request_with_scope(
         .body(encoded)
         .send()
         .await
-        .map_err(RequestError::Transport)?;
+        .map_err(|error| {
+            RequestError::Upstream(transport_failure("sending proxy execution request", error))
+        })?;
     parse_proxy_response(response, limits).await
 }
 
@@ -1214,25 +1189,125 @@ fn read_proxy_file(path: &PathBuf, limit: Option<usize>) -> std::io::Result<Vec<
         .unwrap_or(u64::MAX);
     let mut content = Vec::new();
     file.take(take_limit).read_to_end(&mut content)?;
-    if limit.is_some_and(|limit| content.len() > limit) {
+    if let Some(limit) = limit.filter(|limit| content.len() > *limit) {
         return Err(std::io::Error::other(format!(
-            "file exceeds the configured proxied request limit"
+            "file exceeds the remaining http.request_bytes budget; expected at most {limit} bytes, read at least {} bytes",
+            content.len()
         )));
     }
     Ok(content)
 }
 
 fn ensure_proxy_body_limit(size: usize, limit: Option<usize>) -> Result<(), RequestError> {
-    if limit.is_some_and(|limit| size > limit) {
+    if let Some(limit) = limit.filter(|limit| size > *limit) {
         return Err(RequestError::Upstream(format!(
-            "request body exceeds the configured proxied request limit"
+            "proxy request validation failed: request body exceeds http.request_bytes; expected at most {limit} bytes, received {size} bytes"
         )));
     }
     Ok(())
 }
 
-async fn parse_proxy_response(
+async fn read_execution_response(
     mut response: reqwest::Response,
+    limit: Option<usize>,
+    operation: &str,
+    limit_name: &str,
+) -> Result<(ResponseContext, Vec<u8>), RequestError> {
+    let context = ResponseContext::from_http(response.status(), response.headers());
+    if context.status.is_redirection() {
+        return Err(RequestError::Upstream(invalid_response(
+            operation,
+            "a direct response from the Resolved API, not a redirect",
+            &context.describe(),
+            Some("redirects are not followed to avoid forwarding credentials"),
+        )));
+    }
+    if let (Some(length), Some(limit)) = (response.content_length(), limit)
+        && length > limit as u64
+    {
+        return Err(RequestError::Upstream(invalid_response(
+            operation,
+            &format!("at most {limit} response bytes ({limit_name})"),
+            &format!("{}; Content-Length: {length} bytes", context.describe()),
+            Some("response exceeds the configured buffering limit"),
+        )));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        RequestError::Upstream(format!(
+            "{} ({}; received {} body bytes before the read failed)",
+            transport_failure(&format!("reading {operation} response"), error),
+            context.describe(),
+            body.len()
+        ))
+    })? {
+        let received = body.len().saturating_add(chunk.len());
+        if let Some(limit) = limit.filter(|limit| received > *limit) {
+            return Err(RequestError::Upstream(invalid_response(
+                operation,
+                &format!("at most {limit} response bytes ({limit_name})"),
+                &format!("{}; at least {received} body bytes", context.describe()),
+                Some("response exceeds the configured buffering limit"),
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((context, body))
+}
+
+fn decode_execution_envelope<T: serde::de::DeserializeOwned>(
+    context: &ResponseContext,
+    body: &[u8],
+    operation: &str,
+    expected: &str,
+) -> Result<T, RequestError> {
+    // Read errors independently of success data. An incompatible or unexpected
+    // `data` field must not hide the server's actual rejection/validation reason.
+    if let Ok(envelope) = serde_json::from_slice::<ErrorEnvelope>(body)
+        && let Some(error) = envelope.error
+    {
+        if error.code == "proxy_destination_blocked" {
+            return Err(RequestError::ProxyDestinationBlocked {
+                request: error.fields.get("request").cloned().unwrap_or_default(),
+                address: error.fields.get("address").cloned().unwrap_or_default(),
+                diagnostic: context.failure(operation, &error, &envelope.request_id),
+            });
+        }
+        return Err(RequestError::Upstream(context.failure(
+            operation,
+            &error,
+            &envelope.request_id,
+        )));
+    }
+
+    let envelope: WorkspaceEnvelope<T> = serde_json::from_slice(body).map_err(|error| {
+        RequestError::Upstream(context.invalid(
+            operation,
+            expected,
+            body,
+            Some(&json_error_reason(&error)),
+        ))
+    })?;
+    if !context.status.is_success() || !envelope.success {
+        return Err(RequestError::Upstream(context.invalid(
+            operation,
+            expected,
+            body,
+            Some("the failure response did not include an error object explaining the rejection"),
+        )));
+    }
+    envelope.data.ok_or_else(|| {
+        RequestError::Upstream(context.invalid(
+            operation,
+            expected,
+            body,
+            Some("the success response is missing its non-null data object"),
+        ))
+    })
+}
+
+async fn parse_proxy_response(
+    response: reqwest::Response,
     limits: &ExecutionLimits,
 ) -> Result<ResponseData, RequestError> {
     let envelope_limit = limits
@@ -1243,63 +1318,42 @@ async fn parse_proxy_response(
         .get("http.response_bytes")
         .as_usize()
         .map_err(RequestError::Upstream)?;
-    if response.status().is_redirection() {
-        return Err(RequestError::Upstream(
-            "the server redirected the proxied request endpoint".to_owned(),
-        ));
+    let (context, body) = read_execution_response(
+        response,
+        envelope_limit,
+        "proxy execution",
+        "http.envelope_bytes",
+    )
+    .await?;
+    let data: ProxyExecuteResult =
+        decode_execution_envelope(&context, &body, "proxy execution", PROXY_RESPONSE_SCHEMA)?;
+    if StatusCode::from_u16(data.status).is_err() {
+        return Err(RequestError::Upstream(invalid_response(
+            "proxy execution",
+            "data.status to be an HTTP status code (100–999)",
+            &format!("{}; data.status = {}", context.describe(), data.status),
+            None,
+        )));
     }
-    let status = response.status();
-    if response
-        .content_length()
-        .is_some_and(|length| envelope_limit.is_some_and(|limit| length > limit as u64))
-    {
-        return Err(RequestError::Upstream(
-            "the server returned an oversized proxied response".to_owned(),
-        ));
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(RequestError::Transport)? {
-        if envelope_limit.is_some_and(|limit| body.len().saturating_add(chunk.len()) > limit) {
-            return Err(RequestError::Upstream(
-                "the server returned an oversized proxied response".to_owned(),
-            ));
-        }
-        body.extend_from_slice(&chunk);
-    }
-
-    let envelope: WorkspaceEnvelope<ProxyExecuteResult> =
-        serde_json::from_slice(&body).map_err(|error| {
-            RequestError::Upstream(format!(
-                "the server returned an invalid proxied response: {error}"
-            ))
-        })?;
-    if !status.is_success() || !envelope.success {
-        if let Some(error) = envelope.error.as_ref()
-            && error.code == "proxy_destination_blocked"
-        {
-            return Err(RequestError::ProxyDestinationBlocked {
-                request: error.fields.get("request").cloned().unwrap_or_default(),
-                address: error.fields.get("address").cloned().unwrap_or_default(),
-                reason: error.fields.get("reason").cloned().unwrap_or_default(),
-            });
-        }
-        let message = envelope
-            .error
-            .map(format_upstream_error)
-            .filter(|message| !message.trim().is_empty())
-            .unwrap_or_else(|| format!("server execution failed with HTTP {status}"));
-        return Err(RequestError::Upstream(message));
-    }
-    let data = envelope.data.ok_or_else(|| {
-        RequestError::Upstream("the server response did not include execution data".to_owned())
-    })?;
-    let decoded = BASE64_STANDARD.decode(data.body_base64).map_err(|error| {
-        RequestError::Upstream(format!(
-            "the server returned invalid response data: {error}"
+    let decoded = BASE64_STANDARD.decode(&data.body_base64).map_err(|error| {
+        RequestError::Upstream(invalid_response(
+            "proxy execution",
+            "data.body_base64 to contain standard base64-encoded response bytes",
+            &format!(
+                "{}; data.body_base64 is a {}-byte string (contents omitted)",
+                context.describe(),
+                data.body_base64.len()
+            ),
+            Some(&error.to_string()),
         ))
     })?;
     if let Some(limit_bytes) = response_limit.filter(|limit| decoded.len() > *limit) {
-        return Err(RequestError::ResponseBodyTooLarge { limit_bytes });
+        return Err(RequestError::Upstream(invalid_response(
+            "proxy execution",
+            &format!("at most {limit_bytes} decoded response bytes (http.response_bytes)"),
+            &format!("{}; {} decoded bytes", context.describe(), decoded.len()),
+            None,
+        )));
     }
 
     Ok(ResponseData {
@@ -2194,12 +2248,238 @@ mod tests {
                 ("url".to_owned(), "must use HTTP or HTTPS".to_owned()),
                 ("method".to_owned(), "is not a valid HTTP method".to_owned()),
             ]),
+            ..Default::default()
         });
 
         assert_eq!(
             message,
             "request validation failed (method: is not a valid HTTP method, url: must use HTTP or HTTPS)"
         );
+    }
+
+    #[test]
+    fn cookie_refresh_failure_does_not_replace_the_execution_failure() {
+        let error = finish_cookie_sync(
+            Err(RequestError::Upstream(
+                "upstream TLS certificate expired".into(),
+            )),
+            Err("session expired".into()),
+            "cookie refresh",
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "upstream TLS certificate expired; cookie refresh also failed: session expired"
+        );
+        let error = finish_cookie_sync(
+            Err(RequestError::ProxyDestinationBlocked {
+                request: "http://127.0.0.1/?secret=value".into(),
+                address: "127.0.0.1".into(),
+                diagnostic: "destination blocked".into(),
+            }),
+            Err("session expired".into()),
+            "cookie refresh",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            RequestError::ProxyDestinationBlocked { .. }
+        ));
+        assert_eq!(
+            error.to_string(),
+            "destination blocked; cookie refresh also failed: session expired"
+        );
+    }
+
+    fn proxy_response_fixture(status: u16, content_type: &str, body: &[u8]) -> reqwest::Response {
+        tokio_tungstenite::tungstenite::http::Response::builder()
+            .status(status)
+            .header("content-type", content_type)
+            .header("x-request-id", "proxy-response-id")
+            .body(body.to_vec())
+            .unwrap()
+            .into()
+    }
+
+    #[tokio::test]
+    async fn invalid_proxy_responses_explain_expected_and_received_without_dumping_values() {
+        for (status, content_type, body, details) in [
+            (
+                502,
+                "text/html",
+                "<html>private-payload</html>",
+                vec!["HTTP 502", "Content-Type: text/html", "HTML/XML"],
+            ),
+            (204, "application/json", "", vec!["HTTP 204", "empty body"]),
+            (
+                200,
+                "application/json",
+                r#"{"success":true,"data":{"status":"private-payload"}}"#,
+                vec!["received string, expected u16", "\"status\": string"],
+            ),
+            (
+                200,
+                "application/json",
+                r#"{"success":true,"data":{"status":200}}"#,
+                vec!["missing field `status_text`", "\"status\": number"],
+            ),
+            (
+                200,
+                "application/json",
+                r#"{"success":true,"data":null}"#,
+                vec!["missing its non-null data object", "\"data\": null"],
+            ),
+            (
+                403,
+                "application/json",
+                r#"{"success":false}"#,
+                vec!["HTTP 403", "did not include an error object"],
+            ),
+            (
+                200,
+                "application/json",
+                r#"{"success":"private-payload"}"#,
+                vec!["received string, expected a boolean"],
+            ),
+        ] {
+            let error = parse_proxy_response(
+                proxy_response_fixture(status, content_type, body.as_bytes()),
+                &ExecutionLimits::default(),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            for detail in [
+                "expected HTTP 2xx with JSON",
+                "received",
+                "request ID: proxy-response-id",
+            ]
+            .into_iter()
+            .chain(details)
+            {
+                assert!(error.contains(detail), "{detail}: {error}");
+            }
+            assert!(!error.contains("private-payload"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_response_data_errors_identify_base64_status_and_byte_limits() {
+        let valid = serde_json::json!({
+            "success": true,
+            "data": {
+                "status": 200,
+                "status_text": "OK",
+                "http_version": "HTTP/1.1",
+                "final_url": "https://example.test",
+                "headers": [],
+                "body_base64": "eA==",
+                "duration_micros": 10
+            }
+        });
+        let mut bad_base64 = valid.clone();
+        bad_base64["data"]["body_base64"] = "private-payload!".into();
+        let mut bad_status = valid.clone();
+        bad_status["data"]["status"] = 0.into();
+        for (body, limits, details) in [
+            (
+                bad_base64,
+                ExecutionLimits::default(),
+                vec!["data.body_base64", "standard base64", "16-byte string"],
+            ),
+            (
+                bad_status,
+                ExecutionLimits::default(),
+                vec!["HTTP status code", "data.status = 0"],
+            ),
+            (
+                valid.clone(),
+                serde_json::from_str(r#"{"http.response_bytes":{"unlimited":false,"value":0}}"#)
+                    .unwrap(),
+                vec!["http.response_bytes", "at most 0", "1 decoded bytes"],
+            ),
+            (
+                valid,
+                serde_json::from_str(r#"{"http.envelope_bytes":{"unlimited":false,"value":0}}"#)
+                    .unwrap(),
+                vec!["http.envelope_bytes", "at most 0", "Content-Length"],
+            ),
+        ] {
+            let error = parse_proxy_response(
+                proxy_response_fixture(
+                    200,
+                    "application/json",
+                    &serde_json::to_vec(&body).unwrap(),
+                ),
+                &limits,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            for detail in details {
+                assert!(error.contains(detail), "{detail}: {error}");
+            }
+            assert!(!error.contains("private-payload"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_redirect_errors_keep_status_without_exposing_location_credentials() {
+        let response = tokio_tungstenite::tungstenite::http::Response::builder()
+            .status(307)
+            .header(
+                "location",
+                "https://user:private-payload@example.test/?token=secret",
+            )
+            .body(Vec::<u8>::new())
+            .unwrap()
+            .into();
+        let error = parse_proxy_response(response, &ExecutionLimits::default())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("HTTP 307"), "{error}");
+        assert!(error.contains("not a redirect"), "{error}");
+        assert!(error.contains("redirects are not followed"), "{error}");
+        assert!(!error.contains("private-payload"));
+        assert!(!error.contains("secret"));
+    }
+
+    #[test]
+    fn truncated_proxy_http_response_preserves_read_phase_and_status() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_http_request(&mut stream);
+            write!(
+                stream,
+                "HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{{}}"
+            )
+            .unwrap();
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let error = runtime
+            .block_on(execute_upstream_request(
+                &build_upstream_execution_client().unwrap(),
+                &Url::parse(&format!("http://{address}/")).unwrap(),
+                "secret-session",
+                "workspace-1",
+                RequestDraft::new("GET", "https://example.test"),
+            ))
+            .unwrap_err()
+            .to_string();
+        server.join().unwrap();
+        assert!(
+            error.contains("reading proxy execution response failed"),
+            "{error}"
+        );
+        assert!(error.contains("HTTP 502"), "{error}");
+        assert!(error.contains("before the read failed"), "{error}");
+        assert!(!error.contains("secret-session"), "{error}");
     }
 
     #[test]
@@ -2422,7 +2702,7 @@ mod tests {
             UpstreamLoginError::Rejected {
                 status: StatusCode::UNAUTHORIZED,
                 ref message,
-            } if message == "login or password is incorrect"
+            } if message == "login or password is incorrect [code: invalid_credentials]"
         ));
     }
 
@@ -3599,11 +3879,15 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let _ = read_http_request(&mut stream);
             let response_body = br#"{
+                "request_id": "execution-rejection-1",
                 "success": false,
+                "data": "incompatible data must not obscure the error",
                 "error": {
                     "code": "validation_failed",
                     "message": "request validation failed",
-                    "fields": {"url": "must use HTTP or HTTPS"}
+                    "fields": {"url": "must use HTTP or HTTPS"},
+                    "phase": "validation",
+                    "reason": "invalid_field"
                 }
             }"#;
             write!(
@@ -3631,10 +3915,19 @@ mod tests {
             .unwrap_err();
 
         server.join().unwrap();
-        assert_eq!(
-            error.to_string(),
-            "request validation failed (url: must use HTTP or HTTPS)"
-        );
+        let message = error.to_string();
+        for detail in [
+            "proxy execution failed",
+            "request validation failed",
+            "url: must use HTTP or HTTPS",
+            "code: validation_failed",
+            "phase: validation",
+            "reason: invalid_field",
+            "HTTP 422",
+            "request ID: execution-rejection-1",
+        ] {
+            assert!(message.contains(detail), "{detail}: {message}");
+        }
     }
 
     #[test]
@@ -3645,12 +3938,13 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let _ = read_http_request(&mut stream);
             let response_body = br#"{
+                "request_id": "blocked-execution-id",
                 "success": false,
                 "error": {
                     "code": "proxy_destination_blocked",
                     "message": "the proxied request was blocked",
                     "fields": {
-                        "request": "http://127.0.0.1/private",
+                        "request": "http://user:password-secret@127.0.0.1/private?token=query-secret#fragment-secret",
                         "address": "127.0.0.1",
                         "reason": "loopback addresses"
                     }
@@ -3685,11 +3979,25 @@ mod tests {
             RequestError::ProxyDestinationBlocked {
                 request,
                 address,
-                reason,
+                diagnostic,
             } => {
-                assert_eq!(request, "http://127.0.0.1/private");
+                assert_eq!(
+                    request,
+                    "http://user:password-secret@127.0.0.1/private?token=query-secret#fragment-secret"
+                );
                 assert_eq!(address, "127.0.0.1");
-                assert_eq!(reason, "loopback addresses");
+                for detail in [
+                    "http://127.0.0.1/private",
+                    "loopback addresses",
+                    "HTTP 422",
+                    "blocked-execution-id",
+                    "proxy_destination_blocked",
+                ] {
+                    assert!(diagnostic.contains(detail), "{detail}: {diagnostic}");
+                }
+                for secret in ["password-secret", "query-secret", "fragment-secret"] {
+                    assert!(!diagnostic.contains(secret), "{diagnostic}");
+                }
             }
             other => panic!("error = {other:?}"),
         }

@@ -830,16 +830,12 @@ impl ApiTester {
             Err(RequestError::ProxyDestinationBlocked {
                 request,
                 address,
-                reason,
+                diagnostic,
             }) => {
                 self.pre_script_report = Some(pre_report);
-                let allowlist_request = request.clone();
-                let display_request = resolved.redact_secrets(&request);
-                let message = format!(
-                    "Proxy blocked {display_request} because {address} is not allowed ({reason})."
-                );
+                let message = resolved.redact_secrets(&diagnostic);
                 self.show_proxy_destination_blocked(
-                    allowlist_request,
+                    request,
                     address,
                     message.clone(),
                     window,

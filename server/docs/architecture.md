@@ -423,6 +423,35 @@ pong, and close frames. An `error` control message terminates setup failures.
 The collaboration bearer token authenticates only the outer connection and is
 never forwarded to the target.
 
+Execution errors retain their public `code`, `message`, and field-specific
+`fields`, with optional `phase` and `reason` identifiers for binding, validation,
+opening, and upstream transport failures. The outer `request_id` correlates the
+failure with server logs. WebSocket opening failures use the same error object:
+
+```json
+{
+  "type": "error",
+  "message": "execution descriptor is invalid",
+  "request_id": "correlation-id",
+  "error": {
+    "code": "invalid_body",
+    "message": "execution descriptor is invalid",
+    "fields": {"url": "expected string; received number"},
+    "phase": "websocket_opening",
+    "reason": "type_mismatch"
+  }
+}
+```
+
+The top-level WebSocket `message` remains for older clients. HTTP upgrade
+rejections use the ordinary HTTP error envelope, before any WebSocket frames.
+Internal failures stay generic publicly and are logged with the request ID.
+Malformed response diagnostics on the desktop show the expected protocol and
+received status, media type, JSON shape or frame type, and byte counts rather
+than echoing payload values. A blocked destination's `fields.request` remains
+the exact URL for the allowlist action; clients must redact it for display,
+not alter it before allowlist matching.
+
 Hostname overrides live in proxies: named rule sets assigned to scopes. A proxy
 takes effect server-wide or on one workspace, collection, or saved request, and
 a scope node carries at most one proxy. Executions resolve overrides most

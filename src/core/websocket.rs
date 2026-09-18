@@ -20,6 +20,10 @@ use tokio_tungstenite::{
     },
 };
 
+use super::execution_diagnostics::{
+    ErrorEnvelope, ResponseContext, ServerError, bounded_text, describe_body, invalid_response,
+    json_error_reason, transport_failure,
+};
 use super::{HeaderEntry, RawBodyLanguage, execution_limits::ExecutionLimits};
 
 pub const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
@@ -168,6 +172,10 @@ struct UpstreamWebSocketOpenResponse {
     response_type: String,
     #[serde(default)]
     message: String,
+    #[serde(default)]
+    request_id: String,
+    #[serde(default)]
+    error: Option<ServerError>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -252,6 +260,8 @@ pub enum WebSocketConnectError {
     InvalidLimit(String),
     #[error("WebSocket handshake timed out")]
     HandshakeTimeout,
+    #[error("{0}")]
+    ProxyOpening(String),
     #[error("invalid WebSocket URL: {0}")]
     InvalidUrl(String),
     #[error("WebSocket URLs must use ws:// or wss://")]
@@ -785,18 +795,6 @@ pub async fn run_upstream_websocket_connection_with_scope(
         .max_message_size(transport_limit)
         .max_frame_size(transport_limit);
     let started = std::time::Instant::now();
-    let (mut stream, _) = match handshake_timeout(
-        timeout,
-        connect_async_with_config(request, Some(config), true),
-    )
-    .await?
-    {
-        Ok(connection) => connection,
-        Err(error) => {
-            let _ = signals.send(WebSocketSignal::Failed(error.to_string()));
-            return Ok(());
-        }
-    };
     let descriptor = UpstreamWebSocketOpen {
         collection_id: collection_id.map(str::to_owned),
         url: url.to_owned(),
@@ -813,68 +811,297 @@ pub async fn run_upstream_websocket_connection_with_scope(
     let payload = serde_json::to_string(&descriptor)
         .map_err(|error| WebSocketConnectError::InvalidUrl(error.to_string()))?;
     if opening_limit.is_some_and(|limit| payload.len() > limit) {
-        return Err(WebSocketConnectError::InvalidLimit(
-            "WebSocket opening descriptor exceeds opening_bytes".into(),
-        ));
+        return Err(WebSocketConnectError::InvalidLimit(format!(
+            "WebSocket proxy opening send: descriptor is {} bytes; websocket.opening_bytes limit is {} bytes",
+            payload.len(),
+            opening_limit.unwrap()
+        )));
     }
-    if let Err(error) = handshake_timeout(
+    let (mut stream, context) =
+        match connect_proxy_websocket(request, config, timeout, started).await {
+            Ok(connection) => connection,
+            Err(error) => {
+                let _ = signals.send(WebSocketSignal::Failed(error));
+                return Ok(());
+            }
+        };
+    if let Err(error) = proxy_opening_timeout(
         timeout.map(|budget| budget.saturating_sub(started.elapsed())),
+        timeout,
+        "opening send",
         stream.send(Message::Text(payload.into())),
     )
     .await?
     {
-        let _ = signals.send(WebSocketSignal::Failed(error.to_string()));
+        let _ = signals.send(WebSocketSignal::Failed(format!(
+            "WebSocket proxy opening send failed: {error}"
+        )));
         return Ok(());
     }
-    let response = match handshake_timeout(
+    let response = match proxy_opening_timeout(
         timeout.map(|budget| budget.saturating_sub(started.elapsed())),
+        timeout,
+        "opening receive",
         stream.next(),
     )
     .await?
     {
         Some(Ok(Message::Text(response))) => response,
-        Some(Ok(_)) => {
-            let _ = signals.send(WebSocketSignal::Failed(
-                "the server returned an invalid WebSocket execution response".to_owned(),
-            ));
+        Some(Ok(frame)) => {
+            let _ = signals.send(WebSocketSignal::Failed(invalid_response(
+                "WebSocket proxy opening receive",
+                OPENING_EXPECTED,
+                &describe_opening_frame(&frame),
+                None,
+            )));
             return Ok(());
         }
         Some(Err(error)) => {
-            let _ = signals.send(WebSocketSignal::Failed(error.to_string()));
+            let _ = signals.send(WebSocketSignal::Failed(format!(
+                "WebSocket proxy opening receive failed: {error}"
+            )));
             return Ok(());
         }
         None => {
-            let _ = signals.send(WebSocketSignal::Failed(
-                "the server closed the WebSocket execution connection".to_owned(),
-            ));
-            return Ok(());
-        }
-    };
-    if opening_limit.is_some_and(|limit| response.len() > limit) {
-        return Err(WebSocketConnectError::InvalidLimit(
-            "WebSocket opening response exceeds opening_bytes".into(),
-        ));
-    }
-    let response: UpstreamWebSocketOpenResponse = match serde_json::from_str(&response) {
-        Ok(response) => response,
-        Err(error) => {
-            let _ = signals.send(WebSocketSignal::Failed(format!(
-                "the server returned an invalid WebSocket execution response: {error}"
+            let _ = signals.send(WebSocketSignal::Failed(invalid_response(
+                "WebSocket proxy opening receive",
+                OPENING_EXPECTED,
+                "end of stream without an opening response",
+                None,
             )));
             return Ok(());
         }
     };
-    if response.response_type != "opened" {
-        let message = if response.message.trim().is_empty() {
-            "the server could not open the WebSocket connection".to_owned()
-        } else {
-            response.message
-        };
+    if opening_limit.is_some_and(|limit| response.len() > limit) {
+        return Err(WebSocketConnectError::InvalidLimit(format!(
+            "WebSocket proxy opening validation: response is {} bytes; websocket.opening_bytes limit is {} bytes",
+            response.len(),
+            opening_limit.unwrap()
+        )));
+    }
+    let response: UpstreamWebSocketOpenResponse = match serde_json::from_str(&response) {
+        Ok(response) => response,
+        Err(error) => {
+            let _ = signals.send(WebSocketSignal::Failed(invalid_response(
+                "WebSocket proxy opening validation",
+                OPENING_EXPECTED,
+                &describe_body(response.as_bytes()),
+                Some(&json_error_reason(&error)),
+            )));
+            return Ok(());
+        }
+    };
+    if response.response_type == "error" {
+        let mut error = response.error.unwrap_or_default();
+        if error.message.trim().is_empty() {
+            error.message = if response.message.trim().is_empty() {
+                "server rejected the WebSocket opening without an error message".into()
+            } else {
+                response.message
+            };
+        }
+        let message = context.failure("WebSocket proxy opening", &error, &response.request_id);
         let _ = signals.send(WebSocketSignal::Failed(message));
+        return Ok(());
+    }
+    if response.response_type != "opened" {
+        let _ = signals.send(WebSocketSignal::Failed(invalid_response(
+            "WebSocket proxy opening validation",
+            OPENING_EXPECTED,
+            "JSON object with an unrecognized string in `type`",
+            None,
+        )));
         return Ok(());
     }
     drive_websocket_connection(stream, commands, signals, message_limit).await;
     Ok(())
+}
+
+const OPENING_EXPECTED: &str = r#"a text frame containing {"type":"opened"} or {"type":"error","message":string,"error"?:object,"request_id"?:string}"#;
+
+fn describe_opening_frame(frame: &Message) -> String {
+    match frame {
+        Message::Text(text) => format!("text frame: {}", describe_body(text.as_bytes())),
+        Message::Binary(bytes) => format!("binary frame ({} bytes)", bytes.len()),
+        Message::Ping(bytes) => format!("ping frame ({} bytes)", bytes.len()),
+        Message::Pong(bytes) => format!("pong frame ({} bytes)", bytes.len()),
+        Message::Close(Some(frame)) => format!(
+            "close frame (code {}, reason: {})",
+            u16::from(frame.code),
+            bounded_text(&frame.reason)
+        ),
+        Message::Close(None) => "close frame without a code or reason".into(),
+        Message::Frame(_) => "raw WebSocket frame".into(),
+    }
+}
+
+async fn proxy_opening_timeout<F: std::future::Future>(
+    remaining: Option<Duration>,
+    budget: Option<Duration>,
+    phase: &str,
+    future: F,
+) -> Result<F::Output, WebSocketConnectError> {
+    handshake_timeout(remaining, future).await.map_err(|_| {
+        WebSocketConnectError::ProxyOpening(format!(
+            "WebSocket proxy {phase} timed out; websocket.handshake_timeout_ms limit is {} ms (shared opening budget)",
+            budget.unwrap_or_default().as_millis()
+        ))
+    })
+}
+
+/// Use the HTTP client's framed body reader for rejections: tungstenite retains
+/// only bytes read alongside the headers, losing delayed/chunked error bodies.
+/// This is still one request, and successful upgrades retain buffered wire bytes.
+async fn connect_proxy_websocket(
+    request: tokio_tungstenite::tungstenite::http::Request<()>,
+    config: WebSocketConfig,
+    timeout: Option<Duration>,
+    started: std::time::Instant,
+) -> Result<
+    (
+        tokio_tungstenite::WebSocketStream<reqwest::Upgraded>,
+        ResponseContext,
+    ),
+    String,
+> {
+    use tokio_tungstenite::tungstenite::{handshake::derive_accept_key, protocol::Role};
+    const OPERATION: &str = "WebSocket proxy HTTP upgrade";
+    const EXPECTED: &str = "HTTP 101 Switching Protocols with a valid WebSocket upgrade";
+    const MAX_ERROR_BODY: usize = 64 * 1024;
+
+    let accept = derive_accept_key(request.headers()["sec-websocket-key"].as_bytes());
+    let mut url = url::Url::parse(&request.uri().to_string())
+        .map_err(|_| format!("{OPERATION}: invalid endpoint URL"))?;
+    let scheme = if url.scheme() == "wss" {
+        "https"
+    } else {
+        "http"
+    };
+    url.set_scheme(scheme)
+        .map_err(|_| format!("{OPERATION}: invalid endpoint scheme"))?;
+    let client = reqwest::Client::builder()
+        .http1_only()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
+        .build()
+        .map_err(|error| transport_failure(&format!("{OPERATION} setup"), error))?;
+    let mut response = proxy_opening_timeout(
+        timeout.map(|budget| budget.saturating_sub(started.elapsed())),
+        timeout,
+        "HTTP upgrade",
+        client.get(url).headers(request.headers().clone()).send(),
+    )
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| transport_failure(OPERATION, error))?;
+    let context = ResponseContext::from_http(response.status(), response.headers());
+    if response.status() != reqwest::StatusCode::SWITCHING_PROTOCOLS {
+        let mut body = Vec::new();
+        let mut read_failure = None;
+        loop {
+            match proxy_opening_timeout(
+                timeout.map(|budget| budget.saturating_sub(started.elapsed())),
+                timeout,
+                "HTTP rejection body read",
+                response.chunk(),
+            )
+            .await
+            {
+                Ok(Ok(Some(chunk))) => {
+                    let remaining = MAX_ERROR_BODY - body.len();
+                    body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                    if chunk.len() > remaining {
+                        read_failure = Some(format!(
+                            "rejection body exceeds {MAX_ERROR_BODY} byte diagnostic limit"
+                        ));
+                        break;
+                    }
+                }
+                Ok(Ok(None)) => break,
+                Ok(Err(error)) => {
+                    read_failure = Some(transport_failure("rejection body read", error));
+                    break;
+                }
+                Err(error) => {
+                    read_failure = Some(format!("{error}; received {} body bytes", body.len()));
+                    break;
+                }
+            }
+        }
+        if let Ok(envelope) = serde_json::from_slice::<ErrorEnvelope>(&body)
+            && let Some(error) = envelope.error
+        {
+            let mut message = context.failure(OPERATION, &error, &envelope.request_id);
+            if let Some(failure) = read_failure {
+                message.push_str(&format!("; {failure}"));
+            }
+            return Err(message);
+        }
+        return Err(invalid_response(
+            OPERATION,
+            EXPECTED,
+            &format!("{}; {}", context.describe(), describe_body(&body)),
+            read_failure.as_deref(),
+        ));
+    }
+    let headers = response.headers();
+    let has_token = |name: &str, token: &str| {
+        headers
+            .get_all(name)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .any(|value| value.trim().eq_ignore_ascii_case(token))
+    };
+    let mut invalid_headers = Vec::new();
+    if !has_token("connection", "upgrade") {
+        invalid_headers.push("Connection header missing required Upgrade token");
+    }
+    if !has_token("upgrade", "websocket") {
+        invalid_headers.push("Upgrade header missing required websocket token");
+    }
+    if headers.get_all("sec-websocket-accept").iter().count() != 1 {
+        invalid_headers.push("expected exactly one Sec-WebSocket-Accept header");
+    } else if headers
+        .get("sec-websocket-accept")
+        .map(|value| value.as_bytes())
+        != Some(accept.as_bytes())
+    {
+        invalid_headers.push("Sec-WebSocket-Accept accept-key mismatch");
+    }
+    if headers.contains_key("sec-websocket-protocol") {
+        invalid_headers.push("unsolicited Sec-WebSocket-Protocol");
+    }
+    if headers.contains_key("sec-websocket-extensions") {
+        invalid_headers.push("unsolicited Sec-WebSocket-Extensions");
+    }
+    if !invalid_headers.is_empty() {
+        return Err(invalid_response(
+            OPERATION,
+            EXPECTED,
+            &context.describe(),
+            Some(&invalid_headers.join("; ")),
+        ));
+    }
+    let upgraded = proxy_opening_timeout(
+        timeout.map(|budget| budget.saturating_sub(started.elapsed())),
+        timeout,
+        "HTTP upgrade transport setup",
+        response.upgrade(),
+    )
+    .await
+    .map_err(|error| format!("{error} ({})", context.describe()))?
+    .map_err(|error| transport_failure(&format!("{OPERATION} transport setup"), error))?;
+    Ok((
+        tokio_tungstenite::WebSocketStream::from_raw_socket(upgraded, Role::Client, Some(config))
+            .await,
+        context,
+    ))
 }
 
 async fn handshake_timeout<F: std::future::Future>(
@@ -1003,6 +1230,248 @@ mod tests {
     };
 
     use super::*;
+
+    async fn proxy_failure_from_frame(frame: Message) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = url::Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            assert!(matches!(socket.next().await, Some(Ok(Message::Text(_)))));
+            socket.send(frame).await.unwrap();
+        });
+        let (_commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (signals, mut received) = tokio::sync::mpsc::unbounded_channel();
+        run_upstream_websocket_connection(
+            &base,
+            "test-token",
+            "workspace",
+            None,
+            "wss://example.test/",
+            &[],
+            receiver,
+            signals,
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        match received.recv().await.unwrap() {
+            WebSocketSignal::Failed(message) => message,
+            other => panic!("expected failure, received {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_opening_errors_preserve_structured_and_legacy_details() {
+        let error = proxy_failure_from_frame(Message::Text(r#"{"type":"error","message":"legacy","request_id":"opening-id","error":{"code":"validation_failed","message":"Invalid descriptor","fields":{"url":"Unsupported scheme"},"phase":"validation","reason":"bad_url"}}"#.into())).await;
+        for expected in [
+            "Invalid descriptor",
+            "validation_failed",
+            "url",
+            "Unsupported scheme",
+            "validation",
+            "bad_url",
+            "opening-id",
+        ] {
+            assert!(error.contains(expected), "{expected}: {error}");
+        }
+        let error = proxy_failure_from_frame(Message::Text(
+            r#"{"type":"error","message":"Legacy refusal"}"#.into(),
+        ))
+        .await;
+        assert!(error.contains("Legacy refusal"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn proxy_opening_invalid_frames_are_actionable_and_redacted() {
+        for (frame, expected) in [
+            (
+                Message::Text(r#"{"message":"secret-payload"}"#.into()),
+                "type",
+            ),
+            (Message::Text(r#"{"type":42}"#.into()), "string"),
+            (
+                Message::Text(r#"{"type":"secret-payload"}"#.into()),
+                "unrecognized",
+            ),
+            (Message::Text(r#"{"type":"opened""#.into()), "line"),
+            (
+                Message::Binary(vec![1, 2, 3].into()),
+                "binary frame (3 bytes)",
+            ),
+            (Message::Ping(vec![1].into()), "ping frame"),
+            (Message::Pong(vec![1].into()), "pong frame"),
+            (Message::Close(None), "close frame"),
+            (
+                Message::Close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                    code:
+                        tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy,
+                    reason: "policy refusal".into(),
+                })),
+                "1008",
+            ),
+        ] {
+            let error = proxy_failure_from_frame(frame).await;
+            assert!(error.contains(expected), "{expected}: {error}");
+            assert!(error.contains("opened"), "{error}");
+            assert!(!error.contains("secret-payload"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_upgrade_rejects_invalid_accept_without_exposing_header_values() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        crate::tls::install_crypto_provider().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(socket.read_u8().await.unwrap());
+            }
+            socket.write_all(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: sensitive-invalid-value\r\n\r\n").await.unwrap();
+        });
+        let error = match connect_proxy_websocket(
+            endpoint.into_client_request().unwrap(),
+            WebSocketConfig::default(),
+            Some(Duration::from_secs(2)),
+            std::time::Instant::now(),
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("invalid accept key was accepted"),
+        };
+        server.await.unwrap();
+        assert!(error.contains("101"), "{error}");
+        assert!(error.contains("accept-key mismatch"), "{error}");
+        assert!(!error.contains("sensitive-invalid-value"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn proxy_upgrade_rejects_duplicate_accept_headers() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        crate::tls::install_crypto_provider().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let request = format!("ws://{}/", listener.local_addr().unwrap())
+            .into_client_request()
+            .unwrap();
+        let accept = tokio_tungstenite::tungstenite::handshake::derive_accept_key(
+            request.headers()["sec-websocket-key"].as_bytes(),
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(socket.read_u8().await.unwrap());
+            }
+            socket.write_all(format!("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\nSec-WebSocket-Accept: private-value\r\n\r\n").as_bytes()).await.unwrap();
+        });
+        let error = connect_proxy_websocket(
+            request,
+            WebSocketConfig::default(),
+            Some(Duration::from_secs(2)),
+            std::time::Instant::now(),
+        )
+        .await
+        .err()
+        .expect("duplicate accept headers must be rejected");
+        server.await.unwrap();
+        assert!(
+            error.contains("exactly one Sec-WebSocket-Accept"),
+            "{error}"
+        );
+        assert!(!error.contains("private-value"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn proxy_rejection_read_timeout_keeps_already_received_http_details() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        crate::tls::install_crypto_provider().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(socket.read_u8().await.unwrap());
+            }
+            socket.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nX-Request-ID: stalled-rejection\r\nContent-Length: 100\r\n\r\n{}").await.unwrap();
+            // Keep the body incomplete until the client's deadline closes it.
+            let _ = socket.read_u8().await;
+        });
+        let error = connect_proxy_websocket(
+            endpoint.into_client_request().unwrap(),
+            WebSocketConfig::default(),
+            Some(Duration::from_millis(250)),
+            std::time::Instant::now(),
+        )
+        .await
+        .err()
+        .expect("stalled rejection must time out");
+        server.await.unwrap();
+        for detail in [
+            "HTTP 403",
+            "application/json",
+            "stalled-rejection",
+            "HTTP rejection body read timed out",
+            "250 ms",
+            "received 2 body bytes",
+        ] {
+            assert!(error.contains(detail), "{detail}: {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_upgrade_rejection_reads_delayed_chunked_envelope() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = url::Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(socket.read_u8().await.unwrap());
+            }
+            socket.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nX-Request-ID: header-id\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let body = r#"{"success":false,"request_id":"body-id","error":{"code":"forbidden","message":"Workspace access denied","fields":{"workspace":"Not accessible"}}}"#;
+            socket
+                .write_all(format!("{:x}\r\n{body}\r\n0\r\n\r\n", body.len()).as_bytes())
+                .await
+                .unwrap();
+        });
+        let (_commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (signals, mut received) = tokio::sync::mpsc::unbounded_channel();
+        run_upstream_websocket_connection(
+            &base,
+            "test-token",
+            "workspace",
+            None,
+            "wss://example.test/",
+            &[],
+            receiver,
+            signals,
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        let WebSocketSignal::Failed(error) = received.recv().await.unwrap() else {
+            panic!("expected rejection")
+        };
+        for expected in [
+            "HTTP upgrade",
+            "403",
+            "application/json",
+            "body-id",
+            "forbidden",
+            "Workspace access denied",
+            "Not accessible",
+        ] {
+            assert!(error.contains(expected), "{expected}: {error}");
+        }
+    }
 
     #[test]
     fn templates_use_distinct_percent_markers_and_repeat_values() {

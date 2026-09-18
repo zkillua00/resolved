@@ -1,6 +1,7 @@
 mod chain;
 mod cookie_jar;
 mod database;
+mod execution_diagnostics;
 pub mod execution_limits;
 pub mod local_execution_limits;
 pub(crate) use chain::drive_inline_with_budget;
