@@ -18,6 +18,12 @@ Sort by newest/oldest, fastest/slowest, response code, method, hostname, or path
 The list identifies its 20-result limit; filters search all 100 retained entries
 for the member in the active workspace.
 
+Member/history lists render only visible rows. Detail text uses persistent,
+read-only editors; ordinary multiline bodies scroll continuously. Text with a
+logical line longer than 16 KiB uses explicit byte-range pages to bound layout
+cost, without reformatting or dropping shared text. **Copy all** copies the
+complete displayed text regardless of the current page.
+
 History loads automatically and follows authorized WebSocket invalidations.
 Background updates preserve the selected request while it still matches.
 Reconnection catches up on missed updates. The status indicator distinguishes

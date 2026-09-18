@@ -82,6 +82,7 @@ pub(super) struct ProfileFiltersState {
     expanded: bool,
     revision: u64,
     pending: bool,
+    resume_pending: bool,
     validation_error: Option<String>,
     subscriptions: Rc<Vec<Subscription>>,
 }
@@ -97,6 +98,11 @@ impl std::fmt::Debug for ProfileFiltersState {
 }
 
 impl ProfileFiltersState {
+    pub(super) fn needs_prepare(&self) -> bool {
+        self.inputs.is_none() || self.resume_pending
+    }
+
+    #[cfg(test)]
     pub(super) fn member_query(&self, cx: &App) -> String {
         self.inputs
             .as_ref()
@@ -242,11 +248,7 @@ impl ApiTester {
         if state.inputs.is_some() {
             // A workspace switch cancels an old debounce. Resume an unapplied
             // valid draft only when this server's Profiles view is rendered.
-            if !state.pending
-                && state
-                    .query(cx)
-                    .is_ok_and(|query| query != self.server_management.profile_history_query)
-            {
+            if state.resume_pending && !state.pending {
                 self.queue_profile_history_filter(window, cx);
             }
             return;
@@ -254,7 +256,14 @@ impl ApiTester {
         let members = cx.new(|cx| InputState::new(window, cx).placeholder("Search members…"));
         let history = HistoryTextFilter::ALL
             .map(|field| cx.new(|cx| InputState::new(window, cx).placeholder(field.placeholder())));
-        let mut subscriptions = vec![cx.observe(&members, |_, _, cx| cx.notify())];
+        let mut subscriptions = vec![cx.subscribe(&members, |this, input, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.server_management
+                    .profile_lists
+                    .search_members(input.read(cx).value().as_ref());
+                cx.notify();
+            }
+        })];
         for input in &history {
             subscriptions.push(
                 cx.subscribe_in(input, window, |this, _, event, window, cx| {
@@ -274,6 +283,7 @@ impl ApiTester {
         let state = &mut self.server_management.profile_filters;
         state.revision = state.revision.wrapping_add(1);
         state.pending = false;
+        state.resume_pending = false;
         let revision = state.revision;
         let query = match state.query(cx) {
             Ok(query) => {
@@ -312,6 +322,7 @@ impl ApiTester {
                 }
                 state.pending = false;
                 if this.workspace_providers.active_id() != &provider {
+                    state.resume_pending = true;
                     cx.notify();
                     return;
                 }

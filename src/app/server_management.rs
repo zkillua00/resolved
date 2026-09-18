@@ -1,5 +1,5 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use gpui::{ListAlignment, ListState};
@@ -29,6 +29,7 @@ pub(super) mod activity_views;
 mod discord_views;
 mod execution_limit_views;
 mod network_views;
+mod profile_detail;
 mod profile_filters;
 mod profile_views;
 mod proxy_rule_editor;
@@ -134,8 +135,10 @@ pub(super) struct ServerManagementState {
     pub snapshot: Option<UpstreamManagementSnapshot>,
     selected_user_id: Option<String>,
     profile_filters: profile_filters::ProfileFiltersState,
+    profile_lists: profile_views::ProfileLists,
     selected_profile_id: Option<String>,
     selected_profile_history_id: Option<String>,
+    profile_detail: profile_detail::ProfileDetailState,
     profile_history_status: ProfileHistoryStatus,
     profile_history: Rc<Vec<SharedHistoryEntry>>,
     profile_history_query: crate::core::SharedHistoryQuery,
@@ -143,9 +146,6 @@ pub(super) struct ServerManagementState {
     profile_history_view_visible: bool,
     profile_history_refresh_pending: bool,
     profile_history_revision: u64,
-    /// Decoded response-body display strings for profile history entries,
-    /// rebuilt by `set_profile_history` so renders never re-decode base64.
-    profile_history_body_cache: HashMap<String, SharedString>,
     change_log: ActivityLogFeed,
     audit_log: ActivityLogFeed,
     change_log_list: ListState,
@@ -168,8 +168,10 @@ impl Default for ServerManagementState {
             snapshot: None,
             selected_user_id: None,
             profile_filters: profile_filters::ProfileFiltersState::default(),
+            profile_lists: profile_views::ProfileLists::default(),
             selected_profile_id: None,
             selected_profile_history_id: None,
+            profile_detail: profile_detail::ProfileDetailState::default(),
             profile_history_status: ProfileHistoryStatus::Idle,
             profile_history: Rc::default(),
             profile_history_query: crate::core::SharedHistoryQuery::default(),
@@ -177,7 +179,6 @@ impl Default for ServerManagementState {
             profile_history_view_visible: false,
             profile_history_refresh_pending: false,
             profile_history_revision: 0,
-            profile_history_body_cache: HashMap::new(),
             change_log: ActivityLogFeed::default(),
             audit_log: ActivityLogFeed::default(),
             change_log_list: ListState::new(0, ListAlignment::Top, px(200.)),
@@ -255,7 +256,8 @@ impl ServerManagementState {
         self.profile_history_refresh_pending = false;
         self.profile_history_status = ProfileHistoryStatus::Idle;
         self.profile_history = Rc::default();
-        self.profile_history_body_cache.clear();
+        self.profile_detail = profile_detail::ProfileDetailState::default();
+        self.profile_lists.reset_history_scroll();
         self.selected_profile_history_id = None;
     }
 
@@ -267,15 +269,7 @@ impl ServerManagementState {
             .take()
             .filter(|selected| entries.iter().any(|entry| &entry.id == selected))
             .or_else(|| entries.first().map(|entry| entry.id.clone()));
-        self.profile_history_body_cache = entries
-            .iter()
-            .filter_map(|entry| {
-                entry
-                    .response
-                    .as_ref()
-                    .map(|response| (entry.id.clone(), shared_history_response_body(response).into()))
-            })
-            .collect();
+        self.profile_detail.retain_entry(&entries, self.selected_profile_history_id.as_deref());
         self.profile_history = Rc::new(entries);
     }
 
@@ -300,6 +294,7 @@ impl ServerManagementState {
     }
 
     fn set_snapshot(&mut self, snapshot: UpstreamManagementSnapshot) {
+        self.profile_lists.set_members(&snapshot.profiles);
         self.reconcile_role_permission_drafts(&snapshot);
         self.proxy_rule_editor.reconcile(&snapshot);
         self.proxy_scope_editor.reconcile(&snapshot);
@@ -1968,9 +1963,6 @@ mod tests {
     fn profile_history_reset_invalidates_inflight_results_and_clears_all_data() {
         let mut state = ServerManagementState::default();
         state.set_profile_history(vec![history_entry("entry")]);
-        state
-            .profile_history_body_cache
-            .insert("entry".into(), "private".into());
         state.profile_history_syncing = true;
         state.profile_history_refresh_pending = true;
         state.profile_history_query.method = "POST".into();
@@ -1980,7 +1972,6 @@ mod tests {
         assert!(!state.profile_history_syncing);
         assert!(!state.profile_history_refresh_pending);
         assert!(state.profile_history.is_empty());
-        assert!(state.profile_history_body_cache.is_empty());
         assert!(state.selected_profile_history_id.is_none());
         assert_eq!(state.profile_history_query.method, "POST");
     }

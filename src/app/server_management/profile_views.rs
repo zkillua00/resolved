@@ -1,8 +1,59 @@
 use super::*;
-use crate::core::{ProfileView, SharedHistoryEntry, SharedHistoryHeader, SharedHistoryRequest};
+use crate::core::{ProfileView, SharedHistoryEntry};
+use gpui::{ScrollStrategy, UniformListScrollHandle, uniform_list};
 
 const PROFILE_SIDEBAR_WIDTH: f32 = 250.;
 const HISTORY_LIST_WIDTH: f32 = 330.;
+
+#[cfg(test)]
+thread_local! {
+    static PROFILE_ROWS_RENDERED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static HISTORY_ROWS_RENDERED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Lists own stable, shared snapshots. Searching is an input/data-change cost,
+/// not work repeated by every scroll frame or caret blink.
+#[derive(Clone, Debug, Default)]
+pub(super) struct ProfileLists {
+    members: Rc<Vec<ProfileView>>,
+    matching_members: Rc<Vec<usize>>,
+    member_query: String,
+    member_scroll: UniformListScrollHandle,
+    history_scroll: UniformListScrollHandle,
+}
+
+impl ProfileLists {
+    pub(super) fn set_members(&mut self, members: &[ProfileView]) {
+        if self.members.as_slice() != members {
+            self.members = Rc::new(members.to_vec());
+            self.filter_members();
+        }
+    }
+
+    pub(super) fn search_members(&mut self, query: &str) {
+        let query = query.trim().to_lowercase();
+        if self.member_query != query {
+            self.member_query = query;
+            self.filter_members();
+            self.member_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        }
+    }
+
+    fn filter_members(&mut self) {
+        self.matching_members = Rc::new(
+            self.members
+                .iter()
+                .enumerate()
+                .filter(|(_, member)| profile_filters::member_matches(member, &self.member_query))
+                .map(|(index, _)| index)
+                .collect(),
+        );
+    }
+
+    pub(super) fn reset_history_scroll(&mut self) {
+        self.history_scroll = UniformListScrollHandle::default();
+    }
+}
 
 pub(super) fn hide_profiles(this: &WeakEntity<ApiTester>, cx: &mut App) {
     if let Some(entity) = this.upgrade() {
@@ -20,17 +71,41 @@ pub(super) fn render_profiles(
     let Some(entity) = this.upgrade() else {
         return div().into_any_element();
     };
-    entity.update(cx, |app, cx| {
-        app.ensure_profile_filter_inputs(window, cx);
-        let management = &mut app.server_management;
-        management.profile_history_view_visible = true;
-        if !management.profile_history_syncing
-            && (management.profile_history_status == ProfileHistoryStatus::Idle
-                || management.profile_history_refresh_pending)
+    // Settings stays mounted to retain its selected page and search. Its
+    // hidden Profiles page must not construct lists, bodies, or start work.
+    if entity.read(cx).workspace_tabs.active() != ActiveWorkspaceTab::ServerTools {
+        if entity
+            .read(cx)
+            .server_management
+            .profile_history_view_visible
         {
-            app.ensure_profile_history_loaded(window, cx);
+            hide_profiles(this, cx);
         }
-    });
+        return div().into_any_element();
+    }
+    let needs_prepare = {
+        let management = &entity.read(cx).server_management;
+        !management.profile_history_view_visible
+            || management.profile_filters.needs_prepare()
+            || (!management.profile_history_syncing
+                && (management.profile_history_status == ProfileHistoryStatus::Idle
+                    || management.profile_history_refresh_pending))
+    };
+    if needs_prepare {
+        entity.update(cx, |app, cx| {
+            if app.server_management.profile_filters.needs_prepare() {
+                app.ensure_profile_filter_inputs(window, cx);
+            }
+            let management = &mut app.server_management;
+            management.profile_history_view_visible = true;
+            if !management.profile_history_syncing
+                && (management.profile_history_status == ProfileHistoryStatus::Idle
+                    || management.profile_history_refresh_pending)
+            {
+                app.ensure_profile_history_loaded(window, cx);
+            }
+        });
+    }
     let (
         status,
         snapshot_present,
@@ -41,10 +116,10 @@ pub(super) fn render_profiles(
         history_status,
         history,
         selected_history_id,
-        selected_body,
         filters,
         realtime_status,
         history_syncing,
+        lists,
     ) = {
         let app = entity.read(cx);
         let management = &app.server_management;
@@ -63,9 +138,7 @@ pub(super) fn render_profiles(
         (
             management.status.clone(),
             snapshot.is_some(),
-            snapshot
-                .map(|snapshot| snapshot.profiles.clone())
-                .unwrap_or_default(),
+            management.profile_lists.members.clone(),
             management.selected_profile_id.clone(),
             snapshot
                 .map(|snapshot| snapshot.current_user.id.clone())
@@ -73,12 +146,11 @@ pub(super) fn render_profiles(
             snapshot.is_some_and(|snapshot| snapshot.has_permission(HISTORY_READ_OTHERS)),
             management.profile_history_status.clone(),
             management.profile_history.clone(),
-            selected_history_id.clone(),
-            selected_history_id
-                .and_then(|id| management.profile_history_body_cache.get(&id).cloned()),
+            selected_history_id,
             management.profile_filters.clone(),
             app.realtime_status,
             management.profile_history_syncing,
+            management.profile_lists.clone(),
         )
     };
     if !snapshot_present {
@@ -96,21 +168,13 @@ pub(super) fn render_profiles(
         .as_deref()
         .and_then(|id| profiles.iter().find(|profile| profile.id == id))
         .or_else(|| profiles.first());
-    let member_query = filters.member_query(cx);
-    let rows = profiles
-        .iter()
-        .filter(|profile| profile_filters::member_matches(profile, &member_query))
-        .map(|profile| {
-            render_profile_row(
-                profile,
-                selected.is_some_and(|selected| selected.id == profile.id),
-                profile.id == current_user_id || can_view_others,
-                this,
-                cx,
-            )
-        })
-        .collect::<Vec<_>>();
-    let visible_members = rows.len();
+    let member_query = &lists.member_query;
+    let visible_members = lists.matching_members.len();
+    let list_members = profiles.clone();
+    let matching_members = lists.matching_members.clone();
+    let list_selected_id = selected.map(|profile| profile.id.clone());
+    let list_current_user_id = current_user_id.clone();
+    let list_this = this.clone();
 
     let sidebar = v_flex()
         .w(px(PROFILE_SIDEBAR_WIDTH))
@@ -145,31 +209,45 @@ pub(super) fn render_profiles(
                         .child(profile_filters::render_member_search(&filters)),
                 ),
         )
-        .child(
-            v_flex()
-                .id("profile-list-scroll")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .p_2()
-                .gap_1()
-                .children(rows)
-                .when(visible_members == 0, |list| {
-                    list.child(
-                        div()
-                            .id("profile-members-empty")
-                            .debug_selector(|| "profile-members-empty".to_owned())
-                            .p_3()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(if member_query.is_empty() {
-                                "No members available."
-                            } else {
-                                "No members match your search."
-                            }),
-                    )
-                }),
-        );
+        .child(div().flex_1().min_h_0().w_full().overflow_hidden().child(
+            if visible_members == 0 {
+                div()
+                    .id("profile-members-empty")
+                    .debug_selector(|| "profile-members-empty".to_owned())
+                    .p_3()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if member_query.is_empty() {
+                        "No members available."
+                    } else {
+                        "No members match your search."
+                    })
+                    .into_any_element()
+            } else {
+                uniform_list(
+                    "profile-list-scroll",
+                    visible_members,
+                    move |range, _, cx| {
+                        range
+                            .map(|index| {
+                                let profile = &list_members[matching_members[index]];
+                                render_profile_row(
+                                    profile,
+                                    list_selected_id.as_ref() == Some(&profile.id),
+                                    profile.id == list_current_user_id || can_view_others,
+                                    &list_this,
+                                    cx,
+                                )
+                            })
+                            .collect()
+                    },
+                )
+                .track_scroll(lists.member_scroll.clone())
+                .size_full()
+                .px_2()
+                .into_any_element()
+            },
+        ));
 
     let detail = selected
         .map(|profile| {
@@ -180,11 +258,12 @@ pub(super) fn render_profiles(
                 &history_status,
                 &history,
                 selected_history_id.as_deref(),
-                selected_body.as_ref().map(|body| body.as_ref()),
                 &filters,
                 realtime_status,
                 history_syncing,
+                &lists.history_scroll,
                 this,
+                window,
                 cx,
             )
         })
@@ -209,6 +288,8 @@ fn render_profile_row(
     this: &WeakEntity<ApiTester>,
     cx: &mut App,
 ) -> AnyElement {
+    #[cfg(test)]
+    PROFILE_ROWS_RENDERED.set(PROFILE_ROWS_RENDERED.get() + 1);
     let select_this = this.clone();
     let user_id = profile.id.clone();
     let debug_profile_id = profile.id.clone();
@@ -216,6 +297,8 @@ fn render_profile_row(
         .id(SharedString::from(format!("select-profile-{}", profile.id)))
         .debug_selector(move || format!("select-profile-{debug_profile_id}"))
         .w_full()
+        .h(rems(3.75))
+        .overflow_hidden()
         .gap_2()
         .px_2()
         .py_2()
@@ -269,13 +352,14 @@ fn render_profile_detail(
     current_user_id: &str,
     can_view_others: bool,
     history_status: &ProfileHistoryStatus,
-    history: &[SharedHistoryEntry],
+    history: &Rc<Vec<SharedHistoryEntry>>,
     selected_history_id: Option<&str>,
-    selected_body: Option<&str>,
     filters: &profile_filters::ProfileFiltersState,
     realtime_status: RealtimeConnectionStatus,
     history_syncing: bool,
+    history_scroll: &UniformListScrollHandle,
     this: &WeakEntity<ApiTester>,
+    window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let can_view = profile.id == current_user_id || can_view_others;
@@ -371,11 +455,28 @@ fn render_profile_detail(
                 .flex_1()
                 .min_h_0()
                 .items_start()
-                .child(render_history_list(history, selected_history_id, this, cx))
+                .child(render_history_list(
+                    history,
+                    selected_history_id,
+                    history_scroll,
+                    this,
+                    cx,
+                ))
                 .child(
                     div().flex_1().min_w_0().h_full().child(
                         selected_entry
-                            .map(|entry| render_history_entry(entry, selected_body, cx))
+                            .and_then(|entry| this.upgrade().map(|entity| (entity, entry)))
+                            .map(|(entity, entry)| {
+                                entity.update(cx, |app, cx| {
+                                    profile_detail::render_history_entry(
+                                        history,
+                                        &entry.id,
+                                        &mut app.server_management.profile_detail,
+                                        window,
+                                        cx,
+                                    )
+                                })
+                            })
                             .unwrap_or_else(|| {
                                 profile_message("Select a history entry.".to_owned(), cx)
                             }),
@@ -420,90 +521,100 @@ fn history_live_status(
 }
 
 fn render_history_list(
-    history: &[SharedHistoryEntry],
+    history: &Rc<Vec<SharedHistoryEntry>>,
     selected_history_id: Option<&str>,
+    scroll: &UniformListScrollHandle,
     this: &WeakEntity<ApiTester>,
     cx: &mut App,
 ) -> AnyElement {
-    let rows = history
-        .iter()
-        .map(|entry| {
-            let select_this = this.clone();
-            let entry_id = entry.id.clone();
-            let debug_entry_id = entry.id.clone();
-            let selected = selected_history_id == Some(entry.id.as_str());
-            let status = entry
-                .response
-                .as_ref()
-                .map(|response| response.status.to_string())
-                .unwrap_or_else(|| "ERR".to_owned());
-            v_flex()
-                .id(SharedString::from(format!(
-                    "profile-history-entry-{}",
-                    entry.id
-                )))
-                .debug_selector(move || format!("profile-history-entry-{debug_entry_id}"))
-                .w_full()
-                .gap_1()
-                .px_3()
-                .py_3()
-                .border_b_1()
-                .border_color(cx.api_outline_variant())
-                .cursor_pointer()
-                .when(selected, |row| row.bg(cx.theme().sidebar_accent))
-                .hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.62)))
-                .on_click(move |_, _, cx| {
-                    if let Some(this) = select_this.upgrade() {
-                        this.update(cx, |this, cx| {
-                            this.server_management.selected_profile_history_id =
-                                Some(entry_id.clone());
-                            cx.notify();
-                        });
-                    }
-                })
-                .child(
-                    h_flex()
-                        .justify_between()
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_semibold()
-                                        .text_color(method_color(&entry.request.method, cx))
-                                        .child(entry.request.method.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(status),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(
-                                    entry
-                                        .created_at
-                                        .with_timezone(&Local)
-                                        .format("%b %d · %H:%M")
-                                        .to_string(),
-                                ),
-                        ),
-                )
-                .child(
-                    div()
-                        .w_full()
-                        .truncate()
-                        .text_sm()
-                        .child(compact_url(&entry.request.url)),
-                )
-                .into_any_element()
-        })
-        .collect::<Vec<_>>();
+    let entries = history.clone();
+    let this = this.clone();
+    let selected_history_id = selected_history_id.map(str::to_owned);
+    let render_rows = move |range: std::ops::Range<usize>, _: &mut Window, cx: &mut App| {
+        range
+            .map(|index| {
+                #[cfg(test)]
+                HISTORY_ROWS_RENDERED.set(HISTORY_ROWS_RENDERED.get() + 1);
+                let entry = &entries[index];
+                let select_this = this.clone();
+                let entry_id = entry.id.clone();
+                let debug_entry_id = entry.id.clone();
+                let selected = selected_history_id.as_deref() == Some(entry.id.as_str());
+                let status = entry
+                    .response
+                    .as_ref()
+                    .map(|response| response.status.to_string())
+                    .unwrap_or_else(|| "ERR".to_owned());
+                v_flex()
+                    .id(SharedString::from(format!(
+                        "profile-history-entry-{}",
+                        entry.id
+                    )))
+                    .debug_selector(move || format!("profile-history-entry-{debug_entry_id}"))
+                    .w_full()
+                    .h(rems(4.75))
+                    .overflow_hidden()
+                    .gap_1()
+                    .px_3()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(cx.api_outline_variant())
+                    .cursor_pointer()
+                    .when(selected, |row| row.bg(cx.theme().sidebar_accent))
+                    .hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.62)))
+                    .on_click(move |_, _, cx| {
+                        if let Some(this) = select_this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.server_management.selected_profile_history_id =
+                                    Some(entry_id.clone());
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_semibold()
+                                            .text_color(method_color(&entry.request.method, cx))
+                                            .child(entry.request.method.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(status),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(
+                                        entry
+                                            .created_at
+                                            .with_timezone(&Local)
+                                            .format("%b %d · %H:%M")
+                                            .to_string(),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .truncate()
+                            .text_sm()
+                            .child(compact_url(&entry.request.url)),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>()
+    };
     v_flex()
         .w(px(HISTORY_LIST_WIDTH))
         .h_full()
@@ -523,7 +634,7 @@ fn render_history_list(
                 .child(
                     div()
                         .font_semibold()
-                        .child(format!("SHARED HISTORY ({})", rows.len())),
+                        .child(format!("SHARED HISTORY ({})", history.len())),
                 )
                 .child(
                     div()
@@ -532,207 +643,11 @@ fn render_history_list(
                 ),
         )
         .child(
-            v_flex()
-                .id("profile-history-list-scroll")
+            uniform_list("profile-history-list-scroll", history.len(), render_rows)
+                .track_scroll(scroll.clone())
                 .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .children(rows),
+                .min_h_0(),
         )
-        .into_any_element()
-}
-
-fn render_history_entry(
-    entry: &SharedHistoryEntry,
-    body: Option<&str>,
-    cx: &mut App,
-) -> AnyElement {
-    let response = entry.response.as_ref();
-    v_flex()
-        .id(SharedString::from(format!(
-            "profile-history-entry-scroll-{}",
-            entry.id
-        )))
-        .size_full()
-        .min_w_0()
-        .overflow_y_scroll()
-        .p_5()
-        .gap_5()
-        .child(
-            v_flex()
-                .gap_2()
-                .child(
-                    h_flex()
-                        .gap_3()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_semibold()
-                                .text_color(method_color(&entry.request.method, cx))
-                                .child(entry.request.method.clone()),
-                        )
-                        .children(response.map(|response| {
-                            profile_badge(
-                                &format!("{} {}", response.status, response.status_text),
-                                status_color(response.status, cx),
-                            )
-                        })),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .child(entry.request.url.clone()),
-                ),
-        )
-        .child(history_headers_section(
-            "REQUEST HEADERS",
-            &entry.request.headers,
-            "Headers marked not to share are omitted.",
-            cx,
-        ))
-        .child(history_request_body_section(&entry.request, cx))
-        .when_some(response, |view, response| {
-            view.child(history_headers_section(
-                "RESPONSE HEADERS",
-                &response.headers,
-                "Sensitive response headers are redacted before sharing.",
-                cx,
-            ))
-            .child(history_text_section(
-                "RESPONSE BODY",
-                body.unwrap_or_default(),
-                response.body_truncated,
-                cx,
-            ))
-        })
-        .when(!entry.error.is_empty(), |view| {
-            view.child(history_text_section("ERROR", &entry.error, false, cx))
-        })
-        .into_any_element()
-}
-
-fn history_headers_section(
-    title: &'static str,
-    headers: &[SharedHistoryHeader],
-    note: &'static str,
-    cx: &mut App,
-) -> AnyElement {
-    v_flex()
-        .gap_2()
-        .child(history_section_title(title, cx))
-        .child(
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(note),
-        )
-        .child(if headers.is_empty() {
-            div()
-                .p_3()
-                .rounded_md()
-                .bg(cx.api_surface_low())
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("No shared headers")
-                .into_any_element()
-        } else {
-            v_flex()
-                .w_full()
-                .rounded_md()
-                .border_1()
-                .border_color(cx.api_outline_variant())
-                .children(headers.iter().enumerate().map(|(index, header)| {
-                    h_flex()
-                        .gap_4()
-                        .px_3()
-                        .py_2()
-                        .when(index > 0, |row| {
-                            row.border_t_1().border_color(cx.api_outline_variant())
-                        })
-                        .child(
-                            div()
-                                .w(px(180.))
-                                .flex_shrink_0()
-                                .text_sm()
-                                .font_semibold()
-                                .child(header.name.clone()),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .text_sm()
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .child(header.value.clone()),
-                        )
-                }))
-                .into_any_element()
-        })
-        .into_any_element()
-}
-
-fn history_request_body_section(request: &SharedHistoryRequest, cx: &mut App) -> AnyElement {
-    let body = if request.body_mode == "raw" {
-        request.body.clone()
-    } else if request.body_fields.is_empty() {
-        "No shared request body".to_owned()
-    } else {
-        request
-            .body_fields
-            .iter()
-            .map(|field| {
-                if field.kind == "file" {
-                    format!("{} = [file contents and path omitted]", field.name)
-                } else {
-                    format!("{} = {}", field.name, field.value)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    history_text_section("REQUEST BODY", &body, request.body_truncated, cx)
-}
-
-fn history_text_section(
-    title: &'static str,
-    value: &str,
-    truncated: bool,
-    cx: &mut App,
-) -> AnyElement {
-    v_flex()
-        .gap_2()
-        .child(
-            h_flex()
-                .gap_2()
-                .child(history_section_title(title, cx))
-                .children(truncated.then(|| profile_badge("Truncated", cx.theme().warning))),
-        )
-        .child(
-            div()
-                .id(SharedString::from(format!("profile-history-body-{title}")))
-                .debug_selector(move || format!("profile-history-body-{title}"))
-                .w_full()
-                .max_h(px(360.))
-                .overflow_y_scroll()
-                .p_3()
-                .rounded_md()
-                .border_1()
-                .border_color(cx.api_outline_variant())
-                .bg(cx.api_surface_lowest())
-                .text_sm()
-                .font_family(cx.theme().mono_font_family.clone())
-                .child(if value.is_empty() { "Empty" } else { value }.to_owned()),
-        )
-        .into_any_element()
-}
-
-fn history_section_title(title: &'static str, cx: &mut App) -> AnyElement {
-    div()
-        .text_xs()
-        .font_semibold()
-        .text_color(cx.theme().muted_foreground)
-        .child(title)
         .into_any_element()
 }
 
@@ -814,7 +729,8 @@ mod tests {
 
     use super::*;
     use crate::core::{
-        ManagementPermission, ManagementRole, ManagementUser, SharedHistoryResponse,
+        ManagementPermission, ManagementRole, ManagementUser, SharedHistoryHeader,
+        SharedHistoryRequest, SharedHistoryResponse,
     };
 
     struct ProfilesHarness {
@@ -843,6 +759,7 @@ mod tests {
             app_entity = Some(app.clone());
             let now = Utc::now();
             app.update(cx, |app, _| {
+                app.workspace_tabs.open_tool(WorkspaceToolTab::ServerTools);
                 let permission = ManagementPermission {
                     key: HISTORY_READ_OTHERS.to_owned(),
                     description: "View other users' shared request history".to_owned(),
@@ -1049,5 +966,90 @@ mod tests {
                 assert!(Rc::ptr_eq(&entries, &app.server_management.profile_history));
             });
         });
+
+        // A large directory and history still construct only a viewport of
+        // rows. Count factories, not elapsed time, to make this deterministic.
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                let mut snapshot = app.server_management.snapshot.clone().unwrap();
+                snapshot
+                    .profiles
+                    .extend((0..5_000).map(|index| ProfileView {
+                        id: format!("bulk-member-{index}"),
+                        email: format!("member-{index}@example.test"),
+                        display_name: format!("Member {index}"),
+                        active: true,
+                    }));
+                app.server_management.set_snapshot(snapshot);
+                app.server_management.profile_lists.search_members("");
+                let example = app.server_management.profile_history[0].clone();
+                let entries = (0..1_000)
+                    .map(|index| {
+                        let mut entry = example.clone();
+                        entry.id = format!("bulk-entry-{index}");
+                        entry
+                    })
+                    .collect();
+                app.server_management.set_profile_history(entries);
+                app.server_management.profile_history_refresh_pending = false;
+                app.server_management.profile_history_status = ProfileHistoryStatus::Ready;
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        PROFILE_ROWS_RENDERED.set(0);
+        HISTORY_ROWS_RENDERED.set(0);
+        cx.update(|_, cx| app.update(cx, |_, cx| cx.notify()));
+        cx.run_until_parked();
+        let member_rows = PROFILE_ROWS_RENDERED.get();
+        let history_rows = HISTORY_ROWS_RENDERED.get();
+        assert!(
+            member_rows > 0 && member_rows < 100,
+            "{member_rows} member rows rendered"
+        );
+        assert!(
+            history_rows > 0 && history_rows < 100,
+            "{history_rows} history rows rendered"
+        );
+        assert!(cx.debug_bounds("select-profile-bulk-member-4999").is_none());
+        assert!(
+            cx.debug_bounds("profile-history-entry-bulk-entry-999")
+                .is_none()
+        );
+
+        // No periodic filter parsing/refetching or parent invalidation after
+        // the view settles, even while an input is focused and its caret blinks.
+        let search = cx.debug_bounds("profile-member-search").unwrap();
+        cx.simulate_click(search.center(), Modifiers::none());
+        cx.run_until_parked();
+        PROFILE_ROWS_RENDERED.set(0);
+        HISTORY_ROWS_RENDERED.set(0);
+        for _ in 0..10 {
+            cx.executor().advance_clock(Duration::from_millis(500));
+            cx.run_until_parked();
+        }
+        assert_eq!(PROFILE_ROWS_RENDERED.get(), 0);
+        assert_eq!(HISTORY_ROWS_RENDERED.get(), 0);
+
+        // Keeping Server Tools open while another tab is active must preserve
+        // state without even constructing its hidden member/history rows.
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.workspace_tabs.activate_request();
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        PROFILE_ROWS_RENDERED.set(0);
+        HISTORY_ROWS_RENDERED.set(0);
+        for _ in 0..10 {
+            cx.update(|_, cx| app.update(cx, |_, cx| cx.notify()));
+            cx.run_until_parked();
+        }
+        assert_eq!(PROFILE_ROWS_RENDERED.get(), 0);
+        assert_eq!(HISTORY_ROWS_RENDERED.get(), 0);
+        eprintln!(
+            "Profiles fixture: 5,002 members / 1,000 history entries; visible frame built {member_rows} / {history_rows} rows; settled idle and hidden built zero."
+        );
     }
 }
