@@ -151,10 +151,21 @@ pub(super) fn response_language(response: &ResponseData) -> CodeLanguage {
         CodeLanguage::Toml
     } else if content_type.contains("xml") {
         CodeLanguage::Html
-    } else if serde_json::from_slice::<serde_json::Value>(&response.body).is_ok() {
+    } else if !response.body.is_file_backed()
+        && serde_json::from_slice::<serde_json::Value>(&response.body).is_ok()
+    {
         CodeLanguage::Json
     } else {
         CodeLanguage::from("text")
+    }
+}
+
+pub(super) fn response_body_is_text(response: &ResponseData) -> bool {
+    if response.body.is_file_backed() {
+        let sample_len = response.body.len().min(8 * 1024);
+        is_probably_text(&response.body[..sample_len])
+    } else {
+        is_probably_text(&response.body)
     }
 }
 

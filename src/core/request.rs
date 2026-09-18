@@ -562,8 +562,7 @@ impl ResponseBody {
         })
     }
 
-    #[cfg(test)]
-    fn is_file_backed(&self) -> bool {
+    pub fn is_file_backed(&self) -> bool {
         matches!(self.storage.as_ref(), ResponseBodyStorage::File(_))
     }
 }

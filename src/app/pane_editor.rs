@@ -457,7 +457,7 @@ impl PaneEditorState {
         self.pretty_body = runtime.pretty_body;
         self.response = runtime.response.clone();
         self.formatted_body = self.response.as_ref().and_then(|response| {
-            is_probably_text(&response.body).then(|| {
+            (!response.body.is_file_backed() && response_body_is_text(response)).then(|| {
                 SharedString::from(format_body(&response.body, self.pretty_body, formatter))
             })
         });
@@ -474,10 +474,14 @@ impl PaneEditorState {
         self.request_notice = runtime.request_notice.clone();
         if let Some(response) = &self.response {
             let language = response_language(response);
-            let content = self.formatted_body.clone().map_or_else(
-                || format!("Binary response ({}).", format_bytes(response.size_bytes())),
-                |body| body.to_string(),
-            );
+            let content = if response.body.is_file_backed() && response_body_is_text(response) {
+                String::new()
+            } else {
+                self.formatted_body.clone().map_or_else(
+                    || format!("Binary response ({}).", format_bytes(response.size_bytes())),
+                    |body| body.to_string(),
+                )
+            };
             self.response_editor.update(cx, |editor, cx| {
                 editor.set_language(language, cx);
                 editor.set_value(content, window, cx);
@@ -1925,9 +1929,23 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let key = session.dom_key(pane_id);
-        let Some(_) = &session.response else {
+        let Some(response) = &session.response else {
             return div().size_full().into_any_element();
         };
+        if response.body.is_file_backed() && response_body_is_text(response) {
+            return div()
+                .id(SharedString::from(format!("{key}-response-body")))
+                .debug_selector(|| "secondary-pane-file-backed-response".to_owned())
+                .size_full()
+                .min_h_0()
+                .bg(cx.api_surface_lowest())
+                .child(super::response_body::render_file_backed_response(
+                    SharedString::from(format!("{key}-file-backed-response")),
+                    response,
+                    cx,
+                ))
+                .into_any_element();
+        }
         div()
             .id(SharedString::from(format!("{key}-response-body")))
             .debug_selector(|| "secondary-pane-response-code-editor".to_owned())
@@ -2487,16 +2505,20 @@ impl ApiTester {
             session.pretty_body = !session.pretty_body;
             session.copied = false;
             session.formatted_body = session.response.as_ref().and_then(|response| {
-                is_probably_text(&response.body).then(|| {
+                (!response.body.is_file_backed() && response_body_is_text(response)).then(|| {
                     SharedString::from(format_body(&response.body, session.pretty_body, &formatter))
                 })
             });
             if let Some(response) = &session.response {
                 let language = response_language(response);
-                let content = session.formatted_body.clone().map_or_else(
-                    || format!("Binary response ({}).", format_bytes(response.size_bytes())),
-                    |body| body.to_string(),
-                );
+                let content = if response.body.is_file_backed() && response_body_is_text(response) {
+                    String::new()
+                } else {
+                    session.formatted_body.clone().map_or_else(
+                        || format!("Binary response ({}).", format_bytes(response.size_bytes())),
+                        |body| body.to_string(),
+                    )
+                };
                 session.response_editor.update(cx, |editor, cx| {
                     editor.set_language(language, cx);
                     editor.set_value(content, window, cx);

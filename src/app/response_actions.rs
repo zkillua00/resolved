@@ -8,7 +8,9 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) {
         let language = response_language(response);
-        let content = if is_probably_text(&response.body) {
+        let content = if response.body.is_file_backed() && response_body_is_text(response) {
+            String::new()
+        } else if response_body_is_text(response) {
             format_body(&response.body, self.pretty_body, &self.settings.formatter)
         } else {
             format!(
@@ -100,6 +102,9 @@ impl ApiTester {
                 .map(|header| format!("{}: {}", header.name, header.value))
                 .collect::<Vec<_>>()
                 .join("\n"),
+            ResponseTab::Body if response.body.is_file_backed() => {
+                format_body(&response.body, self.pretty_body, &self.settings.formatter)
+            }
             ResponseTab::Body => self.response_editor.read(cx).value(cx).to_string(),
             ResponseTab::Preview => {
                 format_body(&response.body, self.pretty_body, &self.settings.formatter)

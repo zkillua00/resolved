@@ -14,7 +14,7 @@ use gpui::{
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _,
     PathPromptOptions, Pixels, Point, Rems, Render, ScrollHandle, ScrollWheelEvent, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, Timer, WeakEntity, Window,
-    anchored, deferred, div, img, point, prelude::FluentBuilder as _, px, rems,
+    anchored, deferred, div, img, point, prelude::FluentBuilder as _, px, rems, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Root, RopeExt as _, Selectable as _,
