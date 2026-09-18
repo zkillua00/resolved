@@ -103,7 +103,7 @@ using Rust 1.95.0 on native hosted runners:
 
 | Platform | Architectures | Downloads |
 | --- | --- | --- |
-| macOS 15 | Apple Silicon, Intel | ZIP containing `Resolved.app` |
+| macOS 26 | Apple Silicon, Intel | ZIP containing `Resolved.app` |
 | Windows 2025 | x64 | MSIX and public signing certificate |
 | Ubuntu 24.04 | x64, ARM64 | Debian, RPM, and `.tar.xz` archives |
 
