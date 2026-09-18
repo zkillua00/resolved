@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 
 	"resolved-server/internal/identity"
@@ -180,21 +181,69 @@ func (r *Repository) UpsertEntry(ctx context.Context, entry Entry) (Entry, error
 	return entry, err
 }
 
-func (r *Repository) ListEntries(ctx context.Context, workspaceID, userID string) ([]Entry, error) {
-	var entries []Entry
-	err := r.db.WithContext(ctx).
+func (r *Repository) ListEntries(ctx context.Context, workspaceID, userID string, options ...ListOptions) ([]Entry, error) {
+	var input ListOptions
+	if len(options) > 0 {
+		input = options[0]
+	}
+	query, err := parseHistoryQuery(input)
+	if err != nil {
+		return nil, err
+	}
+	// Snapshot only IDs so concurrent inserts cannot extend the scan or displace
+	// candidates between batches. Concurrent deletes are simply skipped.
+	limit := MaxEntriesPerProfileWorkspace
+	if query.unfilteredNewest() {
+		limit = MaxListedEntries
+	}
+	var ids []string
+	db := r.db.WithContext(ctx)
+	err = db.Model(&Entry{}).
 		Where("workspace_id = ? AND user_id = ?", workspaceID, userID).
 		Order("created_at DESC, id DESC").
-		Limit(MaxListedEntries).
-		Find(&entries).Error
-	if err == nil {
+		Limit(limit).
+		Pluck("id", &ids).Error
+	if err != nil {
+		return nil, err
+	}
+	matches := make([]Entry, 0, MaxListedEntries)
+	// Find closes its rows before decryption, which itself may query data keys.
+	// Keep at most four unread records and twenty winning plaintext records,
+	// rather than retaining all 100 ciphertexts and decrypted bodies.
+	const batchSize = 4
+	for start := 0; start < len(ids); start += batchSize {
+		var entries []Entry
+		if err := db.Where("workspace_id = ? AND user_id = ?", workspaceID, userID).
+			Where("id IN ?", ids[start:min(start+batchSize, len(ids))]).
+			Find(&entries).Error; err != nil {
+			return nil, err
+		}
 		for index := range entries {
-			if err := r.decryptEntry(ctx, r.db.WithContext(ctx), &entries[index]); err != nil {
+			entry := entries[index]
+			entries[index] = Entry{}
+			if err := r.decryptEntry(ctx, db, &entry); err != nil {
 				return nil, err
 			}
+			entry.EncryptedPayload = nil
+			match, err := query.matches(entry)
+			if err != nil {
+				return nil, err
+			}
+			if !match {
+				continue
+			}
+			position, _ := slices.BinarySearchFunc(matches, entry, query.compare)
+			if position >= MaxListedEntries {
+				continue
+			}
+			if len(matches) < MaxListedEntries {
+				matches = append(matches, Entry{})
+			}
+			copy(matches[position+1:], matches[position:len(matches)-1])
+			matches[position] = entry
 		}
 	}
-	return entries, err
+	return matches, nil
 }
 
 func (r *Repository) DeleteEntries(ctx context.Context, workspaceID, userID string) error {

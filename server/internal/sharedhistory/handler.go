@@ -16,8 +16,9 @@ type Handler struct {
 }
 
 type ListRequest struct {
-	UserID      string `json:"-" validate:"required"`
-	WorkspaceID string `json:"-" validate:"required"`
+	UserID      string      `json:"-" validate:"required"`
+	WorkspaceID string      `json:"-" validate:"required"`
+	Options     ListOptions `json:"-"`
 }
 
 type ListPayload ListRequest
@@ -46,6 +47,13 @@ func NewHandler(service *Service) *Handler {
 func (request *ListRequest) BindFiber(c fiber.Ctx) error {
 	request.UserID = c.Params("user_id")
 	request.WorkspaceID = c.Query("workspace_id")
+	request.Options = ListOptions{
+		Method: c.Query("method"), Status: c.Query("status"),
+		Hostname: c.Query("hostname"), Path: c.Query("path"),
+		HeaderKeys: c.Query("header_keys"), ParamKeys: c.Query("param_keys"),
+		BodyType: c.Query("body_type"), From: c.Query("from"),
+		Before: c.Query("before"), Sort: c.Query("sort"),
+	}
 	return nil
 }
 
@@ -109,6 +117,7 @@ func (h *Handler) ListController() fiber.Handler {
 				c.Context(), actorFromContext(c),
 				principal.HasPermission(identity.PermissionHistoryReadOthers),
 				payload.WorkspaceID, payload.UserID,
+				payload.Options,
 			)
 			if err != nil {
 				return httpkit.NewErrorResponse[[]EntryView](err)

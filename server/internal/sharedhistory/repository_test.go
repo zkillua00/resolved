@@ -235,3 +235,68 @@ func TestRepositoryScopesRealtimeViewersByPermissionAndWorkspaceAccess(t *testin
 		t.Fatalf("realtime viewers = %v, want %v", got, want)
 	}
 }
+
+func TestRepositoryBatchedTopTwentyAndReadBounds(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s?mode=memory&cache=shared", uuid.NewString())), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	if err := db.AutoMigrate(&Entry{}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for i := 0; i < 105; i++ {
+		method := "GET"
+		if i < 60 {
+			method = "PATCH"
+		}
+		entry := Entry{
+			ID: fmt.Sprintf("%03d", i), WorkspaceID: "workspace", UserID: "user",
+			ClientEntryID: fmt.Sprint(i), Method: method, URL: "https://example.test/",
+			RequestHeadersJSON: []byte("[]"), RequestBody: make([]byte, 64*1024),
+			RequestBodyFieldsJSON: []byte("[]"), ResponseHeadersJSON: []byte("[]"),
+			CreatedAt: now, UpdatedAt: now,
+		}
+		if err := db.Create(&entry).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var read int
+	if err := db.Callback().Query().After("gorm:query").Register("test:bound-history-batches", func(tx *gorm.DB) {
+		if entries, ok := tx.Statement.Dest.(*[]Entry); ok {
+			if len(*entries) > 4 {
+				t.Errorf("loaded %d full entries in one batch", len(*entries))
+			}
+			read += len(*entries)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	repository := NewRepository(db)
+	for _, tc := range []struct {
+		options      ListOptions
+		first, last  string
+		count, reads int
+	}{
+		{ListOptions{Method: "PATCH", Sort: "oldest"}, "005", "024", 20, 100},
+		{ListOptions{Method: "PATCH", Sort: "method"}, "059", "040", 20, 100},
+		{ListOptions{Method: "DELETE"}, "", "", 0, 100},
+		{ListOptions{Sort: "newest", HeaderKeys: ", ,", ParamKeys: ", ,"}, "104", "085", 20, 20},
+		{ListOptions{}, "104", "085", 20, 20},
+	} {
+		read = 0
+		got, err := repository.ListEntries(t.Context(), "workspace", "user", tc.options)
+		if err != nil || len(got) != tc.count || read != tc.reads {
+			t.Fatalf("%+v: count=%d reads=%d err=%v", tc.options, len(got), read, err)
+		}
+		if len(got) > 0 && (got[0].ID != tc.first || got[len(got)-1].ID != tc.last) {
+			t.Fatalf("%+v: range=%s..%s", tc.options, got[0].ID, got[len(got)-1].ID)
+		}
+	}
+}

@@ -835,17 +835,70 @@ async fn list_activity(
     parse_response(response).await
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SharedHistoryQuery {
+    pub method: String,
+    pub status: String,
+    pub hostname: String,
+    pub path: String,
+    pub body_type: String,
+    pub sort: String,
+    pub header_keys: Vec<String>,
+    pub param_keys: Vec<String>,
+    pub from: Option<DateTime<Utc>>,
+    pub before: Option<DateTime<Utc>>,
+}
+
+impl SharedHistoryQuery {
+    fn append_to(&self, endpoint: &mut Url) {
+        let mut pairs = endpoint.query_pairs_mut();
+        for (name, value) in [
+            ("method", self.method.as_str()),
+            ("status", self.status.as_str()),
+            ("hostname", self.hostname.as_str()),
+            ("path", self.path.as_str()),
+            ("body_type", self.body_type.as_str()),
+            ("sort", self.sort.as_str()),
+        ] {
+            if !value.is_empty() {
+                pairs.append_pair(name, value);
+            }
+        }
+        for (name, keys) in [
+            ("header_keys", &self.header_keys),
+            ("param_keys", &self.param_keys),
+        ] {
+            let value = keys
+                .iter()
+                .filter(|key| !key.is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(",");
+            if !value.is_empty() {
+                pairs.append_pair(name, &value);
+            }
+        }
+        for (name, date) in [("from", self.from), ("before", self.before)] {
+            if let Some(date) = date {
+                pairs.append_pair(name, &date.to_rfc3339());
+            }
+        }
+    }
+}
+
 pub async fn list_shared_history(
     client: &Client,
     base_url: &Url,
     bearer_token: &str,
     workspace_id: &str,
     user_id: &str,
+    query: &SharedHistoryQuery,
 ) -> Result<Vec<SharedHistoryEntry>, UpstreamManagementError> {
     let mut endpoint = endpoint(base_url, &format!("api/v1/profiles/{user_id}/history"))?;
     endpoint
         .query_pairs_mut()
         .append_pair("workspace_id", workspace_id);
+    query.append_to(&mut endpoint);
     let response = client
         .get(endpoint)
         .bearer_auth(bearer_token)
@@ -1276,6 +1329,51 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn shared_history_query_omits_empty_fields() {
+        let mut url = Url::parse("https://example.test/history?workspace_id=workspace").unwrap();
+        SharedHistoryQuery::default().append_to(&mut url);
+        assert_eq!(url.query(), Some("workspace_id=workspace"));
+    }
+
+    #[test]
+    fn shared_history_query_encodes_values_without_query_injection() {
+        let from = DateTime::parse_from_rfc3339("2026-01-02T03:04:05+02:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let query = SharedHistoryQuery {
+            method: "GET".into(),
+            status: "2xx".into(),
+            hostname: "example.test&status=500".into(),
+            path: "/a?b=猫 +%".into(),
+            body_type: "raw:json".into(),
+            sort: "duration_desc".into(),
+            header_keys: vec!["X-Token".into(), "Accept".into()],
+            param_keys: vec!["a&b".into(), "space key".into()],
+            from: Some(from),
+            before: Some(from + chrono::Duration::hours(1)),
+        };
+        let mut url = Url::parse("https://example.test/history?workspace_id=w").unwrap();
+        query.append_to(&mut url);
+        let pairs = url
+            .query_pairs()
+            .into_owned()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(pairs.len(), 11);
+        assert_eq!(pairs["workspace_id"], "w");
+        assert_eq!(pairs["method"], query.method);
+        assert_eq!(pairs["status"], query.status);
+        assert_eq!(pairs["hostname"], query.hostname);
+        assert_eq!(pairs["path"], query.path);
+        assert_eq!(pairs["body_type"], query.body_type);
+        assert_eq!(pairs["sort"], query.sort);
+        assert_eq!(pairs["header_keys"], "X-Token,Accept");
+        assert_eq!(pairs["param_keys"], "a&b,space key");
+        assert_eq!(pairs["from"], from.to_rfc3339());
+        assert_eq!(pairs["before"], query.before.unwrap().to_rfc3339());
+    }
+
     #[test]
     fn effective_permissions_are_deduplicated_across_roles() {
         let permission = ManagementPermission {

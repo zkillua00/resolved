@@ -962,11 +962,28 @@ func TestSharedHistoryProfilesAndAuthorization(t *testing.T) {
 		t.Fatalf("personal history = %+v, want created entry", personal)
 	}
 
+	filtered := request[[]sharedhistory.EntryView](
+		t, app, http.MethodGet,
+		"/api/v1/profiles/"+member.ID+"/history?workspace_id="+workspace.ID+"&method=NO_MATCH&sort=oldest",
+		memberLogin.Token, nil, fiber.StatusOK,
+	).Data
+	if len(filtered) != 0 {
+		t.Fatalf("history filter was ignored: %+v", filtered)
+	}
+	badFilter := request[[]sharedhistory.EntryView](
+		t, app, http.MethodGet,
+		"/api/v1/profiles/"+member.ID+"/history?workspace_id="+workspace.ID+"&status=600",
+		memberLogin.Token, nil, fiber.StatusUnprocessableEntity,
+	)
+	if badFilter.Error.Fields["status"] == "" {
+		t.Fatalf("missing status validation field: %+v", badFilter.Error)
+	}
+
 	denied := request[[]sharedhistory.EntryView](
 		t,
 		app,
 		http.MethodGet,
-		"/api/v1/profiles/"+owner.ID+"/history?workspace_id="+workspace.ID,
+		"/api/v1/profiles/"+owner.ID+"/history?workspace_id="+workspace.ID+"&method=GET&sort=oldest",
 		memberLogin.Token,
 		nil,
 		fiber.StatusForbidden,
@@ -1007,7 +1024,7 @@ func TestSharedHistoryProfilesAndAuthorization(t *testing.T) {
 		t,
 		app,
 		http.MethodGet,
-		"/api/v1/profiles/"+owner.ID+"/history?workspace_id="+privateWorkspace.ID,
+		"/api/v1/profiles/"+owner.ID+"/history?workspace_id="+privateWorkspace.ID+"&status=error&sort=oldest",
 		memberLogin.Token,
 		nil,
 		fiber.StatusForbidden,

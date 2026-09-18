@@ -208,7 +208,9 @@ omitted before upload, their values are scrubbed from the rest of the request
 and response, and known sensitive headers are redacted independently. File
 paths and file bytes are stripped from shared body fields and never stored.
 Bodies are limited to 1 MiB, the newest 100 entries are retained per member and
-workspace, and a profile read returns the newest 20. Clearing local history while a server
+workspace, and a profile read returns up to 20 matches (newest first by default).
+[History filters and sorting](docs/shared-history.md) apply across all retained
+entries before that result limit. Clearing local history while a server
 workspace is active also clears that member's shared history for the workspace.
 Uploads and clears emit metadata-only WebSocket invalidations to the history
 owner and to users who have both workspace access and `history.read_others`.

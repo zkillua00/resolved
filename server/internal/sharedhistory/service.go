@@ -87,6 +87,7 @@ func (s *Service) List(
 	actor workspaces.Actor,
 	canReadOthers bool,
 	workspaceID, userID string,
+	options ...ListOptions,
 ) ([]EntryView, error) {
 	if err := validation.ID("workspace_id", workspaceID); err != nil {
 		return nil, err
@@ -110,7 +111,13 @@ func (s *Service) List(
 		}
 		return nil, problem.Wrap(err, "load history profile")
 	}
-	entries, err := s.repository.ListEntries(ctx, workspaceID, userID)
+	// Validate only after the existing access checks; filters never grant access.
+	for _, option := range options {
+		if _, err := parseHistoryQuery(option); err != nil {
+			return nil, err
+		}
+	}
+	entries, err := s.repository.ListEntries(ctx, workspaceID, userID, options...)
 	if err != nil {
 		return nil, problem.Wrap(err, "list shared history")
 	}

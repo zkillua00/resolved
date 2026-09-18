@@ -90,6 +90,7 @@ impl ApiTester {
                     match signal {
                         RealtimeSignal::Connected => {
                             this.realtime_status = RealtimeConnectionStatus::Connected;
+                            this.catch_up_profile_history_realtime(window, cx);
                             this.sync_activity_log_realtime(
                                 server_management::activity_views::ActivityLogKind::Change,
                                 window,

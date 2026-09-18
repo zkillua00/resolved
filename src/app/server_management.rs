@@ -29,6 +29,7 @@ pub(super) mod activity_views;
 mod discord_views;
 mod execution_limit_views;
 mod network_views;
+mod profile_filters;
 mod profile_views;
 mod proxy_rule_editor;
 mod proxy_scope_views;
@@ -132,13 +133,19 @@ pub(super) struct ServerManagementState {
     pub status: ServerManagementStatus,
     pub snapshot: Option<UpstreamManagementSnapshot>,
     selected_user_id: Option<String>,
+    profile_filters: profile_filters::ProfileFiltersState,
     selected_profile_id: Option<String>,
     selected_profile_history_id: Option<String>,
     profile_history_status: ProfileHistoryStatus,
-    profile_history: Vec<SharedHistoryEntry>,
+    profile_history: Rc<Vec<SharedHistoryEntry>>,
+    profile_history_query: crate::core::SharedHistoryQuery,
+    profile_history_syncing: bool,
+    profile_history_view_visible: bool,
+    profile_history_refresh_pending: bool,
+    profile_history_revision: u64,
     /// Decoded response-body display strings for profile history entries,
     /// rebuilt by `set_profile_history` so renders never re-decode base64.
-    profile_history_body_cache: HashMap<String, String>,
+    profile_history_body_cache: HashMap<String, SharedString>,
     change_log: ActivityLogFeed,
     audit_log: ActivityLogFeed,
     change_log_list: ListState,
@@ -160,10 +167,16 @@ impl Default for ServerManagementState {
             status: ServerManagementStatus::default(),
             snapshot: None,
             selected_user_id: None,
+            profile_filters: profile_filters::ProfileFiltersState::default(),
             selected_profile_id: None,
             selected_profile_history_id: None,
             profile_history_status: ProfileHistoryStatus::Idle,
-            profile_history: Vec::new(),
+            profile_history: Rc::default(),
+            profile_history_query: crate::core::SharedHistoryQuery::default(),
+            profile_history_syncing: false,
+            profile_history_view_visible: false,
+            profile_history_refresh_pending: false,
+            profile_history_revision: 0,
             profile_history_body_cache: HashMap::new(),
             change_log: ActivityLogFeed::default(),
             audit_log: ActivityLogFeed::default(),
@@ -237,23 +250,42 @@ impl ServerManagementState {
     }
 
     pub(super) fn reset_profile_history(&mut self) {
+        self.profile_history_revision = self.profile_history_revision.wrapping_add(1);
+        self.profile_history_syncing = false;
+        self.profile_history_refresh_pending = false;
         self.profile_history_status = ProfileHistoryStatus::Idle;
-        self.profile_history.clear();
+        self.profile_history = Rc::default();
         self.profile_history_body_cache.clear();
         self.selected_profile_history_id = None;
     }
 
     fn set_profile_history(&mut self, entries: Vec<SharedHistoryEntry>) {
+        // Read selection at completion, not when the request started: the user
+        // can inspect another entry while a background refresh is in flight.
+        self.selected_profile_history_id = self
+            .selected_profile_history_id
+            .take()
+            .filter(|selected| entries.iter().any(|entry| &entry.id == selected))
+            .or_else(|| entries.first().map(|entry| entry.id.clone()));
         self.profile_history_body_cache = entries
             .iter()
             .filter_map(|entry| {
                 entry
                     .response
                     .as_ref()
-                    .map(|response| (entry.id.clone(), shared_history_response_body(response)))
+                    .map(|response| (entry.id.clone(), shared_history_response_body(response).into()))
             })
             .collect();
-        self.profile_history = entries;
+        self.profile_history = Rc::new(entries);
+    }
+
+    fn coalesce_profile_history_refresh(&mut self) -> bool {
+        if self.profile_history_syncing {
+            self.profile_history_refresh_pending = true;
+            true
+        } else {
+            false
+        }
     }
 
     pub(super) fn is_history_visible_for(&self, user_id: &str) -> bool {
@@ -697,6 +729,14 @@ impl ApiTester {
         {
             self.refresh_server_management(window, cx);
         }
+        if matches!(self.server_management.status, ServerManagementStatus::Ready)
+            && matches!(
+                self.server_management.profile_history_status,
+                ProfileHistoryStatus::Idle
+            )
+        {
+            self.ensure_profile_history_loaded(window, cx);
+        }
         self.ensure_proxy_workspace_inputs(window, cx);
     }
 
@@ -767,58 +807,9 @@ impl ApiTester {
             cx.notify();
             return;
         };
-        let change_log = if self.server_management.upstream_id.as_deref() == Some(&upstream_id) {
-            self.server_management.change_log.clone()
-        } else {
-            ActivityLogFeed::default()
-        };
-        let audit_log = if self.server_management.upstream_id.as_deref() == Some(&upstream_id) {
-            self.server_management.audit_log.clone()
-        } else {
-            ActivityLogFeed::default()
-        };
-        let role_permission_drafts =
-            if self.server_management.upstream_id.as_deref() == Some(&upstream_id) {
-                self.server_management.role_permission_drafts.clone()
-            } else {
-                BTreeMap::new()
-            };
-        let selected_role_id = (self.server_management.upstream_id.as_deref()
-            == Some(&upstream_id))
-        .then(|| self.server_management.selected_role_id.clone())
-        .flatten();
-        // Keep in-progress proxy work through same-server refreshes, including
-        // realtime updates. A server switch must never carry a draft across.
-        let same_server = self.server_management.upstream_id.as_deref() == Some(&upstream_id);
-        let proxy_workspace = same_server
-            .then(|| self.server_management.proxy_workspace.clone())
-            .unwrap_or_default();
-        let proxy_rule_editor = same_server
-            .then(|| self.server_management.proxy_rule_editor.clone())
-            .unwrap_or_default();
-        let proxy_scope_editor = same_server
-            .then(|| self.server_management.proxy_scope_editor.clone())
-            .unwrap_or_default();
-        let execution_limits =
-            if self.server_management.upstream_id.as_deref() == Some(&upstream_id) {
-                self.server_management.execution_limits.clone()
-            } else {
-                execution_limit_views::ExecutionLimitState::default()
-            };
-        self.server_management = ServerManagementState {
-            upstream_id: Some(upstream_id.clone()),
-            status: ServerManagementStatus::Loading,
-            snapshot: None,
-            change_log,
-            audit_log,
-            selected_role_id,
-            role_permission_drafts,
-            execution_limits,
-            proxy_workspace,
-            proxy_rule_editor,
-            proxy_scope_editor,
-            ..ServerManagementState::default()
-        };
+        // A different server was reset above. Preserve same-server inputs,
+        // drafts and history in place, without copying body-bearing entries.
+        self.server_management.status = ServerManagementStatus::Loading;
         self.ensure_proxy_workspace_inputs(window, cx);
         let vault = self.credential_vault.clone();
         let runtime = Arc::clone(&self.runtime);
@@ -849,12 +840,6 @@ impl ApiTester {
                 this.server_management_abort_handle = None;
                 match result {
                     Ok(Ok(snapshot)) => {
-                        if let Some(abort_handle) = this.profile_history_abort_handle.take() {
-                            abort_handle.abort();
-                        }
-                        this.profile_history_generation =
-                            this.profile_history_generation.wrapping_add(1);
-                        this.server_management.reset_profile_history();
                         this.sync_upstream_profile_permissions(
                             &upstream_id,
                             &snapshot.current_user,
@@ -862,6 +847,7 @@ impl ApiTester {
                         );
                         this.server_management.status = ServerManagementStatus::Ready;
                         this.server_management.set_snapshot(snapshot);
+                        this.ensure_profile_history_loaded(window, cx);
                     }
                     Ok(Err(error)) => {
                         this.server_management.status = ServerManagementStatus::Error(error);
@@ -966,6 +952,7 @@ impl ApiTester {
                         );
                         this.server_management.status = ServerManagementStatus::Ready;
                         this.server_management.set_snapshot(snapshot);
+                        this.ensure_profile_history_loaded(window, cx);
                         this.settings_notice = Some(outcome.notice);
                     }
                     Ok(Err(error)) => {
@@ -1117,7 +1104,10 @@ impl ApiTester {
             .full_bleed()
             .group(SettingGroup::new().item(SettingItem::render_searchable(
                 "users accounts login roles active inactive",
-                move |_, _, cx| render_user_management(&this, cx),
+                move |_, _, cx| {
+                    profile_views::hide_profiles(&this, cx);
+                    render_user_management(&this, cx)
+                },
             )))
     }
 
@@ -1129,7 +1119,10 @@ impl ApiTester {
             .full_bleed()
             .group(SettingGroup::new().item(SettingItem::render_searchable(
                 "roles permissions capabilities access",
-                move |_, _, cx| render_role_management(&this, cx),
+                move |_, _, cx| {
+                    profile_views::hide_profiles(&this, cx);
+                    render_role_management(&this, cx)
+                },
             )))
     }
 
@@ -1141,7 +1134,7 @@ impl ApiTester {
             .full_bleed()
             .group(SettingGroup::new().item(SettingItem::render_searchable(
                 "profiles members shared request history headers bodies",
-                move |_, _, cx| profile_views::render_profiles(&this, cx),
+                move |_, window, cx| profile_views::render_profiles(&this, window, cx),
             )))
     }
 
@@ -1153,7 +1146,10 @@ impl ApiTester {
             .full_bleed()
             .group(SettingGroup::new().item(SettingItem::render_searchable(
                 "change log diffs requests collections workspaces from to",
-                move |_, window, cx| activity_views::render_change_log(&this, window, cx),
+                move |_, window, cx| {
+                    profile_views::hide_profiles(&this, cx);
+                    activity_views::render_change_log(&this, window, cx)
+                },
             )))
     }
 
@@ -1165,7 +1161,10 @@ impl ApiTester {
             .full_bleed()
             .group(SettingGroup::new().item(SettingItem::render_searchable(
                 "audit log users roles permissions before after",
-                move |_, window, cx| activity_views::render_audit_log(&this, window, cx),
+                move |_, window, cx| {
+                    profile_views::hide_profiles(&this, cx);
+                    activity_views::render_audit_log(&this, window, cx)
+                },
             )))
     }
 
@@ -1175,7 +1174,25 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.load_profile_history_selecting(user_id, None, window, cx);
+        self.load_profile_history_selecting(user_id, false, window, cx);
+    }
+
+    fn ensure_profile_history_loaded(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.profile_history_view_active() {
+            self.server_management.profile_history_refresh_pending = true;
+            return;
+        }
+        let Some(user_id) = self.server_management.selected_profile_id.clone() else {
+            return;
+        };
+        if matches!(
+            self.server_management.profile_history_status,
+            ProfileHistoryStatus::Idle
+        ) {
+            self.load_profile_history(user_id, window, cx);
+        } else {
+            self.refresh_profile_history_realtime(user_id, window, cx);
+        }
     }
 
     pub(super) fn refresh_profile_history_realtime(
@@ -1184,35 +1201,74 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let selected_entry_id = self.server_management.selected_profile_history_id.clone();
-        self.load_profile_history_selecting(user_id, selected_entry_id, window, cx);
+        if !self.server_management.is_history_visible_for(&user_id) {
+            return;
+        }
+        if !self.profile_history_view_active() {
+            // A metadata invalidation is enough while hidden. Catch up with the
+            // current query when Profiles is shown, including after reconnect.
+            self.server_management.profile_history_refresh_pending = true;
+            return;
+        }
+        if self.server_management.coalesce_profile_history_refresh() {
+            return;
+        }
+        self.load_profile_history_selecting(user_id, true, window, cx);
+    }
+
+    fn profile_history_view_active(&self) -> bool {
+        self.server_management.profile_history_view_visible
+            && matches!(self.workspace_tabs.active(), ActiveWorkspaceTab::ServerTools)
+    }
+
+    pub(super) fn catch_up_profile_history_realtime(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(user_id) = self.server_management.selected_profile_id.clone() {
+            self.refresh_profile_history_realtime(user_id, window, cx);
+        }
     }
 
     fn load_profile_history_selecting(
         &mut self,
         user_id: String,
-        preferred_entry_id: Option<String>,
+        background: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(snapshot) = self.server_management.snapshot.as_ref() else {
             return;
         };
+        // Workspace switches can precede the next management snapshot load.
+        // Never combine the previous server's profile with the new credentials.
+        if !matches!(
+            self.workspace_providers.active_id(),
+            WorkspaceProviderId::Upstream { upstream_id, .. }
+                if self.server_management.upstream_id.as_ref() == Some(upstream_id)
+        ) {
+            return;
+        }
         if user_id != snapshot.current_user.id && !snapshot.has_permission(HISTORY_READ_OTHERS) {
             if let Some(abort_handle) = self.profile_history_abort_handle.take() {
                 abort_handle.abort();
             }
             self.profile_history_generation = self.profile_history_generation.wrapping_add(1);
             self.server_management.selected_profile_id = Some(user_id);
+            self.server_management.reset_profile_history();
             self.server_management.profile_history_status = ProfileHistoryStatus::Error(
                 "You do not have permission to view this member's history.".to_owned(),
             );
-            self.server_management.profile_history.clear();
-            self.server_management.selected_profile_history_id = None;
             cx.notify();
             return;
         }
         let Ok(target) = self.active_upstream_workspace() else {
+            if let Some(abort_handle) = self.profile_history_abort_handle.take() {
+                abort_handle.abort();
+            }
+            self.profile_history_generation = self.profile_history_generation.wrapping_add(1);
+            self.server_management.reset_profile_history();
             self.server_management.profile_history_status = ProfileHistoryStatus::Error(
                 "Select an accessible server workspace to view shared history.".to_owned(),
             );
@@ -1225,9 +1281,17 @@ impl ApiTester {
         self.profile_history_generation = self.profile_history_generation.wrapping_add(1);
         let generation = self.profile_history_generation;
         self.server_management.selected_profile_id = Some(user_id.clone());
-        self.server_management.profile_history_status = ProfileHistoryStatus::Loading;
-        self.server_management.profile_history.clear();
-        self.server_management.selected_profile_history_id = None;
+        if !background {
+            self.server_management.reset_profile_history();
+            self.server_management.profile_history_status = ProfileHistoryStatus::Loading;
+        }
+        self.server_management.profile_history_syncing = true;
+        self.server_management.profile_history_refresh_pending = false;
+        let revision = self.server_management.profile_history_revision;
+        let query = self.server_management.profile_history_query.clone();
+        let request_query = query.clone();
+        let workspace_id = target.workspace_id.clone();
+        let request_upstream_id = target.upstream_id.clone();
 
         let vault = self.credential_vault.clone();
         let client = self.upstream_client.clone();
@@ -1244,47 +1308,78 @@ impl ApiTester {
             if credential.expires_at <= Utc::now() {
                 return Err("Log in to this server again.".to_owned());
             }
-            list_shared_history(
-                &client,
-                &target.base_url,
-                credential.bearer_token(),
-                &target.workspace_id,
-                &selected_user_id,
-            )
-            .await
-            .map_err(|error| error.to_string())
+            for attempt in 0..3 {
+                let result = list_shared_history(
+                    &client,
+                    &target.base_url,
+                    credential.bearer_token(),
+                    &target.workspace_id,
+                    &selected_user_id,
+                    &request_query,
+                )
+                .await;
+                let retryable = match &result {
+                    Err(crate::core::UpstreamManagementError::Transport(_)) => true,
+                    Err(crate::core::UpstreamManagementError::Rejected { status, .. }) => {
+                        status.is_server_error()
+                    }
+                    _ => false,
+                };
+                if !retryable || attempt == 2 {
+                    return result.map_err(|error| error.to_string());
+                }
+                tokio::time::sleep(Duration::from_millis(300 * (attempt + 1))).await;
+            }
+            unreachable!("the final history attempt always returns")
         });
         self.profile_history_abort_handle = Some(task.abort_handle());
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
-            let _ = this.update_in(cx, |this, _, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 if this.profile_history_generation != generation
+                    || this.server_management.profile_history_revision != revision
+                    || this.server_management.profile_history_query != query
                     || this.server_management.selected_profile_id.as_deref()
                         != Some(user_id.as_str())
                 {
                     return;
                 }
                 this.profile_history_abort_handle = None;
+                this.server_management.profile_history_syncing = false;
+                if !this.active_upstream_workspace().is_ok_and(|target| {
+                    target.upstream_id == request_upstream_id && target.workspace_id == workspace_id
+                }) || !this.server_management.is_history_visible_for(&user_id)
+                {
+                    this.server_management.reset_profile_history();
+                    cx.notify();
+                    return;
+                }
+                let pending =
+                    std::mem::take(&mut this.server_management.profile_history_refresh_pending);
                 match result {
                     Ok(Ok(entries)) => {
-                        this.server_management.selected_profile_history_id = preferred_entry_id
-                            .filter(|selected| entries.iter().any(|entry| &entry.id == selected))
-                            .or_else(|| entries.first().map(|entry| entry.id.clone()));
                         this.server_management.set_profile_history(entries);
                         this.server_management.profile_history_status = ProfileHistoryStatus::Ready;
                     }
                     Ok(Err(error)) => {
+                        this.server_management.set_profile_history(Vec::new());
+                        this.server_management.selected_profile_history_id = None;
                         this.server_management.profile_history_status =
                             ProfileHistoryStatus::Error(error);
                     }
                     Err(error) if error.is_cancelled() => return,
                     Err(error) => {
+                        this.server_management.set_profile_history(Vec::new());
+                        this.server_management.selected_profile_history_id = None;
                         this.server_management.profile_history_status = ProfileHistoryStatus::Error(
                             format!("Shared history could not be loaded: {error}"),
                         );
                     }
+                }
+                if pending {
+                    this.refresh_profile_history_realtime(user_id, window, cx);
                 }
                 cx.notify();
             });
@@ -1300,7 +1395,10 @@ impl ApiTester {
             .full_bleed()
             .group(SettingGroup::new().item(SettingItem::render_searchable(
                 "resources workspaces collections requests access users creator",
-                move |_, _, cx| render_resource_management(&this, cx),
+                move |_, _, cx| {
+                    profile_views::hide_profiles(&this, cx);
+                    render_resource_management(&this, cx)
+                },
             )))
     }
 
@@ -1831,8 +1929,102 @@ mod tests {
 
     use super::*;
 
+    fn history_entry(id: &str) -> SharedHistoryEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "created_at": "2026-01-01T00:00:00Z",
+            "request": {
+                "method": "GET", "url": "https://example.test",
+                "headers": [], "body": "", "body_mode": "none",
+                "raw_body_language": "", "body_fields": [], "body_truncated": false
+            },
+            "response": null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn profile_history_refresh_coalesces_without_clearing_visible_selection() {
+        let mut state = ServerManagementState::default();
+        state.set_profile_history(vec![history_entry("first"), history_entry("second")]);
+        state.profile_history_status = ProfileHistoryStatus::Ready;
+        state.profile_history_syncing = true;
+        for _ in 0..20 {
+            assert!(state.coalesce_profile_history_refresh());
+        }
+        assert!(state.profile_history_refresh_pending);
+        assert_eq!(state.profile_history.len(), 2);
+        state.selected_profile_history_id = Some("second".into());
+        state.set_profile_history(vec![history_entry("new"), history_entry("second")]);
+        assert_eq!(state.selected_profile_history_id.as_deref(), Some("second"));
+        assert!(std::mem::take(&mut state.profile_history_refresh_pending));
+        assert!(!state.profile_history_refresh_pending);
+        state.profile_history_syncing = false;
+        assert!(!state.coalesce_profile_history_refresh());
+        state.set_profile_history(vec![history_entry("new")]);
+        assert_eq!(state.selected_profile_history_id.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn profile_history_reset_invalidates_inflight_results_and_clears_all_data() {
+        let mut state = ServerManagementState::default();
+        state.set_profile_history(vec![history_entry("entry")]);
+        state
+            .profile_history_body_cache
+            .insert("entry".into(), "private".into());
+        state.profile_history_syncing = true;
+        state.profile_history_refresh_pending = true;
+        state.profile_history_query.method = "POST".into();
+        let revision = state.profile_history_revision;
+        state.reset_profile_history();
+        assert_ne!(state.profile_history_revision, revision);
+        assert!(!state.profile_history_syncing);
+        assert!(!state.profile_history_refresh_pending);
+        assert!(state.profile_history.is_empty());
+        assert!(state.profile_history_body_cache.is_empty());
+        assert!(state.selected_profile_history_id.is_none());
+        assert_eq!(state.profile_history_query.method, "POST");
+    }
+
     fn permission_keys(keys: &[&str]) -> BTreeSet<String> {
         keys.iter().map(|key| (*key).to_owned()).collect()
+    }
+
+    #[test]
+    fn profile_history_permission_revocation_invalidates_running_refresh() {
+        let mut state = ServerManagementState::default();
+        state.selected_profile_id = Some("other".into());
+        state.set_profile_history(vec![history_entry("private")]);
+        state.profile_history_status = ProfileHistoryStatus::Ready;
+        state.profile_history_syncing = true;
+        let revision = state.profile_history_revision;
+        state.set_snapshot(UpstreamManagementSnapshot {
+            current_user: ManagementUser {
+                id: "self".into(),
+                email: "self@example.test".into(),
+                display_name: "Self".into(),
+                active: true,
+                roles: Vec::new(),
+                created_by: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+            profiles: vec![crate::core::ProfileView {
+                id: "other".into(),
+                email: "other@example.test".into(),
+                display_name: "Other".into(),
+                active: true,
+            }],
+            users: None,
+            roles: None,
+            permissions: None,
+            workspaces: None,
+            request_execution_settings: None,
+            proxies: None,
+        });
+        assert_ne!(state.profile_history_revision, revision);
+        assert!(!state.is_history_visible_for("other"));
+        assert!(state.profile_history.is_empty());
+        assert!(!state.profile_history_syncing);
     }
 
     #[test]

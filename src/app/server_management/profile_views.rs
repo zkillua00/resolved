@@ -4,10 +4,33 @@ use crate::core::{ProfileView, SharedHistoryEntry, SharedHistoryHeader, SharedHi
 const PROFILE_SIDEBAR_WIDTH: f32 = 250.;
 const HISTORY_LIST_WIDTH: f32 = 330.;
 
-pub(super) fn render_profiles(this: &WeakEntity<ApiTester>, cx: &mut App) -> AnyElement {
+pub(super) fn hide_profiles(this: &WeakEntity<ApiTester>, cx: &mut App) {
+    if let Some(entity) = this.upgrade() {
+        entity.update(cx, |app, _| {
+            app.server_management.profile_history_view_visible = false;
+        });
+    }
+}
+
+pub(super) fn render_profiles(
+    this: &WeakEntity<ApiTester>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
     let Some(entity) = this.upgrade() else {
         return div().into_any_element();
     };
+    entity.update(cx, |app, cx| {
+        app.ensure_profile_filter_inputs(window, cx);
+        let management = &mut app.server_management;
+        management.profile_history_view_visible = true;
+        if !management.profile_history_syncing
+            && (management.profile_history_status == ProfileHistoryStatus::Idle
+                || management.profile_history_refresh_pending)
+        {
+            app.ensure_profile_history_loaded(window, cx);
+        }
+    });
     let (
         status,
         snapshot_present,
@@ -19,6 +42,9 @@ pub(super) fn render_profiles(this: &WeakEntity<ApiTester>, cx: &mut App) -> Any
         history,
         selected_history_id,
         selected_body,
+        filters,
+        realtime_status,
+        history_syncing,
     ) = {
         let app = entity.read(cx);
         let management = &app.server_management;
@@ -50,6 +76,9 @@ pub(super) fn render_profiles(this: &WeakEntity<ApiTester>, cx: &mut App) -> Any
             selected_history_id.clone(),
             selected_history_id
                 .and_then(|id| management.profile_history_body_cache.get(&id).cloned()),
+            management.profile_filters.clone(),
+            app.realtime_status,
+            management.profile_history_syncing,
         )
     };
     if !snapshot_present {
@@ -67,8 +96,10 @@ pub(super) fn render_profiles(this: &WeakEntity<ApiTester>, cx: &mut App) -> Any
         .as_deref()
         .and_then(|id| profiles.iter().find(|profile| profile.id == id))
         .or_else(|| profiles.first());
+    let member_query = filters.member_query(cx);
     let rows = profiles
         .iter()
+        .filter(|profile| profile_filters::member_matches(profile, &member_query))
         .map(|profile| {
             render_profile_row(
                 profile,
@@ -79,10 +110,12 @@ pub(super) fn render_profiles(this: &WeakEntity<ApiTester>, cx: &mut App) -> Any
             )
         })
         .collect::<Vec<_>>();
+    let visible_members = rows.len();
 
     let sidebar = v_flex()
         .w(px(PROFILE_SIDEBAR_WIDTH))
         .h_full()
+        .min_h_0()
         .flex_shrink_0()
         .border_r_1()
         .border_color(cx.api_outline_variant())
@@ -97,9 +130,19 @@ pub(super) fn render_profiles(this: &WeakEntity<ApiTester>, cx: &mut App) -> Any
                 .child(div().text_sm().font_semibold().child("SERVER PROFILES"))
                 .child(
                     div()
+                        .debug_selector(move || format!("profile-member-count-{visible_members}"))
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(format!("{} member profiles", profiles.len())),
+                        .child(if member_query.is_empty() {
+                            format!("{} member profiles", profiles.len())
+                        } else {
+                            format!("{visible_members} of {} members", profiles.len())
+                        }),
+                )
+                .child(
+                    div()
+                        .pt_2()
+                        .child(profile_filters::render_member_search(&filters)),
                 ),
         )
         .child(
@@ -110,7 +153,22 @@ pub(super) fn render_profiles(this: &WeakEntity<ApiTester>, cx: &mut App) -> Any
                 .overflow_y_scroll()
                 .p_2()
                 .gap_1()
-                .children(rows),
+                .children(rows)
+                .when(visible_members == 0, |list| {
+                    list.child(
+                        div()
+                            .id("profile-members-empty")
+                            .debug_selector(|| "profile-members-empty".to_owned())
+                            .p_3()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(if member_query.is_empty() {
+                                "No members available."
+                            } else {
+                                "No members match your search."
+                            }),
+                    )
+                }),
         );
 
     let detail = selected
@@ -122,7 +180,10 @@ pub(super) fn render_profiles(this: &WeakEntity<ApiTester>, cx: &mut App) -> Any
                 &history_status,
                 &history,
                 selected_history_id.as_deref(),
-                selected_body.as_deref(),
+                selected_body.as_ref().map(|body| body.as_ref()),
+                &filters,
+                realtime_status,
+                history_syncing,
                 this,
                 cx,
             )
@@ -133,6 +194,8 @@ pub(super) fn render_profiles(this: &WeakEntity<ApiTester>, cx: &mut App) -> Any
         .debug_selector(|| "server-profiles-workspace".to_owned())
         .size_full()
         .min_w_0()
+        .min_h_0()
+        .overflow_hidden()
         .items_start()
         .child(sidebar)
         .child(div().flex_1().min_w_0().h_full().child(detail))
@@ -209,12 +272,13 @@ fn render_profile_detail(
     history: &[SharedHistoryEntry],
     selected_history_id: Option<&str>,
     selected_body: Option<&str>,
+    filters: &profile_filters::ProfileFiltersState,
+    realtime_status: RealtimeConnectionStatus,
+    history_syncing: bool,
     this: &WeakEntity<ApiTester>,
     cx: &mut App,
 ) -> AnyElement {
     let can_view = profile.id == current_user_id || can_view_others;
-    let refresh_this = this.clone();
-    let refresh_user_id = profile.id.clone();
     let selected_entry = selected_history_id
         .and_then(|id| history.iter().find(|entry| entry.id == id))
         .or_else(|| history.first());
@@ -222,9 +286,11 @@ fn render_profile_detail(
     v_flex()
         .size_full()
         .min_w_0()
+        .min_h_0()
         .child(
             h_flex()
                 .w_full()
+                .flex_shrink_0()
                 .gap_3()
                 .p_4()
                 .border_b_1()
@@ -268,40 +334,39 @@ fn render_profile_detail(
                                 .child(profile.email.clone()),
                         ),
                 )
-                .child(
-                    Button::new(SharedString::from(format!(
-                        "refresh-profile-history-{}",
-                        profile.id
-                    )))
-                    .label("Refresh history")
-                    .small()
-                    .outline()
-                    .disabled(!can_view || *history_status == ProfileHistoryStatus::Loading)
-                    .on_click(move |_, window, cx| {
-                        if let Some(this) = refresh_this.upgrade() {
-                            this.update(cx, |this, cx| {
-                                this.load_profile_history(refresh_user_id.clone(), window, cx);
-                            });
-                        }
-                    }),
-                ),
+                .when(can_view, |header| {
+                    header.child(history_live_status(
+                        realtime_status,
+                        history_syncing,
+                        history_status,
+                        cx,
+                    ))
+                }),
         )
+        .when(can_view, |detail| {
+            detail.child(profile_filters::render_history_filters(filters, this, cx))
+        })
         .child(match (can_view, history_status) {
             (false, _) => profile_message(
                 "Only members with history.read_others can view this history.".to_owned(),
                 cx,
             ),
-            (true, ProfileHistoryStatus::Idle) => profile_message(
-                "Select this profile or refresh to load its shared history.".to_owned(),
-                cx,
-            ),
+            (true, ProfileHistoryStatus::Idle) => {
+                profile_message("Loading this member's shared history…".to_owned(), cx)
+            }
             (true, ProfileHistoryStatus::Loading) => {
                 profile_message("Loading shared history…".to_owned(), cx)
             }
             (true, ProfileHistoryStatus::Error(error)) => profile_message(error.clone(), cx),
-            (true, ProfileHistoryStatus::Ready) if history.is_empty() => {
-                profile_message("No shared requests in this workspace yet.".to_owned(), cx)
-            }
+            (true, ProfileHistoryStatus::Ready) if history.is_empty() => profile_message(
+                if filters.has_history_filters(cx) {
+                    "No shared requests match these filters. Try changing or clearing the filters."
+                } else {
+                    "No shared requests in this workspace yet. New requests appear automatically."
+                }
+                .to_owned(),
+                cx,
+            ),
             (true, ProfileHistoryStatus::Ready) => h_flex()
                 .flex_1()
                 .min_h_0()
@@ -318,6 +383,39 @@ fn render_profile_detail(
                 )
                 .into_any_element(),
         })
+        .into_any_element()
+}
+
+fn history_live_status(
+    connection: RealtimeConnectionStatus,
+    syncing: bool,
+    status: &ProfileHistoryStatus,
+    cx: &mut App,
+) -> AnyElement {
+    let (label, color) = match connection {
+        RealtimeConnectionStatus::Connected => {
+            if matches!(status, ProfileHistoryStatus::Error(_)) {
+                ("Sync failed", cx.theme().danger)
+            } else if syncing || matches!(status, ProfileHistoryStatus::Loading) {
+                ("Syncing…", cx.theme().info)
+            } else {
+                ("Live", cx.theme().success)
+            }
+        }
+        RealtimeConnectionStatus::Connecting => ("Connecting…", cx.theme().muted_foreground),
+        RealtimeConnectionStatus::Reconnecting => ("Reconnecting…", cx.theme().muted_foreground),
+        RealtimeConnectionStatus::Inactive | RealtimeConnectionStatus::Unavailable => {
+            ("Live updates offline", cx.theme().muted_foreground)
+        }
+    };
+    h_flex()
+        .id("profile-history-live-status")
+        .debug_selector(|| "profile-history-live-status".to_owned())
+        .gap_1p5()
+        .text_xs()
+        .text_color(color)
+        .child(div().size(px(6.)).rounded_full().bg(color))
+        .child(label)
         .into_any_element()
 }
 
@@ -409,18 +507,29 @@ fn render_history_list(
     v_flex()
         .w(px(HISTORY_LIST_WIDTH))
         .h_full()
+        .min_h_0()
         .flex_shrink_0()
         .border_r_1()
         .border_color(cx.api_outline_variant())
         .child(
-            h_flex()
-                .h(px(42.))
+            v_flex()
+                .flex_shrink_0()
+                .gap_1()
                 .px_3()
+                .py_2()
                 .border_b_1()
                 .border_color(cx.api_outline_variant())
                 .text_xs()
-                .font_semibold()
-                .child(format!("SHARED HISTORY ({})", rows.len())),
+                .child(
+                    div()
+                        .font_semibold()
+                        .child(format!("SHARED HISTORY ({})", rows.len())),
+                )
+                .child(
+                    div()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Up to 20 matches · 100 retained per workspace"),
+                ),
         )
         .child(
             v_flex()
@@ -701,7 +810,7 @@ fn profile_message(message: String, cx: &mut App) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-    use gpui::{Context, Render, TestAppContext, Window, px, size};
+    use gpui::{Context, Modifiers, Render, TestAppContext, Window, px, size};
 
     use super::*;
     use crate::core::{
@@ -713,8 +822,8 @@ mod tests {
     }
 
     impl Render for ProfilesHarness {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            render_profiles(&self.app.downgrade(), cx)
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            render_profiles(&self.app.downgrade(), window, cx)
         }
     }
 
@@ -724,12 +833,14 @@ mod tests {
         let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
         store.initialize().expect("initialize test database");
 
+        let mut app_entity = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
             gpui_component::init(cx);
             let base_key_bindings = shortcuts::capture_base_key_bindings(cx);
             crate::theme::configure(cx);
             let app = cx
                 .new(|cx| ApiTester::new_with_database_store(base_key_bindings, store, window, cx));
+            app_entity = Some(app.clone());
             let now = Utc::now();
             app.update(cx, |app, _| {
                 let permission = ManagementPermission {
@@ -816,19 +927,127 @@ mod tests {
                         error: String::new(),
                     }]);
             });
-            let harness = cx.new(|_| ProfilesHarness { app });
+            let harness = cx.new(|cx| {
+                cx.observe(&app, |_, _, cx| cx.notify()).detach();
+                ProfilesHarness { app }
+            });
             gpui_component::Root::new(harness, window, cx)
         });
+        let app = app_entity.unwrap();
         cx.update(|window, _| window.activate_window());
         cx.simulate_resize(size(px(1_300.), px(900.)));
         cx.run_until_parked();
 
         assert!(cx.debug_bounds("server-profiles-workspace").is_some());
+        assert!(cx.debug_bounds("profile-member-search").is_some());
+        assert!(cx.debug_bounds("profile-history-filters").is_some());
+        assert!(cx.debug_bounds("profile-history-sort-control").is_some());
+        assert!(cx.debug_bounds("profile-history-live-status").is_some());
         assert!(cx.debug_bounds("select-profile-author").is_some());
         assert!(cx.debug_bounds("profile-history-entry-entry-1").is_some());
         assert!(
             cx.debug_bounds("profile-history-body-RESPONSE BODY")
                 .is_some()
         );
+
+        // Member search does not disturb the request currently being inspected.
+        let search = cx.debug_bounds("profile-member-search").unwrap();
+        cx.simulate_click(search.center(), Modifiers::none());
+        cx.simulate_input("AUTHOR");
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert_eq!(
+                app.read(cx)
+                    .server_management
+                    .profile_filters
+                    .member_query(cx),
+                "author",
+            );
+        });
+        assert!(cx.debug_bounds("select-profile-author").is_some());
+        assert!(cx.debug_bounds("profile-member-count-1").is_some());
+        assert!(cx.debug_bounds("profile-history-entry-entry-1").is_some());
+        cx.simulate_input("-not-found");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("profile-members-empty").is_some());
+        assert!(cx.debug_bounds("profile-member-count-0").is_some());
+
+        let toggle = cx.debug_bounds("toggle-profile-history-filters").unwrap();
+        cx.simulate_click(toggle.center(), Modifiers::none());
+        for (width, height) in [(1300., 900.), (1000., 760.)] {
+            cx.simulate_resize(size(px(width), px(height)));
+            cx.run_until_parked();
+            let panel = cx.debug_bounds("profile-history-filters").unwrap();
+            for field in [
+                "profile-filter-method",
+                "profile-filter-status",
+                "profile-filter-hostname",
+                "profile-filter-path",
+                "profile-filter-header-keys",
+                "profile-filter-param-keys",
+                "profile-filter-from",
+                "profile-filter-through",
+                "profile-filter-body-type-field",
+            ] {
+                let bounds = cx.debug_bounds(field).expect(field);
+                assert!(bounds.origin.x >= panel.origin.x);
+                assert!(
+                    bounds.origin.x + bounds.size.width
+                        <= panel.origin.x + panel.size.width + px(1.),
+                    "{field} overflows at {width}px",
+                );
+            }
+            assert!(cx.debug_bounds("profile-history-entry-entry-1").is_some());
+        }
+
+        // Invalid filters are explained locally without replacing valid results.
+        let status = cx.debug_bounds("profile-filter-status").unwrap();
+        cx.simulate_click(status.center(), Modifiers::none());
+        cx.simulate_input("999");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("profile-history-filter-error").is_some());
+        assert!(cx.debug_bounds("profile-history-entry-entry-1").is_some());
+        let clear = cx.debug_bounds("clear-profile-history-filters").unwrap();
+        cx.simulate_click(clear.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let filters = &app.read(cx).server_management.profile_filters;
+            assert!(!filters.has_history_filters(cx));
+            assert_eq!(filters.member_query(cx), "author-not-found");
+        });
+        assert!(cx.debug_bounds("profile-members-empty").is_some());
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                let entries = app.server_management.profile_history.clone();
+                app.server_management.profile_history_view_visible = false;
+                app.refresh_profile_history_realtime("author".into(), window, cx);
+                assert!(app.server_management.profile_history_refresh_pending);
+                assert!(app.profile_history_abort_handle.is_none());
+                assert!(Rc::ptr_eq(&entries, &app.server_management.profile_history));
+                app.server_management.profile_history_refresh_pending = false;
+                app.catch_up_profile_history_realtime(window, cx);
+                assert!(app.server_management.profile_history_refresh_pending);
+                assert!(app.profile_history_abort_handle.is_none());
+
+                // A workspace switch can leave the previous management snapshot
+                // until the tool is reopened. It must never issue a mixed-server query.
+                app.server_management.upstream_id = Some("old-server".into());
+                let provider = RemoteWorkspaceProvider::new(
+                    app.database_store.clone(),
+                    "new-server".into(),
+                    "new-workspace".into(),
+                    app.workspace.clone(),
+                );
+                let id = provider.id();
+                app.workspace_providers.register(Arc::new(provider));
+                app.workspace_providers.switch(id).unwrap();
+                let generation = app.profile_history_generation;
+                app.load_profile_history("author".into(), window, cx);
+                assert_eq!(app.profile_history_generation, generation);
+                assert!(app.profile_history_abort_handle.is_none());
+                assert!(Rc::ptr_eq(&entries, &app.server_management.profile_history));
+            });
+        });
     }
 }
