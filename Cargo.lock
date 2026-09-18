@@ -129,6 +129,7 @@ dependencies = [
  "lsp-types",
  "markdown",
  "memchr",
+ "memmap2",
  "quick-xml 0.41.0",
  "reqwest",
  "ring",

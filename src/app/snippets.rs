@@ -2607,7 +2607,7 @@ mod tests {
             final_url: "https://example.test/".to_owned(),
             headers: Vec::new(),
             content_type: Some("application/json".to_owned()),
-            body: bytes::Bytes::from_static(body),
+            body: bytes::Bytes::from_static(body).into(),
             duration: Duration::from_millis(25),
         }
     }
@@ -2646,7 +2646,7 @@ mod tests {
             Some(SnippetMenuStaleReason::ResponseState)
         );
         let mut reallocated_response = response.clone();
-        reallocated_response.body = bytes::Bytes::copy_from_slice(&response.body);
+        reallocated_response.body = bytes::Bytes::copy_from_slice(&response.body).into();
         assert_eq!(
             marker.stale_reason("selected source", &tab_id, 7, Some(&reallocated_response)),
             Some(SnippetMenuStaleReason::ResponseState)

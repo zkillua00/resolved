@@ -1,5 +1,6 @@
 use std::fmt;
 use std::future::Future;
+use std::ops::Deref;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -7,9 +8,11 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures::StreamExt as _;
+use memmap2::{Mmap, MmapOptions};
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt as _;
 use tokio::runtime::Handle;
 use tokio::task::{AbortHandle, JoinHandle};
 use url::Url;
@@ -20,6 +23,7 @@ use super::{CookieJar, DbStringEnum};
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_USER_AGENT: &str = concat!("resolved/", env!("RESOLVED_BUILD_VERSION"));
 const MAX_BUFFERED_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
+const RESPONSE_BODY_MEMORY_THRESHOLD_BYTES: usize = 10 * 1024 * 1024;
 
 /// Common HTTP methods offered by editable method controls and script
 /// completions. Custom extension methods remain valid when entered manually.
@@ -518,10 +522,94 @@ pub struct ResponseHeader {
     pub value: String,
 }
 
-/// The fully buffered response returned to the UI.
-///
-/// Buffering is deliberate for the MVP: it makes raw, pretty, and HTML views
-/// deterministic. A later streaming/download path can bypass this type.
+/// A complete response body backed by memory for small responses and by a
+/// lazily paged temporary-file mapping for large responses.
+#[derive(Clone)]
+pub struct ResponseBody {
+    storage: Arc<ResponseBodyStorage>,
+}
+
+enum ResponseBodyStorage {
+    Memory(Bytes),
+    File(FileBackedResponseBody),
+}
+
+struct FileBackedResponseBody {
+    // Drop the mapping before closing the anonymous temporary file. This
+    // ordering matters on Windows.
+    mapping: Mmap,
+    _file: std::fs::File,
+}
+
+impl ResponseBody {
+    fn memory(bytes: impl Into<Bytes>) -> Self {
+        Self {
+            storage: Arc::new(ResponseBodyStorage::Memory(bytes.into())),
+        }
+    }
+
+    fn file(file: std::fs::File) -> Result<Self, RequestError> {
+        // SAFETY: the anonymous file is reachable only through this response
+        // body, is fully written before mapping, is never exposed mutably, and
+        // remains open until after the mapping is dropped.
+        let mapping = unsafe { MmapOptions::new().map(&file) }
+            .map_err(|error| RequestError::ResponseBodyStorageFailed(error.to_string()))?;
+        Ok(Self {
+            storage: Arc::new(ResponseBodyStorage::File(FileBackedResponseBody {
+                mapping,
+                _file: file,
+            })),
+        })
+    }
+
+    #[cfg(test)]
+    fn is_file_backed(&self) -> bool {
+        matches!(self.storage.as_ref(), ResponseBodyStorage::File(_))
+    }
+}
+
+impl fmt::Debug for ResponseBody {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResponseBody")
+            .field("len", &self.len())
+            .field(
+                "file_backed",
+                &matches!(self.storage.as_ref(), ResponseBodyStorage::File(_)),
+            )
+            .finish()
+    }
+}
+
+impl Deref for ResponseBody {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        match self.storage.as_ref() {
+            ResponseBodyStorage::Memory(bytes) => bytes,
+            ResponseBodyStorage::File(file) => &file.mapping,
+        }
+    }
+}
+
+impl AsRef<[u8]> for ResponseBody {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
+impl From<Bytes> for ResponseBody {
+    fn from(bytes: Bytes) -> Self {
+        Self::memory(bytes)
+    }
+}
+
+impl From<Vec<u8>> for ResponseBody {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::memory(bytes)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ResponseData {
     pub status: u16,
@@ -531,8 +619,8 @@ pub struct ResponseData {
     pub headers: Vec<ResponseHeader>,
     pub content_type: Option<String>,
     /// Immutable shared storage keeps UI, script, and tab snapshots from
-    /// duplicating a response that may be as large as the buffering limit.
-    pub body: Bytes,
+    /// duplicating the response or its temporary backing file.
+    pub body: ResponseBody,
     pub duration: Duration,
 }
 
@@ -568,6 +656,7 @@ pub enum RequestError {
         limit_bytes: usize,
     },
     ResponseBodyAllocationFailed(String),
+    ResponseBodyStorageFailed(String),
     ProxyDestinationBlocked {
         request: String,
         address: String,
@@ -619,9 +708,10 @@ impl fmt::Display for RequestError {
                     "could not allocate the response body buffer: {reason}"
                 )
             }
-            Self::ProxyDestinationBlocked {
-                diagnostic, ..
-            } => formatter.write_str(diagnostic),
+            Self::ResponseBodyStorageFailed(reason) => {
+                write!(formatter, "could not store the response body: {reason}")
+            }
+            Self::ProxyDestinationBlocked { diagnostic, .. } => formatter.write_str(diagnostic),
             Self::Transport(error) => write!(formatter, "{error}"),
             Self::Upstream(message) => formatter.write_str(message),
             Self::Cancelled => formatter.write_str("request cancelled"),
@@ -954,7 +1044,7 @@ fn check_request_body_size(limit: Option<usize>, size: usize) -> Result<(), Requ
 async fn read_response_body(
     mut response: reqwest::Response,
     limit_bytes: usize,
-) -> Result<Vec<u8>, RequestError> {
+) -> Result<ResponseBody, RequestError> {
     let limit_u64 = u64::try_from(limit_bytes).unwrap_or(u64::MAX);
     if response
         .content_length()
@@ -965,48 +1055,99 @@ async fn read_response_body(
 
     let mut body = BoundedResponseBody::new(limit_bytes);
     while let Some(chunk) = response.chunk().await? {
-        body.extend(&chunk)?;
+        body.extend(&chunk).await?;
     }
-    Ok(body.into_bytes())
+    body.finish().await
 }
 
 struct BoundedResponseBody {
-    bytes: Vec<u8>,
+    storage: ResponseBodyWriter,
+    len: usize,
     limit_bytes: usize,
+}
+
+enum ResponseBodyWriter {
+    Memory(Vec<u8>),
+    File(tokio::fs::File),
 }
 
 impl BoundedResponseBody {
     fn new(limit_bytes: usize) -> Self {
         Self {
-            bytes: Vec::new(),
+            storage: ResponseBodyWriter::Memory(Vec::new()),
+            len: 0,
             limit_bytes,
         }
     }
 
-    fn extend(&mut self, chunk: &[u8]) -> Result<(), RequestError> {
+    async fn extend(&mut self, chunk: &[u8]) -> Result<(), RequestError> {
         let next_len = self
-            .bytes
-            .len()
+            .len
             .checked_add(chunk.len())
             .filter(|next_len| *next_len <= self.limit_bytes)
             .ok_or(RequestError::ResponseBodyTooLarge {
                 limit_bytes: self.limit_bytes,
             })?;
 
-        if next_len > self.bytes.capacity() {
-            let doubled_capacity = self.bytes.capacity().max(16 * 1024).saturating_mul(2);
-            let target_capacity = next_len.max(doubled_capacity).min(self.limit_bytes);
-            self.bytes
-                .try_reserve_exact(target_capacity.saturating_sub(self.bytes.len()))
-                .map_err(|error| RequestError::ResponseBodyAllocationFailed(error.to_string()))?;
+        if next_len > RESPONSE_BODY_MEMORY_THRESHOLD_BYTES
+            && matches!(self.storage, ResponseBodyWriter::Memory(_))
+        {
+            let ResponseBodyWriter::Memory(bytes) =
+                std::mem::replace(&mut self.storage, ResponseBodyWriter::Memory(Vec::new()))
+            else {
+                unreachable!("response body storage changed after memory check");
+            };
+            let file = tokio::task::spawn_blocking(tempfile::tempfile)
+                .await
+                .map_err(|error| RequestError::ResponseBodyStorageFailed(error.to_string()))?
+                .map_err(|error| RequestError::ResponseBodyStorageFailed(error.to_string()))?;
+            let mut file = tokio::fs::File::from_std(file);
+            file.write_all(&bytes)
+                .await
+                .map_err(|error| RequestError::ResponseBodyStorageFailed(error.to_string()))?;
+            file.write_all(chunk)
+                .await
+                .map_err(|error| RequestError::ResponseBodyStorageFailed(error.to_string()))?;
+            self.storage = ResponseBodyWriter::File(file);
+            self.len = next_len;
+            return Ok(());
         }
 
-        self.bytes.extend_from_slice(chunk);
+        match &mut self.storage {
+            ResponseBodyWriter::Memory(bytes) => {
+                if next_len > bytes.capacity() {
+                    let doubled_capacity = bytes.capacity().max(16 * 1024).saturating_mul(2);
+                    let target_capacity = next_len
+                        .max(doubled_capacity)
+                        .min(RESPONSE_BODY_MEMORY_THRESHOLD_BYTES)
+                        .min(self.limit_bytes);
+                    bytes
+                        .try_reserve_exact(target_capacity.saturating_sub(bytes.len()))
+                        .map_err(|error| {
+                            RequestError::ResponseBodyAllocationFailed(error.to_string())
+                        })?;
+                }
+                bytes.extend_from_slice(chunk);
+            }
+            ResponseBodyWriter::File(file) => file
+                .write_all(chunk)
+                .await
+                .map_err(|error| RequestError::ResponseBodyStorageFailed(error.to_string()))?,
+        }
+        self.len = next_len;
         Ok(())
     }
 
-    fn into_bytes(self) -> Vec<u8> {
-        self.bytes
+    async fn finish(self) -> Result<ResponseBody, RequestError> {
+        match self.storage {
+            ResponseBodyWriter::Memory(bytes) => Ok(ResponseBody::memory(bytes)),
+            ResponseBodyWriter::File(mut file) => {
+                file.flush()
+                    .await
+                    .map_err(|error| RequestError::ResponseBodyStorageFailed(error.to_string()))?;
+                ResponseBody::file(file.into_std().await)
+            }
+        }
     }
 }
 
@@ -1648,33 +1789,65 @@ mod tests {
         assert!(message.contains("missing.txt"));
     }
 
-    #[test]
-    fn bounded_response_body_accepts_the_exact_limit() {
+    #[tokio::test]
+    async fn bounded_response_body_accepts_the_exact_limit() {
         let mut body = BoundedResponseBody::new(5);
-        body.extend(b"he").expect("first chunk should fit");
-        body.extend(b"llo").expect("exact limit should fit");
+        body.extend(b"he").await.expect("first chunk should fit");
+        body.extend(b"llo").await.expect("exact limit should fit");
 
-        assert_eq!(body.into_bytes(), b"hello");
+        let body = body.finish().await.unwrap();
+        assert_eq!(body.as_ref(), b"hello");
+        assert!(!body.is_file_backed());
     }
 
-    #[test]
-    fn bounded_response_body_rejects_before_growing_or_appending() {
+    #[tokio::test]
+    async fn response_body_spills_after_memory_threshold_and_shares_file_lifetime() {
+        let mut writer = BoundedResponseBody::new(usize::MAX);
+        let at_threshold = vec![b'a'; RESPONSE_BODY_MEMORY_THRESHOLD_BYTES];
+        writer.extend(&at_threshold).await.unwrap();
+        assert!(matches!(writer.storage, ResponseBodyWriter::Memory(_)));
+
+        writer.extend(b"b").await.unwrap();
+        assert!(matches!(writer.storage, ResponseBodyWriter::File(_)));
+        let body = writer.finish().await.unwrap();
+        assert!(body.is_file_backed());
+        assert_eq!(body.len(), RESPONSE_BODY_MEMORY_THRESHOLD_BYTES + 1);
+        assert_eq!(body[0], b'a');
+        assert_eq!(body[RESPONSE_BODY_MEMORY_THRESHOLD_BYTES], b'b');
+
+        let clone = body.clone();
+        drop(body);
+        assert_eq!(clone[RESPONSE_BODY_MEMORY_THRESHOLD_BYTES], b'b');
+        drop(clone);
+    }
+
+    #[tokio::test]
+    async fn bounded_response_body_rejects_before_growing_or_appending() {
         let mut body = BoundedResponseBody::new(5);
-        body.extend(b"four").expect("first chunk should fit");
-        let len_before = body.bytes.len();
-        let capacity_before = body.bytes.capacity();
+        body.extend(b"four").await.expect("first chunk should fit");
+        let len_before = body.len;
+        let capacity_before = match &body.storage {
+            ResponseBodyWriter::Memory(bytes) => bytes.capacity(),
+            ResponseBodyWriter::File(_) => panic!("small response unexpectedly spilled"),
+        };
 
         let error = body
             .extend(b"!!")
+            .await
             .expect_err("chunk crossing the limit must fail");
 
         assert!(matches!(
             error,
             RequestError::ResponseBodyTooLarge { limit_bytes: 5 }
         ));
-        assert_eq!(body.bytes.len(), len_before);
-        assert_eq!(body.bytes.capacity(), capacity_before);
-        assert_eq!(body.bytes, b"four");
+        assert_eq!(body.len, len_before);
+        match &body.storage {
+            ResponseBodyWriter::Memory(bytes) => {
+                assert_eq!(bytes.capacity(), capacity_before);
+                assert_eq!(bytes, b"four");
+            }
+            ResponseBodyWriter::File(_) => panic!("rejected chunk unexpectedly spilled"),
+        }
     }
 
     #[test]
@@ -1886,7 +2059,7 @@ mod tests {
             final_url: "https://example.test/large".to_owned(),
             headers: Vec::new(),
             content_type: Some("application/octet-stream".to_owned()),
-            body: shared_body,
+            body: shared_body.into(),
             duration: Duration::from_millis(1),
         };
 

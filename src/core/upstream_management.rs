@@ -349,7 +349,7 @@ impl SharedHistoryUpload {
             .body
             .len()
             .min(MAX_SHARED_HISTORY_BODY_BYTES.saturating_add(redaction_overlap));
-        response.body = response.body.slice(..prefix_len);
+        response.body = response.body[..prefix_len].to_vec().into();
         let response = response_for_shared_history(&response, &secrets);
         Self {
             client_entry_id,

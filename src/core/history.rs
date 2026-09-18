@@ -330,7 +330,7 @@ pub(crate) fn response_for_shared_history(
             },
         })
         .collect();
-    let body = Bytes::from(redact_secret_bytes(&response.body, &known_secrets));
+    let body = Bytes::from(redact_secret_bytes(&response.body, &known_secrets)).into();
     ResponseData {
         status: response.status,
         status_text: redact_secret_values(&response.status_text, &known_secrets),
@@ -805,7 +805,7 @@ mod tests {
         }];
         let mut binary_body = vec![0xff, 0x00];
         binary_body.extend_from_slice(private_value.as_bytes());
-        response.body = Bytes::from(binary_body);
+        response.body = Bytes::from(binary_body).into();
 
         let (shared_request, secrets) = request_for_shared_history(&request, &[]);
         let shared_response = response_for_shared_history(&response, &secrets);

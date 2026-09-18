@@ -1370,7 +1370,7 @@ async fn parse_proxy_response(
             })
             .collect(),
         content_type: (!data.content_type.is_empty()).then_some(data.content_type),
-        body: Bytes::from(decoded),
+        body: Bytes::from(decoded).into(),
         duration: Duration::from_micros(data.duration_micros),
     })
 }
