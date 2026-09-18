@@ -2,6 +2,7 @@
 """Verify the standalone MCP executable and package it for a native CI runner."""
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import tarfile
@@ -13,7 +14,13 @@ def package(platform, arch, version):
     executable = 'resolved-mcp.exe' if platform == 'windows' else 'resolved-mcp'
     binary = root / 'target' / 'release' / executable
     if platform == 'macos':
-        subprocess.run(['codesign', '--force', '--sign', '-', str(binary)], check=True)
+        identity = os.environ.get('API_TESTER_CODESIGN_IDENTITY', '-')
+        if os.environ.get('RESOLVED_NOTARY_PROFILE') and identity == '-':
+            raise ValueError('Notarization requires a Developer ID signing identity')
+        signing = ['codesign', '--force', '--sign', identity]
+        if identity != '-':
+            signing += ['--options', 'runtime', '--timestamp']
+        subprocess.run([*signing, str(binary)], check=True)
         subprocess.run(['codesign', '--verify', '--strict', str(binary)], check=True)
 
     # These protocol operations never discover or contact a running desktop.
@@ -54,6 +61,15 @@ def package(platform, arch, version):
         with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as output:
             for source, filename in files:
                 output.write(source, arcname=f'{name}/{filename}')
+    if platform == 'macos' and os.environ.get('RESOLVED_NOTARY_PROFILE'):
+        # Apple records the executable's hash. Bare CLI tools cannot be stapled;
+        # Gatekeeper needs network access for their first verification.
+        try:
+            subprocess.run([str(root / 'scripts' / 'notarize-macos.sh'), str(archive)],
+                           check=True)
+        except Exception:
+            archive.unlink(missing_ok=True)
+            raise
     print(f'Verified MCP {version}; packaged {archive.name}')
 
 

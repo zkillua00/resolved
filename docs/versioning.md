@@ -165,8 +165,12 @@ five builds succeed does CI publish a GitHub Release with all packages and
 runs for the same commit replace that release's assets. Version releases use
 the existing `v0.4.2` tag. Releases remain available until manually removed.
 
-No signing secrets are required. macOS packages use the existing ad-hoc signing
-path and are **not Apple notarized**; Gatekeeper can block downloaded builds.
+macOS releases require the signing secrets documented in
+[Building and packaging](building.md#signed-macos-releases-outside-the-app-store).
+Desktop archives are Developer ID signed, Apple notarized, and stapled;
+standalone MCP executables are signed and notarized. Missing credentials or
+failed notarization stop publication. Local development builds remain ad-hoc
+signed by default.
 Windows packages use a fresh self-signed certificate on each runner. Before
 installing, import the matching downloaded `.cer` into **Local Machine →
 Trusted People** (administrator access), then install the `.msix`. A new build
