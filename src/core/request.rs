@@ -548,10 +548,15 @@ impl ResponseBody {
         }
     }
 
-    fn file(file: std::fs::File) -> Result<Self, RequestError> {
-        // SAFETY: the anonymous file is reachable only through this response
-        // body, is fully written before mapping, is never exposed mutably, and
-        // remains open until after the mapping is dropped.
+    /// Map a completed, exclusively owned response file.
+    ///
+    /// # Safety
+    /// The file must be anonymous, with no other handles or mappings that can
+    /// modify or truncate it. These obligations last until the final body clone
+    /// is dropped. Consuming a `File` alone cannot prove exclusive ownership.
+    pub(crate) unsafe fn file(file: std::fs::File) -> Result<Self, RequestError> {
+        // SAFETY: the caller guarantees immutable, exclusively owned storage.
+        // We keep the handle alive until after the mapping is dropped.
         let mapping = unsafe { MmapOptions::new().map(&file) }
             .map_err(|error| RequestError::ResponseBodyStorageFailed(error.to_string()))?;
         Ok(Self {
@@ -1144,7 +1149,9 @@ impl BoundedResponseBody {
                 file.flush()
                     .await
                     .map_err(|error| RequestError::ResponseBodyStorageFailed(error.to_string()))?;
-                ResponseBody::file(file.into_std().await)
+                // SAFETY: this anonymous file was created by the writer, never
+                // cloned/exposed, and all asynchronous writes have finished.
+                unsafe { ResponseBody::file(file.into_std().await) }
             }
         }
     }

@@ -18,6 +18,99 @@ use gpui_component::{
 
 use crate::{core::EditorSettings, theme::ApiThemeExt as _};
 
+mod document;
+mod pretty;
+mod read_only;
+
+use read_only::{ReadOnlyEditor, ViewOptions};
+
+/// An immutable editor snapshot. A mapped snapshot retains its document rather
+/// than copying it; only an explicit `to_string()` materializes the text.
+#[derive(Clone)]
+pub enum EditorText {
+    Owned(SharedString),
+    Mapped {
+        document: document::Document,
+        range: Range<usize>,
+    },
+}
+
+impl EditorText {
+    /// Snapshot comparison must not scan a different multi-gigabyte mapping on
+    /// the UI thread. Mapped documents are immutable, so identity is sufficient.
+    pub fn matches_snapshot(&self, other: &str) -> bool {
+        let text = self.as_ref();
+        if text.as_ptr() == other.as_ptr() && text.len() == other.len() {
+            return true;
+        }
+        matches!(self, Self::Owned(_)) && text == other
+    }
+
+    fn slice(&self, range: Range<usize>) -> Self {
+        match self {
+            Self::Owned(text) => Self::Owned(text[range].to_owned().into()),
+            Self::Mapped {
+                document,
+                range: outer,
+            } => Self::Mapped {
+                document: document.clone(),
+                range: outer.start + range.start..outer.start + range.end,
+            },
+        }
+    }
+}
+
+impl AsRef<str> for EditorText {
+    fn as_ref(&self) -> &str {
+        match self {
+            Self::Owned(text) => text.as_ref(),
+            Self::Mapped { document, range } => document.text(range.clone()),
+        }
+    }
+}
+
+impl std::ops::Deref for EditorText {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.as_ref()
+    }
+}
+
+impl std::fmt::Debug for EditorText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EditorText")
+            .field("len", &self.len())
+            .finish()
+    }
+}
+
+impl PartialEq for EditorText {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Owned(left), Self::Owned(right)) => left == right,
+            _ => self.as_ptr() == other.as_ptr() && self.len() == other.len(),
+        }
+    }
+}
+
+impl From<SharedString> for EditorText {
+    fn from(value: SharedString) -> Self {
+        Self::Owned(value)
+    }
+}
+
+impl From<String> for EditorText {
+    fn from(value: String) -> Self {
+        Self::Owned(value.into())
+    }
+}
+
+impl From<&str> for EditorText {
+    fn from(value: &str) -> Self {
+        Self::Owned(value.to_owned().into())
+    }
+}
+
 const DIAGNOSTIC_REFRESH_DEBOUNCE: Duration = Duration::from_millis(120);
 
 /// A syntax-highlighting language understood by `gpui-component`.
@@ -108,12 +201,10 @@ enum DiagnosticProviderKind {
 pub struct CodeEditorContextMenuContext {
     pub editor: Entity<CodeEditor>,
     pub range: Range<usize>,
-    /// The complete buffer at menu-open time. `SharedString` keeps subsequent
-    /// deferred-action clones cheap and lets them reject stale selections or
-    /// cursor locations without re-reading the leased editor while the menu is
-    /// being built.
-    pub document: SharedString,
-    pub selected_text: String,
+    /// The complete buffer at menu-open time, retaining mapped storage without
+    /// materializing it. Deferred actions can reject stale selections safely.
+    pub document: EditorText,
+    pub selected_text: EditorText,
     pub language: CodeLanguage,
 }
 
@@ -303,6 +394,8 @@ pub enum CodeEditorEvent {
 #[allow(dead_code)]
 pub struct CodeEditor {
     input: Entity<InputState>,
+    mapped: Option<Entity<ReadOnlyEditor>>,
+    view_options: ViewOptions,
     language: CodeLanguage,
     rows: usize,
     read_only: bool,
@@ -380,6 +473,14 @@ impl CodeEditor {
 
         let mut this = Self {
             input,
+            mapped: None,
+            view_options: ViewOptions {
+                tab_size: tab_size.tab_size,
+                soft_wrap,
+                line_numbers,
+                indent_guides,
+                active_line,
+            },
             language,
             rows,
             read_only,
@@ -427,8 +528,75 @@ impl CodeEditor {
         self.rows
     }
 
-    pub fn value(&self, cx: &App) -> SharedString {
-        self.input.read(cx).value()
+    pub fn value(&self, cx: &App) -> EditorText {
+        if let Some(mapped) = &self.mapped {
+            mapped.read(cx).value()
+        } else {
+            self.input.read(cx).value().into()
+        }
+    }
+
+    pub fn set_response_body(
+        &mut self,
+        body: crate::core::ResponseBody,
+        pretty: bool,
+        formatter: crate::core::FormatterSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        assert!(self.read_only, "mapped response documents are read-only");
+        if self.mapped.is_none() {
+            let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
+            // Release any previous owned response/undo buffers before attaching
+            // a mapping. The source never passes through InputState::set_value.
+            self.input.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+            });
+            self.mapped = Some(cx.new(|cx| {
+                ReadOnlyEditor::new(self.view_options, self.language.clone(), window, cx)
+            }));
+            if focused {
+                self.mapped
+                    .as_ref()
+                    .unwrap()
+                    .read(cx)
+                    .focus_handle(cx)
+                    .focus(window);
+            }
+        }
+        self.mapped.as_ref().unwrap().update(cx, |editor, cx| {
+            editor.set_source(body, pretty, formatter, cx);
+        });
+        cx.notify();
+    }
+
+    pub fn selection_snapshot(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (Range<usize>, EditorText, EditorText) {
+        if let Some(mapped) = &self.mapped {
+            return mapped.read(cx).selection_snapshot();
+        }
+        self.input.update(cx, |input, cx| {
+            let range = EntityInputHandler::selected_text_range(input, true, window, cx)
+                .map_or(0..0, |selection| selection.range);
+            let bytes = input.text().offset_utf16_to_offset(range.start)
+                ..input.text().offset_utf16_to_offset(range.end);
+            let document: EditorText = input.value().into();
+            let selected = document.slice(bytes);
+            (range, document, selected)
+        })
+    }
+
+    pub fn copy_all(&mut self, cx: &mut Context<Self>) {
+        if let Some(mapped) = &self.mapped {
+            mapped.update(cx, |editor, cx| editor.copy_all(cx));
+        } else {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                self.input.read(cx).value().to_string(),
+            ));
+        }
     }
 
     pub fn set_value(
@@ -437,9 +605,14 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let focused = self.focus_handle(cx).is_focused(window);
+        self.mapped = None;
         let value = value.into();
         self.input
             .update(cx, |input, cx| input.set_value(value, window, cx));
+        if focused {
+            self.input.read(cx).focus_handle(cx).focus(window);
+        }
         self.refresh_diagnostics(cx);
     }
 
@@ -447,6 +620,11 @@ impl CodeEditor {
         let language = language.into();
         let highlighter_language: SharedString = language.as_str().to_owned().into();
         self.language = language;
+        if let Some(mapped) = &self.mapped {
+            mapped.update(cx, |editor, cx| {
+                editor.set_language(self.language.clone(), cx)
+            });
+        }
         self.input.update(cx, |input, cx| {
             input.set_highlighter(highlighter_language, cx)
         });
@@ -470,6 +648,10 @@ impl CodeEditor {
     }
 
     pub fn set_soft_wrap(&mut self, soft_wrap: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.view_options.soft_wrap = soft_wrap;
+        if let Some(mapped) = &self.mapped {
+            mapped.update(cx, |editor, cx| editor.set_options(self.view_options, cx));
+        }
         self.input
             .update(cx, |input, cx| input.set_soft_wrap(soft_wrap, window, cx));
     }
@@ -485,6 +667,13 @@ impl CodeEditor {
             tab_size: settings.effective_tab_size(),
             hard_tabs: settings.hard_tabs,
         };
+        self.view_options.tab_size = tab_size.tab_size;
+        self.view_options.soft_wrap = settings.soft_wrap;
+        self.view_options.line_numbers = settings.line_numbers;
+        self.view_options.indent_guides = settings.indent_guides;
+        if let Some(mapped) = &self.mapped {
+            mapped.update(cx, |editor, cx| editor.set_options(self.view_options, cx));
+        }
         self.input.update(cx, |input, cx| {
             input.set_soft_wrap(settings.soft_wrap, window, cx);
             input.set_line_number(settings.line_numbers, window, cx);
@@ -588,29 +777,33 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         if event.button != MouseButton::Right
-            || (!self.format_action && self.context_menu_builder.is_none())
+            || (self.mapped.is_none() && !self.format_action && self.context_menu_builder.is_none())
         {
             return;
         }
 
         cx.stop_propagation();
         let position = event.position;
-        let Some((selection, clicked)) = self.input.update(cx, |input, cx| {
-            Some((
-                EntityInputHandler::selected_text_range(input, true, window, cx)?,
-                EntityInputHandler::character_index_for_point(input, position, window, cx),
-            ))
-        }) else {
-            return;
-        };
-        if let Some(clicked_utf16) = clicked
-            && !selection.range.contains(&clicked_utf16)
-        {
-            self.input.update(cx, |input, cx| {
-                let offset = input.text().offset_utf16_to_offset(clicked_utf16);
-                let point = input.text().offset_to_position(offset);
-                input.set_cursor_position(point, window, cx);
-            });
+        if let Some(mapped) = &self.mapped {
+            mapped.update(cx, |editor, cx| editor.context_click(event, window, cx));
+        } else {
+            let Some((selection, clicked)) = self.input.update(cx, |input, cx| {
+                Some((
+                    EntityInputHandler::selected_text_range(input, true, window, cx)?,
+                    EntityInputHandler::character_index_for_point(input, position, window, cx),
+                ))
+            }) else {
+                return;
+            };
+            if let Some(clicked_utf16) = clicked
+                && !selection.range.contains(&clicked_utf16)
+            {
+                self.input.update(cx, |input, cx| {
+                    let offset = input.text().offset_utf16_to_offset(clicked_utf16);
+                    let point = input.text().offset_to_position(offset);
+                    input.set_cursor_position(point, window, cx);
+                });
+            }
         }
 
         let _ = self.input.update(cx, |input, cx| {
@@ -621,25 +814,9 @@ impl CodeEditor {
             )
         });
         cx.stop_propagation();
-        let focus = self.input.read(cx).focus_handle(cx);
+        let focus = self.focus_handle(cx);
         let editor = cx.entity();
-        let (range, document, selected_text) = self.input.update(cx, |input, cx| {
-            let Some(selection) = EntityInputHandler::selected_text_range(input, true, window, cx)
-            else {
-                return (0..0, input.value(), String::new());
-            };
-            let mut adjusted = None;
-            let selected_text = EntityInputHandler::text_for_range(
-                input,
-                selection.range.clone(),
-                &mut adjusted,
-                window,
-                cx,
-            )
-            .unwrap_or_default();
-            let document = input.value();
-            (selection.range, document, selected_text)
-        });
+        let (range, document, selected_text) = self.selection_snapshot(window, cx);
         let context = CodeEditorContextMenuContext {
             editor: editor.clone(),
             range,
@@ -678,7 +855,7 @@ impl CodeEditor {
         let subscription =
             cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, window, cx| {
                 this.context_menu = None;
-                this.input.read(cx).focus_handle(cx).focus(window);
+                this.focus_handle(cx).focus(window);
                 cx.notify();
             });
         self.context_menu = Some(menu);
@@ -747,7 +924,10 @@ impl EventEmitter<CodeEditorEvent> for CodeEditor {}
 
 impl Focusable for CodeEditor {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.input.read(cx).focus_handle(cx)
+        match &self.mapped {
+            Some(mapped) => mapped.read(cx).focus_handle(cx),
+            None => self.input.read(cx).focus_handle(cx),
+        }
     }
 }
 
@@ -802,20 +982,23 @@ impl Render for CodeEditor {
                 .bg(cx.api_surface_lowest())
             })
             .overflow_hidden()
-            .child(
-                Input::new(&self.input)
-                    .appearance(false)
-                    .disabled(self.read_only)
-                    .size_full()
-                    // Zed's gutter bounds begin at the editor bounds. The
-                    // generic Input component otherwise keeps control padding
-                    // even with appearance disabled, leaving an inset strip
-                    // to the left of the line-number gutter.
-                    .p_0()
-                    .font_family(editor_style.font_family)
-                    .text_size(editor_style.font_size)
-                    .line_height(editor_line_height),
-            )
+            .when_some(self.mapped.clone(), |this, mapped| this.child(mapped))
+            .when(self.mapped.is_none(), |this| {
+                this.child(
+                    Input::new(&self.input)
+                        .appearance(false)
+                        .disabled(self.read_only)
+                        .size_full()
+                        // Zed's gutter bounds begin at the editor bounds. The
+                        // generic Input component otherwise keeps control padding
+                        // even with appearance disabled, leaving an inset strip
+                        // to the left of the line-number gutter.
+                        .p_0()
+                        .font_family(editor_style.font_family)
+                        .text_size(editor_style.font_size)
+                        .line_height(editor_line_height),
+                )
+            })
             .children(context_menu)
             .capture_any_mouse_down(cx.listener(Self::capture_mouse_down))
             .capture_key_down(cx.listener(Self::capture_key_down))

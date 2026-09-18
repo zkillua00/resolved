@@ -8,19 +8,27 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) {
         let language = response_language(response);
-        let content = if response.body.is_file_backed() && response_body_is_text(response) {
-            String::new()
-        } else if response_body_is_text(response) {
-            format_body(&response.body, self.pretty_body, &self.settings.formatter)
-        } else {
-            format!(
-                "Binary response ({}). The post-response script receives a bounded Base64 view.",
-                format_bytes(response.size_bytes())
-            )
-        };
         self.response_editor.update(cx, |editor, cx| {
             editor.set_language(language, cx);
-            editor.set_value(content, window, cx);
+            if response.body.is_file_backed() && response_body_is_text(response) {
+                editor.set_response_body(
+                    response.body.clone(),
+                    self.pretty_body,
+                    self.settings.formatter.clone(),
+                    window,
+                    cx,
+                );
+            } else {
+                let content = if response_body_is_text(response) {
+                    format_body(&response.body, self.pretty_body, &self.settings.formatter)
+                } else {
+                    format!(
+                        "Binary response ({}). The post-response script receives a bounded Base64 view.",
+                        format_bytes(response.size_bytes())
+                    )
+                };
+                editor.set_value(content, window, cx);
+            }
         });
     }
 
@@ -95,6 +103,14 @@ impl ApiTester {
             return;
         };
 
+        if self.response_tab == ResponseTab::Body {
+            self.response_editor
+                .update(cx, |editor, cx| editor.copy_all(cx));
+            self.copied = true;
+            cx.notify();
+            return;
+        }
+
         let value = match self.response_tab {
             ResponseTab::Headers => response
                 .headers
@@ -102,10 +118,7 @@ impl ApiTester {
                 .map(|header| format!("{}: {}", header.name, header.value))
                 .collect::<Vec<_>>()
                 .join("\n"),
-            ResponseTab::Body if response.body.is_file_backed() => {
-                format_body(&response.body, self.pretty_body, &self.settings.formatter)
-            }
-            ResponseTab::Body => self.response_editor.read(cx).value(cx).to_string(),
+            ResponseTab::Body => unreachable!("body copying is handled by the response editor"),
             ResponseTab::Preview => {
                 format_body(&response.body, self.pretty_body, &self.settings.formatter)
             }

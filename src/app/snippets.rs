@@ -1,6 +1,7 @@
 use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc};
 
 use super::*;
+use crate::code_editor::EditorText;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::app) enum SnippetMenuSurface {
@@ -52,7 +53,7 @@ struct SnippetMenuEntry {
 
 #[derive(Clone)]
 struct SnippetMenuInvocationMarker {
-    source_document: SharedString,
+    source_document: EditorText,
     request_tab_id: RequestTabId,
     request_generation: u64,
     response_identity: Option<SnippetResponseIdentity>,
@@ -882,7 +883,10 @@ impl SnippetMenuInvocationMarker {
         current_request_generation: u64,
         current_response: Option<&ResponseData>,
     ) -> Option<SnippetMenuStaleReason> {
-        if self.source_document.as_ref() != current_source_document {
+        if !self
+            .source_document
+            .matches_snapshot(current_source_document)
+        {
             return Some(SnippetMenuStaleReason::SourceDocument);
         }
         if &self.request_tab_id != current_request_tab_id {
@@ -1320,31 +1324,12 @@ fn capture_editor_selection<C>(
     window: &mut Window,
     cx: &mut Context<C>,
 ) -> CapturedEditorSelection {
-    let input = editor.read(cx).input_state();
-    let (range, document, selected) = input.update(cx, |input, cx| {
-        let Some(selection) = EntityInputHandler::selected_text_range(input, true, window, cx)
-        else {
-            return (0..0, None, None);
-        };
-        if selection.range.is_empty() {
-            return (selection.range, None, None);
-        }
-        let mut adjusted = None;
-        let selected = EntityInputHandler::text_for_range(
-            input,
-            selection.range.clone(),
-            &mut adjusted,
-            window,
-            cx,
-        )
-        .unwrap_or_default();
-        let document = json.then(|| input.value());
-        (selection.range, document, Some(selected))
-    });
+    let (range, document, selected) =
+        editor.update(cx, |editor, cx| editor.selection_snapshot(window, cx));
     captured_editor_selection(
         range,
-        document.as_ref().map(AsRef::as_ref).unwrap_or_default(),
-        selected.as_deref().unwrap_or_default(),
+        document.as_ref(),
+        selected.as_ref(),
         surface,
         content_type,
         json,
@@ -1359,7 +1344,9 @@ fn captured_editor_selection(
     content_type: Option<String>,
     json: bool,
 ) -> CapturedEditorSelection {
-    if range.is_empty() {
+    // Validate the borrowed snapshot before SnippetSelection::new converts it
+    // into an owned String, including the fallback for oversized JSON documents.
+    if range.is_empty() || selected.len() > crate::core::MAX_SNIPPET_SELECTION_BYTES {
         return CapturedEditorSelection {
             range,
             selection: None,
@@ -2609,6 +2596,33 @@ mod tests {
             content_type: Some("application/json".to_owned()),
             body: bytes::Bytes::from_static(body).into(),
             duration: Duration::from_millis(25),
+        }
+    }
+
+    #[test]
+    fn captured_response_selection_respects_payload_limit() {
+        for json in [false, true] {
+            let document = "x".repeat(crate::core::MAX_SNIPPET_SELECTION_BYTES + 1);
+            let captured = captured_editor_selection(
+                0..document.len(),
+                &document,
+                &document,
+                SnippetMenuSurface::ResponseBody,
+                None,
+                json,
+            );
+            assert!(captured.selection.is_none());
+
+            let selected = &document[..crate::core::MAX_SNIPPET_SELECTION_BYTES];
+            let captured = captured_editor_selection(
+                0..selected.len(),
+                &document,
+                selected,
+                SnippetMenuSurface::ResponseBody,
+                None,
+                json,
+            );
+            assert_eq!(captured.selection.unwrap().text(), selected);
         }
     }
 

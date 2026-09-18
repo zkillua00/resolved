@@ -474,17 +474,23 @@ impl PaneEditorState {
         self.request_notice = runtime.request_notice.clone();
         if let Some(response) = &self.response {
             let language = response_language(response);
-            let content = if response.body.is_file_backed() && response_body_is_text(response) {
-                String::new()
-            } else {
-                self.formatted_body.clone().map_or_else(
-                    || format!("Binary response ({}).", format_bytes(response.size_bytes())),
-                    |body| body.to_string(),
-                )
-            };
             self.response_editor.update(cx, |editor, cx| {
                 editor.set_language(language, cx);
-                editor.set_value(content, window, cx);
+                if response.body.is_file_backed() && response_body_is_text(response) {
+                    editor.set_response_body(
+                        response.body.clone(),
+                        self.pretty_body,
+                        formatter.clone(),
+                        window,
+                        cx,
+                    );
+                } else {
+                    let content = self.formatted_body.clone().map_or_else(
+                        || format!("Binary response ({}).", format_bytes(response.size_bytes())),
+                        |body| body.to_string(),
+                    );
+                    editor.set_value(content, window, cx);
+                }
             });
         } else {
             self.response_editor.update(cx, |editor, cx| {
@@ -1929,23 +1935,6 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let key = session.dom_key(pane_id);
-        let Some(response) = &session.response else {
-            return div().size_full().into_any_element();
-        };
-        if response.body.is_file_backed() && response_body_is_text(response) {
-            return div()
-                .id(SharedString::from(format!("{key}-response-body")))
-                .debug_selector(|| "secondary-pane-file-backed-response".to_owned())
-                .size_full()
-                .min_h_0()
-                .bg(cx.api_surface_lowest())
-                .child(super::response_body::render_file_backed_response(
-                    SharedString::from(format!("{key}-file-backed-response")),
-                    response,
-                    cx,
-                ))
-                .into_any_element();
-        }
         div()
             .id(SharedString::from(format!("{key}-response-body")))
             .debug_selector(|| "secondary-pane-response-code-editor".to_owned())
@@ -2511,17 +2500,28 @@ impl ApiTester {
             });
             if let Some(response) = &session.response {
                 let language = response_language(response);
-                let content = if response.body.is_file_backed() && response_body_is_text(response) {
-                    String::new()
-                } else {
-                    session.formatted_body.clone().map_or_else(
-                        || format!("Binary response ({}).", format_bytes(response.size_bytes())),
-                        |body| body.to_string(),
-                    )
-                };
                 session.response_editor.update(cx, |editor, cx| {
                     editor.set_language(language, cx);
-                    editor.set_value(content, window, cx);
+                    if response.body.is_file_backed() && response_body_is_text(response) {
+                        editor.set_response_body(
+                            response.body.clone(),
+                            session.pretty_body,
+                            formatter.clone(),
+                            window,
+                            cx,
+                        );
+                    } else {
+                        let content = session.formatted_body.clone().map_or_else(
+                            || {
+                                format!(
+                                    "Binary response ({}).",
+                                    format_bytes(response.size_bytes())
+                                )
+                            },
+                            |body| body.to_string(),
+                        );
+                        editor.set_value(content, window, cx);
+                    }
                 });
             }
         }
@@ -2536,6 +2536,14 @@ impl ApiTester {
         let Some(response) = session.response.clone() else {
             return;
         };
+        if session.response_tab == ResponseTab::Body {
+            session
+                .response_editor
+                .update(cx, |editor, cx| editor.copy_all(cx));
+            session.copied = true;
+            cx.notify();
+            return;
+        }
         let value = match session.response_tab {
             ResponseTab::Headers => response
                 .headers
@@ -2543,9 +2551,8 @@ impl ApiTester {
                 .map(|header| format!("{}: {}", header.name, header.value))
                 .collect::<Vec<_>>()
                 .join("\n"),
-            ResponseTab::Preview | ResponseTab::Body => {
-                format_body(&response.body, session.pretty_body, &formatter)
-            }
+            ResponseTab::Body => unreachable!("body copying is handled by the response editor"),
+            ResponseTab::Preview => format_body(&response.body, session.pretty_body, &formatter),
             ResponseTab::Scripts => {
                 session.copied = false;
                 return;

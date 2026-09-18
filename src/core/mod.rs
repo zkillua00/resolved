@@ -46,7 +46,7 @@ pub use realtime::{RealtimeResourceChange, RealtimeSignal, watch_upstream_change
 pub use request::{build_client, spawn_request};
 pub use request::{
     BodyField, BodyFieldKind, BodyMode, HeaderEntry, QueryParamEntry, RawBodyLanguage,
-    RequestDraft, RequestError, RequestTask, ResponseData, STANDARD_HTTP_METHODS,
+    RequestDraft, RequestError, RequestTask, ResponseBody, ResponseData, STANDARD_HTTP_METHODS,
     build_client_with_cookie_jar, build_http_client_with_limits, query_params_from_url,
     send_request_with_limits, url_with_query_params,
 };
@@ -78,7 +78,9 @@ pub use settings::{
     MAX_ZOOM_PERCENT, MIN_ZOOM_PERCENT, McpSettings, MetricsPosition, SavedTheme, ShortcutOverride,
     ThemeSettings, ZOOM_STEP_PERCENT, ZoomSettings,
 };
-pub(crate) use snippet::{GENERATOR_WRAPPER_PREFIX, GENERATOR_WRAPPER_SUFFIX};
+pub(crate) use snippet::{
+    GENERATOR_WRAPPER_PREFIX, GENERATOR_WRAPPER_SUFFIX, MAX_SNIPPET_SELECTION_BYTES,
+};
 pub use snippet::{
     MAX_SNIPPET_NAME_BYTES, Snippet, SnippetCancellation, SnippetCategory,
     SnippetInvocationContext, SnippetKind, SnippetLog, SnippetLogLevel, SnippetRequirement,
