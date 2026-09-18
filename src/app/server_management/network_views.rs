@@ -209,7 +209,7 @@ impl ApiTester {
                 .child(self.render_proxy_sidebar(snapshot, cx))
                 .child(if management.proxy_workspace.show_limits {
                     v_flex().id("request-proxy-limits").flex_1().min_w_0().min_h_0()
-                        .overflow_y_scroll().p_6().child(self.render_execution_limits(cx)).into_any_element()
+                        .overflow_hidden().child(self.render_execution_limits(cx)).into_any_element()
                 } else if let Some(proxy) = snapshot.proxies.as_deref()
                     .and_then(|proxies| management.proxy_workspace.selected_proxy(proxies))
                 {

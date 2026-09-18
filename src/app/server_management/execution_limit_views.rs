@@ -4,12 +4,37 @@ use crate::core::{
     ExecutionLimitScope, ExecutionLimitSnapshot, ExecutionLimitSource, load_execution_limits,
     replace_execution_limits,
 };
+use gpui_component::tab::Tab;
+
+const SERVER_LIMIT_SECTIONS: &[(&str, &str, &str)] = &[
+    (
+        "HTTP",
+        "http.",
+        "Request timeouts, connection budgets, payload sizes, redirects, and relay envelopes.",
+    ),
+    (
+        "WebSocket",
+        "websocket.",
+        "Connection, message, session, and automation budgets.",
+    ),
+    (
+        "Scripts",
+        "script.",
+        "Runtime, memory, source, output, and logging budgets for scripts.",
+    ),
+    (
+        "Chains",
+        "chain.",
+        "Depth and request budgets for chained request execution.",
+    ),
+];
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct ExecutionLimitState {
     scope: ExecutionLimitScope,
     snapshot: Option<ExecutionLimitSnapshot>,
     draft: BTreeMap<String, Bound>,
+    section: usize,
     busy: bool,
     error: Option<String>,
     notice: Option<String>,
@@ -177,40 +202,128 @@ impl ApiTester {
         let can_update = self.execution_limits_can_update();
         let unavailable =
             self.server_management.status.busy() || self.server_management.snapshot.is_none();
-        let mut selector = v_flex()
-            .id("execution-limit-scope-selector")
-            .gap_1()
-            .max_h(px(200.))
-            .overflow_y_scroll()
-            .id("execution-limit-scopes");
-        for (index, (scope, label)) in scopes.iter().enumerate() {
-            let selected = scope == &state.scope;
-            let scope = scope.clone();
-            selector = selector.child(
-                Button::new(("execution-limit-scope", index))
-                    .label(label.clone())
-                    .small()
+        let scope_label = scopes
+            .iter()
+            .find(|(scope, _)| scope == &state.scope)
+            .map(|(_, label)| label.clone())
+            .unwrap_or_else(|| "Scope no longer available".to_owned());
+        let menu_scopes = scopes.clone();
+        let menu_selected = state.scope.clone();
+        let menu_this = cx.entity().downgrade();
+        let selector = h_flex()
+            .min_w_0()
+            .gap_3()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Scope"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .font_semibold()
+                    .truncate()
+                    .child(scope_label.clone()),
+            )
+            .child(
+                Button::new("execution-limit-scope")
+                    .label("Change scope")
                     .outline()
-                    .selected(selected)
+                    .dropdown_caret(true)
                     .disabled(state.busy || unavailable || state.dirty())
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.request_execution_limits(scope.clone(), false, window, cx);
+                    .tooltip(if state.dirty() {
+                        "Save or discard your edits before switching scope.".to_owned()
+                    } else {
+                        scope_label
+                    })
+                    .dropdown_menu(move |mut menu, _, _| {
+                        menu = menu.scrollable(true);
+                        for (scope, label) in &menu_scopes {
+                            let scope = scope.clone();
+                            let this = menu_this.clone();
+                            let is_selected = scope == menu_selected;
+                            menu = menu.item(
+                                PopupMenuItem::new(label.clone())
+                                    .checked(is_selected)
+                                    .on_click(move |_, window, cx| {
+                                        if !is_selected && let Some(this) = this.upgrade() {
+                                            this.update(cx, |this, cx| {
+                                                this.request_execution_limits(
+                                                    scope.clone(),
+                                                    false,
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        }
+                                    }),
+                            );
+                        }
+                        menu
+                    }),
+            )
+            .child(
+                Button::new("execution-limit-scope-by-id")
+                    .icon(IconName::Search)
+                    .small()
+                    .ghost()
+                    .tooltip("Open workspace / collection by ID…")
+                    .disabled(state.busy || unavailable || state.dirty())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_execution_limit_scope_dialog(window, cx);
                     })),
             );
-        }
-        let mut section = v_flex().w_full().gap_4().p_5().rounded_lg().border_1()
-            .border_color(cx.api_outline_variant()).bg(cx.api_surface())
-            .child(div().text_base().font_semibold().child("Execution limits"))
-            .child(div().text_sm().text_color(cx.theme().muted_foreground)
-                .child("Select a scope to load its limits. Inherit removes this scope's override. More specific scopes win, including larger values or Unlimited. Zero is an explicit limit. Changes apply without a restart."))
-            .child(selector)
-            .child(Button::new("execution-limit-scope-by-id").label("Open workspace / collection by ID…").small().outline()
-                .disabled(state.busy || unavailable || state.dirty())
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.open_execution_limit_scope_dialog(window, cx);
-                })));
+        let active_section = state.section.min(SERVER_LIMIT_SECTIONS.len() - 1);
+        let mut section = v_flex()
+            .size_full()
+            .min_h_0()
+            .min_w_0()
+            .overflow_hidden()
+            .child(
+                v_flex()
+                    .flex_shrink_0()
+                    .gap_3()
+                    .px_4()
+                    .pt_4()
+                    .child(selector)
+                    .child(
+                        TabBar::new("server-limit-sections")
+                            .underline()
+                            .children(
+                                SERVER_LIMIT_SECTIONS
+                                    .iter()
+                                    .map(|(title, _, _)| Tab::new().label(*title)),
+                            )
+                            .selected_index(active_section)
+                            .on_click(cx.listener(|this, index: &usize, _, cx| {
+                                this.server_management.execution_limits.section = *index;
+                                cx.notify();
+                            })),
+                    ),
+            );
+        let mut fields = v_flex()
+            .id("server-limit-fields")
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .overflow_y_scroll()
+            .px_4()
+            .child(
+                v_flex()
+                    .flex_shrink_0()
+                    .gap_2()
+                    .py_4()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SERVER_LIMIT_SECTIONS[active_section].2)
+                    .child("Blank / Inherit uses the nearest ancestor. Zero is an explicit limit; Unlimited removes the cap. Effective values below reflect the last saved server snapshot.")
+                    .child("Workspace and collection scopes follow the same hierarchy used for proxy assignments."),
+            );
         if let Some(error) = &state.error {
-            section = section.child(
+            fields = fields.child(
                 div()
                     .text_sm()
                     .text_color(cx.theme().danger)
@@ -218,7 +331,7 @@ impl ApiTester {
             );
         }
         if let Some(notice) = &state.notice {
-            section = section.child(
+            fields = fields.child(
                 div()
                     .text_sm()
                     .text_color(cx.theme().info)
@@ -226,13 +339,11 @@ impl ApiTester {
             );
         }
         if state.busy {
-            section = section.child(div().text_sm().child("Loading execution limits…"));
+            fields = fields.child(div().text_sm().child("Loading execution limits…"));
         }
         if let Some(snapshot) = &state.snapshot {
-            section = section.child(div().text_sm().text_color(cx.theme().muted_foreground)
-                .child("Effective values and sources below reflect the last server snapshot. Save to apply drafts."));
             if !can_update {
-                section = section.child(
+                fields = fields.child(
                     div()
                         .text_sm()
                         .child("Read only: you do not have permission to update this scope."),
@@ -240,6 +351,9 @@ impl ApiTester {
             }
             for (index, definition) in snapshot.definitions.iter().enumerate() {
                 let key = &definition.key;
+                if !key.starts_with(SERVER_LIMIT_SECTIONS[active_section].1) {
+                    continue;
+                }
                 let current = state.draft.get(key);
                 let effective = snapshot
                     .effective
@@ -260,110 +374,149 @@ impl ApiTester {
                     .or(snapshot.effective.get(key))
                     .unwrap_or(&definition.default)
                     .value;
-                section = section.child(
+                fields = fields.child(
                     v_flex()
+                        .flex_shrink_0()
                         .gap_2()
-                        .py_3()
-                        .border_b_1()
+                        .py_4()
+                        .border_t_1()
                         .border_color(cx.api_outline_variant())
                         .child(
-                            div()
-                                .font_semibold()
-                                .child(format!("{} ({})", definition.label, definition.unit)),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .child(format!("Effective: {effective} · From: {source}")),
+                            h_flex()
+                                .flex_wrap()
+                                .gap_3()
+                                .child(
+                                    v_flex()
+                                        .flex_1()
+                                        .min_w(rems(14.))
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_medium()
+                                                .child(definition.label.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(key.clone()),
+                                        ),
+                                )
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .child(
+                                            Button::new(("limit-custom", index))
+                                                .label(
+                                                    current
+                                                        .filter(|bound| !bound.unlimited)
+                                                        .map(|bound| {
+                                                            bound_label(bound, &definition.unit)
+                                                        })
+                                                        .unwrap_or_else(|| "Custom…".to_owned()),
+                                                )
+                                                .small()
+                                                .outline()
+                                                .selected(current.is_some_and(|b| !b.unlimited))
+                                                .disabled(!can_update || state.busy)
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        this.open_execution_limit_dialog(
+                                                            custom_key.clone(),
+                                                            custom_label.clone(),
+                                                            custom_unit.clone(),
+                                                            custom_value,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
+                                        )
+                                        .child(
+                                            Button::new(("limit-inherit", index))
+                                                .label("Inherit")
+                                                .small()
+                                                .ghost()
+                                                .selected(current.is_none())
+                                                .disabled(!can_update || state.busy)
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.server_management
+                                                        .execution_limits
+                                                        .draft
+                                                        .remove(&inherit_key);
+                                                    this.server_management
+                                                        .execution_limits
+                                                        .notice = None;
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new(("limit-unlimited", index))
+                                                .label("Unlimited")
+                                                .small()
+                                                .ghost()
+                                                .selected(current.is_some_and(|b| b.unlimited))
+                                                .disabled(!can_update || state.busy)
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.server_management
+                                                        .execution_limits
+                                                        .draft
+                                                        .insert(
+                                                            unlimited_key.clone(),
+                                                            Bound {
+                                                                unlimited: true,
+                                                                value: 0,
+                                                            },
+                                                        );
+                                                    this.server_management
+                                                        .execution_limits
+                                                        .notice = None;
+                                                    cx.notify();
+                                                })),
+                                        ),
+                                ),
                         )
                         .child(
                             div()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(format!(
-                                    "Default: {} · Draft: {}",
-                                    bound_label(&definition.default, &definition.unit),
-                                    current
-                                        .map(|b| bound_label(b, &definition.unit))
-                                        .unwrap_or_else(|| "Inherit".to_owned())
+                                    "Saved effective: {effective} · From {source} · Default: {}",
+                                    bound_label(&definition.default, &definition.unit)
                                 )),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    Button::new(("limit-inherit", index))
-                                        .label("Inherit / reset")
-                                        .small()
-                                        .outline()
-                                        .selected(current.is_none())
-                                        .disabled(!can_update || state.busy)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.server_management
-                                                .execution_limits
-                                                .draft
-                                                .remove(&inherit_key);
-                                            this.server_management.execution_limits.notice = None;
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    Button::new(("limit-custom", index))
-                                        .label("Custom…")
-                                        .small()
-                                        .outline()
-                                        .selected(current.is_some_and(|b| !b.unlimited))
-                                        .disabled(!can_update || state.busy)
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.open_execution_limit_dialog(
-                                                custom_key.clone(),
-                                                custom_label.clone(),
-                                                custom_unit.clone(),
-                                                custom_value,
-                                                window,
-                                                cx,
-                                            );
-                                        })),
-                                )
-                                .child(
-                                    Button::new(("limit-unlimited", index))
-                                        .label("Unlimited")
-                                        .small()
-                                        .outline()
-                                        .selected(current.is_some_and(|b| b.unlimited))
-                                        .disabled(!can_update || state.busy)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.server_management.execution_limits.draft.insert(
-                                                unlimited_key.clone(),
-                                                Bound {
-                                                    unlimited: true,
-                                                    value: 0,
-                                                },
-                                            );
-                                            this.server_management.execution_limits.notice = None;
-                                            cx.notify();
-                                        })),
-                                ),
                         ),
                 );
             }
-            section = section.child(
-                h_flex()
+            section = section
+                .child(fields)
+                .child(
+                v_flex()
+                    .flex_shrink_0()
                     .gap_2()
+                    .p_4()
+                    .border_t_1()
+                    .border_color(cx.api_outline_variant())
                     .child(
-                        Button::new("save-execution-limits")
-                            .label("Save limits")
-                            .primary()
-                            .disabled(!can_update || state.busy || !state.dirty())
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                let scope = this.server_management.execution_limits.scope.clone();
-                                this.request_execution_limits(scope, true, window, cx);
-                            })),
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(if !can_update {
+                                "Read only — you do not have permission to update this scope."
+                            } else if state.dirty() {
+                                "Unsaved changes — save or discard before switching scope."
+                            } else {
+                                "Saved limits apply immediately. More specific scopes take precedence."
+                            }),
                     )
+                    .child(
+                        h_flex()
+                    .gap_2()
+                    .child(div().flex_1())
                     .child(
                         Button::new("reset-execution-limit-draft")
                             .label("Discard edits")
-                            .outline()
+                            .ghost()
                             .disabled(state.busy || !state.dirty())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let state = &mut this.server_management.execution_limits;
@@ -373,15 +526,21 @@ impl ApiTester {
                                 state.error = None;
                                 cx.notify();
                             })),
+                    )
+                    .child(
+                        Button::new("save-execution-limits")
+                            .label("Save changes")
+                            .primary()
+                            .disabled(!can_update || state.busy || !state.dirty())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let scope = this.server_management.execution_limits.scope.clone();
+                                this.request_execution_limits(scope, true, window, cx);
+                            })),
+                    ),
                     ),
             );
-            if state.dirty() {
-                section = section.child(
-                    div()
-                        .text_sm()
-                        .child("Save or discard edits before switching scope."),
-                );
-            }
+        } else {
+            section = section.child(fields);
         }
         section.into_any_element()
     }
