@@ -1,5 +1,8 @@
 use super::*;
 
+mod assignment_tree;
+mod assignment_tree_views;
+
 /// A complete-list edit, kept separate from the live snapshot. Only a save started
 /// by this editor may close it on mutation completion.
 #[derive(Clone, Debug, Default)]
@@ -7,6 +10,8 @@ pub(super) struct ProxyScopeEditorState {
     draft: Option<ScopeDraft>,
     saving: bool,
     save_error: Option<String>,
+    /// Disclosure choices survive Save/Cancel and same-server refreshes.
+    tree_expansion: BTreeMap<String, bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -29,7 +34,6 @@ enum ScopeSelection {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ScopeItem {
-    Assignment(ProxyAssignment),
     User(String),
     Role(String),
 }
@@ -52,7 +56,6 @@ impl ScopeSelection {
 
     fn contains(&self, item: &ScopeItem) -> bool {
         match (self, item) {
-            (Self::Assignments(values), ScopeItem::Assignment(value)) => values.contains(value),
             (Self::Exclusions { users, .. }, ScopeItem::User(id)) => users.contains(id),
             (Self::Exclusions { roles, .. }, ScopeItem::Role(id)) => roles.contains(id),
             _ => false,
@@ -61,9 +64,6 @@ impl ScopeSelection {
 
     fn set(&mut self, item: &ScopeItem, checked: bool) {
         match (self, item) {
-            (Self::Assignments(values), ScopeItem::Assignment(value)) => {
-                set_selected(values, value, checked);
-            }
             (Self::Exclusions { users, .. }, ScopeItem::User(id)) => {
                 set_selected(users, id, checked);
             }
@@ -110,7 +110,9 @@ impl ProxyScopeEditorState {
     }
 
     pub(super) fn clear(&mut self) {
-        *self = Self::default();
+        self.draft = None;
+        self.saving = false;
+        self.save_error = None;
     }
 
     fn begin(&mut self, proxy: &ManagementProxy, assignments: bool) {
@@ -167,90 +169,6 @@ impl ProxyScopeEditorState {
     }
 }
 
-#[derive(Clone, Debug)]
-struct ScopeOption {
-    assignment: ProxyAssignment,
-    label: String,
-}
-
-fn scope_kind_label(kind: ProxyScopeKind) -> &'static str {
-    match kind {
-        ProxyScopeKind::Server => "Server",
-        ProxyScopeKind::Workspace => "Workspace",
-        ProxyScopeKind::Collection => "Collection",
-        ProxyScopeKind::Request => "Saved request",
-    }
-}
-
-fn scope_options(workspaces: Option<&[UpstreamWorkspaceView]>) -> Vec<ScopeOption> {
-    let mut options = vec![ScopeOption {
-        assignment: ProxyAssignment {
-            scope_kind: ProxyScopeKind::Server,
-            scope_id: None,
-        },
-        label: "Server-wide · All workspaces".into(),
-    }];
-    for workspace in workspaces.unwrap_or_default() {
-        options.push(ScopeOption {
-            assignment: ProxyAssignment {
-                scope_kind: ProxyScopeKind::Workspace,
-                scope_id: Some(workspace.id.clone()),
-            },
-            label: format!("Workspace · {}", workspace.name),
-        });
-        for collection in &workspace.collections {
-            push_collection_options(&mut options, collection, &workspace.name);
-        }
-    }
-    options
-}
-
-fn push_collection_options(
-    options: &mut Vec<ScopeOption>,
-    collection: &UpstreamCollectionView,
-    parent_path: &str,
-) {
-    let path = format!("{parent_path} / {}", collection.name);
-    options.push(ScopeOption {
-        assignment: ProxyAssignment {
-            scope_kind: ProxyScopeKind::Collection,
-            scope_id: Some(collection.id.clone()),
-        },
-        label: format!("Collection · {path}"),
-    });
-    for request in &collection.requests {
-        options.push(ScopeOption {
-            assignment: ProxyAssignment {
-                scope_kind: ProxyScopeKind::Request,
-                scope_id: Some(request.id.clone()),
-            },
-            label: format!("Saved request · {path} / {}", request.name),
-        });
-    }
-    for child in &collection.sub_collections {
-        push_collection_options(options, child, &path);
-    }
-}
-
-fn inaccessible_assignment_label(assignment: &ProxyAssignment) -> String {
-    format!(
-        "Inaccessible {} · ID: {}",
-        scope_kind_label(assignment.scope_kind),
-        assignment.scope_id.as_deref().unwrap_or("(unavailable)")
-    )
-}
-
-pub(super) fn proxy_assignment_label(
-    assignment: &ProxyAssignment,
-    workspaces: Option<&[UpstreamWorkspaceView]>,
-) -> String {
-    scope_options(workspaces)
-        .into_iter()
-        .find(|option| &option.assignment == assignment)
-        .map(|option| option.label)
-        .unwrap_or_else(|| inaccessible_assignment_label(assignment))
-}
-
 fn assignment_owner<'a>(
     snapshot: &'a UpstreamManagementSnapshot,
     proxy_id: &str,
@@ -265,96 +183,67 @@ fn assignment_owner<'a>(
         .map(|proxy| proxy.name.as_str())
 }
 
-struct SelectionRow {
+struct ExclusionRow {
     item: ScopeItem,
     label: String,
-    owner: Option<String>,
 }
 
 /// Include the baseline as well as the selection: an inaccessible item that was
 /// unchecked must remain visible so that the user can undo that change.
-fn selection_rows(
-    proxy: &ManagementProxy,
+fn exclusion_rows(
     snapshot: &UpstreamManagementSnapshot,
     selection: &ScopeSelection,
     base: &ScopeSelection,
     editing: bool,
-) -> Vec<SelectionRow> {
+) -> Vec<ExclusionRow> {
     let mut rows = Vec::new();
-    match selection {
-        ScopeSelection::Assignments(values) => {
-            let mut options = scope_options(snapshot.workspaces.as_deref());
-            for value in values.iter().chain(match base {
-                ScopeSelection::Assignments(base) => base.as_slice(),
-                _ => &[],
-            }) {
-                if !options.iter().any(|option| &option.assignment == value) {
-                    options.push(ScopeOption {
-                        assignment: value.clone(),
-                        label: inaccessible_assignment_label(value),
-                    });
+    if let ScopeSelection::Exclusions { users, roles } = selection {
+        for is_user in [false, true] {
+            let known: Vec<(String, String)> = if is_user {
+                snapshot
+                    .users
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|user| (user.id.clone(), user.display_name.clone()))
+                    .collect()
+            } else {
+                snapshot
+                    .roles
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|role| (role.id.clone(), role.name.clone()))
+                    .collect()
+            };
+            let selected = if is_user { users } else { roles };
+            let baseline = match base {
+                ScopeSelection::Exclusions { users, roles } => {
+                    if is_user {
+                        users
+                    } else {
+                        roles
+                    }
+                }
+                _ => selected,
+            };
+            let noun = if is_user { "User" } else { "Role" };
+            let mut subjects = known;
+            for id in selected.iter().chain(baseline) {
+                if !subjects.iter().any(|(known_id, _)| known_id == id) {
+                    subjects.push((id.clone(), format!("Inaccessible · ID: {id}")));
                 }
             }
-            for option in options {
-                if editing || values.contains(&option.assignment) {
-                    rows.push(SelectionRow {
-                        owner: assignment_owner(snapshot, &proxy.id, &option.assignment)
-                            .map(str::to_owned),
-                        item: ScopeItem::Assignment(option.assignment),
-                        label: option.label,
-                    });
-                }
-            }
-        }
-        ScopeSelection::Exclusions { users, roles } => {
-            for is_user in [false, true] {
-                let known: Vec<(String, String)> = if is_user {
-                    snapshot
-                        .users
-                        .as_deref()
-                        .unwrap_or_default()
-                        .iter()
-                        .map(|user| (user.id.clone(), user.display_name.clone()))
-                        .collect()
-                } else {
-                    snapshot
-                        .roles
-                        .as_deref()
-                        .unwrap_or_default()
-                        .iter()
-                        .map(|role| (role.id.clone(), role.name.clone()))
-                        .collect()
-                };
-                let selected = if is_user { users } else { roles };
-                let baseline = match base {
-                    ScopeSelection::Exclusions { users, roles } => {
-                        if is_user {
-                            users
+            for (id, name) in subjects {
+                if editing || selected.contains(&id) {
+                    rows.push(ExclusionRow {
+                        item: if is_user {
+                            ScopeItem::User(id)
                         } else {
-                            roles
-                        }
-                    }
-                    _ => selected,
-                };
-                let noun = if is_user { "User" } else { "Role" };
-                let mut subjects = known;
-                for id in selected.iter().chain(baseline) {
-                    if !subjects.iter().any(|(known_id, _)| known_id == id) {
-                        subjects.push((id.clone(), format!("Inaccessible · ID: {id}")));
-                    }
-                }
-                for (id, name) in subjects {
-                    if editing || selected.contains(&id) {
-                        rows.push(SelectionRow {
-                            item: if is_user {
-                                ScopeItem::User(id)
-                            } else {
-                                ScopeItem::Role(id)
-                            },
-                            label: format!("{noun} · {name}"),
-                            owner: None,
-                        });
-                    }
+                            ScopeItem::Role(id)
+                        },
+                        label: format!("{noun} · {name}"),
+                    });
                 }
             }
         }
@@ -451,7 +340,11 @@ impl ApiTester {
         let busy = self.server_management.status.busy() || editor.saving;
         let can_assign = snapshot.has_permission(PROXIES_ASSIGN);
         let disabled = busy || !can_assign || conflict;
-        let rows = selection_rows(proxy, snapshot, selection, base, editing);
+        let rows = if assignments {
+            Vec::new()
+        } else {
+            exclusion_rows(snapshot, selection, base, editing)
+        };
         let edit_proxy_id = proxy.id.clone();
         let edit_button = Button::new("proxy-scope-edit")
             .label(if assignments {
@@ -500,7 +393,7 @@ impl ApiTester {
                     div().debug_selector(|| "proxy-scope-edit".to_owned()).child(edit_button),
                 )))
             .child(scope_note(if assignments {
-                "More specific rules take precedence per hostname: saved request → collection → workspace → server. Removing an assignment restores inheritance; it does not force direct routing."
+                "Check a folder to include its descendants. A mixed folder keeps only its selected branches; new items added directly beneath it start unchecked."
             } else {
                 "Excluded users and roles skip this proxy and fall through to the next applicable scope. Exclusions change routing, not permissions; they do not block requests or force direct routing."
             }, cx));
@@ -533,31 +426,24 @@ impl ApiTester {
                     .child(error.clone()),
             );
         }
-        if rows.is_empty() {
-            content = content.child(scope_note(if assignments {
-                "No assignments. This proxy does not apply to any scope."
-            } else if editing {
+        if !assignments && rows.is_empty() {
+            content = content.child(scope_note(if editing {
                 "No users or roles are available to select."
             } else {
                 "No exclusions. Everyone in the assigned scopes uses these rules unless a more specific rule takes precedence."
             }, cx));
         }
+        if let (ScopeSelection::Assignments(selected), ScopeSelection::Assignments(baseline)) =
+            (selection, base)
+        {
+            content = content.child(
+                self.render_proxy_assignment_tree(proxy, snapshot, selected, baseline, editing, cx),
+            );
+        }
         for (index, row) in rows.into_iter().enumerate() {
             let checked = selection.contains(&row.item);
-            let occupied = row.owner.is_some();
-            let label = match row.owner {
-                Some(owner) => format!("{} · Assigned to {owner}", row.label),
-                None => row.label,
-            };
             let item = row.item;
             let row_selector = match &item {
-                ScopeItem::Assignment(value) => format!(
-                    "proxy-scope-row-assignment-{}-{}",
-                    scope_kind_label(value.scope_kind)
-                        .replace(' ', "-")
-                        .to_lowercase(),
-                    value.scope_id.as_deref().unwrap_or("server"),
-                ),
                 ScopeItem::User(id) => format!("proxy-scope-row-user-{id}"),
                 ScopeItem::Role(id) => format!("proxy-scope-row-role-{id}"),
             };
@@ -570,12 +456,12 @@ impl ApiTester {
                     .debug_selector(move || row_selector.clone())
                     .border_b_1()
                     .border_color(cx.api_outline_variant())
-                    .child(div().flex_1().min_w_0().text_sm().child(label))
+                    .child(div().flex_1().min_w_0().text_sm().child(row.label))
                     .when(editing, |row| {
                         row.child(
                             Switch::new(SharedString::from(format!("proxy-scope-item-{index}")))
                                 .checked(checked)
-                                .disabled(disabled || occupied)
+                                .disabled(disabled)
                                 .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                                     if this.server_management.status.busy() {
                                         return;
@@ -595,16 +481,7 @@ impl ApiTester {
                                     if let Some(draft) = editor.draft.as_mut().filter(|draft| {
                                         draft.proxy_id == row_proxy_id && !draft.conflict
                                     }) {
-                                        let occupied = match &item {
-                                            ScopeItem::Assignment(value) => {
-                                                assignment_owner(snapshot, &row_proxy_id, value)
-                                                    .is_some()
-                                            }
-                                            _ => false,
-                                        };
-                                        if !occupied {
-                                            draft.selection.set(&item, *checked);
-                                        }
+                                        draft.selection.set(&item, *checked);
                                     }
                                     cx.notify();
                                 })),
@@ -770,26 +647,46 @@ mod tests {
     fn unknown_items_survive_edits_and_remain_available_to_undo() {
         let proxy = proxy();
         let snapshot = snapshot(proxy.clone());
-        let base = ScopeSelection::from_proxy(&proxy, true);
-        let mut selection = base.clone();
-        let server = ScopeItem::Assignment(assignment(ProxyScopeKind::Server, None));
-        selection.set(&server, true);
-        assert!(selection.contains(&ScopeItem::Assignment(proxy.assignments[0].clone())));
-        selection.set(&ScopeItem::Assignment(proxy.assignments[0].clone()), false);
-        let rows = selection_rows(&proxy, &snapshot, &selection, &base, true);
+        let tree = assignment_tree::AssignmentTree::new(
+            &snapshot,
+            &proxy.id,
+            &proxy.assignments,
+            &proxy.assignments,
+        );
+        let selected = tree
+            .toggle(
+                &proxy.assignments,
+                &assignment(ProxyScopeKind::Server, None),
+                true,
+            )
+            .unwrap();
+        assert!(selected.contains(&proxy.assignments[0]));
+        let selected = tree
+            .toggle(&selected, &proxy.assignments[0], false)
+            .unwrap();
+        let tree = assignment_tree::AssignmentTree::new(
+            &snapshot,
+            &proxy.id,
+            &selected,
+            &proxy.assignments,
+        );
         assert!(
-            rows.iter()
-                .any(|row| row.label == "Inaccessible Workspace · ID: hidden")
+            tree.roots
+                .iter()
+                .any(|node| node.assignment == proxy.assignments[0] && !node.available)
         );
         let base = ScopeSelection::from_proxy(&proxy, false);
         let mut selection = base.clone();
         selection.set(&ScopeItem::User("visible".into()), true);
         assert!(selection.contains(&ScopeItem::User("unknown-user".into())));
         assert!(selection.contains(&ScopeItem::Role("unknown-role".into())));
-        assert_eq!(
-            selection_rows(&proxy, &snapshot, &selection, &base, false).len(),
-            3
-        );
+        assert_eq!(exclusion_rows(&snapshot, &selection, &base, false).len(), 3);
+        let unknown_user = ScopeItem::User("unknown-user".into());
+        selection.set(&unknown_user, false);
+        let rows = exclusion_rows(&snapshot, &selection, &base, true);
+        assert!(rows.iter().any(|row| {
+            row.item == unknown_user && row.label == "User · Inaccessible · ID: unknown-user"
+        }));
     }
 
     #[test]
@@ -849,18 +746,6 @@ mod tests {
         other.id = "other".into();
         other.name = "Other proxy".into();
         snapshot.proxies.as_mut().unwrap().push(other);
-        let draft = editor.draft.as_ref().unwrap();
-        let rows = selection_rows(
-            &snapshot.proxies.as_ref().unwrap()[0],
-            &snapshot,
-            &draft.selection,
-            &draft.base,
-            true,
-        );
-        assert!(
-            rows.iter()
-                .any(|row| row.owner.as_deref() == Some("Other proxy"))
-        );
         editor.reconcile(&snapshot);
         assert!(editor.draft.as_ref().unwrap().conflict);
         editor.begin(&snapshot.proxies.as_ref().unwrap()[0], false);
@@ -908,53 +793,5 @@ mod tests {
         editor.saving = true;
         editor.finish_save(true);
         assert!(!editor.is_editing());
-    }
-
-    #[test]
-    fn scope_paths_include_nested_collections_and_saved_requests() {
-        let workspace: UpstreamWorkspaceView = serde_json::from_value(serde_json::json!({
-            "id": "w", "name": "Workspace", "user_ids": [],
-            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-            "collections": [{
-                "id": "c", "workspace_id": "w", "name": "Parent", "user_ids": [],
-                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-                "sub_collections": [{
-                    "id": "nested", "workspace_id": "w", "name": "Child", "user_ids": [],
-                    "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-                    "sub_collections": [], "requests": []
-                }], "requests": []
-            }]
-        }))
-        .unwrap();
-        let mut workspace = workspace;
-        workspace.collections[0].sub_collections[0]
-            .requests
-            .push(UpstreamSavedRequestView {
-                id: "r".into(),
-                collection_id: "nested".into(),
-                name: "Fetch".into(),
-                definition: Default::default(),
-                created_by: None,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            });
-        let workspaces = [workspace];
-        let options = scope_options(Some(&workspaces));
-        assert_eq!(options.len(), 5);
-        assert_eq!(
-            options[4].label,
-            "Saved request · Workspace / Parent / Child / Fetch"
-        );
-        assert_eq!(
-            proxy_assignment_label(&assignment(ProxyScopeKind::Server, None), None),
-            "Server-wide · All workspaces"
-        );
-        assert_eq!(
-            proxy_assignment_label(
-                &assignment(ProxyScopeKind::Request, Some("r")),
-                Some(&workspaces)
-            ),
-            options[4].label
-        );
     }
 }

@@ -176,6 +176,19 @@ the outgoing scheme and allows a request URL with that exact source hostname to
 omit its own scheme. Both forms preserve the request's original port; override
 targets cannot define a port or path.
 
+The Assignments tab shows an expandable workspace → collection/folder → saved
+request tree. Checking a folder assigns its whole scope, including descendants.
+Unchecking a child replaces ancestor assignments with assignments for the
+remaining sibling branches. Those ancestors become mixed: new items added
+directly beneath them start unchecked, while fully checked sibling folders still
+cover their descendants. This also removes the partial workspace's ad-hoc
+coverage. Changes remain a draft until Save; Cancel leaves the server untouched.
+Unchecked items may still use another proxy through normal scope resolution.
+The editor refuses an exception that would split Server-wide coverage, omit
+hidden children, take a scope owned by another proxy, change proxy precedence,
+or exceed the server's 256-assignment limit. Clear Server-wide before configuring
+selective workspace assignments.
+
 Without an exact administrator-configured override, the server rejects
 loopback, link-local, private, carrier-grade NAT, unspecified, and multicast
 destinations. Hostname overrides are therefore the explicit mechanism for
