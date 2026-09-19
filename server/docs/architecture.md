@@ -289,6 +289,13 @@ Permissions in the initial catalog are:
 
 ## HTTP surface
 
+REST failures use the shared envelope with a `request_id`, `success: false`,
+and an `error` object containing `code`, `message`, and optional `fields`.
+Execution failures can also include `phase` and `reason` to identify the failing
+stage. WebSocket opening failures carry the same structured error and request
+ID in their opening response. Validation details describe expected types or
+schema fields without echoing submitted values; internal causes stay in logs.
+
 | Method | Path | Required permission |
 | --- | --- | --- |
 | `POST` | `/api/v1/auth/login` | public |

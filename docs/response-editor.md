@@ -1,8 +1,10 @@
 # File-backed response documents
 
-HTTP bodies above 10 MiB spill to an anonymous file and are exposed as a
+Direct local HTTP bodies above 10 MiB spill to an anonymous file and are exposed as a
 read-only mapping. This is a storage transition, not a response-size policy.
 `http.response_bytes` still determines whether a request is accepted.
+The collaboration server's HTTP relay still buffers its JSON/base64 response;
+it does not use this streaming receipt path.
 
 Both response panes always host `CodeEditor`. Its editable/small-buffer backend
 is gpui-component's `InputState`. Its read-only mapped backend uses the same

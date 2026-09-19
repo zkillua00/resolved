@@ -23,8 +23,12 @@ operations are grouped by their first tag. Untagged operations use nested URL
 path folders, excluding path-parameter segments. Operation parameters override
 path-level parameters with the same name and location.
 
-Variable placeholders remain editable. Postman collection and URL variable values
-must be added to a Resolved environment. Postman scripts are not executed or
+Variable placeholders remain editable. Postman collection variables still need
+Resolved environment values. Explicit Postman URL variable definitions paired
+with `:name` path segments become request-local `{name}` path variables;
+OpenAPI path parameters retain `{name}` and use examples/defaults when available.
+See [path variables](user-guide.md#request-local-path-variables) for encoding,
+missing values, and export behavior. Postman scripts are not executed or
 translated to Resolved's scripting API. API-spec authentication and unsupported
 Postman authentication require manual configuration; the preview shows these
 limitations. Postman query descriptions are not imported into the former

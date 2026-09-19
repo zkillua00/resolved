@@ -240,7 +240,12 @@ that header and scrubs its value anywhere it is echoed in the URL, request body,
 response headers, response body, or final URL. Known authentication headers are
 still redacted automatically, and multipart file contents and local paths are
 never placed in shared history. An open profile history updates in real time
-through the existing server WebSocket connection.
+through the existing server WebSocket connection. Use **Filter history** to combine
+method, response-code, hostname, path, request-header-key, query-parameter-key,
+body-type, and date filters, then choose a sort order. Filters search all 100
+retained entries before returning up to 20 results. See
+[shared profile history](../server/docs/shared-history.md) for date semantics,
+live status, and the matching API parameters.
 
 Server Tools → Change log shows the newest workspace, collection, and
 saved-request mutations for the selected server workspace. Server Tools → Audit
@@ -265,7 +270,8 @@ hostname overrides can connect an origin hostname to another hostname or IP.
 Overrides are grouped into named proxies that administrators assign server-wide
 or to one workspace, collection, or saved request; the most specific assigned
 proxy wins per hostname, and users or roles excluded from a proxy fall through
-to the next scope. An
+to the next scope. Use the [Request proxy workspace](request-proxies.md) to edit
+rules, select assignment branches, and manage exclusions. An
 IP target behaves like DNS and preserves the requested HTTP Host and HTTPS SNI;
 a hostname target becomes the outgoing HTTP Host and HTTPS SNI. A target may be
 prefixed with `http://` or `https://`; that scheme becomes the outgoing scheme
@@ -302,6 +308,19 @@ the outgoing raw media type. Script editors use JavaScript, and response
 highlighting follows the response content type. Response editors are read-only
 snapshots so Pretty/Raw, Copy, Preview, and post-response scripts cannot silently
 diverge.
+
+Direct local HTTP responses above 10 MiB are received into anonymous temporary
+files and displayed through read-only mappings. The editor keeps the complete
+body available while rendering only the visible portion, including very long
+single-line responses. Find searches the complete document; Copy uses the actual
+selection. JSON Pretty formats to a separate file while preserving values,
+key order, and numeric spelling; invalid JSON remains raw. These operations can
+use disk space and time, and explicit Copy all still materializes clipboard
+text. Mapped responses do not offer syntax-tree folding; non-JSON highlighting
+uses viewport fragments. The default 64 MiB response acceptance limit is
+unchanged; increase it in [Execution limits](execution-limits.md) when needed.
+Server execution still uses a buffered JSON/base64 relay. See
+[file-backed response documents](response-editor.md) for implementation details.
 
 Raw and script editors automatically close language-appropriate braces, brackets,
 parentheses, and quote marks, including closer overtyping. Tab and Enter both
@@ -737,13 +756,13 @@ distinct meanings. The following values are defaults, not fixed ceilings:
 - 32 MiB engine heap and 256 KiB engine stack
 - 256 KiB script source
 - 5 MiB script-visible request or response body
-- 64 MiB buffered response allowance
+- 64 MiB accepted HTTP response body
 - 100 console entries totaling at most 64 KiB
 - 8 MiB serialized result
 
 Response bodies above the script limit are exposed to scripts as a truncated
 view and reported as such; responses above the app cap are rejected while
-streaming rather than buffered without a bound. Secret environment values,
+receiving them. File-backed local receipt does not bypass that policy. Secret environment values,
 including encoded and same-run rotated values, are scrubbed from captured logs,
 errors, and stack traces.
 
@@ -751,8 +770,8 @@ This is a capability-limited scripting environment, not a hardened security
 boundary for hostile code. There is no general-purpose filesystem or network API, module loader,
 Node.js environment, browser DOM, `fetch`, `WebSocket`, `XMLHttpRequest`,
 `require`, `process`, or `Deno`; however, scripts still execute in-process in a
-native QuickJS engine. Only run scripts you trust. Imported collection formats
-and an isolated helper-process sandbox are not currently included.
+native QuickJS engine. Only run scripts you trust. Imported scripts are not automatically translated or executed. An isolated
+helper-process sandbox is not currently included.
 
 ## Snippets
 

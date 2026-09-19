@@ -113,14 +113,13 @@ narrowed first. Existing installations keep their persisted allowlist when an
 upgrade adds tools, so newly introduced execution or WebSocket tools must be
 enabled deliberately in Settings.
 
-**Follow agent activity** is enabled by default. Execution-oriented calls keep
-the relevant saved request visible as the agent changes context: HTTP calls show
-the native request and response stages, script-console calls select the Scripts
-console, and WebSocket calls select the WebSocket console. Turn it off to stop
-polling and session activity from refocusing the visible tab. Starting an HTTP
-execution still opens its saved request because it runs through the app's active
-request pipeline. The execution surfaces label agent-owned activity as MCP
-controlled.
+**Follow agent activity** is enabled by default. Ordered request sequences,
+history replays, script-console calls, and followed WebSocket sessions use the
+native request or console views and label agent-owned activity **MCP controlled**.
+Turn it off to stop polling and session activity from refocusing the visible tab.
+Independent `execute_http_request` runs keep the user's visible request and
+workspace unchanged. An explicit `run_script_console` call against a retained
+HTTP result brings that saved request and response into the UI.
 
 ### Target workspace resources without switching the UI
 
@@ -153,7 +152,9 @@ The optional field is available on these tool families:
 - environments: `list_environments`, `get_environment`, `create_environment`,
   `rename_environment`, `set_environment_variable`, `delete_environment`, and
   `delete_environment_variable`;
-- interchange: `import_requests` and `export_request`.
+- interchange: `import_requests` and `export_request`;
+- independent HTTP execution: `execute_http_request`, `get_http_exchange`,
+  `query_http_response`, and `cancel_http_request`.
 
 WebSocket, environment selection, history, and snippet tools continue to use the
 active application context and do not accept a background workspace target.
@@ -176,7 +177,7 @@ does not make it temporarily active or replace the state shown in the UI.
 | `list_collections` | List collections, folder trees, and saved-request summaries in the active workspace | None |
 | `search_requests` | Search saved requests by name or URL; an empty query returns all matches | Optional `query` |
 | `get_request` | Read a saved request, scripts, and timestamps | `request_id` |
-| `get_http_exchange` | Poll the current HTTP operation and read response data, errors, and script reports | Optional `operation_id`, `max_body_bytes` |
+| `get_http_exchange` | Poll a retained HTTP execution by ID and read response data, errors, and script reports | Optional `operation_id`, `max_body_bytes` |
 | `query_http_response` | Select and optionally project bounded JSON without returning the full response body | `json_pointer`; optional `operation_id`, `projection`, `limit`, `max_output_bytes` |
 | `get_request_sequence` | Poll a bounded ordered request run and read retained per-request exchanges | Optional `operation_id`, `max_body_bytes` |
 | `list_request_history` | List secret-redacted request history and response summaries | Optional `limit` |
@@ -399,7 +400,7 @@ environment normally, but does not change the saved request or its revision.
 Response bodies are returned as UTF-8 when valid and otherwise as base64. Set
 `max_body_bytes` up to 524288 to bound the MCP response; `size_bytes`,
 `body_included_bytes`, and `body_truncated` make truncation explicit. The
-request's [effective response-buffering limit](execution-limits.md) applies before
+request's [effective response-size limit](execution-limits.md) applies before
 this smaller MCP projection; its default is 64 MiB.
 
 For large JSON responses, `query_http_response` applies an RFC 6901 JSON Pointer
@@ -561,9 +562,10 @@ finished.
 The MCP surface does not expose arbitrary SQL, unrestricted filesystem or shell
 execution, server administration, shared-history administration, or generic UI
 automation. HTTP and WebSocket operations intentionally use saved requests and
-the application's bounded runtimes and network policies. Agent-owned HTTP,
-script-console, and WebSocket execution is projected into the same native
-surfaces used for interactive work rather than a hidden duplicate UI.
+the application's bounded runtimes and network policies. Independent HTTP runs
+reuse the native pipeline without moving the visible request. Explicit console
+inspection, ordered sequences, and followed WebSocket sessions use the existing
+interactive views.
 
 The MCP transport belongs to the desktop client and is never exposed by the
 collaboration server. When a server workspace is active, the desktop forwards
