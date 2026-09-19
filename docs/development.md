@@ -1,7 +1,8 @@
 # Development guide
 
-Resolved contains two independently buildable applications. The Rust desktop
-client lives at the repository root; the Go collaboration server lives in
+Resolved contains a Rust desktop client, an independently buildable MCP adapter,
+and a standalone Go collaboration server. The desktop lives at the repository
+root, the lightweight adapter package in `crates/resolved-mcp/`, and the server in
 `server/`. The server is not a backend required by the desktop app: local
 workspaces, execution, and persistence work without it.
 
@@ -14,6 +15,8 @@ workspaces, execution, and persistence work without it.
 | `src/core/` | Request modeling and execution, scripts, persistence, history, interchange, settings, upstream clients, and realtime signals |
 | `src/control_server.rs`, `src/control_tools.rs` | Authenticated per-user local control transport and the authoritative MCP tool catalog |
 | `src/app/control.rs`, `src/bin/resolved-mcp.rs` | Desktop semantic control handlers and the standalone MCP stdio adapter |
+| `crates/resolved-mcp/`, `src/mcp_docs.rs` | Lightweight adapter package and offline retrieval from bundled repository docs |
+| `src/code_editor.rs`, `src/code_editor/`, `docs/response-editor.md` | Shared editor, mapped response documents, and viewport rendering |
 | `src/platform.rs`, `src/platform/` | Compile-time Linux, macOS, and Windows integration |
 | `src/theme/` | Constrained CSS parsing, schema, palette mapping, and editor intelligence |
 | `scripts/` | Reproducible dependency preparation, builds, packaging, audits, releases, and profiling |
@@ -45,7 +48,8 @@ MCP client -> resolved-mcp stdio adapter -> authenticated local IPC
   -> GPUI application state -> active workspace provider and persistence
 ```
 
-The adapter discovers only tools enabled in the desktop's MCP settings. It does
+The adapter advertises workspace tools enabled in the desktop's MCP settings,
+plus its always-available, read-only `ask` documentation tool and prompt. It does
 not access SQLite directly. Connected server workspace access is independently
 disabled by default; when it is off, workspace-scoped tools are neither
 advertised nor accepted while a server workspace is active. When enabled, remote
@@ -162,6 +166,12 @@ contract test:
 scripts/cargo.sh test --bin resolved-mcp
 ```
 
+Targeted `--bin resolved-mcp` builds and tests use the lightweight workspace
+member without compiling the desktop dependency graph. See its
+[package guide](../crates/resolved-mcp/README.md). The adapter embeds the user,
+MCP, WebSocket, import, and execution-limit guides at build time; changes to
+those guides should also pass the adapter tests.
+
 `scripts/check-rustsec.sh` requires `cargo-audit`. Tests that exercise real
 loopback HTTP may need permission to bind a local socket in restricted
 environments.
@@ -181,6 +191,9 @@ desktop client, read its SQLite database, or depend on a local workspace.
 ## Related documentation
 
 - [Theme CSS reference](theme-css.md)
+- [Execution limits](execution-limits.md)
+- [Request proxies](request-proxies.md)
+- [File-backed response documents](response-editor.md)
 - [Local MCP control](mcp.md)
 - [Upstreams and secure local credentials](upstreams.md)
 - [Versioning and releases](versioning.md)

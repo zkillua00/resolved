@@ -33,10 +33,11 @@ desktop represent nested server collections and participate in this ancestry.
 Unsaved requests outside a collection use workspace policy. Chained saved
 requests use their own collection, not the calling request's collection.
 
-Each setting offers:
+Choose a scope, then the **HTTP**, **WebSocket**, **Scripts**, or **Chains** tab.
+Each setting accepts:
 
 - **Inherit:** no override at this scope. Future parent changes flow through.
-- **Custom:** an explicit numeric value in the displayed unit.
+- A non-negative whole number in the displayed unit (milliseconds, bytes, or count).
 - **Unlimited:** no application-imposed bound for that setting.
 
 Zero is a real value, not a shortcut for inheritance or unlimited. For example,
@@ -45,6 +46,13 @@ for the operation; zero bytes permits only an empty payload.
 
 The editor shows both the effective value and its source. Resetting a setting to
 inherit deletes its override rather than copying its parent's current value.
+Edits remain drafts until **Save changes**, which saves every section for the
+selected scope. **Discard edits** restores saved values. The effective values
+shown below the fields describe saved policy, not the draft. Save or discard
+before switching scope. Local settings also offer **Reset scope**, which immediately removes all
+overrides at that scope and discards its unsaved edits. Server settings retain a dirty draft when a realtime policy
+change arrives and display a notice to reload before continuing.
+
 Changing deployment settings requires server-settings permissions; changing
 workspace or collection overrides requires the corresponding scope's update
 permission and access to that scope. In particular, granting permission to edit
@@ -60,7 +68,7 @@ These are starting values, not upper bounds for configuration.
 | `http.connect_timeout_ms` | 30,000 | HTTP connection timeout |
 | `http.tls_handshake_timeout_ms` | 10,000 | TLS handshake timeout |
 | `http.request_bytes` | 67,108,864 | Encoded target request body, after building raw/form/multipart content |
-| `http.response_bytes` | 67,108,864 | Buffered target response body |
+| `http.response_bytes` | 67,108,864 | Accepted target response body, independent of storage |
 | `http.envelope_bytes` | 100,663,296 | JSON transport envelope, including base64 and metadata |
 | `http.redirects` | 10 | Redirect allowance |
 | `http.header_count` | 256 | Supplied target header entries |
@@ -105,8 +113,12 @@ each child still resolves its own collection's HTTP and script limits.
 
 Unlimited removes a policy bound, not physical memory, OS socket constraints,
 or a reverse proxy's independently configured timeout/upload limits. Large
-HTTP exchanges are still buffered; raising or disabling size limits increases
-memory consumption. Match any reverse proxy's limits to the intended policy.
+local HTTP responses above 10 MiB spill to anonymous files and use read-only
+memory mappings. This reduces whole-body heap allocation but still needs disk
+space and paged memory; it does not raise `http.response_bytes`. Server-executed
+HTTP responses still use a buffered JSON/base64 relay. Raising its limits can
+increase memory consumption on both ends. Match any reverse proxy's limits to
+the intended policy. See [response documents](response-editor.md).
 
 Authentication, workspace access, destination restrictions, and wire-format
 validation are not resource budgets and are not disabled by Unlimited.

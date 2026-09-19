@@ -276,6 +276,9 @@ connections with `audit.read`; server-setting changes emit `server_settings`
 events to connections with `server_settings.read`, and proxy changes emit
 `proxy` events to connections with `proxies.read`.
 
+The [desktop proxy guide](../docs/request-proxies.md) explains rule editing,
+hierarchical assignments, exclusions, and execution diagnostics.
+
 Proxies are managed under `/api/v1/proxies`: list (`GET`, `proxies.read`),
 create (`POST`, `proxies.create`), rename or replace rules (`PATCH
 /proxies/{proxy_id}`, `proxies.update`), delete (`DELETE /proxies/{proxy_id}`,

@@ -8,11 +8,14 @@ into reusable workflows. Work locally or collaborate through your own server.
 
 [Documentation](https://apiworkbench.dev/docs) · [Build from source](docs/building.md) · [Self-hosting](server/README.md)
 
+Download desktop packages and the separate MCP adapter from
+[GitHub Releases](https://github.com/zkillua00/resolved/releases).
+
 ## What you can do
 
 - **Explore APIs:** compose HTTP requests, inspect response bodies and headers,
-  exchange WebSocket messages, and import requests from commands, specifications,
-  or source code.
+  use request-local path variables, exchange WebSocket messages, and import
+  requests from commands, specifications, or source code.
 - **Automate workflows:** write JavaScript pre-request and post-response scripts,
   assert results, chain saved requests, reuse snippets, and replay WebSocket
   conversations.
@@ -21,7 +24,8 @@ into reusable workflows. Work locally or collaborate through your own server.
 - **Collaborate:** connect to a self-hosted server for shared workspaces,
   permission controls, shared history, and live change updates.
 - **Connect agents:** enable selected MCP tools to work with requests,
-  environments, scripts, and live connections through the running app.
+  environments, scripts, and parallel HTTP/WebSocket sessions through the running
+  app. The adapter's `ask` tool searches bundled documentation even offline.
 - **Make it yours:** configure keyboard shortcuts, editor behavior, and native
   CSS themes.
 
@@ -82,6 +86,8 @@ disable automatic cookies. See [cookie behavior](docs/user-guide.md#cookies).
 - [Building and packaging](docs/building.md) — prerequisites and platform distribution
 - [Development](docs/development.md) — architecture, repository map, and verification
 - [MCP integration](docs/mcp.md) — setup, tool catalog, and access controls
+- [Execution limits](docs/execution-limits.md) — saved policies and inherited budgets
+- [Request proxies](docs/request-proxies.md) — hostname rules, assignments, and exclusions
 - [Collaboration server](server/README.md) — self-hosting and configuration
 - [Brand guide](docs/brand/resolved-brand.md) — slogans, visual identity, and assets
 
