@@ -12,11 +12,11 @@ use std::{
 
 use gpui::{
     App, AppContext as _, Bounds, ClipboardItem, ContentMask, Context, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, Focusable, HighlightStyle, InteractiveElement as _,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _,
-    Pixels, Point, Render, ScrollWheelEvent, ShapedLine, SharedString, Styled as _, Subscription,
-    Task, TextRun, UTF16Selection, Window, canvas, div, fill, point, prelude::FluentBuilder as _,
-    px, size,
+    EntityInputHandler, FocusHandle, Focusable, Font, HighlightStyle, Hsla,
+    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, ParentElement as _, Pixels, Point, Render, ScrollWheelEvent, ShapedLine,
+    SharedString, Styled as _, Subscription, Task, TextRun, UTF16Selection, Window, canvas, div,
+    fill, point, prelude::FluentBuilder as _, px, size,
 };
 use gpui_component::{
     ActiveTheme as _, IconName, Selectable as _, Sizable as _, StyledExt as _,
@@ -27,7 +27,7 @@ use gpui_component::{
 
 use super::{
     CodeLanguage, EditorText,
-    document::{Document, Row},
+    document::{Document, Position, Row},
 };
 use crate::{
     core::{FormatterSettings, ResponseBody},
@@ -63,16 +63,78 @@ struct Viewport {
     columns: usize,
 }
 
+impl Viewport {
+    fn bottom(self) -> usize {
+        self.row.saturating_add(self.rows)
+    }
+
+    fn right(self) -> usize {
+        self.column.saturating_add(self.columns)
+    }
+
+    fn contains(self, other: Self) -> bool {
+        self.row <= other.row
+            && self.column <= other.column
+            && self.bottom() >= other.bottom()
+            && self.right() >= other.right()
+    }
+
+    fn overlap(self, other: Self) -> usize {
+        self.bottom()
+            .min(other.bottom())
+            .saturating_sub(self.row.max(other.row))
+            .saturating_mul(
+                self.right()
+                    .min(other.right())
+                    .saturating_sub(self.column.max(other.column)),
+            )
+    }
+
+    /// A screen-relative display margin, not a file cache or content limit.
+    /// Refill before the visible region reaches the edge of this frame.
+    fn padded(self, rows: usize, columns: usize, document: &Document) -> Self {
+        let row = self.row.saturating_sub(rows);
+        let column = self.column.saturating_sub(columns);
+        Self {
+            row,
+            column,
+            rows: self
+                .bottom()
+                .saturating_add(rows)
+                .min(document.display_rows())
+                - row,
+            columns: self
+                .right()
+                .saturating_add(columns)
+                .min(document.max_columns().saturating_add(2))
+                - column,
+        }
+    }
+}
+
 struct FrameRow {
-    row: Row,
+    index: usize,
+    row: Arc<Row>,
     styles: Vec<(Range<usize>, HighlightStyle)>,
     first_visual_row: bool,
+    ends_row: bool,
+    layout: Option<ShapedLine>,
+    number_layout: Option<ShapedLine>,
 }
 
 struct PaintedRow {
-    row: Row,
+    row: Arc<Row>,
     layout: ShapedLine,
     origin: Point<Pixels>,
+    ends_row: bool,
+}
+
+#[derive(Clone, PartialEq)]
+struct ShapeStyle {
+    font: Font,
+    font_size: Pixels,
+    foreground: Hsla,
+    line_number: Hsla,
 }
 
 #[derive(Clone, Copy)]
@@ -113,6 +175,7 @@ pub(super) struct ReadOnlyEditor {
     generation: u64,
     wrap_columns: Option<usize>,
     selection: Selection,
+    cursor: Option<(usize, Position)>,
     preferred_column: Option<usize>,
     top: usize,
     left: usize,
@@ -123,11 +186,17 @@ pub(super) struct ReadOnlyEditor {
     cell_width: Pixels,
     line_height: Pixels,
     viewport: Option<Viewport>,
+    frame_viewport: Option<Viewport>,
+    frame_request: Option<Viewport>,
     frame: Vec<FrameRow>,
     painted: Vec<PaintedRow>,
     frame_task: Task<()>,
+    frame_cancel: Cancellation,
     frame_generation: u64,
     frame_theme: Option<Arc<gpui_component::highlighter::HighlightTheme>>,
+    shape_style: Option<ShapeStyle>,
+    #[cfg(test)]
+    frame_gate: Option<futures::channel::oneshot::Receiver<()>>,
     vertical_thumb: Option<Bounds<Pixels>>,
     horizontal_thumb: Option<Bounds<Pixels>>,
     drag: Option<Drag>,
@@ -171,6 +240,7 @@ impl ReadOnlyEditor {
             generation: 0,
             wrap_columns: None,
             selection: Selection::default(),
+            cursor: None,
             preferred_column: None,
             top: 0,
             left: 0,
@@ -181,11 +251,17 @@ impl ReadOnlyEditor {
             cell_width: px(8.),
             line_height: px(20.),
             viewport: None,
+            frame_viewport: None,
+            frame_request: None,
             frame: Vec::new(),
             painted: Vec::new(),
             frame_task: Task::ready(()),
+            frame_cancel: Cancellation::new(),
             frame_generation: 0,
             frame_theme: None,
+            shape_style: None,
+            #[cfg(test)]
+            frame_gate: None,
             vertical_thumb: None,
             horizontal_thumb: None,
             drag: None,
@@ -223,15 +299,18 @@ impl ReadOnlyEditor {
         self.document = None;
         self.copy_on_ready = false;
         self.selection = Selection::default();
+        self.cursor = None;
         self.top = 0;
         self.left = 0;
+        self.wheel_x = 0.;
+        self.wheel_y = 0.;
         self.rebuild(cx);
     }
 
     pub fn set_language(&mut self, language: CodeLanguage, cx: &mut Context<Self>) {
         if self.language != language {
             self.language = language;
-            self.viewport = None;
+            self.invalidate_frames();
             cx.notify();
         }
     }
@@ -250,6 +329,17 @@ impl ReadOnlyEditor {
         cx.notify();
     }
 
+    fn invalidate_frames(&mut self) {
+        self.frame_generation = self.frame_generation.wrapping_add(1);
+        self.frame_cancel = Cancellation::new();
+        self.frame_task = Task::ready(());
+        self.viewport = None;
+        self.frame_request = None;
+        self.frame_viewport = None;
+        self.frame.clear();
+        self.painted.clear();
+    }
+
     fn rebuild(&mut self, cx: &mut Context<Self>) {
         let Some(source) = self.source.clone() else {
             return;
@@ -264,9 +354,7 @@ impl ReadOnlyEditor {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         self.error = None;
-        self.viewport = None;
-        self.frame.clear();
-        self.painted.clear();
+        self.invalidate_frames();
         self.find_cancel = Cancellation::new();
         self.find_task = Task::ready(());
         self.find_generation = self.find_generation.wrapping_add(1);
@@ -294,10 +382,8 @@ impl ReadOnlyEditor {
                         // A resized/wrapped document may have exactly the same
                         // viewport coordinates as the previous index. Invalidate
                         // both ready and in-flight frames from that index.
-                        this.viewport = None;
-                        this.frame_generation = this.frame_generation.wrapping_add(1);
-                        this.frame.clear();
-                        this.painted.clear();
+                        this.invalidate_frames();
+                        this.cursor = None;
                         this.reveal_cursor();
                         if this.find_open {
                             this.find_next(false, true, cx);
@@ -449,11 +535,22 @@ impl ReadOnlyEditor {
         })
     }
 
+    fn cursor_position(&mut self) -> Option<Position> {
+        let document = self.document.as_ref()?;
+        if let Some((offset, position)) = self.cursor
+            && offset == self.selection.head
+        {
+            return Some(position);
+        }
+        let position = document.position(self.selection.head);
+        self.cursor = Some((self.selection.head, position));
+        Some(position)
+    }
+
     fn reveal_cursor(&mut self) {
-        let Some(document) = &self.document else {
+        let Some(point) = self.cursor_position() else {
             return;
         };
-        let point = document.position(self.selection.head);
         let rows = self.visible_rows();
         let columns = self.visible_columns();
         if point.row < self.top {
@@ -471,6 +568,8 @@ impl ReadOnlyEditor {
         let (max_top, max_left) = self.scroll_limits();
         self.top = self.top.min(max_top);
         self.left = self.left.min(max_left);
+        self.wheel_x = 0.;
+        self.wheel_y = 0.;
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -600,12 +699,26 @@ impl ReadOnlyEditor {
     }
 
     fn hit_offset(&self, position: Point<Pixels>) -> Option<usize> {
-        let row = ((position.y - self.bounds.top()) / self.line_height)
-            .floor()
-            .max(0.) as usize;
+        // Ready rows keep their document coordinates while another region is
+        // loading. Never treat a cache index (or an unfilled gap) as a screen row.
         let painted = self
             .painted
-            .get(row.min(self.painted.len().saturating_sub(1)))?;
+            .iter()
+            .find(|row| position.y >= row.origin.y && position.y < row.origin.y + self.line_height)
+            .or_else(|| {
+                self.painted.last().filter(|row| {
+                    position.y >= row.origin.y
+                        && self
+                            .document
+                            .as_ref()
+                            .is_some_and(|doc| row.row.range.end == doc.len())
+                })
+            })?;
+        if position.x < painted.origin.x && painted.row.start_column > 0
+            || position.x > painted.origin.x + painted.layout.width && !painted.ends_row
+        {
+            return None;
+        }
         let ix = painted
             .layout
             .closest_index_for_x(position.x - painted.origin.x);
@@ -695,7 +808,25 @@ impl ReadOnlyEditor {
                 if position.x >= self.bounds.right() {
                     self.left = self.left.saturating_add(1).min(max_left);
                 }
-                if let Some(offset) = self.hit_offset(position) {
+                // A drag may leave the element while autoscrolling. Clamp it
+                // to the loaded visible edge, but leave hit_offset strict for
+                // clicks in an in-viewport gap awaiting async text.
+                let mut hit = position;
+                if hit.y < self.bounds.top()
+                    && let Some(first) = self.painted.first()
+                {
+                    hit.y = first.origin.y.max(self.bounds.top()) + px(0.01);
+                } else if hit.y >= self.bounds.bottom() - px(12.)
+                    && let Some(last) = self.painted.last()
+                {
+                    hit.y = (last.origin.y + self.line_height).min(self.bounds.bottom() - px(12.))
+                        - px(0.01);
+                }
+                hit.x = hit
+                    .x
+                    .max(self.bounds.left() + self.gutter)
+                    .min(self.bounds.right() - px(12.));
+                if let Some(offset) = self.hit_offset(hit) {
                     self.selection.head = offset;
                 }
             }
@@ -706,6 +837,7 @@ impl ReadOnlyEditor {
                 let travel = (self.bounds.size.height - px(12.) - thumb).max(px(1.));
                 let ratio = ((position.y - self.bounds.top() - px(grab)) / travel).clamp(0., 1.);
                 self.top = (f64::from(ratio) * max_top as f64).round() as usize;
+                self.wheel_y = 0.;
             }
             Some(Drag::Horizontal { grab }) => {
                 let thumb = self
@@ -715,6 +847,7 @@ impl ReadOnlyEditor {
                 let ratio = ((position.x - self.bounds.left() - self.gutter - px(grab)) / travel)
                     .clamp(0., 1.);
                 self.left = (f64::from(ratio) * max_left as f64).round() as usize;
+                self.wheel_x = 0.;
             }
             None => {}
         }
@@ -743,23 +876,46 @@ impl ReadOnlyEditor {
         self.line_height = style.font_size * (20. / 13.);
         let font = gpui::font(style.font_family);
         let font_size = style.font_size;
-        self.cell_width = window
-            .text_system()
-            .shape_line(
-                "m".into(),
-                font_size,
-                &[TextRun {
-                    len: 1,
-                    font,
-                    color: cx.theme().foreground,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }],
-                None,
-            )
-            .width
-            .max(px(1.));
+        let shape_style = ShapeStyle {
+            font: font.clone(),
+            font_size,
+            foreground: cx
+                .theme()
+                .highlight_theme
+                .style
+                .editor_foreground
+                .unwrap_or(cx.theme().foreground),
+            line_number: cx
+                .theme()
+                .highlight_theme
+                .style
+                .editor_line_number
+                .unwrap_or(cx.theme().muted_foreground),
+        };
+        if self.shape_style.as_ref() != Some(&shape_style) {
+            self.cell_width = window
+                .text_system()
+                .shape_line(
+                    "m".into(),
+                    font_size,
+                    &[TextRun {
+                        len: 1,
+                        font,
+                        color: shape_style.foreground,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }],
+                    None,
+                )
+                .width
+                .max(px(1.));
+            self.shape_style = Some(shape_style);
+            for row in &mut self.frame {
+                row.layout = None;
+                row.number_layout = None;
+            }
+        }
         let digits = self.document.as_ref().map_or(4, |doc| {
             doc.line_number_at(doc.len()).to_string().len().max(4)
         });
@@ -783,69 +939,127 @@ impl ReadOnlyEditor {
         let viewport = Viewport {
             row: self.top,
             column: self.left,
-            rows: self.visible_rows() + 1,
-            columns: columns + 2,
+            rows: (self.visible_rows() + 1).min(document.display_rows() - self.top),
+            columns: (columns + 2).min(document.max_columns().saturating_add(2) - self.left),
         };
         let theme = cx.theme().highlight_theme.clone();
-        if self.viewport == Some(viewport)
-            && self
-                .frame_theme
-                .as_ref()
-                .is_some_and(|previous| Arc::ptr_eq(previous, &theme))
+        if !self
+            .frame_theme
+            .as_ref()
+            .is_some_and(|previous| Arc::ptr_eq(previous, &theme))
+        {
+            self.invalidate_frames();
+            self.frame_theme = Some(theme);
+        }
+        self.viewport = Some(viewport);
+        self.request_frame(cx);
+    }
+
+    fn request_frame(&mut self, cx: &mut Context<Self>) {
+        // A changing viewport is a new destination, not a new content
+        // generation. Let one load finish, then service the latest destination.
+        // Restarting on every wheel event can starve every result indefinitely.
+        if self.frame_request.is_some() {
+            return;
+        }
+        let (Some(visible), Some(document), Some(theme)) = (
+            self.viewport,
+            self.document.clone(),
+            self.frame_theme.clone(),
+        ) else {
+            return;
+        };
+        let refill = visible.padded(visible.rows / 2, visible.columns / 2, &document);
+        if self
+            .frame_viewport
+            .is_some_and(|ready| ready.contains(refill))
         {
             return;
         }
-        self.frame_theme = Some(theme.clone());
-        self.viewport = Some(viewport);
-        self.frame.clear();
-        self.painted.clear();
-        self.frame_generation = self.frame_generation.wrapping_add(1);
+        let viewport = visible.padded(visible.rows, visible.columns, &document);
+        self.frame_request = Some(viewport);
+        let cancelled = self.frame_cancel.0.clone();
         let generation = self.frame_generation;
         let document_generation = self.generation;
         let language = self.language.clone();
+        #[cfg(test)]
+        let gate = self.frame_gate.take();
         let task = cx.background_spawn(async move {
-            (viewport.row
-                ..viewport
-                    .row
-                    .saturating_add(viewport.rows)
-                    .min(document.display_rows()))
-                .map(|index| {
-                    let row = document.row(index, viewport.column, viewport.columns);
-                    let row_start = document.offset_at(index, 0);
-                    let first_visual_row = document.line_range(row_start).start == row_start;
-                    let styles = if language.as_str() == "json" {
-                        json_styles(
-                            &row.text,
-                            document.json_in_string(row.range.start),
-                            document.json_escaped(row.range.start),
-                            &theme,
-                        )
-                    } else if language.as_str() != "text" && !row.text.is_empty() {
-                        // Only this display fragment enters the syntax parser,
-                        // never the complete source or a giant natural line.
-                        let mut highlighter =
-                            gpui_component::highlighter::SyntaxHighlighter::new(language.as_str());
-                        let text = gpui_component::input::Rope::from(row.text.as_str());
-                        highlighter.update(None, &text);
-                        highlighter.styles(&(0..row.text.len()), &theme)
-                    } else {
-                        Vec::new()
-                    };
-                    FrameRow {
-                        row,
-                        styles,
-                        first_visual_row,
-                    }
-                })
-                .collect::<Vec<_>>()
+            #[cfg(test)]
+            if let Some(gate) = gate {
+                let _ = gate.await;
+            }
+            if cancelled.load(Ordering::Relaxed) {
+                return Vec::new();
+            }
+            let mut rows = Vec::with_capacity(viewport.rows);
+            let mut highlighter = (!matches!(language.as_str(), "json" | "text"))
+                .then(|| gpui_component::highlighter::SyntaxHighlighter::new(language.as_str()));
+            let mut previous_text_len = 0;
+            for index in viewport.row..viewport.bottom() {
+                if cancelled.load(Ordering::Relaxed) {
+                    break;
+                }
+                let row = document.row(index, viewport.column, viewport.columns);
+                let row_start = document.offset_at(index, 0);
+                let first_visual_row = document.is_line_start(row_start);
+                let ends_row = row.range.end == document.offset_at(index, usize::MAX);
+                let styles = if language.as_str() == "json" {
+                    let (in_string, escaped) = document.json_state(row.range.start);
+                    json_styles(&row.text, in_string, escaped, &theme)
+                } else if let Some(highlighter) = highlighter.as_mut() {
+                    // Only this display fragment enters the syntax parser,
+                    // never the complete source or a giant natural line.
+                    // Reuse the query/parser for this load, with a genuine
+                    // full replacement edit between independent fragments.
+                    let text = gpui_component::input::Rope::from(row.text.as_str());
+                    highlighter.update(
+                        Some(tree_sitter::InputEdit {
+                            start_byte: 0,
+                            old_end_byte: previous_text_len,
+                            new_end_byte: row.text.len(),
+                            start_position: tree_sitter::Point::new(0, 0),
+                            old_end_position: tree_sitter::Point::new(0, previous_text_len),
+                            new_end_position: tree_sitter::Point::new(0, row.text.len()),
+                        }),
+                        &text,
+                    );
+                    previous_text_len = row.text.len();
+                    highlighter.styles(&(0..row.text.len()), &theme)
+                } else {
+                    Vec::new()
+                };
+                rows.push(FrameRow {
+                    index,
+                    row: Arc::new(row),
+                    styles,
+                    first_visual_row,
+                    ends_row,
+                    layout: None,
+                    number_layout: None,
+                });
+            }
+            rows
         });
         self.frame_task = cx.spawn(async move |this, cx| {
             let rows = task.await;
             let _ = this.update(cx, |this, cx| {
-                if this.frame_generation == generation && this.generation == document_generation {
-                    this.frame = rows;
-                    cx.notify();
+                if this.frame_generation != generation || this.generation != document_generation {
+                    return;
                 }
+                this.frame_request = None;
+                // A direction reversal can make the old frame more useful than
+                // the just-finished one. Never replace better visible coverage.
+                let visible = this.viewport.unwrap_or(viewport);
+                if this
+                    .frame_viewport
+                    .is_none_or(|ready| viewport.overlap(visible) >= ready.overlap(visible))
+                {
+                    this.frame = rows;
+                    this.frame_viewport = Some(viewport);
+                }
+                this.request_frame(cx);
+                cx.notify();
             });
         });
     }
@@ -888,6 +1102,7 @@ impl ReadOnlyEditor {
             underline: None,
             strikethrough: None,
         };
+        let cursor = self.cursor_position().unwrap_or_default();
         self.painted.clear();
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             if let Some(error) = self.error.as_ref() {
@@ -923,8 +1138,6 @@ impl ReadOnlyEditor {
                 return;
             }
             let selection = self.selection.range();
-            let document = self.document.as_ref().unwrap();
-            let cursor = document.position(self.selection.head);
             let text_bounds = Bounds::new(
                 bounds.origin + point(self.gutter, px(0.)),
                 size(
@@ -937,18 +1150,24 @@ impl ReadOnlyEditor {
                     bounds: text_bounds,
                 }),
                 |window| {
-                    for (index, frame) in self.frame.iter().enumerate() {
+                    for frame in &mut self.frame {
+                        let y = bounds.top()
+                            + self.line_height
+                                * (frame.index as f64 - self.top as f64 - self.wheel_y) as f32;
+                        if y + self.line_height <= text_bounds.top() || y >= text_bounds.bottom() {
+                            continue;
+                        }
                         let row = &frame.row;
-                        let y = bounds.top() + self.line_height * index as f32;
                         let origin = point(
                             bounds.left()
                                 + self.gutter
                                 + self.cell_width
-                                    * (row.start_column as f64 - self.left as f64) as f32,
+                                    * (row.start_column as f64 - self.left as f64 - self.wheel_x)
+                                        as f32,
                             y,
                         );
                         if self.options.active_line
-                            && cursor.row == self.top + index
+                            && cursor.row == frame.index
                             && let Some(color) = active_line
                         {
                             window.paint_quad(fill(
@@ -959,24 +1178,26 @@ impl ReadOnlyEditor {
                                 color,
                             ));
                         }
-                        let mut runs = Vec::new();
-                        let mut previous = 0;
-                        for (range, style) in &frame.styles {
-                            if previous < range.start {
-                                runs.push(run(range.start - previous, foreground));
+                        let layout = frame.layout.get_or_insert_with(|| {
+                            let mut runs = Vec::new();
+                            let mut previous = 0;
+                            for (range, style) in &frame.styles {
+                                if previous < range.start {
+                                    runs.push(run(range.start - previous, foreground));
+                                }
+                                runs.push(run(range.len(), style.color.unwrap_or(foreground)));
+                                previous = range.end;
                             }
-                            runs.push(run(range.len(), style.color.unwrap_or(foreground)));
-                            previous = range.end;
-                        }
-                        if previous < row.text.len() {
-                            runs.push(run(row.text.len() - previous, foreground));
-                        }
-                        let layout = window.text_system().shape_line(
-                            row.text.clone().into(),
-                            font_size,
-                            &runs,
-                            None,
-                        );
+                            if previous < row.text.len() {
+                                runs.push(run(row.text.len() - previous, foreground));
+                            }
+                            window.text_system().shape_line(
+                                row.text.clone().into(),
+                                font_size,
+                                &runs,
+                                None,
+                            )
+                        });
                         if self.options.indent_guides {
                             let leading = row.text.bytes().take_while(|byte| *byte == b' ').count();
                             let tab = self.options.tab_size.max(1);
@@ -1010,7 +1231,7 @@ impl ReadOnlyEditor {
                         }
                         let _ = layout.paint(origin, self.line_height, window, cx);
                         if self.focus.is_focused(window)
-                            && cursor.row == self.top + index
+                            && cursor.row == frame.index
                             && row.range.start <= self.selection.head
                             && self.selection.head <= row.range.end
                         {
@@ -1025,8 +1246,9 @@ impl ReadOnlyEditor {
                         }
                         self.painted.push(PaintedRow {
                             row: row.clone(),
-                            layout,
+                            layout: layout.clone(),
                             origin,
+                            ends_row: frame.ends_row,
                         });
                     }
                 },
@@ -1042,23 +1264,33 @@ impl ReadOnlyEditor {
                         bounds: gutter_bounds,
                     }),
                     |window| {
-                        for (index, frame) in self.frame.iter().enumerate() {
+                        for frame in &mut self.frame {
                             if !frame.first_visual_row {
                                 continue;
                             }
-                            let text = frame.row.line_number.to_string();
-                            let number = window.text_system().shape_line(
-                                text.clone().into(),
-                                font_size,
-                                &[run(text.len(), line_number)],
-                                None,
-                            );
+                            let y = bounds.top()
+                                + self.line_height
+                                    * (frame.index as f64 - self.top as f64 - self.wheel_y) as f32;
+                            if y + self.line_height <= bounds.top()
+                                || y >= bounds.bottom() - px(12.)
+                            {
+                                continue;
+                            }
+                            let number = frame.number_layout.get_or_insert_with(|| {
+                                let text = frame.row.line_number.to_string();
+                                window.text_system().shape_line(
+                                    text.clone().into(),
+                                    font_size,
+                                    &[run(text.len(), line_number)],
+                                    None,
+                                )
+                            });
                             let _ = number.paint(
                                 point(
                                     bounds.left() + self.gutter
                                         - number.width
                                         - self.cell_width * 2.,
-                                    bounds.top() + self.line_height * index as f32,
+                                    y,
                                 ),
                                 self.line_height,
                                 window,
@@ -1286,9 +1518,10 @@ impl Render for ReadOnlyEditor {
 }
 
 fn add_scroll(current: usize, pending: &mut f64, maximum: usize) -> usize {
-    let whole = pending.trunc();
-    *pending -= whole;
-    (current as f64 + whole).clamp(0., maximum as f64) as usize
+    let position = (current as f64 + *pending).clamp(0., maximum as f64);
+    let whole = position.floor();
+    *pending = position - whole;
+    whole as usize
 }
 
 fn scrollbar_thumb(
@@ -1470,6 +1703,314 @@ mod tests {
             &AtomicBool::new(false),
         )
         .unwrap()
+    }
+
+    fn scrolling_editor(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<CodeEditor>,
+        Entity<ReadOnlyEditor>,
+        &mut gpui::VisualTestContext,
+    ) {
+        let text = (0..400)
+            .map(|index| format!("{index:04} {}\n", "abcdefghij".repeat(50)))
+            .collect::<String>();
+        let body = mapped_body(text.as_bytes());
+        let mut editor = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            crate::theme::configure(cx);
+            let view = cx.new(|cx| {
+                let mut editor = CodeEditor::new(
+                    CodeEditorConfig::default()
+                        .language(CodeLanguage::Plain)
+                        .read_only(true)
+                        .soft_wrap(false)
+                        .framed(false),
+                    window,
+                    cx,
+                );
+                editor.set_response_body(body, false, FormatterSettings::default(), window, cx);
+                editor
+            });
+            editor = Some(view.clone());
+            gpui_component::Root::new(view, window, cx)
+        });
+        cx.simulate_resize(size(px(640.), px(320.)));
+        cx.run_until_parked();
+        let editor = editor.unwrap();
+        let mapped = cx.read(|cx| editor.read(cx).mapped.clone().unwrap());
+        (editor, mapped, cx)
+    }
+
+    #[test]
+    fn fractional_scroll_moves_both_directions_and_does_not_accumulate_at_edges() {
+        let mut fraction = 0.25;
+        assert_eq!(add_scroll(10, &mut fraction, 20), 10);
+        assert_eq!(fraction, 0.25);
+        fraction -= 0.5;
+        assert_eq!(add_scroll(10, &mut fraction, 20), 9);
+        assert_eq!(fraction, 0.75);
+        fraction = -100.;
+        assert_eq!(add_scroll(0, &mut fraction, 20), 0);
+        assert_eq!(fraction, 0.);
+        fraction = 100.;
+        assert_eq!(add_scroll(20, &mut fraction, 20), 20);
+        assert_eq!(fraction, 0.);
+    }
+
+    #[gpui::test]
+    fn fractional_scrolling_reuses_ready_text_and_shaped_layouts(cx: &mut TestAppContext) {
+        let (_, mapped, cx) = scrolling_editor(cx);
+        let (viewport, row, layout, origin, line_height, cell_width) = cx.read(|cx| {
+            let state = mapped.read(cx);
+            let painted = &state.painted[0];
+            (
+                state.frame_viewport,
+                painted.row.clone(),
+                painted.layout.clone(),
+                painted.origin,
+                state.line_height,
+                state.cell_width,
+            )
+        });
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(160.), px(80.)),
+            delta: ScrollDelta::Pixels(point(-cell_width / 4., -line_height / 4.)),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let state = mapped.read(cx);
+            let painted = &state.painted[0];
+            assert_eq!(state.frame_viewport, viewport);
+            assert!(
+                state.frame_request.is_none(),
+                "a sub-cell scroll uses the ready frame"
+            );
+            assert!(
+                Arc::ptr_eq(&painted.row, &row),
+                "row maps must not be cloned on every paint"
+            );
+            assert_eq!(
+                painted.layout.text.as_ptr(),
+                layout.text.as_ptr(),
+                "don't shape unchanged text again"
+            );
+            assert!((painted.origin.x - (origin.x - cell_width / 4.)).abs() < px(0.01));
+            assert!((painted.origin.y - (origin.y - line_height / 4.)).abs() < px(0.01));
+            let click = painted.origin + point(painted.layout.x_for_index(3), line_height / 2.);
+            assert_eq!(state.hit_offset(click), Some(painted.row.source_offset(3)));
+        });
+    }
+
+    #[gpui::test]
+    fn drag_selection_extends_outside_the_viewport_while_autoscrolling(cx: &mut TestAppContext) {
+        let (_, mapped, cx) = scrolling_editor(cx);
+        cx.update(|_, cx| {
+            mapped.update(cx, |state, cx| {
+                state.top = 40;
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        let (above, below, initial) = cx.read(|cx| {
+            let state = mapped.read(cx);
+            let x = state.bounds.left() + state.gutter + px(16.);
+            (
+                point(x, state.bounds.top() - px(60.)),
+                point(x, state.bounds.bottom() + px(60.)),
+                state.painted[2].row.range.start,
+            )
+        });
+        cx.update(|_, cx| {
+            mapped.update(cx, |state, _| {
+                state.selection = Selection {
+                    anchor: initial,
+                    head: initial,
+                };
+                state.drag = Some(Drag::Selection);
+            })
+        });
+        let mut last = initial;
+        for _ in 0..3 {
+            cx.update(|_, cx| {
+                mapped.update(cx, |state, cx| {
+                    state.drag_to(below);
+                    cx.notify();
+                })
+            });
+            cx.run_until_parked();
+            let head = cx.read(|cx| mapped.read(cx).selection.head);
+            assert!(
+                head > last,
+                "dragging below the viewport must keep extending"
+            );
+            last = head;
+        }
+        for _ in 0..3 {
+            cx.update(|_, cx| {
+                mapped.update(cx, |state, cx| {
+                    state.drag_to(above);
+                    cx.notify();
+                })
+            });
+            cx.run_until_parked();
+            let head = cx.read(|cx| mapped.read(cx).selection.head);
+            assert!(
+                head < last,
+                "dragging above the viewport must keep extending"
+            );
+            last = head;
+        }
+    }
+
+    #[gpui::test]
+    fn pending_frames_do_not_blank_or_restart_during_continuous_scrolling(cx: &mut TestAppContext) {
+        let (_, mapped, cx) = scrolling_editor(cx);
+        let (send, gate) = futures::channel::oneshot::channel();
+        let (ready, row, line_height) = cx.read(|cx| {
+            let state = mapped.read(cx);
+            (
+                state.frame_viewport.unwrap(),
+                state.frame[0].row.clone(),
+                state.line_height,
+            )
+        });
+        cx.update(|_, cx| {
+            mapped.update(cx, |state, cx| {
+                state.frame_gate = Some(gate);
+                let visible = state.viewport.unwrap();
+                state.top = ready
+                    .bottom()
+                    .saturating_sub(visible.rows + visible.rows / 2)
+                    + 1;
+                cx.notify();
+            })
+        });
+        cx.run_until_parked(); // The next fetch is deliberately held, not timed.
+        let pending = cx.read(|cx| mapped.read(cx).frame_request.unwrap());
+        for _ in 0..8 {
+            cx.simulate_event(ScrollWheelEvent {
+                position: point(px(160.), px(80.)),
+                delta: ScrollDelta::Pixels(point(px(0.), -line_height / 4.)),
+                ..Default::default()
+            });
+            cx.run_until_parked();
+            cx.read(|cx| {
+                let state = mapped.read(cx);
+                assert_eq!(
+                    state.frame_viewport,
+                    Some(ready),
+                    "keep ready rows while the load is pending"
+                );
+                assert_eq!(
+                    state.frame_request,
+                    Some(pending),
+                    "only one fetch may run at a time"
+                );
+                assert!(Arc::ptr_eq(&state.frame[0].row, &row));
+                assert!(!state.painted.is_empty());
+                let painted = &state.painted[0];
+                let point = painted.origin + point(painted.layout.x_for_index(2), line_height / 2.);
+                assert_eq!(state.hit_offset(point), Some(painted.row.source_offset(2)));
+                assert_eq!(
+                    painted.row.line_number,
+                    state.top + 1,
+                    "retained rows keep their global positions"
+                );
+            });
+        }
+        // A much newer destination replaces queued wheel positions, not the
+        // running job. Its result must eventually render without a new event.
+        cx.update(|_, cx| {
+            mapped.update(cx, |state, cx| {
+                state.top = 200;
+                state.wheel_y = 0.;
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.read(|cx| mapped.read(cx).frame_request), Some(pending));
+        assert!(
+            cx.read(|cx| mapped.read(cx).painted.is_empty()),
+            "never paint old rows under new line numbers"
+        );
+        send.send(()).unwrap();
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let state = mapped.read(cx);
+            assert!(state.frame_request.is_none());
+            assert!(
+                state
+                    .frame_viewport
+                    .unwrap()
+                    .contains(state.viewport.unwrap())
+            );
+            assert_eq!(state.painted[0].row.line_number, 201);
+        });
+    }
+
+    #[gpui::test]
+    fn reversing_scroll_keeps_the_better_ready_frame_and_source_change_rejects_old_work(
+        cx: &mut TestAppContext,
+    ) {
+        let (editor, mapped, cx) = scrolling_editor(cx);
+        let ready = cx.read(|cx| mapped.read(cx).frame_viewport);
+        let (send, gate) = futures::channel::oneshot::channel();
+        cx.update(|_, cx| {
+            mapped.update(cx, |state, cx| {
+                state.frame_gate = Some(gate);
+                state.top = 200;
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            mapped.update(cx, |state, cx| {
+                state.top = 0;
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        send.send(()).unwrap();
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let state = mapped.read(cx);
+            assert_eq!(
+                state.frame_viewport, ready,
+                "an obsolete result must not evict visible data"
+            );
+            assert!(state.frame_request.is_none());
+        });
+        let (send, gate) = futures::channel::oneshot::channel();
+        cx.update(|_, cx| {
+            mapped.update(cx, |state, cx| {
+                state.frame_gate = Some(gate);
+                state.top = 200;
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.set_response_body(
+                    mapped_body(b"new response"),
+                    false,
+                    FormatterSettings::default(),
+                    window,
+                    cx,
+                );
+            })
+        });
+        let _ = send.send(());
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let state = mapped.read(cx);
+            assert_eq!(state.value().as_ref(), "new response");
+            assert!(state.frame_request.is_none());
+            assert_eq!(state.painted[0].row.text, "new response");
+        });
     }
 
     #[test]

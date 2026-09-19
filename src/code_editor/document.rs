@@ -242,14 +242,20 @@ impl Document {
         self.cursor(offset).line + 1
     }
 
-    /// JSON lexical state immediately before the scalar at `offset`.
-    /// This is quote/escape tracking, not a validating JSON parser.
-    pub fn json_in_string(&self, offset: usize) -> bool {
-        self.cursor(offset).in_string
+    pub fn is_line_start(&self, offset: usize) -> bool {
+        self.cursor(offset).line_start == offset
     }
 
-    pub fn json_escaped(&self, offset: usize) -> bool {
-        self.cursor(offset).escaped
+    pub fn json_state(&self, offset: usize) -> (bool, bool) {
+        let cursor = self.cursor(offset);
+        (cursor.in_string, cursor.escaped)
+    }
+
+    /// JSON lexical state immediately before the scalar at `offset`.
+    /// This is quote/escape tracking, not a validating JSON parser.
+    #[cfg(test)]
+    pub fn json_in_string(&self, offset: usize) -> bool {
+        self.json_state(offset).0
     }
 
     pub fn row(&self, row: usize, start_column: usize, max_columns: usize) -> Row {

@@ -23,8 +23,8 @@ The mapped document instead:
 - resolves byte, UTF-16, line, and display coordinates from nearby checkpoints;
 - decodes invalid UTF-8 into a separate anonymous file when needed, leaving the
   original response bytes untouched;
-- builds and shapes only viewport text, including horizontal fragments of a
-  single huge natural line;
+- builds text for the viewport and a screen-sized margin, including horizontal
+  fragments of a single huge natural line; only visible rows are shaped;
 - tracks selection offsets globally, independently of the loaded viewport.
 
 Checkpoints are proportional to file bytes, not the number of lines. No array
@@ -36,6 +36,23 @@ text. Calling `to_string()` is an explicit full materialization; do not do that
 in render, context-menu construction, or change detection. Explicit clipboard
 copy necessarily creates the string required by the platform clipboard API and
 runs that preparation on a background worker.
+
+## Scrolling
+
+The displayed frame and the requested viewport are separate. Scrolling
+translates ready rows in document coordinates, including fractional row/column
+offsets, while one background load runs. New scroll events update the latest
+destination instead of cancelling/restarting that load. Completion services
+the latest destination; source, wrapping, language, and theme changes still
+invalidate obsolete work.
+
+The retained display margin is relative to the viewport, not a fixed-size file
+cache. It is replenished before visible text reaches its edge. Row maps, text
+layouts, font metrics, gutter layouts, and caret coordinates are reused rather
+than copied or reshaped on each paint. Hit testing uses actual painted origins,
+so a delayed fetch cannot put old text under new line numbers. A jump outside
+loaded coverage waits for that region rather than pretending the old rows are
+the requested content.
 
 ## Formatting and search
 
@@ -85,5 +102,8 @@ the original mapping:
 
 The regular GUI tests also exercise find/copy, read-only input, horizontal
 scrolling, Raw/Pretty, soft-wrap reflow, source replacement, and snapshot
-lifetime. On macOS use a short `TMPDIR` (e.g. `/tmp`) for the full test suite to
+lifetime. Scrolling tests deliberately hold a background fetch while sending
+wheel events, then check retained text, hit testing, coalescing, direction
+reversal, and stale-result rejection without timing-dependent sleeps.
+On macOS use a short `TMPDIR` (e.g. `/tmp`) for the full test suite to
 avoid unrelated Unix-socket path-length failures in long worktree paths.
