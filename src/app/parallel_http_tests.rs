@@ -118,6 +118,10 @@ fn mcp_http_runs_overlap_and_keep_scoped_results(cx: &mut gpui::TestAppContext) 
                 cx,
             );
             assert_eq!(slow.result.unwrap()["state"], "running");
+            assert!(
+                !app.local_persistence_ready_to_close(cx),
+                "an isolated execution must finalize history before closing"
+            );
             let switched = app.handle_window_control_call(
                 "switch_workspace",
                 serde_json::json!({"workspace_id": format!("local:{}", other.id)}),
@@ -126,6 +130,21 @@ fn mcp_http_runs_overlap_and_keep_scoped_results(cx: &mut gpui::TestAppContext) 
             );
             assert!(switched.ok, "{:?}", switched.error);
         })
+    });
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        cx.run_until_parked();
+        if cx.update(|_, cx| !app.read(cx).workspace_switch_status.busy()) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "workspace switch did not complete");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    cx.update(|_, cx| {
+        assert_eq!(
+            app.read(cx).workspace_providers.active_id(),
+            &WorkspaceProviderId::Local(other.id.clone()),
+        );
     });
     release_slow.send(()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -150,6 +169,9 @@ fn mcp_http_runs_overlap_and_keep_scoped_results(cx: &mut gpui::TestAppContext) 
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(5));
     }
+    // Execution completion updates the owner's in-memory history first. Drain
+    // its queued save before inspecting durable history, outside a GPUI update.
+    futures::executor::block_on(crate::io::flush()).unwrap();
     cx.update(|window, cx| app.update(cx, |app, cx| {
         for (id, name) in [(&slow_id, "slow"), (&fast_id, "fast")] {
             let result = app.handle_window_control_call("query_http_response",
@@ -158,7 +180,11 @@ fn mcp_http_runs_overlap_and_keep_scoped_results(cx: &mut gpui::TestAppContext) 
             assert_eq!(result.result.unwrap()["value"], name);
         }
         assert_eq!(app.history.len(), 2);
-        assert_eq!(store.load_history().unwrap().len(), 2);
+        let stored_history = store.load_history().unwrap();
+        assert_eq!(
+            stored_history.entries().iter().map(|entry| &entry.id).collect::<HashSet<_>>(),
+            app.history.entries().iter().map(|entry| &entry.id).collect::<HashSet<_>>(),
+        );
         let persisted = app.workspace_providers.provider(&source_workspace_id).unwrap().load_workspace().unwrap();
         let environment = persisted.environment(&environment_id).unwrap();
         for key in ["slow", "fast"] {
@@ -218,6 +244,20 @@ fn mcp_http_runs_overlap_and_keep_scoped_results(cx: &mut gpui::TestAppContext) 
                 cx,
             );
             assert!(switched.ok, "{:?}", switched.error);
+        })
+    });
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        cx.run_until_parked();
+        if cx.update(|_, cx| !app.read(cx).workspace_switch_status.busy()) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "workspace switch did not complete");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    cx.update(|_, cx| {
+        app.update(cx, |app, _| {
+            assert_eq!(app.workspace_providers.active_id(), &source_workspace_id);
             app.settings.mcp.follow_agent_activity = false;
             app.active_saved_request_id = None;
             // A console must never inherit a previous server Send's upload target.

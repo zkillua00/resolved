@@ -225,6 +225,7 @@ impl ApiTester {
             editor,
             preview_editor,
             selected_id,
+            session_generation: 0,
             category,
             kind,
             requirements: baseline.requirements.clone(),
@@ -561,24 +562,46 @@ impl ApiTester {
                 return;
             }
         };
-        if let Some(index) = self
-            .snippets
+        let generation = self.snippet_editor.session_generation;
+        let mut candidate = self.snippets.clone();
+        if let Some(index) = candidate
             .iter()
             .position(|current| current.id == snippet.id)
         {
-            self.snippets[index] = snippet.clone();
+            candidate[index] = snippet.clone();
         } else {
-            self.snippets.push(snippet.clone());
+            candidate.push(snippet.clone());
         }
-        SNIPPET_LIST_CACHE.with(|cache| cache.borrow_mut().invalidate());
-        match self.persist_snippets() {
-            Ok(()) => {
-                self.snippet_editor.selected_id = Some(snippet.id.clone());
-                self.snippet_editor.baseline = SnippetDraftSnapshot::from_snippet(&snippet);
-                self.set_snippet_notice(format!("Saved ‘{}’.", snippet.name), false);
+        let save = match self.begin_snippets_save(candidate) {
+            Ok(save) => save,
+            Err(error) => {
+                self.set_snippet_notice(error, true);
+                cx.notify();
+                return;
             }
-            Err(error) => self.set_snippet_notice(error, true),
-        }
+        };
+        self.set_snippet_notice("Saving snippet…", false);
+        cx.spawn(async move |this, cx| {
+            let result = save
+                .await
+                .map_err(|error| format!("Snippet I/O failed: {error}"))
+                .and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                match this.finish_snippets_save(result) {
+                    Ok(()) => {
+                        if this.snippet_editor.session_generation == generation {
+                            this.snippet_editor.selected_id = Some(snippet.id.clone());
+                            this.snippet_editor.baseline =
+                                SnippetDraftSnapshot::from_snippet(&snippet);
+                        }
+                        this.set_snippet_notice(format!("Saved ‘{}’.", snippet.name), false);
+                    }
+                    Err(error) => this.set_snippet_notice(error, true),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -586,10 +609,16 @@ impl ApiTester {
     /// `false` vetoes the close path and leaves the validation/storage error
     /// visible in the Snippets workspace.
     pub(super) fn flush_snippet_editor(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.persistence_io.snippets_pending {
+            return false;
+        }
         if !self.snippet_editor_is_dirty(cx) {
             return true;
         }
         self.save_snippet(cx);
+        if self.persistence_io.snippets_pending {
+            return false;
+        }
         let saved = !self.snippet_editor_is_dirty(cx);
         if !saved {
             let reason = self
@@ -629,18 +658,41 @@ impl ApiTester {
         duplicate.requirements = source.requirements;
         duplicate.output_language = source.output_language;
 
-        self.snippets.push(duplicate.clone());
-        SNIPPET_LIST_CACHE.with(|cache| cache.borrow_mut().invalidate());
-        match self.persist_snippets() {
-            Ok(()) => {
-                self.load_snippet_now(duplicate, window, cx);
-                self.set_snippet_notice("Snippet duplicated.", false);
-            }
+        let generation = self.snippet_editor.session_generation;
+        let draft = self.snippet_draft_snapshot(cx);
+        let mut candidate = self.snippets.clone();
+        candidate.push(duplicate.clone());
+        let save = match self.begin_snippets_save(candidate) {
+            Ok(save) => save,
             Err(error) => {
                 self.set_snippet_notice(error, true);
                 cx.notify();
+                return;
             }
-        }
+        };
+        self.set_snippet_notice("Duplicating snippet…", false);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = save
+                .await
+                .map_err(|error| format!("Snippet I/O failed: {error}"))
+                .and_then(|result| result);
+            let _ = this.update_in(cx, |this, window, cx| {
+                match this.finish_snippets_save(result) {
+                    Ok(()) => {
+                        if this.snippet_editor.session_generation == generation
+                            && this.snippet_draft_snapshot(cx).is_equivalent_to(&draft)
+                        {
+                            this.load_snippet_now(duplicate, window, cx);
+                        }
+                        this.set_snippet_notice("Snippet duplicated.", false);
+                    }
+                    Err(error) => this.set_snippet_notice(error, true),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     pub(super) fn request_delete_snippet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -691,23 +743,52 @@ impl ApiTester {
         let Some(index) = self.snippets.iter().position(|snippet| snippet.id == id) else {
             return;
         };
-        self.snippets.remove(index);
-        SNIPPET_LIST_CACHE.with(|cache| cache.borrow_mut().invalidate());
-        match self.persist_snippets() {
-            Ok(()) => {
-                if let Some(next) = self
-                    .snippets
-                    .get(index.min(self.snippets.len().saturating_sub(1)))
-                    .cloned()
-                {
-                    self.load_snippet_now(next, window, cx);
-                } else {
-                    self.new_snippet_now(window, cx);
-                }
-                self.set_snippet_notice("Snippet deleted.", false);
+        let generation = self.snippet_editor.session_generation;
+        let draft = self.snippet_draft_snapshot(cx);
+        let mut candidate = self.snippets.clone();
+        candidate.remove(index);
+        let save = match self.begin_snippets_save(candidate) {
+            Ok(save) => save,
+            Err(error) => {
+                self.set_snippet_notice(error, true);
+                cx.notify();
+                return;
             }
-            Err(error) => self.set_snippet_notice(error, true),
-        }
+        };
+        self.set_snippet_notice("Deleting snippet…", false);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = save
+                .await
+                .map_err(|error| format!("Snippet I/O failed: {error}"))
+                .and_then(|result| result);
+            let _ = this.update_in(cx, |this, window, cx| {
+                match this.finish_snippets_save(result) {
+                    Ok(()) => {
+                        if this.snippet_editor.session_generation == generation
+                            && this.snippet_draft_snapshot(cx).is_equivalent_to(&draft)
+                        {
+                            if let Some(next) = this
+                                .snippets
+                                .get(index.min(this.snippets.len().saturating_sub(1)))
+                                .cloned()
+                            {
+                                this.load_snippet_now(next, window, cx);
+                            } else {
+                                this.new_snippet_now(window, cx);
+                            }
+                        } else if this.snippet_editor.session_generation == generation {
+                            // Keep edits made during deletion as a new draft.
+                            this.snippet_editor.selected_id = None;
+                            this.snippet_editor.baseline = SnippetDraftSnapshot::empty();
+                        }
+                        this.set_snippet_notice("Snippet deleted.", false);
+                    }
+                    Err(error) => this.set_snippet_notice(error, true),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -739,6 +820,8 @@ impl ApiTester {
     }
 
     fn new_snippet_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.snippet_editor.session_generation =
+            self.snippet_editor.session_generation.wrapping_add(1);
         self.snippet_editor
             .name
             .update(cx, |input, cx| input.set_value(String::new(), window, cx));
@@ -810,6 +893,8 @@ impl ApiTester {
     }
 
     fn load_snippet_now(&mut self, snippet: Snippet, window: &mut Window, cx: &mut Context<Self>) {
+        self.snippet_editor.session_generation =
+            self.snippet_editor.session_generation.wrapping_add(1);
         self.snippet_editor.name.update(cx, |input, cx| {
             input.set_value(snippet.name.clone(), window, cx)
         });
@@ -1644,7 +1729,7 @@ impl ApiTester {
                 .read(cx)
                 .value(cx)
                 .is_empty();
-        let writable = true;
+        let writable = !self.persistence_io.snippets_pending;
         let preview_help = snippet_preview_help(self.snippet_editor.category);
 
         v_flex()

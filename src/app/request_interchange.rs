@@ -41,6 +41,7 @@ pub(super) struct RequestInterchangeState {
     import_preview: ImportPreview,
     export_error: Option<String>,
     loaded_import: Option<(String, ImportBundle)>,
+    import_generation: u64,
 }
 
 impl RequestInterchangeState {
@@ -54,6 +55,7 @@ impl RequestInterchangeState {
             import_preview: ImportPreview::Empty,
             export_error: None,
             loaded_import: None,
+            import_generation: 0,
         }
     }
 }
@@ -416,14 +418,12 @@ impl ApiTester {
         self.request_interchange.open = false;
         let vault = self.credential_vault.clone();
         let client = self.upstream_client.clone();
-        let runtime = Arc::clone(&self.runtime);
         let task_target = target.clone();
         let task = self.runtime.spawn(async move {
             let mut saved = Vec::new();
             let result: Result<(), String> = async {
                 let upstream_id = task_target.upstream_id.clone();
-                let credential = runtime
-                    .spawn_blocking(move || vault.load_upstream(&upstream_id))
+                let credential = crate::io::run(move || vault.load_upstream(&upstream_id))
                     .await
                     .map_err(|e| e.to_string())?
                     .map_err(|e| e.to_string())?
@@ -652,14 +652,52 @@ impl ApiTester {
         if self.sending || self.workspace_switch_status.busy() || paths.is_empty() {
             return;
         }
-        match import_request_files(paths) {
-            Ok(bundle) => self.preview_imported_files(bundle, window, cx),
-            Err(error) => {
-                self.request_interchange.import_preview = ImportPreview::Error(error.clone());
-                self.request_notice = Some(format!("Import failed: {error}"));
-                cx.notify();
-            }
-        }
+        self.request_interchange.import_generation =
+            self.request_interchange.import_generation.wrapping_add(1);
+        let generation = self.request_interchange.import_generation;
+        let workspace_generation = self.workspace_switch_generation;
+        let panel_state = (self.request_interchange.open, self.request_interchange.tab);
+        let original = self
+            .request_interchange
+            .import_editor
+            .read(cx)
+            .value(cx)
+            .to_string();
+        let paths = paths.to_vec();
+        let task = crate::io::run(move || import_request_files(&paths));
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.sending
+                    || this.workspace_switch_status.busy()
+                    || this.workspace_switch_generation != workspace_generation
+                    || this.request_interchange.import_generation != generation
+                    || (this.request_interchange.open, this.request_interchange.tab) != panel_state
+                    || this
+                        .request_interchange
+                        .import_editor
+                        .read(cx)
+                        .value(cx)
+                        .as_ref()
+                        != original
+                {
+                    return;
+                }
+                match result {
+                    Ok(bundle) => this.preview_imported_files(bundle, window, cx),
+                    Err(error) => {
+                        this.request_interchange.import_preview =
+                            ImportPreview::Error(error.clone());
+                        this.request_notice = Some(format!("Import failed: {error}"));
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     pub(super) fn render_request_interchange_panel(
@@ -1003,6 +1041,13 @@ impl ApiTester {
             cx.notify();
             return;
         }
+        let workspace_generation = self.workspace_switch_generation;
+        let original = self
+            .request_interchange
+            .import_editor
+            .read(cx)
+            .value(cx)
+            .to_string();
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -1013,14 +1058,19 @@ impl ApiTester {
             let Ok(Ok(Some(paths))) = receiver.await else {
                 return;
             };
-            let result = import_request_files(&paths);
-            let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(bundle) => this.preview_imported_files(bundle, window, cx),
-                Err(error) => {
-                    this.request_interchange.import_preview = ImportPreview::Error(error.clone());
-                    this.request_notice = Some(format!("Import failed: {error}"));
-                    cx.notify();
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.workspace_switch_generation != workspace_generation
+                    || this
+                        .request_interchange
+                        .import_editor
+                        .read(cx)
+                        .value(cx)
+                        .as_ref()
+                        != original
+                {
+                    return;
                 }
+                this.import_request_paths(&paths, window, cx);
             });
         })
         .detach();
@@ -1139,17 +1189,43 @@ impl ApiTester {
         };
         let base_name = safe_export_file_name(self.request_tabs.active().display_title());
         let suggested_name = format!("{base_name}.{}", format.file_extension());
-        let directory = dirs::download_dir()
-            .or_else(dirs::document_dir)
-            .unwrap_or_else(std::env::temp_dir);
-        let receiver = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+        let request_id = self.request_tabs.active_tab_id().clone();
+        let directory_task = crate::io::run(|| {
+            dirs::download_dir()
+                .or_else(dirs::document_dir)
+                .unwrap_or_else(std::env::temp_dir)
+        });
         cx.spawn_in(window, async move |this, cx| {
+            let directory = match directory_task.await {
+                Ok(directory) => directory,
+                Err(error) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.request_notice = Some(format!("Export failed: {error}"));
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let Ok(receiver) = this.update(cx, |_, cx| {
+                cx.prompt_for_new_path(&directory, Some(&suggested_name))
+            }) else {
+                return;
+            };
             let Ok(Ok(Some(path))) = receiver.await else {
                 return;
             };
-            let result = std::fs::write(&path, source)
-                .map_err(|error| format!("{}: {error}", path.display()));
+            let output_path = path.clone();
+            let result = crate::io::run(move || {
+                std::fs::write(&output_path, source)
+                    .map_err(|error| format!("{}: {error}", output_path.display()))
+            })
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
+                if this.request_tabs.active_tab_id() != &request_id {
+                    return;
+                }
                 this.request_notice = Some(match result {
                     Ok(()) => format!("Exported {} to {}.", format.label(), path.display()),
                     Err(error) => format!("Export failed: {error}"),
@@ -1515,13 +1591,15 @@ mod tests {
         cx.simulate_resize(size(px(1200.), px(800.)));
         let file = directory.path().join("Users.yaml");
         std::fs::write(&file,"openapi: 3.0.0\ninfo: {title: Users}\nservers: [{url: 'https://example.test'}]\npaths:\n  /users:\n    get: {}\n").unwrap();
+        // Exercise the preview/save UI separately from worker scheduling.
+        let bundle = import_request_files(&[file]).unwrap();
         cx.update(|window, cx| {
             app.update(cx, |app, cx| {
                 app.url.update(cx, |input, cx| {
                     input.set_value("https://keep.test/draft", window, cx)
                 });
                 let count = app.request_tabs.tabs().len();
-                app.import_request_paths(&[file], window, cx);
+                app.preview_imported_files(bundle, window, cx);
                 assert_eq!(app.request_tabs.tabs().len(), count);
                 assert!(app.request_interchange.open);
             })

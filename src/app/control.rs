@@ -167,6 +167,10 @@ struct SetVariableParams {
 enum ControlDispatch {
     Immediate(ControlResponse),
     Remote(RemoteControlPending),
+    Snippets {
+        task: crate::io::IoTask<Result<Vec<Snippet>, String>>,
+        response: Value,
+    },
 }
 
 enum ControlWorkspaceTarget {
@@ -804,13 +808,16 @@ impl ApiTester {
             return Err("HTTP method cannot be empty.".to_owned());
         }
         let provider = self.workspace_providers.active_id().clone();
-        let cookie_jar = if self.mcp_scoped_local_workspace_id.is_some() {
-            self.cookie_client_for(&provider, cx)
-                .map_err(|error| error.to_string())?
-                .0
-        } else {
-            self.cookie_jar.clone()
-        };
+        // The scoped provider is restored to the visible workspace after this call.
+        // Capture its jar key now, and never borrow the visible workspace's cookies.
+        let cookie_task = self
+            .mcp_scoped_local_workspace_id
+            .as_ref()
+            .map(|workspace_id| {
+                let cookie_scope = WorkspaceProviderId::Local(workspace_id.clone()).to_string();
+                let vault = self.credential_vault.clone();
+                crate::io::run(move || Arc::new(CookieJar::open(vault, cookie_scope)))
+            });
         let id = http_execution_id(&provider, request_id);
         let owner = cx.entity().downgrade();
         let runner = cx.new(|cx| {
@@ -829,18 +836,54 @@ impl ApiTester {
             runner.history = RequestHistory::default();
             runner.history_writable = self.history_writable;
             runner.request_tabs_writable = false;
-            runner.cookie_jar = cookie_jar;
+            if cookie_task.is_none() {
+                runner.cookie_jar = self.cookie_jar.clone();
+            }
             runner.upstream_client = self.upstream_client.clone();
             runner.upstream_execution_client = self.upstream_execution_client.clone();
             runner.request_namespace =
                 crate::core::RequestNamespaceCatalog::from_workspace(&runner.workspace);
             runner.active_saved_request_id = Some(request_id.to_owned());
             runner.response_tab = ResponseTab::Body;
-            let operation_id = runner.begin_request_template(template, window, cx);
+            let operation_id = if cookie_task.is_some() {
+                runner.request_generation = 1;
+                runner.sending = true;
+                1
+            } else {
+                runner.begin_request_template(template.clone(), window, cx)
+            };
             runner.mcp_http_operation_id = Some(operation_id);
             runner.mcp_http_request_id = Some(request_id.to_owned());
             runner
         });
+        if let Some(task) = cookie_task {
+            runner.update(cx, |_, cx| {
+                cx.spawn_in(window, async move |this, cx| {
+                    let result = task.await;
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        // Cancellation also invalidates the pending cookie load. A
+                        // late completion must not resurrect the isolated request.
+                        if !this.sending || this.request_generation != 1 {
+                            return;
+                        }
+                        match result {
+                            Ok(cookie_jar) => {
+                                this.cookie_jar = cookie_jar;
+                                this.request_generation = 0;
+                                this.begin_request_template(template, window, cx);
+                            }
+                            Err(error) => {
+                                this.sending = false;
+                                this.request_error = Some(error.to_string());
+                                this.capture_mcp_http_exchange(1);
+                                cx.notify();
+                            }
+                        }
+                    });
+                })
+                .detach();
+            });
+        }
         let subscription = cx.observe(&runner, |this, _, cx| this.collect_http_executions(cx));
         self.mcp_http_executions.insert(
             id.clone(),
@@ -937,7 +980,6 @@ impl ApiTester {
             runner
         });
         let vault = self.credential_vault.clone();
-        let runtime = self.runtime.clone();
         let client = self.upstream_client.clone();
         let environment_id = self
             .settings
@@ -947,8 +989,7 @@ impl ApiTester {
             .map(str::to_owned);
         let task = self.runtime.spawn(async move {
             let upstream_id = target.upstream_id.clone();
-            let credential = runtime
-                .spawn_blocking(move || vault.load_upstream(&upstream_id))
+            let credential = crate::io::run(move || vault.load_upstream(&upstream_id))
                 .await
                 .map_err(|error| error.to_string())?
                 .map_err(|error| error.to_string())?
@@ -1385,6 +1426,15 @@ impl ApiTester {
         }
     }
 
+    pub(super) fn has_pending_execution(&self, cx: &App) -> bool {
+        self.sending
+            || self.mcp_http_executions.values().any(|run| {
+                run.runner
+                    .as_ref()
+                    .is_some_and(|runner| runner.read(cx).sending)
+            })
+    }
+
     pub(super) fn stop_mcp_runtime_operations(&mut self, cx: &mut Context<Self>) {
         self.stop_mcp_websocket();
         self.stop_mcp_script_console();
@@ -1509,6 +1559,21 @@ impl ApiTester {
                 };
                 let response = match dispatch {
                     ControlDispatch::Immediate(response) => response,
+                    ControlDispatch::Snippets { task, response } => {
+                        let result = task
+                            .await
+                            .map_err(|error| error.to_string())
+                            .and_then(|result| result);
+                        this.update(cx, |this, cx| {
+                            let result = this.finish_snippets_save(result);
+                            cx.notify();
+                            match result {
+                                Ok(()) => ControlResponse::success(response),
+                                Err(error) => ControlResponse::error(error),
+                            }
+                        })
+                        .unwrap_or_else(|error| ControlResponse::error(error.to_string()))
+                    }
                     ControlDispatch::Remote(pending) => {
                         let target = pending.target.clone();
                         let generation = pending.generation;
@@ -1558,6 +1623,24 @@ impl ApiTester {
                 };
             }
             ControlWorkspaceTarget::Active => {}
+        }
+        if matches!(method, "create_snippet" | "save_snippet" | "delete_snippet") {
+            if let Some(response) = self.validate_control_method(method) {
+                return ControlDispatch::Immediate(response);
+            }
+            let prepared = match method {
+                "create_snippet" => self.control_create_snippet(params),
+                "save_snippet" => self.control_save_snippet(params),
+                "delete_snippet" => self.control_delete_snippet(params),
+                _ => unreachable!(),
+            };
+            return match prepared.and_then(|(candidate, response)| {
+                self.begin_snippets_save(candidate)
+                    .map(|task| (task, response))
+            }) {
+                Ok((task, response)) => ControlDispatch::Snippets { task, response },
+                Err(error) => ControlDispatch::Immediate(ControlResponse::error(error)),
+            };
         }
         if method == "__list_enabled_tools"
             || !matches!(
@@ -2014,12 +2097,10 @@ impl ApiTester {
         self.workspace_switch_status = WorkspaceSwitchStatus::Loading;
         let vault = self.credential_vault.clone();
         let client = self.upstream_client.clone();
-        let runtime = Arc::clone(&self.runtime);
         let credential_upstream_id = target.upstream_id.clone();
         let task_target = target.clone();
         let task = self.runtime.spawn(async move {
-            let credential = runtime
-                .spawn_blocking(move || vault.load_upstream(&credential_upstream_id))
+            let credential = crate::io::run(move || vault.load_upstream(&credential_upstream_id))
                 .await
                 .map_err(|error| format!("Could not open the saved session: {error}"))?
                 .map_err(|error| error.to_string())?
@@ -2059,13 +2140,11 @@ impl ApiTester {
             .map(str::to_owned);
         let vault = self.credential_vault.clone();
         let client = self.upstream_client.clone();
-        let runtime = Arc::clone(&self.runtime);
         let credential_upstream_id = target.upstream_id.clone();
         let task_target = target.clone();
         let method = method.to_owned();
         let task = self.runtime.spawn(async move {
-            let credential = runtime
-                .spawn_blocking(move || vault.load_upstream(&credential_upstream_id))
+            let credential = crate::io::run(move || vault.load_upstream(&credential_upstream_id))
                 .await
                 .map_err(|error| format!("Could not open the saved session: {error}"))?
                 .map_err(|error| error.to_string())?
@@ -2832,9 +2911,9 @@ impl ApiTester {
             "delete_environment_variable" => self.control_delete_environment_variable(params, cx),
             "list_snippets" => self.control_list_snippets(),
             "get_snippet" => self.control_get_snippet(params),
-            "create_snippet" => self.control_create_snippet(params),
-            "save_snippet" => self.control_save_snippet(params),
-            "delete_snippet" => self.control_delete_snippet(params),
+            "create_snippet" | "save_snippet" | "delete_snippet" => {
+                Err("snippet mutations require asynchronous control dispatch".to_owned())
+            }
             "switch_workspace"
             | "run_request_sequence"
             | "get_request_sequence"
@@ -2961,6 +3040,9 @@ impl ApiTester {
                 return Err(format!("workspace '{workspace_id}' was not found"));
             }
             self.switch_to_local_workspace(local_id.to_owned(), window, cx);
+            if self.workspace_switch_status.busy() {
+                return Ok(json!({ "workspace_id": workspace_id, "state": "switching" }));
+            }
             let active = self.workspace_providers.active_id().to_string();
             if active != workspace_id {
                 return Err(self
@@ -4933,7 +5015,7 @@ impl ApiTester {
         serde_json::to_value(snippet).map_err(|error| error.to_string())
     }
 
-    fn control_create_snippet(&mut self, params: Value) -> Result<Value, String> {
+    fn control_create_snippet(&self, params: Value) -> Result<(Vec<Snippet>, Value), String> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Params {
@@ -4958,15 +5040,11 @@ impl ApiTester {
         snippet.validate().map_err(|error| error.to_string())?;
         let mut candidate = self.snippets.clone();
         candidate.push(snippet.clone());
-        self.database_store
-            .save_snippets(&candidate)
-            .map_err(|error| format!("Snippets could not be saved: {error}"))?;
-        self.snippets = candidate;
-        self.invalidate_snippet_list_cache();
-        serde_json::to_value(snippet).map_err(|error| error.to_string())
+        let response = serde_json::to_value(snippet).map_err(|error| error.to_string())?;
+        Ok((candidate, response))
     }
 
-    fn control_save_snippet(&mut self, params: Value) -> Result<Value, String> {
+    fn control_save_snippet(&self, params: Value) -> Result<(Vec<Snippet>, Value), String> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Params {
@@ -5020,15 +5098,11 @@ impl ApiTester {
         snippet.normalize();
         snippet.validate().map_err(|error| error.to_string())?;
         let result = snippet.clone();
-        self.database_store
-            .save_snippets(&candidate)
-            .map_err(|error| format!("Snippets could not be saved: {error}"))?;
-        self.snippets = candidate;
-        self.invalidate_snippet_list_cache();
-        serde_json::to_value(result).map_err(|error| error.to_string())
+        let response = serde_json::to_value(result).map_err(|error| error.to_string())?;
+        Ok((candidate, response))
     }
 
-    fn control_delete_snippet(&mut self, params: Value) -> Result<Value, String> {
+    fn control_delete_snippet(&self, params: Value) -> Result<(Vec<Snippet>, Value), String> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Params {
@@ -5049,12 +5123,7 @@ impl ApiTester {
             ));
         }
         candidate.remove(index);
-        self.database_store
-            .save_snippets(&candidate)
-            .map_err(|error| format!("Snippets could not be saved: {error}"))?;
-        self.snippets = candidate;
-        self.invalidate_snippet_list_cache();
-        Ok(json!({ "snippet_id": params.snippet_id }))
+        Ok((candidate, json!({ "snippet_id": params.snippet_id })))
     }
 
     pub(super) fn commit_control_workspace(

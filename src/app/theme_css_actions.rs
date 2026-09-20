@@ -14,7 +14,54 @@ fn saved_theme_editor_id(theme_id: &str) -> String {
     format!("saved-theme-{theme_id}")
 }
 
+// An I/O completion must not replace edits, resurrect a closed editor, or apply
+// a result to a different theme selected while the worker was reading.
+#[derive(PartialEq)]
+struct ThemeIoSnapshot {
+    settings: ThemeSettings,
+    active_tab: ActiveWorkspaceTab,
+    active_editor_id: Option<String>,
+    active_request_id: String,
+    editors: Vec<ThemeEditorIoSnapshot>,
+}
+
+#[derive(PartialEq)]
+struct ThemeEditorIoSnapshot {
+    id: String,
+    editor: Entity<CodeEditor>,
+    source: String,
+    baseline: String,
+    path: Option<PathBuf>,
+    disk_source: Option<String>,
+}
+
 impl ApiTester {
+    fn theme_io_snapshot(&self, cx: &App) -> ThemeIoSnapshot {
+        let mut editors = self
+            .theme_editors
+            .iter()
+            .map(|(id, session)| ThemeEditorIoSnapshot {
+                id: id.clone(),
+                editor: session.editor.clone(),
+                source: session.editor.read(cx).value(cx).to_string(),
+                baseline: session.baseline.clone(),
+                path: session.path.clone(),
+                disk_source: session.disk_source.clone(),
+            })
+            .collect::<Vec<_>>();
+        editors.sort_by(|a, b| a.id.cmp(&b.id));
+        ThemeIoSnapshot {
+            settings: self.settings.theme.clone(),
+            active_tab: self.workspace_tabs.active(),
+            active_editor_id: self
+                .workspace_tabs
+                .active_theme_editor_id()
+                .map(ToOwned::to_owned),
+            active_request_id: self.request_tabs.active_tab_id().as_str().to_owned(),
+            editors,
+        }
+    }
+
     pub(super) fn active_theme_editor(&self) -> Option<&ThemeEditorSession> {
         self.workspace_tabs
             .active_theme_editor_id()
@@ -49,6 +96,7 @@ impl ApiTester {
             cx.notify();
             return;
         }
+        let snapshot = self.theme_io_snapshot(cx);
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -62,14 +110,23 @@ impl ApiTester {
             let Some(path) = paths.into_iter().next() else {
                 return;
             };
-            let result = read_css_theme(&path);
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(source) => {
-                    this.install_css_theme(Some(path.clone()), source, None, cx);
+            let read_path = path.clone();
+            let result = crate::io::run(move || read_css_theme(&read_path))
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                if this.theme_io_snapshot(cx) != snapshot {
+                    return;
                 }
-                Err(error) => {
-                    this.settings_notice = Some(error);
-                    cx.notify();
+                match result {
+                    Ok(source) => {
+                        this.install_css_theme(Some(path.clone()), source, None, cx);
+                    }
+                    Err(error) => {
+                        this.settings_notice = Some(error);
+                        cx.notify();
+                    }
                 }
             });
         })
@@ -114,16 +171,31 @@ impl ApiTester {
             cx.notify();
             return;
         };
-        match read_css_theme(&path) {
-            Ok(source) => {
-                let active_theme_id = self.settings.theme.active_theme_id.clone();
-                self.install_css_theme(Some(path), source, active_theme_id, cx);
-            }
-            Err(error) => {
-                self.settings_notice = Some(error);
-                cx.notify();
-            }
-        }
+        let snapshot = self.theme_io_snapshot(cx);
+        let read_path = path.clone();
+        let task = crate::io::run(move || read_css_theme(&read_path));
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                if this.theme_io_snapshot(cx) != snapshot {
+                    return;
+                }
+                match result {
+                    Ok(source) => {
+                        let active_theme_id = this.settings.theme.active_theme_id.clone();
+                        this.install_css_theme(Some(path), source, active_theme_id, cx);
+                    }
+                    Err(error) => {
+                        this.settings_notice = Some(error);
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     pub(super) fn switch_css_theme(&mut self, theme_id: Option<String>, cx: &mut Context<Self>) {
@@ -187,8 +259,7 @@ impl ApiTester {
                     }
                     None => {
                         crate::theme::configure(cx);
-                        self.settings_notice =
-                            Some("Using built-in Resolved Dark.".to_owned());
+                        self.settings_notice = Some("Using built-in Resolved Dark.".to_owned());
                     }
                 }
                 self.refresh_variable_intelligence(cx);
@@ -240,6 +311,7 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.theme_editor_open_generation = self.theme_editor_open_generation.wrapping_add(1);
         if !self.settings_writable {
             self.settings_notice =
                 Some("The CSS editor is unavailable while settings are read-only.".into());
@@ -271,37 +343,23 @@ impl ApiTester {
         let baseline = theme.css_source.clone();
         let draft_path = theme.draft_path.clone();
         let path = draft_path.clone().or_else(|| theme.source_path.clone());
-        let disk_source = path.as_deref().and_then(|path| read_css_theme(path).ok());
-        let source = theme
-            .draft_source
-            .clone()
-            .or_else(|| {
-                draft_path
-                    .as_deref()
-                    .and_then(|path| read_css_theme(path).ok())
-            })
-            .unwrap_or_else(|| baseline.clone());
-        let disk_source = trusted_theme_disk_source(
-            disk_source,
-            theme.draft_disk_source.as_deref(),
-            &source,
-            &baseline,
-            path.as_ref() == theme.source_path.as_ref(),
-        );
-        self.create_theme_editor_session(
+        self.load_theme_editor_session(
             editor_id,
             Some(theme_id),
             theme.name,
             baseline,
-            source,
             path,
-            disk_source,
+            draft_path,
+            theme.draft_source,
+            theme.draft_disk_source,
+            theme.source_path,
             window,
             cx,
         );
     }
 
     fn open_detached_theme_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.theme_editor_open_generation = self.theme_editor_open_generation.wrapping_add(1);
         let editor_id = DETACHED_THEME_EDITOR_ID.to_owned();
         if let Some(editor) = self
             .theme_editors
@@ -318,39 +376,90 @@ impl ApiTester {
         let path = draft_path
             .clone()
             .or_else(|| self.settings.theme.source_path.clone());
-        let disk_source = path.as_deref().and_then(|path| read_css_theme(path).ok());
-        let source = self
-            .settings
-            .theme
-            .draft_source
-            .clone()
-            .or_else(|| {
-                draft_path
-                    .as_deref()
-                    .and_then(|path| read_css_theme(path).ok())
-            })
-            .unwrap_or_else(|| baseline.clone());
         let theme_name = crate::theme::parse_css(&baseline)
             .map(|theme| theme.name.to_string())
             .unwrap_or_else(|_| "Unsaved theme".to_owned());
-        let disk_source = trusted_theme_disk_source(
-            disk_source,
-            self.settings.theme.draft_disk_source.as_deref(),
-            &source,
-            &baseline,
-            path.as_ref() == self.settings.theme.source_path.as_ref(),
-        );
-        self.create_theme_editor_session(
+        self.load_theme_editor_session(
             editor_id,
             None,
             theme_name,
             baseline,
-            source,
             path,
-            disk_source,
+            draft_path,
+            self.settings.theme.draft_source.clone(),
+            self.settings.theme.draft_disk_source.clone(),
+            self.settings.theme.source_path.clone(),
             window,
             cx,
         );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn load_theme_editor_session(
+        &mut self,
+        editor_id: String,
+        theme_id: Option<String>,
+        theme_name: String,
+        baseline: String,
+        path: Option<PathBuf>,
+        draft_path: Option<PathBuf>,
+        draft_source: Option<String>,
+        draft_disk_source: Option<String>,
+        source_path: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Supersede earlier open requests before either worker result can create
+        // a session and invalidate the later request's settings/editor snapshot.
+        let generation = self.theme_editor_open_generation;
+        let snapshot = self.theme_io_snapshot(cx);
+        let task = crate::io::run(move || {
+            let disk_source = path.as_deref().and_then(|path| read_css_theme(path).ok());
+            let source = draft_source
+                .or_else(|| {
+                    draft_path
+                        .as_deref()
+                        .and_then(|path| read_css_theme(path).ok())
+                })
+                .unwrap_or_else(|| baseline.clone());
+            let disk_source = trusted_theme_disk_source(
+                disk_source,
+                draft_disk_source.as_deref(),
+                &source,
+                &baseline,
+                path.as_ref() == source_path.as_ref(),
+            );
+            (baseline, source, path, disk_source)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.theme_editor_open_generation != generation
+                    || this.theme_io_snapshot(cx) != snapshot
+                    || !this.settings_writable
+                {
+                    return;
+                }
+                match result {
+                    Ok((baseline, source, path, disk_source)) => this.create_theme_editor_session(
+                        editor_id,
+                        theme_id,
+                        theme_name,
+                        baseline,
+                        source,
+                        path,
+                        disk_source,
+                        window,
+                        cx,
+                    ),
+                    Err(error) => {
+                        this.settings_notice = Some(error.to_string());
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -885,11 +994,7 @@ impl ApiTester {
         if let Some(session) = self.theme_editors.get_mut(&editor_id) {
             session.path = source_path;
             session.dirty = false;
-            session.disk_source = session
-                .path
-                .as_deref()
-                .and_then(|path| read_css_theme(path).ok())
-                .filter(|disk| disk == &baseline);
+            session.disk_source = None;
             session.persist_task = None;
         }
         self.settings_notice = Some(match self.commit_settings(candidate, false, cx) {
@@ -900,7 +1005,52 @@ impl ApiTester {
                 )
             }
         });
+        self.refresh_theme_editor_disk_source(&editor_id, true, cx);
         cx.notify();
+    }
+
+    fn refresh_theme_editor_disk_source(
+        &mut self,
+        editor_id: &str,
+        require_baseline: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.theme_editors.get(editor_id) else {
+            return;
+        };
+        let editor = session.editor.clone();
+        let path = session.path.clone();
+        let baseline = session.baseline.clone();
+        let original = editor.read(cx).value(cx).to_string();
+        let editor_id = editor_id.to_owned();
+        let read_path = path.clone();
+        let task = crate::io::run(move || {
+            read_path
+                .as_deref()
+                .and_then(|path| read_css_theme(path).ok())
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(disk_source) = task.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                let Some(session) = this.theme_editors.get_mut(&editor_id) else {
+                    return;
+                };
+                if session.editor != editor
+                    || session.path != path
+                    || session.baseline != baseline
+                    || session.editor.read(cx).value(cx).as_ref() != original
+                    || session.disk_source.is_some()
+                {
+                    return;
+                }
+                session.disk_source =
+                    disk_source.filter(|disk| !require_baseline || disk == &baseline);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(super) fn restore_default_theme_template(
@@ -1004,14 +1154,37 @@ impl ApiTester {
             cx.notify();
             return;
         };
-        let source = match read_css_theme(&path) {
-            Ok(source) => source,
-            Err(error) => {
-                self.settings_notice = Some(error);
-                cx.notify();
-                return;
-            }
-        };
+        let snapshot = self.theme_io_snapshot(cx);
+        let editor_id = editor_id.to_owned();
+        let task = crate::io::run(move || read_css_theme(&path));
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.theme_io_snapshot(cx) != snapshot {
+                    return;
+                }
+                match result {
+                    Ok(source) => this.finish_reload_theme_editor(&editor_id, source, window, cx),
+                    Err(error) => {
+                        this.settings_notice = Some(error);
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn finish_reload_theme_editor(
+        &mut self,
+        editor_id: &str,
+        source: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(editor) = self
             .theme_editors
             .get(editor_id)
@@ -1106,48 +1279,63 @@ impl ApiTester {
             })
             .or_else(|| persisted_path.clone())
             .filter(|path| !(draft_pending && persisted_path.as_ref() == Some(path)));
-        let mut path = match path {
-            Some(path) => path,
-            None => next_available_managed_theme_path(draft_pending),
-        };
-
-        if draft_pending {
-            let known_disk_source = session
-                .and_then(|session| session.disk_source.as_deref())
-                .or_else(|| saved_theme.and_then(|theme| theme.draft_disk_source.as_deref()))
-                .or_else(|| {
-                    theme_id
-                        .is_none()
-                        .then_some(self.settings.theme.draft_disk_source.as_deref())
-                        .flatten()
-                });
-            match inspect_external_theme_source(&path, known_disk_source, &source) {
-                Ok(ThemeSourceState::Ready) => {}
-                Ok(ThemeSourceState::Missing | ThemeSourceState::NeedsFreshPath) => {
-                    path = next_available_managed_theme_path(true);
-                    if let Err(error) = materialize_theme_source(&path, source.as_bytes()) {
-                        self.settings_notice = Some(error);
-                        cx.notify();
-                        return;
-                    }
-                }
-                Err(error) => {
-                    self.settings_notice = Some(error);
-                    cx.notify();
+        let known_disk_source = session
+            .and_then(|session| session.disk_source.as_deref())
+            .or_else(|| saved_theme.and_then(|theme| theme.draft_disk_source.as_deref()))
+            .or_else(|| {
+                theme_id
+                    .is_none()
+                    .then_some(self.settings.theme.draft_disk_source.as_deref())
+                    .flatten()
+            })
+            .map(ToOwned::to_owned);
+        let snapshot = self.theme_io_snapshot(cx);
+        let worker_source = source.clone();
+        let task = crate::io::run(move || {
+            prepare_external_theme_source(
+                path,
+                draft_pending,
+                known_disk_source.as_deref(),
+                &worker_source,
+            )
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                if this.theme_io_snapshot(cx) != snapshot || !this.settings_writable {
                     return;
                 }
-            }
-        } else if !path.exists()
-            && let Err(error) = materialize_theme_source(&path, source.as_bytes())
-        {
-            path = next_available_managed_theme_path(false);
-            if let Err(second_error) = materialize_theme_source(&path, source.as_bytes()) {
-                self.settings_notice = Some(format!("{error} {second_error}"));
-                cx.notify();
-                return;
-            }
-        }
+                match result {
+                    Ok(path) => this.finish_open_css_in_preferred_editor(
+                        theme_id,
+                        editor_id,
+                        source,
+                        draft_pending,
+                        path,
+                        cx,
+                    ),
+                    Err(error) => {
+                        this.settings_notice = Some(error);
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
 
+    fn finish_open_css_in_preferred_editor(
+        &mut self,
+        theme_id: Option<String>,
+        editor_id: Option<String>,
+        source: String,
+        draft_pending: bool,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
         let persisted = if let Some(editor_id) = editor_id.as_deref()
             && self.theme_editors.contains_key(editor_id)
         {
@@ -1289,10 +1477,16 @@ impl ApiTester {
                     .filter(|session| session.theme_id == active_theme_id)
                 {
                     session.path = source_path.clone();
-                    session.disk_source = session
-                        .path
-                        .as_deref()
-                        .and_then(|source_path| read_css_theme(source_path).ok());
+                    session.disk_source = None;
+                }
+                let ids = self
+                    .theme_editors
+                    .iter()
+                    .filter(|(_, session)| session.theme_id == active_theme_id)
+                    .map(|(id, _)| id.clone())
+                    .collect::<Vec<_>>();
+                for id in ids {
+                    self.refresh_theme_editor_disk_source(&id, false, cx);
                 }
                 self.settings_notice = Some(format!(
                     "Resolved will no longer watch {} for changes. The file was kept.",
@@ -1347,10 +1541,16 @@ impl ApiTester {
                     .filter(|session| session.theme_id.as_deref() == Some(&theme_id))
                 {
                     session.path = source_path.clone();
-                    session.disk_source = session
-                        .path
-                        .as_deref()
-                        .and_then(|source_path| read_css_theme(source_path).ok());
+                    session.disk_source = None;
+                }
+                let ids = self
+                    .theme_editors
+                    .iter()
+                    .filter(|(_, session)| session.theme_id.as_deref() == Some(&theme_id))
+                    .map(|(id, _)| id.clone())
+                    .collect::<Vec<_>>();
+                for id in ids {
+                    self.refresh_theme_editor_disk_source(&id, false, cx);
                 }
                 self.settings_notice = Some(format!(
                     "Resolved will no longer watch {} for changes. The file was kept.",
@@ -1649,6 +1849,31 @@ fn next_available_theme_name(themes: &[SavedTheme], requested: &str) -> String {
     unreachable!("theme name suffix search is unbounded")
 }
 
+fn prepare_external_theme_source(
+    path: Option<PathBuf>,
+    draft_pending: bool,
+    known_disk_source: Option<&str>,
+    source: &str,
+) -> Result<PathBuf, String> {
+    let mut path = path.unwrap_or_else(|| next_available_managed_theme_path(draft_pending));
+    if draft_pending {
+        match inspect_external_theme_source(&path, known_disk_source, source)? {
+            ThemeSourceState::Ready => {}
+            ThemeSourceState::Missing | ThemeSourceState::NeedsFreshPath => {
+                path = next_available_managed_theme_path(true);
+                materialize_theme_source(&path, source.as_bytes())?;
+            }
+        }
+    } else if !path.exists()
+        && let Err(error) = materialize_theme_source(&path, source.as_bytes())
+    {
+        path = next_available_managed_theme_path(false);
+        materialize_theme_source(&path, source.as_bytes())
+            .map_err(|second_error| format!("{error} {second_error}"))?;
+    }
+    Ok(path)
+}
+
 fn read_css_theme(path: &Path) -> Result<String, String> {
     const MAX_THEME_BYTES: u64 = 256 * 1024;
 
@@ -1834,6 +2059,43 @@ fn ensure_theme_parent(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_preparation_preserves_conflicting_disk_edits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("theme.css");
+        fs::write(&path, "external edit").unwrap();
+
+        let error = prepare_external_theme_source(
+            Some(path.clone()),
+            true,
+            Some("previous"),
+            "in-app edit",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("changed in another app"));
+        assert_eq!(fs::read_to_string(path).unwrap(), "external edit");
+    }
+
+    #[test]
+    fn external_preparation_reuses_matching_draft_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("theme.css");
+        fs::write(&path, "in-app edit").unwrap();
+
+        assert_eq!(
+            prepare_external_theme_source(
+                Some(path.clone()),
+                true,
+                Some("previous"),
+                "in-app edit",
+            )
+            .unwrap(),
+            path
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), "in-app edit");
+    }
 
     #[test]
     fn first_theme_materialization_never_overwrites_an_existing_draft() {

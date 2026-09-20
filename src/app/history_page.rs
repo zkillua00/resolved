@@ -1,5 +1,48 @@
 use super::*;
 
+fn history_after_clear(history: &RequestHistory, removed_ids: &HashSet<String>) -> RequestHistory {
+    let mut remaining = history.clone();
+    remaining.clear();
+    for entry in history.entries().iter().rev() {
+        if !removed_ids.contains(&entry.id) {
+            remaining.push(entry.clone());
+        }
+    }
+    remaining
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    #[test]
+    fn clear_completion_preserves_requests_that_finished_during_io() {
+        let mut history = RequestHistory::new(3);
+        let old = HistoryEntry::failed_with_secrets(&RequestDraft::default(), "old", &[]);
+        history.push(old.clone());
+        let removed = HashSet::from([old.id.clone()]);
+        let first = HistoryEntry::failed_with_secrets(&RequestDraft::default(), "first", &[]);
+        let second = HistoryEntry::failed_with_secrets(&RequestDraft::default(), "second", &[]);
+        history.push(first.clone());
+        history.push(second.clone());
+
+        let remaining = history_after_clear(&history, &removed);
+        assert_eq!(
+            remaining
+                .entries()
+                .iter()
+                .map(|entry| &entry.id)
+                .collect::<Vec<_>>(),
+            vec![&second.id, &first.id],
+        );
+        assert_eq!(
+            history.len(),
+            3,
+            "constructing the result does not mutate live state"
+        );
+    }
+}
+
 impl ApiTester {
     pub(super) fn confirm_delete(&mut self, target: PendingDelete, cx: &mut Context<Self>) -> bool {
         if self.pending_delete.as_ref() == Some(&target) {
@@ -24,19 +67,54 @@ impl ApiTester {
         if !self.confirm_delete(PendingDelete::History, cx) {
             return;
         }
-
+        if self.persistence_io.history_clear_pending {
+            return;
+        }
+        let removed_ids = self
+            .history
+            .entries()
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<HashSet<_>>();
         let mut candidate = self.history.clone();
         candidate.clear();
-        match self.database_store.save_history(&candidate) {
-            Ok(()) => {
-                self.history = candidate;
-                self.history_warning = None;
-                self.delete_own_shared_history(cx);
-            }
-            Err(error) => {
-                self.history_warning = Some(format!("History could not be cleared: {error}"));
-            }
-        }
+        let shared_target = self.active_upstream_workspace().ok();
+        self.persistence_io.history_generation =
+            self.persistence_io.history_generation.wrapping_add(1);
+        self.persistence_io.history_clear_pending = true;
+        self.persistence_io.history_pending = true;
+        let database = self.database_store.clone();
+        let save = crate::io::run(move || database.save_history(&candidate));
+        cx.spawn(async move |this, cx| {
+            let result = save
+                .await
+                .map_err(|error| format!("History I/O failed: {error}"))
+                .and_then(|result| {
+                    result.map_err(|error| format!("History could not be cleared: {error}"))
+                });
+            let _ = this.update(cx, |this, cx| {
+                this.persistence_io.history_clear_pending = false;
+                this.persistence_io.history_pending = false;
+                this.persistence_io.history_failed = result.is_err();
+                match result {
+                    Ok(()) => {
+                        // Requests may finish while the clear is in flight.
+                        // Only remove entries covered by this transaction.
+                        this.history = history_after_clear(&this.history, &removed_ids);
+                        this.history_warning = None;
+                        if let Some(target) = shared_target {
+                            this.delete_own_shared_history(target, cx);
+                        }
+                    }
+                    Err(error) => this.history_warning = Some(error),
+                }
+                if std::mem::take(&mut this.persistence_io.history_save_deferred) {
+                    this.persist_history(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -50,11 +128,9 @@ impl ApiTester {
         };
         let vault = self.credential_vault.clone();
         let client = self.upstream_client.clone();
-        let runtime = Arc::clone(&self.runtime);
         let upstream_id = target.upstream_id.clone();
         let task = self.runtime.spawn(async move {
-            let credential = runtime
-                .spawn_blocking(move || vault.load_upstream(&upstream_id))
+            let credential = crate::io::run(move || vault.load_upstream(&upstream_id))
                 .await
                 .map_err(|error| format!("Could not open the saved session: {error}"))?
                 .map_err(|error| error.to_string())?
@@ -100,17 +176,16 @@ impl ApiTester {
         .detach();
     }
 
-    fn delete_own_shared_history(&mut self, cx: &mut Context<Self>) {
-        let Ok(target) = self.active_upstream_workspace() else {
-            return;
-        };
+    fn delete_own_shared_history(
+        &mut self,
+        target: workspace_connections::ActiveUpstreamWorkspace,
+        cx: &mut Context<Self>,
+    ) {
         let vault = self.credential_vault.clone();
         let client = self.upstream_client.clone();
-        let runtime = Arc::clone(&self.runtime);
         let upstream_id = target.upstream_id.clone();
         let task = self.runtime.spawn(async move {
-            let credential = runtime
-                .spawn_blocking(move || vault.load_upstream(&upstream_id))
+            let credential = crate::io::run(move || vault.load_upstream(&upstream_id))
                 .await
                 .map_err(|error| format!("Could not open the saved session: {error}"))?
                 .map_err(|error| error.to_string())?

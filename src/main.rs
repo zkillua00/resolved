@@ -1,6 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-use std::borrow::Cow;
+use std::{borrow::Cow, cell::Cell, rc::Rc};
 
 use gpui::{
     App, AppContext as _, Application, AssetSource, Bounds, Entity, SharedString, WindowBounds,
@@ -20,6 +20,7 @@ mod documentation_intelligence;
 mod documentation_references;
 mod editor_util;
 mod instance_guard;
+mod io;
 mod platform;
 mod request_dirty;
 mod script_intelligence;
@@ -45,6 +46,47 @@ use shortcuts::{
 };
 
 struct AppAssets;
+
+/// Closing is a foreground continuation, never a synchronous wait for the
+/// worker. Recheck after the barrier because edits may arrive while it drains.
+fn request_app_exit(view: &gpui::WeakEntity<ApiTester>, pending: &Rc<Cell<bool>>, cx: &mut App) {
+    if pending.replace(true) {
+        return;
+    }
+    let view = view.clone();
+    let pending = Rc::clone(pending);
+    if let Err(error) = view.update(cx, |view, cx| {
+        view.flush_local_state(cx);
+        view.local_persistence_ready_to_close(cx);
+    }) {
+        tracing::error!("could not begin flushing local state: {error}");
+        pending.set(false);
+        return;
+    }
+    let barrier = io::flush();
+    cx.spawn(async move |cx| {
+        let result = barrier.await;
+        let _ = cx.update(|cx| {
+            pending.set(false);
+            if let Err(error) = result {
+                tracing::error!("could not drain I/O before quit: {error}");
+                return;
+            }
+            let saved = view
+                .update(cx, |view, cx| {
+                    view.flush_local_state(cx) && view.local_persistence_ready_to_close(cx)
+                })
+                .unwrap_or_else(|error| {
+                    tracing::error!("could not verify local state before quit: {error}");
+                    false
+                });
+            if saved {
+                cx.quit();
+            }
+        });
+    })
+    .detach();
+}
 
 fn register_app_action_handlers(view: &Entity<ApiTester>, cx: &mut App) {
     macro_rules! register {
@@ -218,53 +260,64 @@ fn main() {
             })
             .detach();
 
-            let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
-            let mut window_options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(1100.0), px(720.0))),
-                titlebar: Some(gpui::TitlebarOptions {
-                    title: Some(PRODUCT_NAME.into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(gpui::point(px(16.0), px(16.0))),
-                }),
-                ..Default::default()
-            };
-            platform::configure_main_window(&mut window_options);
-            match cx.open_window(window_options, |window, cx| {
-                let view = cx.new(|cx| ApiTester::new(base_key_bindings.clone(), window, cx));
-                register_app_action_handlers(&view, cx);
-                platform::configure_menus(cx);
-                let view_for_close = view.downgrade();
-                window.on_window_should_close(cx, move |_, cx| {
-                    view_for_close
-                        .update(cx, |view, cx| view.flush_local_state(cx))
-                        .unwrap_or_else(|error| {
-                            tracing::error!("could not flush local state before close: {error}");
-                            true
-                        })
-                });
-                let view_for_quit = view.downgrade();
-                cx.on_action(move |_: &QuitApp, cx| {
-                    let saved = view_for_quit
-                        .update(cx, |view, cx| view.flush_local_state(cx))
-                        .unwrap_or_else(|error| {
-                            tracing::error!("could not flush local state before quit: {error}");
-                            true
-                        });
-                    if saved {
-                        cx.quit();
+            let initial_state = ApiTester::load_initial_state();
+            cx.spawn(async move |cx| {
+                let initial_state = match initial_state.await {
+                    Ok(state) => state,
+                    Err(error) => {
+                        tracing::error!("could not load initial application state: {error}");
+                        let _ = cx.update(|cx| cx.quit());
+                        return;
                     }
-                });
-                cx.new(|cx| Root::new(view, window, cx))
-            }) {
-                Ok(_) => {}
-                Err(error) => {
-                    eprintln!("{PRODUCT_NAME} could not open its main window: {error}");
-                    std::process::exit(1);
-                }
-            }
+                };
+                let _ = cx.update(move |cx| {
+                    let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
+                    let mut window_options = WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        window_min_size: Some(size(px(1100.0), px(720.0))),
+                        titlebar: Some(gpui::TitlebarOptions {
+                            title: Some(PRODUCT_NAME.into()),
+                            appears_transparent: true,
+                            traffic_light_position: Some(gpui::point(px(16.0), px(16.0))),
+                        }),
+                        ..Default::default()
+                    };
+                    platform::configure_main_window(&mut window_options);
+                    match cx.open_window(window_options, |window, cx| {
+                        let view = cx.new(|cx| {
+                            ApiTester::new_with_initial_state(
+                                base_key_bindings,
+                                initial_state,
+                                window,
+                                cx,
+                            )
+                        });
+                        register_app_action_handlers(&view, cx);
+                        platform::configure_menus(cx);
+                        let exit_pending = Rc::new(Cell::new(false));
+                        let close_pending = Rc::clone(&exit_pending);
+                        let view_for_close = view.downgrade();
+                        window.on_window_should_close(cx, move |_, cx| {
+                            request_app_exit(&view_for_close, &close_pending, cx);
+                            false
+                        });
+                        let view_for_quit = view.downgrade();
+                        cx.on_action(move |_: &QuitApp, cx| {
+                            request_app_exit(&view_for_quit, &exit_pending, cx);
+                        });
+                        cx.new(|cx| Root::new(view, window, cx))
+                    }) {
+                        Ok(_) => {}
+                        Err(error) => {
+                            eprintln!("{PRODUCT_NAME} could not open its main window: {error}");
+                            std::process::exit(1);
+                        }
+                    }
 
-            cx.activate(true);
+                    cx.activate(true);
+                });
+            })
+            .detach();
         });
 }
 

@@ -82,7 +82,7 @@ pub enum CredentialVaultError {
     Database(#[from] super::database::DatabaseError),
 }
 
-trait MasterKeyProvider: Send + Sync {
+pub(super) trait MasterKeyProvider: Send + Sync {
     fn load_or_create(&self) -> Result<Zeroizing<Vec<u8>>, CredentialVaultError>;
 }
 
@@ -135,7 +135,7 @@ impl CredentialVault {
     }
 
     #[cfg(test)]
-    fn with_key_provider(
+    pub(super) fn with_key_provider(
         database: DatabaseStore,
         key_provider: Arc<dyn MasterKeyProvider>,
     ) -> Self {

@@ -35,6 +35,19 @@ pub struct ControlCall {
 }
 
 impl ControlCall {
+    #[cfg(test)]
+    pub(crate) fn for_test(method: &str, params: Value) -> (Self, mpsc::Receiver<ControlResponse>) {
+        let (response, receiver) = mpsc::channel();
+        (
+            Self {
+                method: method.to_owned(),
+                params,
+                response,
+            },
+            receiver,
+        )
+    }
+
     pub fn respond(self, response: ControlResponse) {
         let _ = self.response.send(response);
     }

@@ -312,14 +312,12 @@ impl ApiTester {
         self.workspace_switch_status = WorkspaceSwitchStatus::Loading;
         let vault = self.credential_vault.clone();
         let client = self.upstream_client.clone();
-        let runtime = Arc::clone(&self.runtime);
         let credential_upstream_id = target.upstream_id.clone();
         let task_target = target.clone();
         let task_name = name.clone();
         let task_parent_collection_id = parent_collection_id.clone();
         let task = self.runtime.spawn(async move {
-            let credential = runtime
-                .spawn_blocking(move || vault.load_upstream(&credential_upstream_id))
+            let credential = crate::io::run(move || vault.load_upstream(&credential_upstream_id))
                 .await
                 .map_err(|error| format!("Could not open the saved session: {error}"))?
                 .map_err(|error| error.to_string())?
@@ -509,7 +507,6 @@ impl ApiTester {
         self.workspace_switch_status = WorkspaceSwitchStatus::Loading;
         let vault = self.credential_vault.clone();
         let client = self.upstream_client.clone();
-        let runtime = Arc::clone(&self.runtime);
         let credential_upstream_id = target.upstream_id.clone();
         let task_target = target.clone();
         let task_collection_id = target_collection_id.clone();
@@ -517,8 +514,7 @@ impl ApiTester {
         let task_name = name.clone();
         let task_definition = definition.clone();
         let task = self.runtime.spawn(async move {
-            let credential = runtime
-                .spawn_blocking(move || vault.load_upstream(&credential_upstream_id))
+            let credential = crate::io::run(move || vault.load_upstream(&credential_upstream_id))
                 .await
                 .map_err(|error| format!("Could not open the saved session: {error}"))?
                 .map_err(|error| error.to_string())?
@@ -930,6 +926,52 @@ impl ApiTester {
                     workspace_id.clone(),
                 )));
         }
+        let vault = self.credential_vault.clone();
+        let cookie_scope = provider_id.to_string();
+        let task = crate::io::run(move || {
+            let jar = Arc::new(CookieJar::open(vault, cookie_scope));
+            build_client_with_cookie_jar(jar.clone()).map(|client| (jar, client))
+        });
+        self.workspace_switch_status = WorkspaceSwitchStatus::Loading;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(client) => {
+                        // Editors can change while cookie storage opens. Persist those
+                        // changes before replacing the active workspace.
+                        if !this.flush_local_state(cx) {
+                            this.fail_workspace_switch(
+                                "Current editor buffers could not be persisted.".to_owned(),
+                                cx,
+                            );
+                            return;
+                        }
+                        this.workspace_switch_status = WorkspaceSwitchStatus::Idle;
+                        this.finish_local_workspace_switch(workspace_id, client, window, cx);
+                    }
+                    Err(error) => this.fail_workspace_switch(
+                        format!("Could not prepare workspace cookies: {error}"),
+                        cx,
+                    ),
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn finish_local_workspace_switch(
+        &mut self,
+        workspace_id: String,
+        prepared_cookie_client: (Arc<CookieJar>, Client),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let provider_id = WorkspaceProviderId::Local(workspace_id.clone());
         let (workspace, mut request_tabs, workspace_writable, request_tabs_writable) = {
             let provider = match self.workspace_providers.provider(&provider_id) {
                 Ok(provider) => provider,
@@ -976,16 +1018,6 @@ impl ApiTester {
             return;
         }
 
-        let prepared_cookie_client = match self.cookie_client_for(&provider_id, cx) {
-            Ok(client) => client,
-            Err(error) => {
-                self.fail_workspace_switch(
-                    format!("Could not prepare workspace cookies: {error}"),
-                    cx,
-                );
-                return;
-            }
-        };
         let mut settings = self.settings.clone();
         settings.upstreams.select_local();
         if let Err(error) = self
@@ -1060,12 +1092,10 @@ impl ApiTester {
         self.settings_notice = None;
         let vault = self.credential_vault.clone();
         let client = self.upstream_client.clone();
-        let runtime = Arc::clone(&self.runtime);
         let task_upstream_id = upstream_id.clone();
         let preferred_workspace_id = workspace_id.or(profile.active_workspace_id.clone());
         let task = self.runtime.spawn(async move {
-            let credential = runtime
-                .spawn_blocking(move || vault.load_upstream(&task_upstream_id))
+            let credential = crate::io::run(move || vault.load_upstream(&task_upstream_id))
                 .await
                 .map_err(|error| format!("Could not open the saved session: {error}"))?
                 .map_err(|error| error.to_string())?
@@ -1143,12 +1173,10 @@ impl ApiTester {
         self.workspace_switch_status = WorkspaceSwitchStatus::Loading;
         let vault = self.credential_vault.clone();
         let client = self.upstream_client.clone();
-        let runtime = Arc::clone(&self.runtime);
         let task_upstream_id = upstream_id.clone();
         let mut summaries = profile.workspaces;
         let task = self.runtime.spawn(async move {
-            let credential = runtime
-                .spawn_blocking(move || vault.load_upstream(&task_upstream_id))
+            let credential = crate::io::run(move || vault.load_upstream(&task_upstream_id))
                 .await
                 .map_err(|error| format!("Could not open the saved session: {error}"))?
                 .map_err(|error| error.to_string())?
@@ -1389,10 +1417,11 @@ impl ApiTester {
         cx: &mut Context<Self>,
     ) -> Result<(Arc<CookieJar>, Client), RequestError> {
         let jar = match provider_id {
-            WorkspaceProviderId::Local(_) => Arc::new(CookieJar::open(
-                self.credential_vault.clone(),
-                provider_id.to_string(),
-            )),
+            WorkspaceProviderId::Local(_) => {
+                return Err(RequestError::Upstream(
+                    "Local cookie storage must be opened on the I/O worker.".into(),
+                ));
+            }
             WorkspaceProviderId::Upstream {
                 upstream_id,
                 workspace_id,

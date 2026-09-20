@@ -42,31 +42,27 @@ impl ApiTester {
         let upstream_id = target.upstream_id.clone();
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let vault = self.credential_vault.clone();
-        let runtime = Arc::clone(&self.runtime);
-        let task_runtime = Arc::clone(&runtime);
         let task_upstream_id = upstream_id.clone();
         let base_url = target.base_url;
         let task = self.runtime.spawn(async move {
-            let credential = match task_runtime
-                .spawn_blocking(move || vault.load_upstream(&task_upstream_id))
-                .await
-            {
-                Ok(Ok(Some(credential))) if credential.expires_at > Utc::now() => credential,
-                Ok(Ok(Some(_))) | Ok(Ok(None)) => {
-                    let _ = sender.send(RealtimeSignal::AuthenticationRequired);
-                    return;
-                }
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "could not open the saved real-time session");
-                    let _ = sender.send(RealtimeSignal::Unavailable);
-                    return;
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "could not load the saved real-time session");
-                    let _ = sender.send(RealtimeSignal::Unavailable);
-                    return;
-                }
-            };
+            let credential =
+                match crate::io::run(move || vault.load_upstream(&task_upstream_id)).await {
+                    Ok(Ok(Some(credential))) if credential.expires_at > Utc::now() => credential,
+                    Ok(Ok(Some(_))) | Ok(Ok(None)) => {
+                        let _ = sender.send(RealtimeSignal::AuthenticationRequired);
+                        return;
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "could not open the saved real-time session");
+                        let _ = sender.send(RealtimeSignal::Unavailable);
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not load the saved real-time session");
+                        let _ = sender.send(RealtimeSignal::Unavailable);
+                        return;
+                    }
+                };
             if let Err(error) = watch_upstream_changes(
                 &base_url,
                 credential.bearer_token(),
@@ -269,12 +265,9 @@ impl ApiTester {
         let task_workspace_id = preferred_workspace_id.clone();
         let vault = self.credential_vault.clone();
         let client = self.upstream_client.clone();
-        let runtime = Arc::clone(&self.runtime);
-        let task_runtime = Arc::clone(&runtime);
         let task = self.runtime.spawn(async move {
             tokio::time::sleep(REALTIME_REFRESH_DEBOUNCE).await;
-            let credential = task_runtime
-                .spawn_blocking(move || vault.load_upstream(&task_upstream_id))
+            let credential = crate::io::run(move || vault.load_upstream(&task_upstream_id))
                 .await
                 .map_err(|error| format!("Could not open the saved session: {error}"))?
                 .map_err(|error| error.to_string())?

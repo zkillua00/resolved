@@ -577,13 +577,11 @@ impl ApiTester {
         state.error = None;
         state.notice = None;
         let vault = self.credential_vault.clone();
-        let runtime = Arc::clone(&self.runtime);
         let client = self.upstream_client.clone();
         let task_upstream_id = upstream_id.clone();
         let task_scope = scope.clone();
         let task = self.runtime.spawn(async move {
-            let credential = runtime
-                .spawn_blocking(move || vault.load_upstream(&task_upstream_id))
+            let credential = crate::io::run(move || vault.load_upstream(&task_upstream_id))
                 .await
                 .map_err(|error| format!("Could not open the saved session: {error}"))?
                 .map_err(|error| error.to_string())?

@@ -807,12 +807,10 @@ impl ApiTester {
         self.server_management.status = ServerManagementStatus::Loading;
         self.ensure_proxy_workspace_inputs(window, cx);
         let vault = self.credential_vault.clone();
-        let runtime = Arc::clone(&self.runtime);
         let client = self.upstream_client.clone();
         let task_upstream_id = upstream_id.clone();
         let task = self.runtime.spawn(async move {
-            let credential = runtime
-                .spawn_blocking(move || vault.load_upstream(&task_upstream_id))
+            let credential = crate::io::run(move || vault.load_upstream(&task_upstream_id))
                 .await
                 .map_err(|error| format!("Could not open the saved session: {error}"))?
                 .map_err(|error| error.to_string())?
@@ -896,12 +894,10 @@ impl ApiTester {
         let upstream_id = profile.id.clone();
         self.server_management.status = ServerManagementStatus::Saving;
         let vault = self.credential_vault.clone();
-        let runtime = Arc::clone(&self.runtime);
         let client = self.upstream_client.clone();
         let task_upstream_id = upstream_id.clone();
         let task = self.runtime.spawn(async move {
-            let credential = runtime
-                .spawn_blocking(move || vault.load_upstream(&task_upstream_id))
+            let credential = crate::io::run(move || vault.load_upstream(&task_upstream_id))
                 .await
                 .map_err(|error| format!("Could not open the saved session: {error}"))?
                 .map_err(|error| error.to_string())?
@@ -1290,12 +1286,10 @@ impl ApiTester {
 
         let vault = self.credential_vault.clone();
         let client = self.upstream_client.clone();
-        let runtime = Arc::clone(&self.runtime);
         let upstream_id = target.upstream_id.clone();
         let selected_user_id = user_id.clone();
         let task = self.runtime.spawn(async move {
-            let credential = runtime
-                .spawn_blocking(move || vault.load_upstream(&upstream_id))
+            let credential = crate::io::run(move || vault.load_upstream(&upstream_id))
                 .await
                 .map_err(|error| format!("Could not open the saved session: {error}"))?
                 .map_err(|error| error.to_string())?

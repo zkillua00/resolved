@@ -2153,7 +2153,7 @@ impl ApiTester {
                     &resolved.sensitive_values,
                 );
                 self.history.push(history_entry);
-                self.persist_history();
+                self.persist_history(cx);
             }
             Err(error) => {
                 runtime.response = None;

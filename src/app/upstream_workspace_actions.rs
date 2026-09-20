@@ -374,12 +374,10 @@ impl ApiTester {
         self.workspace_switch_status = WorkspaceSwitchStatus::Loading;
         let vault = self.credential_vault.clone();
         let client = self.upstream_client.clone();
-        let runtime = Arc::clone(&self.runtime);
         let credential_upstream_id = target.upstream_id.clone();
         let task_target = target.clone();
         let task = self.runtime.spawn(async move {
-            let credential = runtime
-                .spawn_blocking(move || vault.load_upstream(&credential_upstream_id))
+            let credential = crate::io::run(move || vault.load_upstream(&credential_upstream_id))
                 .await
                 .map_err(|error| format!("Could not open the saved session: {error}"))?
                 .map_err(|error| error.to_string())?
@@ -734,12 +732,10 @@ impl ApiTester {
         self.workspace_switch_status = WorkspaceSwitchStatus::Loading;
         let vault = self.credential_vault.clone();
         let client = self.upstream_client.clone();
-        let runtime = Arc::clone(&self.runtime);
         let task_upstream_id = upstream_id.clone();
         let task_workspace_id = workspace_id.clone();
         let task = self.runtime.spawn(async move {
-            let credential = runtime
-                .spawn_blocking(move || vault.load_upstream(&task_upstream_id))
+            let credential = crate::io::run(move || vault.load_upstream(&task_upstream_id))
                 .await
                 .map_err(|error| format!("Could not open the saved session: {error}"))?
                 .map_err(|error| error.to_string())?

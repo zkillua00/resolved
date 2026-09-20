@@ -1,6 +1,30 @@
 use super::request_tab_reconciliation::reconcile_restored_request_tabs;
 use super::*;
 
+/// Fully loaded persistence state. Constructed on the I/O worker before any GPUI
+/// entities exist, including startup repairs and their confirmed save results.
+pub struct InitialAppState {
+    database_store: DatabaseStore,
+    workspace_providers: WorkspaceProviderRegistry,
+    local_workspaces: Vec<LocalWorkspace>,
+    credential_vault: CredentialVault,
+    cookie_jar: Arc<CookieJar>,
+    history: RequestHistory,
+    workspace: Workspace,
+    history_warning: Option<String>,
+    workspace_warning: Option<String>,
+    request_tabs: RequestTabs,
+    last_persisted_request_tabs: RequestTabs,
+    request_tabs_warning: Option<String>,
+    history_writable: bool,
+    workspace_writable: bool,
+    request_tabs_writable: bool,
+    settings: AppSettings,
+    settings_warning: Option<String>,
+    settings_writable: bool,
+    snippets: Vec<Snippet>,
+}
+
 /// Fatal-startup convenience: exit cleanly with a message instead of panicking
 /// when an invariant the app cannot run without fails to construct.
 fn startup_or_exit<T, E: std::fmt::Display>(what: &str, result: Result<T, E>) -> T {
@@ -31,14 +55,17 @@ fn embedded_typescript_service() -> Option<TypeScriptServiceHandle> {
 }
 
 impl ApiTester {
-    pub fn new(
+    pub fn load_initial_state() -> crate::io::IoTask<InitialAppState> {
+        crate::io::run(|| Self::load_initial_state_with_database_store(DatabaseStore::default()))
+    }
+
+    pub fn new_with_initial_state(
         base_key_bindings: Vec<gpui::KeyBinding>,
+        initial_state: InitialAppState,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let database_store = DatabaseStore::default();
-        let mut this =
-            Self::new_with_database_store(base_key_bindings, database_store.clone(), window, cx);
+        let mut this = Self::from_initial_state(base_key_bindings, initial_state, None, window, cx);
         if let Err(error) = this.sync_control_server(cx) {
             tracing::warn!(%error, "local agent control is unavailable");
             this.settings_warning = Some(format!("MCP could not start: {error}"));
@@ -46,6 +73,9 @@ impl ApiTester {
         this
     }
 
+    /// Tests may load fixture databases synchronously; production must await
+    /// `load_initial_state` before entering the GPUI constructor.
+    #[cfg(test)]
     pub(super) fn new_with_database_store(
         base_key_bindings: Vec<gpui::KeyBinding>,
         database_store: DatabaseStore,
@@ -62,12 +92,60 @@ impl ApiTester {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let execution_only = execution_runtime.is_some();
-        let database_initialization = if execution_only {
-            Ok(())
+        // MCP callers populate the runner from the owner's in-memory state.
+        // Never load or repair the owner's disk snapshots while creating a runner.
+        let initial_state = if execution_runtime.is_some() {
+            Self::execution_initial_state(database_store)
         } else {
-            database_store.initialize()
+            Self::load_initial_state_with_database_store(database_store)
         };
+        Self::from_initial_state(
+            base_key_bindings,
+            initial_state,
+            execution_runtime,
+            window,
+            cx,
+        )
+    }
+
+    fn execution_initial_state(database_store: DatabaseStore) -> InitialAppState {
+        let local_workspace = LocalWorkspace {
+            id: "local-default".to_owned(),
+            name: "My Workspace".to_owned(),
+        };
+        let workspace_providers =
+            WorkspaceProviderRegistry::local(database_store.clone(), local_workspace.id.clone());
+        let credential_vault = CredentialVault::new(database_store.clone());
+        let cookie_jar = Arc::new(CookieJar::uninitialized(
+            credential_vault.clone(),
+            workspace_providers.active_id().to_string(),
+        ));
+        let request_tabs = RequestTabs::default();
+        InitialAppState {
+            database_store,
+            workspace_providers,
+            local_workspaces: vec![local_workspace],
+            credential_vault,
+            cookie_jar,
+            history: RequestHistory::default(),
+            workspace: Workspace::default(),
+            history_warning: None,
+            workspace_warning: None,
+            last_persisted_request_tabs: request_tabs.clone(),
+            request_tabs,
+            request_tabs_warning: None,
+            history_writable: true,
+            workspace_writable: true,
+            request_tabs_writable: false,
+            settings: AppSettings::default(),
+            settings_warning: None,
+            settings_writable: false,
+            snippets: Vec::new(),
+        }
+    }
+
+    fn load_initial_state_with_database_store(database_store: DatabaseStore) -> InitialAppState {
+        let database_initialization = database_store.initialize();
         let (local_workspaces, active_local_workspace_id, local_catalog_warning) =
             match &database_initialization {
                 Ok(()) => match (
@@ -117,6 +195,227 @@ impl ApiTester {
             }
         }
         let credential_vault = CredentialVault::new(database_store.clone());
+        let (
+            history,
+            workspace,
+            history_warning,
+            workspace_warning,
+            request_tabs,
+            mut request_tabs_warning,
+            history_writable,
+            workspace_writable,
+            request_tabs_writable,
+            mut settings,
+            mut settings_warning,
+            settings_writable,
+        ) = match database_initialization {
+            Ok(()) => {
+                let import_warning = database_store
+                    .import_legacy_if_needed()
+                    .err()
+                    .map(|error| format!("Legacy JSON data could not be imported: {error}"));
+                let (history, history_warning, history_writable) =
+                    match database_store.load_history() {
+                        Ok(history) => (history, None, true),
+                        Err(error) => (
+                            RequestHistory::default(),
+                            Some(format!(
+                                "History could not be loaded and will not be overwritten: {error}"
+                            )),
+                            false,
+                        ),
+                    };
+                let (workspace, workspace_load_warning, workspace_writable) =
+                    match workspace_providers.active().load_workspace() {
+                        Ok(workspace) => (workspace, None, true),
+                        Err(error) => (
+                            Workspace::default(),
+                            Some(format!(
+                                "Workspace could not be loaded and will not be overwritten: {error}"
+                            )),
+                            false,
+                        ),
+                    };
+                let (request_tabs, request_tabs_warning, request_tabs_writable) =
+                    match workspace_providers.active().load_request_tabs() {
+                        Ok(request_tabs) => (request_tabs, None, true),
+                        Err(error) => (
+                            RequestTabs::default(),
+                            Some(format!(
+                                "Request tabs could not be restored and will not be overwritten: {error}"
+                            )),
+                            false,
+                        ),
+                    };
+                let (settings, settings_warning, settings_writable) =
+                    match database_store.load_app_settings() {
+                        Ok(settings) => (settings, None, true),
+                        Err(error) => (
+                            AppSettings::default(),
+                            Some(format!(
+                                "Settings could not be loaded and will not be overwritten: {error}"
+                            )),
+                            false,
+                        ),
+                    };
+                let workspace_warning = [
+                    workspace_load_warning,
+                    import_warning,
+                    local_catalog_warning,
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("\n");
+                let workspace_warning =
+                    (!workspace_warning.is_empty()).then_some(workspace_warning);
+                (
+                    history,
+                    workspace,
+                    history_warning,
+                    workspace_warning,
+                    request_tabs,
+                    request_tabs_warning,
+                    history_writable,
+                    workspace_writable,
+                    request_tabs_writable,
+                    settings,
+                    settings_warning,
+                    settings_writable,
+                )
+            }
+            Err(error) => (
+                RequestHistory::default(),
+                Workspace::default(),
+                Some(format!(
+                    "Database could not be opened and history will not be overwritten: {error}"
+                )),
+                Some(format!(
+                    "Database could not be opened and workspace will not be overwritten: {error}"
+                )),
+                RequestTabs::default(),
+                Some(format!(
+                    "Database could not be opened and request tabs will not be overwritten: {error}"
+                )),
+                false,
+                false,
+                false,
+                AppSettings::default(),
+                Some(format!(
+                    "Database could not be opened and settings will not be overwritten: {error}"
+                )),
+                false,
+            ),
+        };
+        let snippets = match database_store.load_snippets() {
+            Ok(snippets) => snippets,
+            Err(error) => {
+                tracing::warn!("snippets could not be loaded: {error}");
+                Vec::new()
+            }
+        };
+        if settings_writable {
+            let mut candidate = settings.clone();
+            let catalog_changed =
+                crate::theme::reconcile_catalog(&mut candidate.theme).unwrap_or(false);
+            let presets_changed = crate::theme::install_bundled_themes(&mut candidate.theme);
+            if catalog_changed || presets_changed {
+                match database_store.save_app_settings(&candidate) {
+                    Ok(()) => settings = candidate,
+                    Err(error) => {
+                        let warning = format!(
+                            "The active CSS theme could not be added to the theme library: {error}"
+                        );
+                        settings_warning = Some(match settings_warning {
+                            Some(existing) => format!("{existing}\n{warning}"),
+                            None => warning,
+                        });
+                    }
+                }
+            }
+        }
+        let mut last_persisted_request_tabs = request_tabs.clone();
+        let mut request_tabs = request_tabs;
+        let request_tabs_changed =
+            reconcile_restored_request_tabs(&mut request_tabs, &workspace, workspace_writable);
+        if request_tabs_changed && request_tabs_writable {
+            match workspace_providers
+                .active()
+                .save_request_tabs(&request_tabs)
+            {
+                Ok(()) => last_persisted_request_tabs = request_tabs.clone(),
+                Err(error) => {
+                    request_tabs_warning =
+                        Some(format!("Repaired request tabs could not be saved: {error}"));
+                }
+            }
+        }
+        let cookie_jar = Arc::new(CookieJar::open(
+            credential_vault.clone(),
+            workspace_providers.active_id().to_string(),
+        ));
+        InitialAppState {
+            database_store,
+            workspace_providers,
+            local_workspaces,
+            credential_vault,
+            cookie_jar,
+            history,
+            workspace,
+            history_warning,
+            workspace_warning,
+            request_tabs,
+            last_persisted_request_tabs,
+            request_tabs_warning,
+            history_writable,
+            workspace_writable,
+            request_tabs_writable,
+            settings,
+            settings_warning,
+            settings_writable,
+            snippets,
+        }
+    }
+
+    fn from_initial_state(
+        base_key_bindings: Vec<gpui::KeyBinding>,
+        initial_state: InitialAppState,
+        execution_runtime: Option<Arc<tokio::runtime::Runtime>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let execution_only = execution_runtime.is_some();
+        let InitialAppState {
+            database_store,
+            workspace_providers,
+            local_workspaces,
+            credential_vault,
+            cookie_jar,
+            history,
+            workspace,
+            history_warning,
+            workspace_warning,
+            request_tabs,
+            last_persisted_request_tabs,
+            request_tabs_warning,
+            history_writable,
+            workspace_writable,
+            request_tabs_writable,
+            settings,
+            mut settings_warning,
+            settings_writable,
+            snippets,
+        } = initial_state;
+        if let Some(mut changes) = cookie_jar.subscribe() {
+            cx.spawn(async move |this, cx| {
+                while changes.changed().await.is_ok() {
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         let snippet_menu_owner = cx.entity().downgrade();
         let script_variable_catalog = ScriptVariableCatalog::default().shared();
         let script_request_namespace =
@@ -292,163 +591,6 @@ impl ApiTester {
             Self::create_request_interchange_state(window, cx);
         let debug_overlay = cx.new(DebugOverlay::new);
 
-        let (
-            history,
-            workspace,
-            history_warning,
-            workspace_warning,
-            request_tabs,
-            mut request_tabs_warning,
-            history_writable,
-            workspace_writable,
-            request_tabs_writable,
-            mut settings,
-            mut settings_warning,
-            settings_writable,
-        ) = match database_initialization {
-            Ok(()) if execution_only => (
-                RequestHistory::default(),
-                Workspace::default(),
-                None,
-                None,
-                RequestTabs::default(),
-                None,
-                true,
-                true,
-                false,
-                AppSettings::default(),
-                None,
-                false,
-            ),
-            Ok(()) => {
-                let import_warning = database_store
-                    .import_legacy_if_needed()
-                    .err()
-                    .map(|error| format!("Legacy JSON data could not be imported: {error}"));
-                let (history, history_warning, history_writable) =
-                    match database_store.load_history() {
-                        Ok(history) => (history, None, true),
-                        Err(error) => (
-                            RequestHistory::default(),
-                            Some(format!(
-                                "History could not be loaded and will not be overwritten: {error}"
-                            )),
-                            false,
-                        ),
-                    };
-                let (workspace, workspace_load_warning, workspace_writable) =
-                    match workspace_providers.active().load_workspace() {
-                        Ok(workspace) => (workspace, None, true),
-                        Err(error) => (
-                            Workspace::default(),
-                            Some(format!(
-                                "Workspace could not be loaded and will not be overwritten: {error}"
-                            )),
-                            false,
-                        ),
-                    };
-                let (request_tabs, request_tabs_warning, request_tabs_writable) =
-                    match workspace_providers.active().load_request_tabs() {
-                        Ok(request_tabs) => (request_tabs, None, true),
-                        Err(error) => (
-                            RequestTabs::default(),
-                            Some(format!(
-                                "Request tabs could not be restored and will not be overwritten: {error}"
-                            )),
-                            false,
-                        ),
-                    };
-                let (settings, settings_warning, settings_writable) =
-                    match database_store.load_app_settings() {
-                        Ok(settings) => (settings, None, true),
-                        Err(error) => (
-                            AppSettings::default(),
-                            Some(format!(
-                                "Settings could not be loaded and will not be overwritten: {error}"
-                            )),
-                            false,
-                        ),
-                    };
-                let workspace_warning = [
-                    workspace_load_warning,
-                    import_warning,
-                    local_catalog_warning,
-                ]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join("\n");
-                let workspace_warning =
-                    (!workspace_warning.is_empty()).then_some(workspace_warning);
-                (
-                    history,
-                    workspace,
-                    history_warning,
-                    workspace_warning,
-                    request_tabs,
-                    request_tabs_warning,
-                    history_writable,
-                    workspace_writable,
-                    request_tabs_writable,
-                    settings,
-                    settings_warning,
-                    settings_writable,
-                )
-            }
-            Err(error) => (
-                RequestHistory::default(),
-                Workspace::default(),
-                Some(format!(
-                    "Database could not be opened and history will not be overwritten: {error}"
-                )),
-                Some(format!(
-                    "Database could not be opened and workspace will not be overwritten: {error}"
-                )),
-                RequestTabs::default(),
-                Some(format!(
-                    "Database could not be opened and request tabs will not be overwritten: {error}"
-                )),
-                false,
-                false,
-                false,
-                AppSettings::default(),
-                Some(format!(
-                    "Database could not be opened and settings will not be overwritten: {error}"
-                )),
-                false,
-            ),
-        };
-        let snippets = if execution_only {
-            Vec::new()
-        } else {
-            match database_store.load_snippets() {
-                Ok(snippets) => snippets,
-                Err(error) => {
-                    tracing::warn!("snippets could not be loaded: {error}");
-                    Vec::new()
-                }
-            }
-        };
-        if !execution_only && settings_writable {
-            let mut candidate = settings.clone();
-            let catalog_changed =
-                crate::theme::reconcile_catalog(&mut candidate.theme).unwrap_or(false);
-            let presets_changed = crate::theme::install_bundled_themes(&mut candidate.theme);
-            if catalog_changed || presets_changed {
-                match database_store.save_app_settings(&candidate) {
-                    Ok(()) => settings = candidate,
-                    Err(error) => {
-                        let warning = format!(
-                            "The active CSS theme could not be added to the theme library: {error}"
-                        );
-                        settings_warning = Some(match settings_warning {
-                            Some(existing) => format!("{existing}\n{warning}"),
-                            None => warning,
-                        });
-                    }
-                }
-            }
-        }
         let navigation_compact = settings.navigation_compact;
         debug_overlay.update(cx, |overlay, cx| {
             overlay.set_position(settings.metrics_position, cx);
@@ -492,22 +634,6 @@ impl ApiTester {
                     Some(existing) => format!("{existing}\n{warning}"),
                     None => warning,
                 });
-            }
-        }
-        let mut last_persisted_request_tabs = request_tabs.clone();
-        let mut request_tabs = request_tabs;
-        let request_tabs_changed =
-            reconcile_restored_request_tabs(&mut request_tabs, &workspace, workspace_writable);
-        if !execution_only && request_tabs_changed && request_tabs_writable {
-            match workspace_providers
-                .active()
-                .save_request_tabs(&request_tabs)
-            {
-                Ok(()) => last_persisted_request_tabs = request_tabs.clone(),
-                Err(error) => {
-                    request_tabs_warning =
-                        Some(format!("Repaired request tabs could not be saved: {error}"));
-                }
             }
         }
         let workspace_tabs = WorkspaceTabs::from_request_tabs(&request_tabs);
@@ -734,10 +860,6 @@ impl ApiTester {
             },
         );
 
-        let cookie_jar = Arc::new(CookieJar::open(
-            credential_vault.clone(),
-            workspace_providers.active_id().to_string(),
-        ));
         let client = startup_or_exit(
             "failed to create the HTTP client",
             build_client_with_cookie_jar(cookie_jar.clone()),
@@ -922,30 +1044,50 @@ impl ApiTester {
                 }
             },
         );
-        let quit_subscription = cx.on_app_quit(|this, cx| {
-            this.stop_realtime();
-            this.stop_websocket();
-            if this.mcp_execution_owner.is_none() {
+        let quit_subscription = (!execution_only).then(|| {
+            cx.on_app_quit(|this, cx| {
+                this.stop_realtime();
+                this.stop_websocket();
+                this.stop_mcp_runtime_operations(cx);
+                if this.sending {
+                    this.cancel_request(cx);
+                }
                 this.flush_local_state(cx);
-            }
-            async {}
+                let owner = cx.entity().downgrade();
+                let cx = cx.to_async();
+                async move {
+                    // Post-response cancellation may still enqueue history.
+                    // Wait for visible and isolated finalizers before sealing I/O.
+                    while owner
+                        .read_with(&cx, |this, cx| this.has_pending_execution(cx))
+                        .unwrap_or(false)
+                    {
+                        gpui::Timer::after(std::time::Duration::from_millis(10)).await;
+                    }
+                    if let Err(error) = crate::io::shutdown().await {
+                        tracing::error!("could not drain accepted I/O during shutdown: {error}");
+                    }
+                }
+            })
         });
         let shortcut_target = cx.entity().downgrade();
-        let shortcut_capture_subscription = cx.intercept_keystrokes(move |event, _, cx| {
-            let Some(shortcut_target) = shortcut_target.upgrade() else {
-                return;
-            };
-            if shortcut_target.read(cx).recording_shortcut_id.is_none() {
-                return;
-            }
-            cx.stop_propagation();
-            let keystroke = event.keystroke.clone();
-            shortcut_target.update(cx, |this, cx| {
-                this.capture_shortcut_keystroke(keystroke, cx);
-            });
+        let shortcut_capture_subscription = (!execution_only).then(|| {
+            cx.intercept_keystrokes(move |event, _, cx| {
+                let Some(shortcut_target) = shortcut_target.upgrade() else {
+                    return;
+                };
+                if shortcut_target.read(cx).recording_shortcut_id.is_none() {
+                    return;
+                }
+                cx.stop_propagation();
+                let keystroke = event.keystroke.clone();
+                shortcut_target.update(cx, |this, cx| {
+                    this.capture_shortcut_keystroke(keystroke, cx);
+                });
+            })
         });
         let quick_send_escape_target = cx.entity().downgrade();
-        let websocket_quick_send_escape_subscription =
+        let websocket_quick_send_escape_subscription = (!execution_only).then(|| {
             cx.intercept_keystrokes(move |event, _, cx| {
                 let Some(target) = quick_send_escape_target.upgrade() else {
                     return;
@@ -974,7 +1116,8 @@ impl ApiTester {
                     }
                     _ => {}
                 }
-            });
+            })
+        });
 
         let mut this = Self {
             method,
@@ -1057,6 +1200,7 @@ impl ApiTester {
             snippets,
             workspace,
             database_store,
+            persistence_io: Default::default(),
             _control_server: None,
             mcp_websocket_generation: 0,
             mcp_websockets: HashMap::new(),
@@ -1126,6 +1270,7 @@ impl ApiTester {
             upstream_login_generation: 0,
             upstream_login_abort_handle: None,
             theme_editors: HashMap::new(),
+            theme_editor_open_generation: 0,
             snippet_editor,
             snippet_apply_generation: 0,
             snippet_apply_cancellation: None,
@@ -1176,9 +1321,6 @@ impl ApiTester {
                 folder_name_subscription,
                 saved_request_name_subscription,
                 request_interchange_subscription,
-                quit_subscription,
-                shortcut_capture_subscription,
-                websocket_quick_send_escape_subscription,
                 upstream_login_password_subscription,
                 websocket_url_subscription,
                 websocket_headers_subscription,
@@ -1192,7 +1334,12 @@ impl ApiTester {
                 websocket_timeline_filter_subscription,
                 websocket_library_search_subscription,
                 websocket_quick_send_query_subscription,
-            ],
+            ]
+            .into_iter()
+            .chain(quit_subscription)
+            .chain(shortcut_capture_subscription)
+            .chain(websocket_quick_send_escape_subscription)
+            .collect(),
         };
         this.apply_code_editor_settings(window, cx);
         this.refresh_websocket_composer_inline_actions(cx);
@@ -1206,5 +1353,97 @@ impl ApiTester {
             this.restore_selected_upstream(window, cx);
         }
         this
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn isolated_initial_state_does_not_open_or_create_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("absent").join("app.sqlite3");
+        let snapshot = ApiTester::execution_initial_state(DatabaseStore::new(path));
+
+        assert!(!directory.path().join("absent").exists());
+        assert!(!snapshot.cookie_jar.enabled());
+        assert!(snapshot.cookie_jar.warning().is_some());
+        assert!(!snapshot.request_tabs_writable);
+        assert!(!snapshot.settings_writable);
+        assert!(snapshot.snippets.is_empty());
+        assert_eq!(snapshot.request_tabs, snapshot.last_persisted_request_tabs);
+    }
+
+    #[test]
+    fn initial_snapshot_loads_and_confirms_repairs_on_io_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DatabaseStore::new(directory.path().join("app.sqlite3"));
+        store.initialize().unwrap();
+        let mut settings = AppSettings::default();
+        settings.navigation_compact = true;
+        store.save_app_settings(&settings).unwrap();
+        let provider =
+            LocalWorkspaceProvider::new(store.clone(), store.active_local_workspace_id().unwrap());
+        let mut tabs = RequestTabs::new();
+        tabs.open_saved(
+            "Missing request",
+            RequestTemplate::default(),
+            crate::core::RequestTabAssociation::new(
+                None,
+                Some("missing-collection".to_owned()),
+                Some("missing-request".to_owned()),
+            ),
+        );
+        provider.save_request_tabs(&tabs).unwrap();
+        let calling_thread = std::thread::current().id();
+        let snapshot = futures::executor::block_on(crate::io::run(move || {
+            assert_ne!(calling_thread, std::thread::current().id());
+            ApiTester::load_initial_state_with_database_store(store)
+        }))
+        .unwrap();
+
+        assert!(snapshot.history_writable);
+        assert!(snapshot.workspace_writable);
+        assert!(snapshot.request_tabs_writable);
+        assert!(snapshot.settings_writable);
+        assert!(snapshot.settings.navigation_compact);
+        assert!(snapshot.request_tabs.active().is_detached());
+        assert!(snapshot.request_tabs_warning.is_none());
+        assert_eq!(snapshot.request_tabs, snapshot.last_persisted_request_tabs);
+        assert_eq!(snapshot.request_tabs, provider.load_request_tabs().unwrap());
+        assert_eq!(
+            snapshot.settings,
+            snapshot.database_store.load_app_settings().unwrap()
+        );
+    }
+
+    #[test]
+    fn initial_snapshot_preserves_corrupt_database_and_read_only_fallbacks() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("app.sqlite3");
+        let corrupt = b"this is not a SQLite database";
+        std::fs::write(&path, corrupt).unwrap();
+        let store = DatabaseStore::new(path.clone());
+        let snapshot = futures::executor::block_on(crate::io::run(move || {
+            ApiTester::load_initial_state_with_database_store(store)
+        }))
+        .unwrap();
+
+        assert!(!snapshot.history_writable);
+        assert!(!snapshot.workspace_writable);
+        assert!(!snapshot.request_tabs_writable);
+        assert!(!snapshot.settings_writable);
+        for warning in [
+            snapshot.history_warning,
+            snapshot.workspace_warning,
+            snapshot.request_tabs_warning,
+            snapshot.settings_warning,
+        ] {
+            assert!(warning.unwrap().contains("will not be overwritten"));
+        }
+        assert!(!snapshot.cookie_jar.enabled());
+        assert!(snapshot.snippets.is_empty());
+        assert_eq!(std::fs::read(path).unwrap(), corrupt);
     }
 }

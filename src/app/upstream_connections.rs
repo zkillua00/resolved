@@ -476,7 +476,7 @@ impl ApiTester {
         let persisted_candidate = candidate.clone();
         let stored_upstream_id = upstream_id.clone();
         self.upstream_login_status = UpstreamLoginStatus::SecuringSession;
-        let task = self.runtime.spawn_blocking(move || {
+        let task = crate::io::run(move || {
             vault.store_upstream_with_settings(
                 &persisted_candidate,
                 &stored_upstream_id,
@@ -1157,6 +1157,21 @@ mod tests {
 
     use super::*;
 
+    fn wait_for_workspace_switch(app: &Entity<ApiTester>, cx: &mut VisualTestContext) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            if cx.update(|_, cx| !app.read(cx).workspace_switch_status.busy()) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "workspace switch did not complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     fn mount_app(
         cx: &mut TestAppContext,
     ) -> (Entity<ApiTester>, &mut VisualTestContext, tempfile::TempDir) {
@@ -1291,7 +1306,7 @@ mod tests {
                 app.switch_to_local_workspace(local_workspace_id.clone(), window, cx);
             });
         });
-        cx.run_until_parked();
+        wait_for_workspace_switch(&app, cx);
 
         let (active_provider, notice) = cx.update(|_, cx| {
             let app = app.read(cx);
@@ -1333,7 +1348,7 @@ mod tests {
                 (default_id, second.id)
             })
         });
-        cx.run_until_parked();
+        wait_for_workspace_switch(&app, cx);
         cx.update(|_, cx| {
             let app = app.read(cx);
             assert_eq!(app.active_workspace_name(), "Second");
@@ -1353,7 +1368,7 @@ mod tests {
                 app.switch_to_local_workspace(default_id.clone(), window, cx);
             });
         });
-        cx.run_until_parked();
+        wait_for_workspace_switch(&app, cx);
         cx.update(|_, cx| {
             let app = app.read(cx);
             assert_eq!(
@@ -1372,7 +1387,7 @@ mod tests {
                 app.switch_to_local_workspace(second_id, window, cx);
             });
         });
-        cx.run_until_parked();
+        wait_for_workspace_switch(&app, cx);
         cx.update(|_, cx| {
             let app = app.read(cx);
             assert_eq!(app.url.read(cx).value(), "https://buffered.example.test");
@@ -1382,7 +1397,7 @@ mod tests {
     #[gpui::test]
     fn cookie_manager_mounts_and_corrupt_jar_does_not_prevent_switch(cx: &mut TestAppContext) {
         let (app, cx, _directory) = mount_app(cx);
-        cx.update(|window, cx| {
+        let second_id = cx.update(|window, cx| {
             app.update(cx, |app, cx| {
                 let second = app
                     .database_store
@@ -1393,13 +1408,19 @@ mod tests {
                     .unwrap();
                 app.local_workspaces.push(second.clone());
                 app.switch_to_local_workspace(second.id.clone(), window, cx);
+                second.id
+            })
+        });
+        wait_for_workspace_switch(&app, cx);
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
                 assert_eq!(
                     app.workspace_providers.active_id(),
-                    &WorkspaceProviderId::Local(second.id.clone())
+                    &WorkspaceProviderId::Local(second_id.clone())
                 );
                 assert_eq!(
                     app.database_store.active_local_workspace_id().unwrap(),
-                    second.id
+                    second_id
                 );
                 assert!(!app.cookie_jar.enabled());
                 assert!(app.cookie_jar.warning().is_some());

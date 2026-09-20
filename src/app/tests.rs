@@ -434,36 +434,53 @@ fn local_control_mutations_persist_and_redact_secret_values(cx: &mut gpui::TestA
             .contains("curl")
     );
 
-    let snippet = cx.update(|_, cx| {
-        app.update(cx, |app, cx| {
-            app.handle_control_call(
-                "create_snippet",
-                serde_json::json!({
-                    "name": "Authorization header",
-                    "category": "pre_request",
-                    "source": "Bearer {{token}}"
-                }),
-                cx,
-            )
-        })
+    let (control_sender, control_receiver) = tokio::sync::mpsc::unbounded_channel();
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| app.attach_control_plane(control_receiver, cx));
     });
+    let call_control =
+        |method: &str, params: serde_json::Value, cx: &mut gpui::VisualTestContext| {
+            let (call, response) = crate::control_server::ControlCall::for_test(method, params);
+            control_sender.send(call).expect("send control call");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                cx.run_until_parked();
+                match response.try_recv() {
+                    Ok(response) => return response,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        panic!("control response channel closed")
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "control call did not complete"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        };
+    let snippet = call_control(
+        "create_snippet",
+        serde_json::json!({
+            "name": "Authorization header",
+            "category": "pre_request",
+            "source": "Bearer {{token}}"
+        }),
+        cx,
+    );
     assert!(snippet.ok, "{:?}", snippet.error);
     let snippet = snippet.result.unwrap();
     let snippet_id = snippet["id"].as_str().unwrap().to_owned();
     let snippet_revision = snippet["updated_at"].as_str().unwrap().to_owned();
-    let saved_snippet = cx.update(|_, cx| {
-        app.update(cx, |app, cx| {
-            app.handle_control_call(
-                "save_snippet",
-                serde_json::json!({
-                    "snippet_id": snippet_id,
-                    "expected_updated_at": snippet_revision,
-                    "description": "MCP managed"
-                }),
-                cx,
-            )
-        })
-    });
+    let saved_snippet = call_control(
+        "save_snippet",
+        serde_json::json!({
+            "snippet_id": snippet_id,
+            "expected_updated_at": snippet_revision,
+            "description": "MCP managed"
+        }),
+        cx,
+    );
     assert!(saved_snippet.ok, "{:?}", saved_snippet.error);
     assert_eq!(saved_snippet.result.unwrap()["description"], "MCP managed");
 

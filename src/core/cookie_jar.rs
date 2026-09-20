@@ -3,21 +3,27 @@ use super::CredentialVault;
 use cookie_store::CookieStore as RfcCookieStore;
 use reqwest::{cookie::CookieStore as ReqwestCookieStore, header::HeaderValue};
 use serde::{Deserialize, Serialize};
-use std::{io::Cursor, sync::RwLock};
+use std::{
+    io::Cursor,
+    sync::{Arc, RwLock},
+};
 use url::Url;
 use zeroize::Zeroizing;
 
 pub struct CookieJar {
     id: String,
     vault: CredentialVault,
-    state: RwLock<State>,
+    state: Arc<RwLock<State>>,
+    local_status: tokio::sync::watch::Sender<CookieSyncStatus>,
     remote: Option<RemoteStorage>,
 }
+#[derive(Clone)]
 struct State {
     store: RfcCookieStore,
     enabled: bool,
     blocked: bool,
     warning: Option<String>,
+    generation: u64,
 }
 #[derive(Serialize, Deserialize)]
 struct Snapshot {
@@ -34,6 +40,26 @@ pub struct CookieEntry {
     pub header: String,
 }
 impl CookieJar {
+    /// A blocked, in-memory placeholder for isolated runners. No storage is read
+    /// or written; the owner must supply its loaded jar before execution.
+    pub fn uninitialized(vault: CredentialVault, id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            vault,
+            remote: None,
+            local_status: tokio::sync::watch::channel(CookieSyncStatus::default()).0,
+            state: Arc::new(RwLock::new(State {
+                store: RfcCookieStore::default(),
+                enabled: false,
+                blocked: true,
+                warning: Some("Cookie storage has not been initialized.".to_owned()),
+                generation: 0,
+            })),
+        }
+    }
+
+    /// Performs synchronous vault I/O. Production callers must open local jars
+    /// on the shared I/O worker, after previously enqueued cookie saves.
     pub fn load(vault: CredentialVault, id: impl Into<String>) -> Result<Self, String> {
         let id = id.into();
         let saved = vault.load_cookie_jar(&id).map_err(|e| e.to_string())?;
@@ -63,12 +89,14 @@ impl CookieJar {
             id,
             vault,
             remote: None,
-            state: RwLock::new(State {
+            local_status: tokio::sync::watch::channel(CookieSyncStatus::default()).0,
+            state: Arc::new(RwLock::new(State {
                 store,
                 enabled,
                 blocked: false,
                 warning: None,
-            }),
+                generation: 0,
+            })),
         })
     }
     /// Preserve unreadable storage until the user explicitly resets it. The app
@@ -79,20 +107,30 @@ impl CookieJar {
             id,
             vault,
             remote: None,
-            state: RwLock::new(State {
+            local_status: tokio::sync::watch::channel(CookieSyncStatus::default()).0,
+            state: Arc::new(RwLock::new(State {
                 store: RfcCookieStore::default(),
                 enabled: false,
                 blocked: true,
                 warning: Some(format!(
                     "Cookie storage could not be opened: {error}. Reset the jar to recover."
                 )),
-            }),
+                generation: 0,
+            })),
         })
     }
     fn persist(&self, store: &RfcCookieStore, enabled: bool) -> Result<(), String> {
         if let Some(remote) = &self.remote {
             return remote.enqueue(RemoteJob::Save(remote_snapshot(store, enabled), false));
         }
+        Self::persist_local(&self.vault, &self.id, store, enabled)
+    }
+    fn persist_local(
+        vault: &CredentialVault,
+        id: &str,
+        store: &RfcCookieStore,
+        enabled: bool,
+    ) -> Result<(), String> {
         let mut cookies = Zeroizing::new(Vec::new());
         cookie_store::serde::json::save_incl_expired_and_nonpersistent(store, &mut *cookies)
             .map_err(|e| e.to_string())?;
@@ -101,8 +139,8 @@ impl CookieJar {
             cookies: serde_json::from_slice(&cookies).map_err(|e| e.to_string())?,
         };
         let bytes = Zeroizing::new(serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?);
-        self.vault
-            .store_cookie_jar(&self.id, &bytes)
+        vault
+            .store_cookie_jar(id, &bytes)
             .map_err(|e| e.to_string())
     }
     pub fn enabled(&self) -> bool {
@@ -112,18 +150,14 @@ impl CookieJar {
             .enabled
     }
     pub fn has_unsaved_changes(&self) -> bool {
-        self.remote
-            .as_ref()
-            .is_some_and(|remote| remote.status.borrow().dirty)
+        self.status().borrow().dirty
     }
     pub fn syncing(&self) -> bool {
-        self.remote
-            .as_ref()
-            .is_some_and(|remote| remote.status.borrow().pending > 0)
+        self.status().borrow().pending > 0
     }
     pub fn warning(&self) -> Option<String> {
-        if let Some(remote) = &self.remote {
-            let status = remote.status.borrow();
+        {
+            let status = self.status().borrow();
             if let Some(error) = &status.error {
                 return Some(error.clone());
             }
@@ -134,37 +168,94 @@ impl CookieJar {
             .warning
             .clone()
     }
-    pub fn set_enabled(&self, enabled: bool) -> Result<(), String> {
-        let mut state = self
-            .state
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.blocked {
-            return Err("Reset the unreadable jar before enabling cookies.".into());
+    /// Account for an accepted management save before enqueueing it, so close
+    /// protection includes jobs which have not started yet. A failure remains
+    /// visible until a successful retry (or explicit reset) saves this jar.
+    /// This includes validation errors: the editor stays open for correction.
+    pub fn save_on_worker(
+        self: &Arc<Self>,
+        change: impl FnOnce(&Self) -> Result<(), String> + Send + 'static,
+    ) -> crate::io::IoTask<Result<(), String>> {
+        let jar = self.clone();
+        if self.is_remote() {
+            // RemoteStorage owns acknowledgment accounting. A worker enqueue
+            // reply must not clear a server-side failure or claim durability.
+            return crate::io::run(move || change(&jar));
         }
-        self.persist(&state.store, enabled)?;
-        state.enabled = enabled;
-        state.warning = None;
-        Ok(())
+        let mut completion = LocalSaveCompletion::new(self.local_status.clone());
+        crate::io::run(move || {
+            let result = change(&jar);
+            completion.finish(result.clone());
+            result
+        })
+    }
+    pub fn set_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.change(false, |state| {
+            if state.blocked {
+                return Err("Reset the unreadable jar before enabling cookies.".into());
+            }
+            state.enabled = enabled;
+            Ok(())
+        })
     }
     pub fn clear(&self) -> Result<(), String> {
-        let mut state = self
-            .state
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let store = RfcCookieStore::default();
-        if let Some(remote) = &self.remote {
-            remote.enqueue(RemoteJob::Save(
-                remote_snapshot(&store, state.enabled),
-                true,
-            ))?;
-        } else {
-            self.persist(&store, state.enabled)?;
+        self.change(true, |state| {
+            state.store = RfcCookieStore::default();
+            state.blocked = false;
+            Ok(())
+        })
+    }
+    /// Local callers run management on the shared I/O worker. Never hold the
+    /// state lock during disk access: render and network readers need it too.
+    /// Retry if a response updated cookies while the candidate was saved.
+    fn change(
+        &self,
+        reset: bool,
+        edit: impl Fn(&mut State) -> Result<(), String>,
+    ) -> Result<(), String> {
+        loop {
+            let mut candidate = self
+                .state
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let generation = candidate.generation;
+            edit(&mut candidate)?;
+            candidate.warning = None;
+            if let Some(remote) = &self.remote {
+                let mut state = self
+                    .state
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.generation != generation {
+                    continue;
+                }
+                remote.enqueue(RemoteJob::Save(
+                    remote_snapshot(&candidate.store, candidate.enabled),
+                    reset,
+                ))?;
+                candidate.generation += 1;
+                *state = candidate;
+                return Ok(());
+            }
+            self.persist(&candidate.store, candidate.enabled)?;
+            let mut state = self
+                .state
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.generation != generation {
+                continue;
+            }
+            candidate.generation += 1;
+            *state = candidate;
+            self.local_status.send_modify(|status| {
+                if status.pending == 0 {
+                    status.dirty = false;
+                }
+                status.error = None;
+            });
+            return Ok(());
         }
-        state.store = store;
-        state.blocked = false;
-        state.warning = None;
-        Ok(())
     }
     pub fn entries(&self) -> Vec<CookieEntry> {
         let state = self
@@ -217,36 +308,25 @@ impl CookieJar {
         if header.len() > 4096 || HeaderValue::from_str(header).is_err() {
             return Err("Enter a valid Set-Cookie value of at most 4096 bytes.".into());
         }
-        let mut state = self
-            .state
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.blocked {
-            return Err("Reset the unreadable jar before editing cookies.".into());
-        }
-        let mut store = state.store.clone();
-        if let Some(old) = old {
-            store.remove(&old.domain, &old.path, &old.name);
-        }
-        store
-            .parse(header, &url)
-            .map_err(|_| "The cookie is invalid, expired, or does not match its origin.")?;
-        self.persist(&store, state.enabled)?;
-        state.store = store;
-        state.warning = None;
-        Ok(())
+        self.change(false, |state| {
+            if state.blocked {
+                return Err("Reset the unreadable jar before editing cookies.".into());
+            }
+            if let Some(old) = old {
+                state.store.remove(&old.domain, &old.path, &old.name);
+            }
+            state
+                .store
+                .parse(header, &url)
+                .map_err(|_| "The cookie is invalid, expired, or does not match its origin.")?;
+            Ok(())
+        })
     }
     pub fn delete(&self, entry: &CookieEntry) -> Result<(), String> {
-        let mut state = self
-            .state
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut store = state.store.clone();
-        store.remove(&entry.domain, &entry.path, &entry.name);
-        self.persist(&store, state.enabled)?;
-        state.store = store;
-        state.warning = None;
-        Ok(())
+        self.change(false, |state| {
+            state.store.remove(&entry.domain, &entry.path, &entry.name);
+            Ok(())
+        })
     }
     #[cfg(test)]
     fn request_cookie_header(&self, url: &Url) -> Option<HeaderValue> {
@@ -281,10 +361,27 @@ impl ReqwestCookieStore for CookieJar {
             }
         }
         if changed {
-            state.warning = self
-                .persist(&state.store, state.enabled)
-                .err()
-                .map(|e| format!("Cookies changed in memory but could not be saved: {e}"));
+            state.generation += 1;
+            if self.remote.is_some() {
+                state.warning = self.persist(&state.store, state.enabled).err();
+            } else {
+                // Enqueue while the mutation lock is held to preserve ordering.
+                // Read the latest state on execution, not an old snapshot that
+                // could overwrite a later management transaction.
+                let shared = self.state.clone();
+                let mut completion = LocalSaveCompletion::new(self.local_status.clone());
+                let vault = self.vault.clone();
+                let id = self.id.clone();
+                drop(crate::io::run(move || {
+                    let snapshot = shared
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    let result =
+                        Self::persist_local(&vault, &id, &snapshot.store, snapshot.enabled);
+                    completion.finish(result);
+                }));
+            }
         }
     }
     fn cookies(&self, url: &Url) -> Option<HeaderValue> {
@@ -339,6 +436,180 @@ mod tests {
         let header = HeaderValue::from_static(value);
         let mut headers = std::iter::once(&header);
         ReqwestCookieStore::set_cookies(jar, &mut headers, url);
+        futures::executor::block_on(crate::io::flush()).unwrap();
+    }
+
+    #[test]
+    fn abandoned_cookie_save_reports_failure_instead_of_staying_pending() {
+        let (status, _) = tokio::sync::watch::channel(CookieSyncStatus::default());
+        {
+            let _completion = LocalSaveCompletion::new(status.clone());
+            assert_eq!(status.borrow().pending, 1);
+        }
+        let status = status.borrow();
+        assert_eq!(status.pending, 0);
+        assert!(status.dirty);
+        assert!(
+            status
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("could not be saved")
+        );
+    }
+
+    #[test]
+    fn management_submission_tracks_queued_failure_and_successful_recovery() {
+        let (_directory, _database, vault) = test_vault();
+        let jar = Arc::new(CookieJar::load(vault, "managed-status").unwrap());
+        let (release, blocked) = mpsc::channel();
+        let blocker = crate::io::run(move || blocked.recv().unwrap());
+        let failed = jar.save_on_worker(|_| Err("test save failure".into()));
+        assert!(jar.syncing());
+        assert!(jar.has_unsaved_changes());
+        release.send(()).unwrap();
+        futures::executor::block_on(blocker).unwrap();
+        assert!(futures::executor::block_on(failed).unwrap().is_err());
+        assert!(!jar.syncing());
+        assert!(jar.has_unsaved_changes());
+        assert!(jar.warning().unwrap().contains("test save failure"));
+
+        // A harmless successful save also acknowledges a failed validation
+        // attempt; recovery does not require deleting/resetting cookies.
+        futures::executor::block_on(jar.save_on_worker(|jar| jar.set_enabled(jar.enabled())))
+            .unwrap()
+            .unwrap();
+        assert!(!jar.syncing());
+        assert!(!jar.has_unsaved_changes());
+        assert!(jar.warning().is_none());
+    }
+
+    #[test]
+    fn panicking_management_job_reports_unsaved_status_and_allows_retry() {
+        let (_directory, _database, vault) = test_vault();
+        let jar = Arc::new(CookieJar::load(vault, "managed-panic").unwrap());
+        let task = jar.save_on_worker(|_| panic!("test management panic"));
+        assert!(futures::executor::block_on(task).is_err());
+        assert!(!jar.syncing());
+        assert!(jar.has_unsaved_changes());
+        assert!(jar.warning().unwrap().contains("did not complete"));
+        futures::executor::block_on(jar.save_on_worker(|jar| jar.clear()))
+            .unwrap()
+            .unwrap();
+        assert!(!jar.has_unsaved_changes());
+        assert!(jar.warning().is_none());
+    }
+
+    #[test]
+    fn response_cookies_are_immediate_but_persistence_is_ordered_on_worker() {
+        let (_directory, _database, vault) = test_vault();
+        let jar = Arc::new(CookieJar::load(vault.clone(), "queued").unwrap());
+        let url = Url::parse("https://example.com/").unwrap();
+        let (release, blocked) = mpsc::channel();
+        let blocker = crate::io::run(move || blocked.recv().unwrap());
+        let header = HeaderValue::from_static("session=response; Path=/");
+        ReqwestCookieStore::set_cookies(&*jar, &mut std::iter::once(&header), &url);
+        assert_eq!(jar.request_cookie_header(&url).unwrap(), "session=response");
+        assert!(jar.syncing());
+        assert!(jar.has_unsaved_changes());
+        assert!(vault.load_cookie_jar("queued").unwrap().is_none());
+        let edited = jar.clone();
+        let management = crate::io::run(move || {
+            edited.edit(None, "https://example.com/", "session=managed; Path=/")
+        });
+        release.send(()).unwrap();
+        futures::executor::block_on(blocker).unwrap();
+        futures::executor::block_on(management).unwrap().unwrap();
+        futures::executor::block_on(crate::io::flush()).unwrap();
+        assert!(!jar.syncing());
+        assert!(!jar.has_unsaved_changes());
+        assert_eq!(
+            CookieJar::load(vault, "queued")
+                .unwrap()
+                .request_cookie_header(&url)
+                .unwrap(),
+            "session=managed",
+        );
+    }
+
+    #[test]
+    fn management_does_not_hold_state_lock_during_storage_access() {
+        use super::super::secure_store::{CredentialVaultError, MasterKeyProvider};
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        };
+        struct BlockingKey {
+            entered: mpsc::Sender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+            blocked: AtomicBool,
+        }
+        impl MasterKeyProvider for BlockingKey {
+            fn load_or_create(&self) -> Result<Zeroizing<Vec<u8>>, CredentialVaultError> {
+                if !self.blocked.swap(true, Ordering::SeqCst) {
+                    self.entered.send(()).unwrap();
+                    self.release.lock().unwrap().recv().unwrap();
+                }
+                Ok(Zeroizing::new(vec![7; 32]))
+            }
+        }
+        let (_directory, database, _) = test_vault();
+        let (entered, ready) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let vault = CredentialVault::with_key_provider(
+            database,
+            Arc::new(BlockingKey {
+                entered,
+                release: Mutex::new(wait),
+                blocked: AtomicBool::new(false),
+            }),
+        );
+        let jar = Arc::new(CookieJar::load(vault.clone(), "nonblocking").unwrap());
+        let writer = jar.clone();
+        let task = crate::io::run(move || {
+            writer.edit(None, "https://example.com/", "manual=edited; Path=/")
+        });
+        ready
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let (read_done, read_result) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let entries = jar.entries();
+            let header = HeaderValue::from_static("network=response; Path=/");
+            ReqwestCookieStore::set_cookies(
+                &*jar,
+                &mut std::iter::once(&header),
+                &Url::parse("https://example.com/").unwrap(),
+            );
+            let _ = read_done.send(entries);
+        });
+        let readable = read_result
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .is_ok();
+        release.send(()).unwrap();
+        reader.join().unwrap();
+        futures::executor::block_on(task).unwrap().unwrap();
+        futures::executor::block_on(crate::io::flush()).unwrap();
+        assert!(
+            readable,
+            "cookie readers and response callbacks must not wait for storage"
+        );
+        let entries = CookieJar::load(vault, "nonblocking").unwrap().entries();
+        assert_eq!(
+            entries.len(),
+            2,
+            "the transaction must preserve concurrent response cookies"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name == "manual" && entry.value == "edited")
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name == "network" && entry.value == "response")
+        );
     }
 
     #[test]
@@ -457,6 +728,7 @@ mod tests {
         assert!(requests[1].contains("cookie: session=from-jar\r\n"));
         assert!(requests[2].contains("cookie: manual=explicit\r\n"));
         assert!(!requests[2].contains("session=from-jar"));
+        futures::executor::block_on(crate::io::flush()).unwrap();
     }
     #[test]
     fn management_and_disabled_state_survive_reload() {
@@ -721,6 +993,45 @@ pub struct CookieSyncStatus {
     pending: usize,
     error: Option<String>,
 }
+// A callback cannot await its I/O reply. Account for both normal completion
+// and a rejected/panicking job, so synchronization never remains pending forever.
+struct LocalSaveCompletion {
+    status: tokio::sync::watch::Sender<CookieSyncStatus>,
+    finished: bool,
+}
+impl LocalSaveCompletion {
+    fn new(status: tokio::sync::watch::Sender<CookieSyncStatus>) -> Self {
+        status.send_modify(|status| {
+            status.pending += 1;
+            status.dirty = true;
+        });
+        Self {
+            status,
+            finished: false,
+        }
+    }
+    fn finish(&mut self, result: Result<(), String>) {
+        self.status.send_modify(|status| {
+            status.pending = status.pending.saturating_sub(1);
+            if result.is_ok() && status.pending == 0 {
+                status.dirty = false;
+            }
+            status.error = result
+                .err()
+                .map(|error| format!("Cookie changes could not be saved: {error}"));
+        });
+        self.finished = true;
+    }
+}
+impl Drop for LocalSaveCompletion {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.finish(Err(
+                "The cookie storage worker did not complete its save.".into()
+            ));
+        }
+    }
+}
 enum RemoteJob {
     Load,
     Save(RemoteSnapshot, bool),
@@ -773,11 +1084,16 @@ fn remote_snapshot(store: &RfcCookieStore, enabled: bool) -> RemoteSnapshot {
     }
 }
 impl CookieJar {
+    fn status(&self) -> &tokio::sync::watch::Sender<CookieSyncStatus> {
+        self.remote
+            .as_ref()
+            .map_or(&self.local_status, |remote| &remote.status)
+    }
     pub fn is_remote(&self) -> bool {
         self.remote.is_some()
     }
     pub fn subscribe(&self) -> Option<tokio::sync::watch::Receiver<CookieSyncStatus>> {
-        self.remote.as_ref().map(|remote| remote.status.subscribe())
+        Some(self.status().subscribe())
     }
     pub fn reload(&self) -> Result<(), String> {
         self.remote
@@ -823,12 +1139,14 @@ impl CookieJar {
         let jar = std::sync::Arc::new(Self {
             id: format!("upstream:{upstream_id}:{workspace_id}"),
             vault: vault.clone(),
-            state: RwLock::new(State {
+            local_status: tokio::sync::watch::channel(CookieSyncStatus::default()).0,
+            state: Arc::new(RwLock::new(State {
                 store: RfcCookieStore::default(),
                 enabled: false,
                 blocked: true,
                 warning: None,
-            }),
+                generation: 0,
+            })),
             remote: Some(RemoteStorage {
                 jobs,
                 status: status.clone(),
@@ -836,7 +1154,6 @@ impl CookieJar {
         });
         let weak = std::sync::Arc::downgrade(&jar);
         jar.reload().expect("new cookie worker is connected");
-        let runtime_handle = runtime.clone();
         runtime.spawn(async move {
             let mut revision = 0;
             let mut pinned_credential = None;
@@ -853,9 +1170,8 @@ impl CookieJar {
                 if pinned_credential.is_none() {
                     let credentials = vault.clone();
                     let upstream = upstream_id.clone();
-                    if let Ok(Ok(Some(credential))) = runtime_handle
-                        .spawn_blocking(move || credentials.load_upstream(&upstream))
-                        .await
+                    if let Ok(Ok(Some(credential))) =
+                        crate::io::run(move || credentials.load_upstream(&upstream)).await
                     {
                         pinned_credential = Some(credential);
                     }
@@ -899,6 +1215,7 @@ impl CookieJar {
                             enabled: snapshot.enabled,
                             blocked: false,
                             warning: None,
+                            generation: state.generation + 1,
                         };
                     }
                     Ok(())

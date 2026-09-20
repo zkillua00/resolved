@@ -147,7 +147,6 @@ impl ApiTester {
         };
         let target = self.active_upstream_workspace();
         let vault = self.credential_vault.clone();
-        let runtime = self.runtime.clone();
         let client = self.upstream_execution_client.clone();
         async move {
             let collection_id = collection_id?;
@@ -161,8 +160,7 @@ impl ApiTester {
             }
             let target = target?;
             let upstream_id = target.upstream_id.clone();
-            let credential = runtime
-                .spawn_blocking(move || vault.load_upstream(&upstream_id))
+            let credential = crate::io::run(move || vault.load_upstream(&upstream_id))
                 .await
                 .map_err(|error| error.to_string())?
                 .map_err(|error| error.to_string())?
@@ -1237,7 +1235,6 @@ impl ApiTester {
         };
         let vault = self.credential_vault.clone();
         let client = self.upstream_client.clone();
-        let runtime = Arc::clone(&self.runtime);
         let upstream_id = target.upstream_id.clone();
         let success_message = if kind == "request" {
             "Allowed this proxy request.".to_owned()
@@ -1246,8 +1243,7 @@ impl ApiTester {
         };
         let task_value = value.clone();
         let task = self.runtime.spawn(async move {
-            let credential = runtime
-                .spawn_blocking(move || vault.load_upstream(&upstream_id))
+            let credential = crate::io::run(move || vault.load_upstream(&upstream_id))
                 .await
                 .map_err(|error| error.to_string())?
                 .map_err(|error| error.to_string())?
@@ -1460,10 +1456,8 @@ impl ApiTester {
         }
         let vault = self.credential_vault.clone();
         let client = self.upstream_client.clone();
-        let runtime = Arc::clone(&self.runtime);
         let task = self.runtime.spawn(async move {
-            let credential = runtime
-                .spawn_blocking(move || vault.load_upstream(&upstream_id))
+            let credential = crate::io::run(move || vault.load_upstream(&upstream_id))
                 .await
                 .map_err(|error| format!("Could not open the saved session: {error}"))?
                 .map_err(|error| error.to_string())?
@@ -1579,9 +1573,7 @@ impl crate::core::ChainExecutor for InlineChainRunner {
                 Some(target) => {
                     let vault = self.vault.clone();
                     let upstream_id = target.upstream_id.clone();
-                    let credential = self
-                        .runtime
-                        .spawn_blocking(move || vault.load_upstream(&upstream_id))
+                    let credential = crate::io::run(move || vault.load_upstream(&upstream_id))
                         .await
                         .map_err(|error| RequestError::TaskFailed(error.to_string()))?
                         .map_err(|error| RequestError::Upstream(error.to_string()))?

@@ -1,5 +1,13 @@
 use super::*;
 use crate::core::CookieEntry;
+use std::{cell::Cell, rc::Rc};
+
+#[derive(Clone, Copy, PartialEq)]
+enum CookieDialogState {
+    Editing,
+    Saving,
+    Closed,
+}
 
 impl ApiTester {
     pub(super) fn render_cookie_manager(
@@ -106,21 +114,15 @@ impl ApiTester {
                     .child(Button::new("delete-cookie").debug_selector(|| "delete-cookie".to_owned()).label("Delete").small().danger().outline()
                         .disabled(selected.is_none())
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            if let Some(entry) = delete_entry.as_ref() {
-                                if let Err(error) = delete_jar.delete(entry) {
-                                    window.push_notification(Notification::error(error), cx);
-                                } else { this.selected_cookie = None; }
-                                cx.notify();
+                            if let Some(entry) = delete_entry.clone() {
+                                this.save_cookie_change(delete_jar.clone(), move |jar| jar.delete(&entry), None, true, window, cx);
                             }
                         })))
                     .child(Button::new("toggle-cookies").debug_selector(|| "toggle-cookies".to_owned())
                         .label(if jar.enabled() { "Disable automatic cookies" } else { "Enable automatic cookies" })
                         .small().ghost()
-                        .on_click(cx.listener(move |_, _, window, cx| {
-                            if let Err(error) = toggle_jar.set_enabled(!toggle_jar.enabled()) {
-                                window.push_notification(Notification::error(error), cx);
-                            }
-                            cx.notify();
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.save_cookie_change(toggle_jar.clone(), |jar| jar.set_enabled(!jar.enabled()), None, false, window, cx);
                         })))
                     .when(jar.is_remote(), |view| view.child(Button::new("reload-cookies")
                         .label("Reload from server").small().ghost()
@@ -133,14 +135,20 @@ impl ApiTester {
                         .on_click(cx.listener(move |_, _, window, cx| {
                             let jar = reset_jar.clone();
                             let this = cx.entity().downgrade();
+                            let save_state = Rc::new(Cell::new(CookieDialogState::Editing));
                             window.open_dialog(cx, move |dialog, _, _| {
                                 let jar = jar.clone(); let this = this.clone();
+                                let save_state = save_state.clone();
+                                let closed = save_state.clone();
                                 dialog.title("Clear this workspace's cookies?").confirm()
                                     .child("This removes all saved cookies, including unreadable storage. Other workspaces are unaffected.")
+                                    .on_close(move |_, _, _| closed.set(CookieDialogState::Closed))
                                     .on_ok(move |_, window, cx| {
-                                        if let Err(error) = jar.clear() { window.push_notification(Notification::error(error), cx); return false; }
-                                        if let Some(this) = this.upgrade() { this.update(cx, |this, cx| { this.selected_cookie = None; cx.notify(); }); }
-                                        true
+                                        if save_state.get() != CookieDialogState::Editing { return false; }
+                                        if let Some(this) = this.upgrade() {
+                                            this.update(cx, |this, cx| this.save_cookie_change(jar.clone(), |jar| jar.clear(), Some(save_state.clone()), true, window, cx));
+                                        }
+                                        false
                                     })
                             });
                         }))))
@@ -192,8 +200,11 @@ impl ApiTester {
         });
         let jar = self.cookie_jar.clone();
         let this = cx.entity().downgrade();
+        let save_state = Rc::new(Cell::new(CookieDialogState::Editing));
         window.open_dialog(cx, move |dialog, _, cx| {
             let origin_ok = origin.clone(); let header_ok = header.clone(); let jar = jar.clone(); let old = entry.clone(); let this = this.clone();
+            let save_state = save_state.clone();
+            let closed = save_state.clone();
             dialog.title(if entry.is_some() { "View / edit cookie" } else { "Add cookie" }).w(px(640.)).confirm()
                 .button_props(DialogButtonProps::default().ok_text("Save cookie"))
                 .child(v_flex().gap_2().child("Origin URL").child(Input::new(&origin))
@@ -202,13 +213,66 @@ impl ApiTester {
                         .child(div().text_xs().text_color(cx.theme().muted_foreground)
                             .child("Including Path, Domain, Secure, HttpOnly and expiry attributes")))
                     .child(Input::new(&header)))
+                .on_close(move |_, _, _| closed.set(CookieDialogState::Closed))
                 .on_ok(move |_, window, cx| {
-                    let result = jar.edit(old.as_ref(), origin_ok.read(cx).value().as_ref(), header_ok.read(cx).value().as_ref());
-                    if let Err(error) = result { window.push_notification(Notification::error(error), cx); return false; }
-                    if let Some(this) = this.upgrade() { this.update(cx, |_, cx| cx.notify()); }
-                    true
+                    if save_state.get() != CookieDialogState::Editing { return false; }
+                    let origin = origin_ok.read(cx).value().to_string();
+                    let header = header_ok.read(cx).value().to_string();
+                    let old = old.clone();
+                    if let Some(this) = this.upgrade() {
+                        this.update(cx, |this, cx| this.save_cookie_change(jar.clone(), move |jar| jar.edit(old.as_ref(), &origin, &header), Some(save_state.clone()), false, window, cx));
+                    }
+                    false
                 })
         });
+    }
+
+    fn save_cookie_change(
+        &mut self,
+        jar: Arc<crate::core::CookieJar>,
+        change: impl FnOnce(&crate::core::CookieJar) -> Result<(), String> + Send + 'static,
+        dialog: Option<Rc<Cell<CookieDialogState>>>,
+        clear_selection: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(dialog) = &dialog {
+            dialog.set(CookieDialogState::Saving);
+        }
+        let task = jar.save_on_worker(change);
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(()) if Arc::ptr_eq(&this.cookie_jar, &jar) => {
+                        if clear_selection {
+                            this.selected_cookie = None;
+                        }
+                        if dialog
+                            .as_ref()
+                            .is_some_and(|dialog| dialog.get() == CookieDialogState::Saving)
+                        {
+                            window.close_dialog(cx);
+                        }
+                    }
+                    Ok(()) => {}
+                    Err(error) => {
+                        if let Some(dialog) = &dialog {
+                            if dialog.get() == CookieDialogState::Saving {
+                                dialog.set(CookieDialogState::Editing);
+                            }
+                        }
+                        window.push_notification(Notification::error(error), cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }
 
