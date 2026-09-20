@@ -474,4 +474,6 @@ mod parallel_http_tests;
 #[cfg(test)]
 mod parallel_websocket_tests;
 #[cfg(test)]
+mod tab_switch_tests;
+#[cfg(test)]
 mod tests;
