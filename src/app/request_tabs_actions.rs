@@ -473,7 +473,8 @@ impl ApiTester {
             });
             self.hide_preview(cx);
         }
-        self.refresh_variable_intelligence(cx);
+        // load_template_unchecked already refreshed the catalogs and input
+        // highlights. Restoring response-only state doesn't invalidate them.
         cx.notify();
     }
 

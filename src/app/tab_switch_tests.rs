@@ -1,6 +1,54 @@
 use super::*;
 use std::time::{Duration, Instant};
 
+#[gpui::test]
+fn restoring_a_tab_refreshes_intelligence_only_once(cx: &mut gpui::TestAppContext) {
+    let directory = tempfile::tempdir().unwrap();
+    let store = DatabaseStore::new(directory.path().join("restore.sqlite3"));
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        gpui_component::init(cx);
+        crate::theme::configure(cx);
+        let bindings = shortcuts::capture_base_key_bindings(cx);
+        let view = cx.new(|cx| ApiTester::new_with_database_store(bindings, store, window, cx));
+        let calls = Rc::new(std::cell::Cell::new(0));
+        let counted = calls.clone();
+        let editor = cx.new(|cx| {
+            CodeEditor::new(
+                CodeEditorConfig::default().diagnostic_provider(move |_| {
+                    counted.set(counted.get() + 1);
+                    Vec::new()
+                }),
+                window,
+                cx,
+            )
+        });
+        view.update(cx, |app, cx| {
+            app.pre_request_script = editor;
+            let mut template =
+                RequestTemplate::new(RequestDraft::new("GET", "https://example.test/"));
+            template.scripts.pre_request = "console.log('restored');".into();
+            app.request_tabs.open_unsaved(
+                "Restore target",
+                template,
+                RequestTabAssociation::default(),
+            );
+            calls.set(0);
+            app.restore_active_request_tab(window, cx);
+            // set_value refreshes once, and refreshing the workspace catalogs
+            // refreshes once. A second full intelligence pass is redundant.
+            assert_eq!(calls.get(), 2);
+            assert_eq!(
+                app.pre_request_script.read(cx).value(cx).as_ref(),
+                "console.log('restored');"
+            );
+            assert_eq!(app.url.read(cx).value().as_ref(), "https://example.test/");
+            assert!(!app.request_is_dirty());
+        });
+        gpui_component::Root::new(view, window, cx)
+    });
+    cx.run_until_parked();
+}
+
 /// An opt-in wall-clock diagnostic, not a timing assertion. GPUI's test context
 /// draws invalidated windows while flushing an update, so the enclosing update
 /// measures both effects and the CPU frame. Do not draw again manually.
@@ -22,6 +70,36 @@ fn no_response_tab_switch_timings(cx: &mut gpui::TestAppContext) {
     let app = app.unwrap();
     let tabs = cx.update(|window, cx| {
         app.update(cx, |app, cx| {
+            let request_count = std::env::var("RESOLVED_TAB_BENCH_REQUESTS")
+                .ok()
+                .map(|value| {
+                    value
+                        .parse::<usize>()
+                        .expect("request count must be a number")
+                })
+                .unwrap_or(0);
+            let mut workspace = Workspace::default();
+            for collection_index in 0..request_count.div_ceil(100) {
+                let collection_id = workspace
+                    .create_collection(format!("Collection {collection_index}"))
+                    .unwrap();
+                for index in
+                    collection_index * 100..((collection_index + 1) * 100).min(request_count)
+                {
+                    workspace
+                        .create_saved_request(
+                            &collection_id,
+                            format!("Request {index}"),
+                            RequestTemplate::new(RequestDraft::new(
+                                "GET",
+                                format!("https://example.test/saved/{index}"),
+                            )),
+                        )
+                        .unwrap();
+                }
+            }
+            app.replace_workspace(workspace);
+            eprintln!("fixture: {request_count} saved requests, four response-less tabs");
             let tabs = (0..4)
                 .map(|index| {
                     app.request_tabs.open_unsaved(

@@ -79,8 +79,12 @@ pub(super) fn new_editor(
         },
     )
     .detach();
-    cx.subscribe(&editor, |_, _, event: &InputEvent, cx| {
+    let decorations = intelligence.clone();
+    cx.subscribe(&editor, move |_, _, event: &InputEvent, cx| {
         if matches!(event, InputEvent::Change) {
+            // InputState clears semantic spans even when a buffer replacement
+            // ends up with identical text (including undo before the next render).
+            decorations.invalidate_decorations();
             cx.notify();
         }
     })
@@ -158,9 +162,7 @@ pub(super) fn refresh_targets(
             .iter()
             .map(|row| row.name.read(cx).value().trim().to_owned()),
     );
-    let resources = ReferenceCatalog::from_workspace(workspace);
-    let resources_changed = *intelligence.resources.borrow() != resources;
-    *intelligence.resources.borrow_mut() = resources;
+    let resources_changed = intelligence.refresh_resources(workspace);
     let body_changed = match body {
         Some((mode, language, body)) => intelligence.replace_body(
             documentation_body_mode(mode, language),
@@ -171,9 +173,18 @@ pub(super) fn refresh_targets(
     if intelligence.replace_targets(targets) || resources_changed || body_changed {
         editor.update(cx, |editor, cx| editor.refresh_diagnostics(cx));
     }
-    let source = editor.read(cx).value(cx).to_string();
+    let source = editor.read(cx).value(cx);
+    let syntax = &cx.theme().highlight_theme;
+    let styles = [
+        syntax.style("keyword").unwrap_or_default(),
+        syntax.style("variable").unwrap_or_default(),
+        reference_link_style(cx),
+    ];
+    if !intelligence.refresh_decorations(source.as_ref(), styles) {
+        return;
+    }
     let mut snapshot = ReferenceActions {
-        source: source.clone(),
+        source: source.to_string(),
         ..Default::default()
     };
     for reference in intelligence
@@ -208,13 +219,7 @@ pub(super) fn refresh_targets(
         .collect();
     *intelligence.reference_actions.borrow_mut() = snapshot;
     editor.update(cx, |editor, cx| editor.set_inline_actions(actions, cx));
-    let syntax = &cx.theme().highlight_theme;
-    let highlights = intelligence.semantic_highlights(
-        &source,
-        syntax.style("keyword").unwrap_or_default(),
-        syntax.style("variable").unwrap_or_default(),
-        reference_link_style(cx),
-    );
+    let highlights = intelligence.semantic_highlights(&source, styles[0], styles[1], styles[2]);
     editor.read(cx).input_state().update(cx, |input, cx| {
         input.set_semantic_highlights(highlights, cx);
     });

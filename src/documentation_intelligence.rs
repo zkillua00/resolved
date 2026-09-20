@@ -326,6 +326,91 @@ struct BodySnapshot {
     targets: BodyTargets,
 }
 
+/// Navigation-only source inputs for ReferenceCatalog's projection. Request
+/// payloads and environment values are deliberately excluded. Keep this in sync
+/// with ReferenceCatalog::from_workspace (which includes WebSocket requests).
+#[derive(PartialEq, Eq)]
+struct ResourceInput<S> {
+    kind: ResourceInputKind,
+    id: S,
+    name: S,
+    parent: Option<S>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResourceInputKind {
+    Collection,
+    Folder,
+    Request,
+    Environment,
+    Variable,
+}
+
+impl ResourceInput<String> {
+    fn borrowed(&self) -> ResourceInput<&str> {
+        ResourceInput {
+            kind: self.kind,
+            id: &self.id,
+            name: &self.name,
+            parent: self.parent.as_deref(),
+        }
+    }
+}
+
+fn resource_inputs(
+    workspace: &crate::core::Workspace,
+) -> impl Iterator<Item = ResourceInput<&str>> {
+    workspace
+        .collections
+        .iter()
+        .flat_map(|collection| {
+            std::iter::once(ResourceInput {
+                kind: ResourceInputKind::Collection,
+                id: collection.id.as_str(),
+                name: collection.name.as_str(),
+                parent: None,
+            })
+            .chain(collection.folders.iter().map(|folder| ResourceInput {
+                kind: ResourceInputKind::Folder,
+                id: folder.id.as_str(),
+                name: folder.name.as_str(),
+                parent: folder.parent_folder_id.as_deref(),
+            }))
+            .chain(collection.requests.iter().map(|request| ResourceInput {
+                kind: ResourceInputKind::Request,
+                id: request.id.as_str(),
+                name: request.name.as_str(),
+                parent: request.folder_id.as_deref(),
+            }))
+        })
+        .chain(
+            workspace
+                .active_environment()
+                .into_iter()
+                .flat_map(|environment| {
+                    std::iter::once(ResourceInput {
+                        kind: ResourceInputKind::Environment,
+                        id: environment.id.as_str(),
+                        name: "",
+                        parent: None,
+                    })
+                    .chain(environment.variables.iter().map(|variable| {
+                        ResourceInput {
+                            kind: ResourceInputKind::Variable,
+                            id: variable.id.as_str(),
+                            name: variable.key.as_str(),
+                            parent: None,
+                        }
+                    }))
+                }),
+        )
+}
+
+struct DecorationSnapshot {
+    source: String,
+    styles: [HighlightStyle; 3],
+}
+
 /// Each editor owns a separate handle, including secondary workspace panes.
 /// Parsing is cached by buffer contents; the index is disposable derived state.
 #[derive(Default)]
@@ -333,6 +418,8 @@ pub struct DocumentationIntelligence {
     targets: RefCell<Targets>,
     body: RefCell<BodySnapshot>,
     parsed: RefCell<(String, Index)>,
+    resource_inputs: RefCell<Option<Vec<ResourceInput<String>>>>,
+    decorations: RefCell<Option<DecorationSnapshot>>,
     pub resources: RefCell<ReferenceCatalog>,
     pub reference_actions: RefCell<ReferenceActions>,
 }
@@ -340,6 +427,70 @@ pub struct DocumentationIntelligence {
 impl DocumentationIntelligence {
     pub fn shared() -> Rc<Self> {
         Rc::new(Self::default())
+    }
+
+    /// Do not rely on the app's workspace_version: scoped workspaces and direct
+    /// assignments can bypass it. Comparing borrowed navigation inputs is linear
+    /// but allocation-free, avoiding namespace construction/sorting on each render.
+    pub fn refresh_resources(&self, workspace: &crate::core::Workspace) -> bool {
+        self.refresh_resources_with(workspace, ReferenceCatalog::from_workspace)
+    }
+
+    fn refresh_resources_with(
+        &self,
+        workspace: &crate::core::Workspace,
+        build: impl FnOnce(&crate::core::Workspace) -> ReferenceCatalog,
+    ) -> bool {
+        let mut inputs = self.resource_inputs.borrow_mut();
+        if inputs.as_ref().is_some_and(|previous| {
+            previous
+                .iter()
+                .map(ResourceInput::borrowed)
+                .eq(resource_inputs(workspace))
+        }) {
+            return false;
+        }
+        *inputs = Some(
+            resource_inputs(workspace)
+                .map(|input| ResourceInput {
+                    kind: input.kind,
+                    id: input.id.to_owned(),
+                    name: input.name.to_owned(),
+                    parent: input.parent.map(str::to_owned),
+                })
+                .collect(),
+        );
+        let resources = build(workspace);
+        let mut current = self.resources.borrow_mut();
+        if *current == resources {
+            return false;
+        }
+        *current = resources;
+        // Invalidates both link actions and styling; target/body changes only
+        // affect diagnostics, not these decorations.
+        self.invalidate_decorations();
+        true
+    }
+
+    pub fn invalidate_decorations(&self) {
+        self.decorations.borrow_mut().take();
+    }
+
+    /// Returns false before cloning source or scanning references on warm renders.
+    /// Style equality also catches theme changes without an app-global revision.
+    pub fn refresh_decorations(&self, source: &str, styles: [HighlightStyle; 3]) -> bool {
+        let mut previous = self.decorations.borrow_mut();
+        if previous
+            .as_ref()
+            .is_some_and(|previous| previous.source == source && previous.styles == styles)
+        {
+            return false;
+        }
+        *previous = Some(DecorationSnapshot {
+            source: source.to_owned(),
+            styles,
+        });
+        true
     }
 
     pub fn replace_targets(&self, targets: Targets) -> bool {
@@ -676,6 +827,162 @@ impl CompletionProvider for DocumentationIntelligence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unchanged_navigation_inputs_do_not_build_resources() {
+        let intelligence = DocumentationIntelligence::default();
+        let mut workspace = crate::documentation_references::tests::workspace_fixture();
+        let builds = std::cell::Cell::new(0);
+        let build = |workspace: &crate::core::Workspace| {
+            builds.set(builds.get() + 1);
+            ReferenceCatalog::from_workspace(workspace)
+        };
+        assert!(intelligence.refresh_resources_with(&workspace, build));
+        assert_eq!(builds.get(), 1);
+        for _ in 0..3 {
+            assert!(!intelligence.refresh_resources_with(&workspace, build));
+        }
+        // Equal source, not Workspace address or app mutation/version hooks.
+        assert!(!intelligence.refresh_resources_with(&workspace.clone(), build));
+        workspace.collections[0].requests[0].definition.request.url = "https://changed.test".into();
+        workspace.environments[0].variables[0].value = "changed value".into();
+        assert!(!intelligence.refresh_resources_with(&workspace, build));
+        assert_eq!(builds.get(), 1);
+
+        workspace.collections[0].requests[0].name = "Renamed".into();
+        assert!(intelligence.refresh_resources_with(&workspace, build));
+        assert_eq!(builds.get(), 2);
+        assert!(
+            intelligence
+                .resources
+                .borrow()
+                .0
+                .contains_key("Backend.Auth.Renamed")
+        );
+        assert!(
+            !intelligence
+                .resources
+                .borrow()
+                .0
+                .contains_key("Backend.Auth.Login")
+        );
+        assert!(!intelligence.refresh_resources_with(&workspace, build));
+        assert_eq!(builds.get(), 2);
+    }
+
+    #[test]
+    fn navigation_cache_tracks_scopes_moves_ambiguity_and_environment_identity() {
+        let intelligence = DocumentationIntelligence::default();
+        let original = crate::documentation_references::tests::workspace_fixture();
+        assert!(intelligence.refresh_resources(&original));
+
+        let mut changed = original.clone();
+        changed.collections[0].name = "Other".into();
+        assert!(intelligence.refresh_resources(&changed));
+        assert!(intelligence.refresh_resources(&original));
+
+        changed = original.clone();
+        changed.collections[0].folders[0].name = "Session".into();
+        assert!(intelligence.refresh_resources(&changed));
+        assert!(
+            intelligence
+                .resources
+                .borrow()
+                .0
+                .contains_key("Backend.Session.Login")
+        );
+        changed.collections[0].requests[0].folder_id = None;
+        assert!(intelligence.refresh_resources(&changed));
+        assert!(
+            intelligence
+                .resources
+                .borrow()
+                .0
+                .contains_key("Backend.Login")
+        );
+        changed.collections[0].requests[0].id = "replacement-request".into();
+        assert!(intelligence.refresh_resources(&changed));
+        let duplicate = changed.collections[0].requests[0].clone();
+        changed.collections[0].requests.push(duplicate);
+        assert!(intelligence.refresh_resources(&changed));
+        assert!(
+            !intelligence
+                .resources
+                .borrow()
+                .0
+                .contains_key("Backend.Login")
+        );
+
+        changed = original.clone();
+        assert!(intelligence.refresh_resources(&changed));
+        changed.environments[0].variables[0].id = "replacement-variable".into();
+        assert!(intelligence.refresh_resources(&changed));
+        changed.environments[0].variables[0].key = "renamed".into();
+        assert!(intelligence.refresh_resources(&changed));
+        changed.active_environment_id = None;
+        assert!(intelligence.refresh_resources(&changed));
+        assert!(
+            !intelligence
+                .resources
+                .borrow()
+                .0
+                .contains_key("api.environment[\"renamed\"]")
+        );
+        assert!(intelligence.refresh_resources(&original));
+        assert_eq!(
+            *intelligence.resources.borrow(),
+            ReferenceCatalog::from_workspace(&original)
+        );
+    }
+
+    #[test]
+    fn decoration_cache_tracks_source_theme_resources_and_explicit_invalidation() {
+        let intelligence = DocumentationIntelligence::default();
+        let mut workspace = crate::documentation_references::tests::workspace_fixture();
+        let styles = [HighlightStyle::default(); 3];
+        let source = "See @Ref(Backend.Auth.Login)";
+        assert!(intelligence.refresh_resources(&workspace));
+        assert!(intelligence.refresh_decorations(source, styles));
+        assert!(!intelligence.refresh_decorations(source, styles));
+        assert!(!intelligence.refresh_resources(&workspace));
+        assert!(!intelligence.refresh_decorations(source, styles));
+
+        assert!(intelligence.refresh_decorations("Changed", styles));
+        assert!(intelligence.refresh_decorations(source, styles));
+        let mut theme = styles;
+        theme[2].color = Some(gpui::rgb(0xff0000).into());
+        assert!(intelligence.refresh_decorations(source, theme));
+        assert!(!intelligence.refresh_decorations(source, theme));
+        intelligence.invalidate_decorations();
+        assert!(intelligence.refresh_decorations(source, theme));
+
+        workspace.collections[0].requests[0].name = "Renamed".into();
+        assert!(intelligence.refresh_resources(&workspace));
+        assert!(intelligence.refresh_decorations(source, theme));
+        assert_eq!(intelligence.diagnostics(source).len(), 1);
+        assert!(!intelligence.refresh_decorations(source, theme));
+    }
+
+    #[test]
+    fn target_and_body_changes_refresh_diagnostics_without_rebuilding_decorations() {
+        let intelligence = DocumentationIntelligence::default();
+        let source = "@param query.page Page number.\n@header Token Authorization.\n@body /id ID.";
+        let styles = [HighlightStyle::default(); 3];
+        intelligence.replace_body(Some(BodyMode::Json), "{}");
+        assert_eq!(intelligence.diagnostics(source).len(), 3);
+        assert!(intelligence.refresh_decorations(source, styles));
+        assert!(intelligence.replace_targets(Targets::new(
+            ["page".to_owned()].into_iter(),
+            ["Token".to_owned()].into_iter(),
+        )));
+        assert_eq!(intelligence.diagnostics(source).len(), 1);
+        assert!(intelligence.replace_body(Some(BodyMode::Json), r#"{"id":1}"#));
+        assert!(intelligence.diagnostics(source).is_empty());
+        assert!(!intelligence.replace_body(Some(BodyMode::Json), r#"{"id":1}"#));
+        assert!(!intelligence.refresh_decorations(source, styles));
+        assert!(intelligence.replace_body(Some(BodyMode::Json), "{}"));
+        assert_eq!(intelligence.diagnostics(source).len(), 1);
+    }
 
     #[test]
     fn body_alternatives_match_each_shape_and_only_report_when_all_missing() {

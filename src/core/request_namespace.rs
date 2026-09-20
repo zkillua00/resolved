@@ -13,7 +13,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use super::workspace::{Collection, CollectionFolder, SavedRequest, Workspace};
 
@@ -238,8 +238,10 @@ pub enum NodeStatus {
 /// The single logical model for the request-reference namespace.
 #[derive(Clone, Debug, Default)]
 pub struct RequestNamespaceCatalog {
-    roots: Vec<RequestNamespaceNode>,
-    notices: Vec<String>,
+    // Catalogs are immutable after construction. Diagnostics and execution
+    // snapshots share their trees rather than cloning every saved request.
+    roots: Arc<[RequestNamespaceNode]>,
+    notices: Arc<[String]>,
 }
 
 impl RequestNamespaceCatalog {
@@ -255,12 +257,13 @@ impl RequestNamespaceCatalog {
     }
 
     fn build(workspace: &Workspace, include_websockets: bool) -> Self {
-        let mut catalog = Self::default();
+        let mut roots = Vec::<RequestNamespaceNode>::new();
+        let mut notices = Vec::new();
         let mut root_names: BTreeMap<String, usize> = BTreeMap::new();
 
         for collection in &workspace.collections {
             if RESERVED_GLOBALS.contains(&collection.name.as_str()) {
-                catalog.notices.push(format!(
+                notices.push(format!(
                     "Collection \"{}\" is not exposed as a script request namespace because its name collides with a built-in scripting global.",
                     collection.name
                 ));
@@ -268,25 +271,28 @@ impl RequestNamespaceCatalog {
                 continue;
             }
 
-            let root = build_collection_namespace(collection, &mut catalog.notices, include_websockets);
+            let root = build_collection_namespace(collection, &mut notices, include_websockets);
 
             if let Some(&first_index) = root_names.get(&collection.name) {
-                catalog.notices.push(format!(
+                notices.push(format!(
                     "Multiple collections are named \"{}\"; only the first is exposed as a request namespace.",
                     collection.name
                 ));
-                if let Some(first) = catalog.roots.get_mut(first_index) {
+                if let Some(first) = roots.get_mut(first_index) {
                     first.status = NodeStatus::DuplicateRoot;
                 }
                 let mut suppressed = root;
                 suppressed.status = NodeStatus::DuplicateRoot;
-                catalog.roots.push(suppressed);
+                roots.push(suppressed);
             } else {
-                root_names.insert(collection.name.clone(), catalog.roots.len());
-                catalog.roots.push(root);
+                root_names.insert(collection.name.clone(), roots.len());
+                roots.push(root);
             }
         }
-        catalog
+        Self {
+            roots: roots.into(),
+            notices: notices.into(),
+        }
     }
 
     /// Root nodes exposed to scripts (each becomes a global).
@@ -437,14 +443,21 @@ fn build_collection_namespace(
 
     for folder in folders {
         children.push(build_folder_namespace(
-            collection, folder, &base_path, notices, include_websockets,
+            collection,
+            folder,
+            &base_path,
+            notices,
+            include_websockets,
         ));
     }
 
     let mut requests = collection
         .requests
         .iter()
-        .filter(|request| request.folder_id.is_none() && (include_websockets || !request.definition.is_websocket()))
+        .filter(|request| {
+            request.folder_id.is_none()
+                && (include_websockets || !request.definition.is_websocket())
+        })
         .collect::<Vec<_>>();
     requests.sort_by(|a, b| a.name.cmp(&b.name));
     for request in requests {
@@ -482,7 +495,11 @@ fn build_folder_namespace(
     child_folders.sort_by(|a, b| a.name.cmp(&b.name));
     for child in child_folders {
         children.push(build_folder_namespace(
-            collection, child, &own_path, notices, include_websockets,
+            collection,
+            child,
+            &own_path,
+            notices,
+            include_websockets,
         ));
     }
 
@@ -622,6 +639,23 @@ pub enum RuntimeNodeKind {
 mod tests {
     use super::*;
     use crate::core::{request::RequestDraft, template::RequestTemplate};
+
+    #[test]
+    fn snapshots_share_immutable_trees_and_survive_workspace_changes() {
+        let mut workspace = sample_workspace();
+        let catalog = RequestNamespaceCatalog::from_workspace(&workspace);
+        let snapshot = catalog.clone();
+        assert!(Arc::ptr_eq(&catalog.roots, &snapshot.roots));
+        assert!(Arc::ptr_eq(&catalog.notices, &snapshot.notices));
+        let original = snapshot.request_by_path("ChatAdmin.Login").unwrap().clone();
+
+        workspace.collections[0].name = "Renamed".into();
+        let updated = RequestNamespaceCatalog::from_workspace(&workspace);
+        assert!(!Arc::ptr_eq(&catalog.roots, &updated.roots));
+        assert_eq!(snapshot.request_by_path("ChatAdmin.Login"), Some(&original));
+        assert!(updated.request_by_path("ChatAdmin.Login").is_none());
+        assert!(updated.request_by_path("Renamed.Login").is_some());
+    }
 
     fn template(url: &str, method: &str) -> RequestTemplate {
         RequestTemplate {
