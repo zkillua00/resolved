@@ -535,7 +535,8 @@ impl ApiTester {
         if self.request_tabs.activate(&tab_id) {
             self.expand_request_tab_group_for(&tab_id);
             self.restore_active_request_tab(window, cx);
-            self.persist_request_tabs_now(cx);
+            // Coalesce selection changes instead of writing to disk on every tab switch.
+            self.schedule_request_tabs_persist(cx);
         }
     }
 
