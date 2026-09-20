@@ -1,0 +1,5 @@
+# Shell scripts need Unix line endings for their shebangs on every platform.
+*.sh text eol=lf
+
+# Vendored patches apply to LF sources and are hashed by the prepare scripts.
+*.patch text eol=lf
