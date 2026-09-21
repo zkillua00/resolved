@@ -27,6 +27,9 @@ mod workspace_provider;
 #[cfg(test)]
 mod mvp_smoke_test;
 
+#[cfg(test)]
+mod gateway_fidelity_test;
+
 pub use chain::{
     ChainExecutor, ChainFailure, ChainLimits, ChainRequestExecution, ChainRun,
     run_chain_with_executor,
