@@ -396,6 +396,7 @@ pub struct ApiTester {
     recording_shortcut_id: Option<ShortcutId>,
     settings_notice: Option<String>,
     update_status: about::UpdateStatus,
+    about_page_request: u64,
     mcp_open_tool_groups: HashSet<String>,
     server_management: server_management::ServerManagementState,
     server_management_generation: u64,

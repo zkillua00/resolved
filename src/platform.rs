@@ -19,8 +19,8 @@ use wry::{WebView, WebViewBuilder};
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use crate::shortcuts::{
-    CloseRequestTab, NewRequestTab, QuitApp, SaveRequest, SaveRequestAs, SendOrCancelRequest,
-    ShowSettings,
+    CheckForUpdates, CloseRequestTab, NewRequestTab, QuitApp, SaveRequest, SaveRequestAs,
+    SendOrCancelRequest, ShowAboutResolved, ShowSettings,
 };
 
 #[cfg(target_os = "linux")]
@@ -147,6 +147,9 @@ fn configure_desktop_menus(cx: &mut App) {
         Menu {
             name: "File".into(),
             items: vec![
+                MenuItem::action("About Resolved", ShowAboutResolved),
+                MenuItem::action("Check for updates", CheckForUpdates),
+                MenuItem::separator(),
                 MenuItem::action("Settings…", ShowSettings),
                 MenuItem::separator(),
                 MenuItem::action("New Request Tab", NewRequestTab),

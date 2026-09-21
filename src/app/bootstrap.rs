@@ -1251,6 +1251,7 @@ impl ApiTester {
             recording_shortcut_id: None,
             settings_notice: None,
             update_status: about::UpdateStatus::default(),
+            about_page_request: 0,
             mcp_open_tool_groups: crate::control_tools::CONTROL_TOOL_GROUPS
                 .iter()
                 .map(|group| group.id.to_owned())

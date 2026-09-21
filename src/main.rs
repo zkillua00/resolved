@@ -38,9 +38,9 @@ use brand::{ICON_ASSET_PATH, PRODUCT_NAME};
 use core::DatabaseStore;
 use instance_guard::InstanceGuard;
 use shortcuts::{
-    ActivateNextRequestTab, ActivatePreviousRequestTab, CloseRequestTab, FocusRequestUrl,
+    ActivateNextRequestTab, ActivatePreviousRequestTab, CheckForUpdates, CloseRequestTab, FocusRequestUrl,
     FormatRawBody, NewRequestTab, QuickSendWebSocketTemplate, QuitApp, SaveRequest, SaveRequestAs,
-    SendOrCancelRequest, ShowCollections, ShowEnvironments, ShowHistory, ShowSettings,
+    SendOrCancelRequest, ShowAboutResolved, ShowCollections, ShowEnvironments, ShowHistory, ShowSettings,
     ToggleMetrics, ToggleNavigation, ZoomEditorIn, ZoomEditorOut, ZoomEditorReset, ZoomUiIn,
     ZoomUiOut, ZoomUiReset,
 };
@@ -144,6 +144,8 @@ fn register_app_action_handlers(view: &Entity<ApiTester>, cx: &mut App) {
     register!(ShowCollections, on_show_collections);
     register!(ShowEnvironments, on_show_environments);
     register!(ShowHistory, on_show_history);
+    register!(ShowAboutResolved, on_show_about_resolved);
+    register!(CheckForUpdates, on_check_for_updates);
     register!(ShowSettings, on_show_settings);
     register!(ToggleNavigation, on_toggle_navigation);
     register!(ToggleMetrics, on_toggle_metrics);

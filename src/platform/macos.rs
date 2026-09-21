@@ -7,8 +7,8 @@ use super::{PlatformBackend, TitleBarIntegration};
 use crate::{
     brand::PRODUCT_NAME,
     shortcuts::{
-        CloseRequestTab, NewRequestTab, QuitApp, SaveRequest, SaveRequestAs, SendOrCancelRequest,
-        ShowSettings,
+        CheckForUpdates, CloseRequestTab, NewRequestTab, QuitApp, SaveRequest, SaveRequestAs,
+        SendOrCancelRequest, ShowAboutResolved, ShowSettings,
     },
 };
 
@@ -33,6 +33,9 @@ impl PlatformBackend for MacOsBackend {
             Menu {
                 name: PRODUCT_NAME.into(),
                 items: vec![
+                    MenuItem::action("About Resolved", ShowAboutResolved),
+                    MenuItem::action("Check for updates", CheckForUpdates),
+                    MenuItem::separator(),
                     MenuItem::action("Settings…", ShowSettings),
                     MenuItem::separator(),
                     MenuItem::os_submenu("Services", SystemMenuType::Services),

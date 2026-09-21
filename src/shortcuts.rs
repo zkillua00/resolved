@@ -31,6 +31,8 @@ actions!(
         ShowCollections,
         ShowEnvironments,
         ShowHistory,
+        ShowAboutResolved,
+        CheckForUpdates,
         ShowSettings,
         ToggleNavigation,
         ToggleMetrics,

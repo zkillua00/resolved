@@ -34,6 +34,7 @@ $pinned = @(
             "$projectDir\patches\gpui-component-0.5.1-code-folding.patch",
             "$projectDir\patches\gpui-component-0.5.1-indent-guide-layout.patch",
             "$projectDir\patches\gpui-component-0.5.1-responsive-settings-sidebar.patch",
+            "$projectDir\patches\gpui-component-0.5.1-settings-navigation.patch",
             "$projectDir\patches\gpui-component-0.5.1-inline-actions.patch",
             "$projectDir\patches\gpui-component-0.5.1-public-input-menu-state.patch",
             "$projectDir\patches\gpui-component-0.5.1-completion-edge-placement.patch",

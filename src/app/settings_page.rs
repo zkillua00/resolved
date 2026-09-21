@@ -219,6 +219,9 @@ impl ApiTester {
                     SettingsView::new("api-tester-settings")
                         .sidebar_width(SETTINGS_SIDEBAR_WIDTH.to_pixels(cx.theme().font_size))
                         .content_top_inset(message_inset)
+                        .when(self.about_page_request > 0, |settings| {
+                            settings.navigate_to_page("About Resolved", self.about_page_request)
+                        })
                         .with_group_variant(GroupBoxVariant::Outline)
                         .pages(pages),
                 ),

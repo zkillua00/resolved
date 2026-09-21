@@ -113,6 +113,26 @@ async fn check_for_updates() -> Result<ReleaseCheck, String> {
 }
 
 impl ApiTester {
+    pub(crate) fn on_show_about_resolved(
+        &mut self,
+        _: &shortcuts::ShowAboutResolved,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.about_page_request = self.about_page_request.wrapping_add(1).max(1);
+        self.open_workspace_tool_tab(WorkspaceToolTab::Settings, window, cx);
+    }
+
+    pub(crate) fn on_check_for_updates(
+        &mut self,
+        _: &shortcuts::CheckForUpdates,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_show_about_resolved(&shortcuts::ShowAboutResolved, window, cx);
+        self.start_update_check(cx);
+    }
+
     pub(super) fn about_settings_page(&self, cx: &mut Context<Self>) -> SettingPage {
         let this = cx.entity().downgrade();
         SettingPage::new("About Resolved")
@@ -148,6 +168,7 @@ impl ApiTester {
                             h_flex()
                                 .gap_2()
                                 .min_w_0()
+                                .pb_px()
                                 .child(
                                     div()
                                         .min_w_0()
@@ -156,26 +177,21 @@ impl ApiTester {
                                         .child(env!("RESOLVED_BUILD_COMMIT")),
                                 )
                                 .child(
-                                    div()
-                                        .flex_shrink_0()
+                                    Button::new("about-copy-commit")
                                         .debug_selector(|| "about-copy-commit".to_owned())
-                                        .child(
-                                            Button::new("about-copy-commit")
-                                                .icon(IconName::Copy)
-                                                .ghost()
-                                                .small()
-                                                .tooltip("Copy build commit hash")
-                                                .disabled(env!("RESOLVED_BUILD_COMMIT") == "Unknown")
-                                                .on_click(|_, _, cx| {
-                                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                                        env!("RESOLVED_BUILD_COMMIT").to_owned(),
-                                                    ));
-                                                }),
-                                        ),
+                                        .label("Copy")
+                                        .outline()
+                                        .small()
+                                        .tooltip("Copy build commit hash")
+                                        .disabled(env!("RESOLVED_BUILD_COMMIT") == "Unknown")
+                                        .on_click(|_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                env!("RESOLVED_BUILD_COMMIT").to_owned(),
+                                            ));
+                                        }),
                                 )
                         }),
-                    )
-                    .layout(gpui::Axis::Vertical),
+                    ),
                 ]),
             )
             .group(
@@ -204,7 +220,13 @@ impl ApiTester {
                                         format!("Could not check for updates: {error}")
                                     }
                                 };
-                                let mut content = v_flex().gap_2().child(div().text_sm().child(message));
+                                let mut content = v_flex()
+                                    .debug_selector(|| "about-updates-content".to_owned())
+                                    // Keep the outline inside the Settings field's overflow
+                                    // clip when nested layout rounds fractional pixel heights.
+                                    .pb_px()
+                                    .gap_2()
+                                    .child(div().text_sm().child(message));
                                 if let UpdateStatus::Checked(release) = &state.update_status
                                     && release.newer
                                 {
@@ -234,6 +256,7 @@ impl ApiTester {
                                             .debug_selector(|| "about-check-updates".to_owned())
                                             .child(
                                                 Button::new("about-check-updates")
+                                                    .debug_selector(|| "about-check-updates-button".to_owned())
                                                     .label("Check for updates")
                                                     .outline()
                                                     .disabled(checking)
@@ -396,6 +419,7 @@ mod tests {
     impl Render for SettingsHarness {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             gpui_component::setting::Settings::new("about-settings-test")
+                .with_group_variant(gpui_component::group_box::GroupBoxVariant::Outline)
                 .pages([self.0.update(cx, |app, cx| app.about_settings_page(cx))])
         }
     }
@@ -407,6 +431,7 @@ mod tests {
         store.initialize().unwrap();
         let release = feed("0.12.2").check("0.12.1", "macos", "aarch64").unwrap();
         let download_url = release.downloads[0].url.clone();
+        let mut about_app = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
             gpui_component::init(cx);
             let bindings = shortcuts::capture_base_key_bindings(cx);
@@ -416,6 +441,7 @@ mod tests {
                 app.update_status = UpdateStatus::Checked(release);
                 app
             });
+            about_app = Some(app.clone());
             let view = cx.new(|_| SettingsHarness(app));
             Root::new(view, window, cx)
         });
@@ -426,6 +452,13 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("about-version").is_some());
         assert!(cx.debug_bounds("about-check-updates").is_some());
+        let content = cx.debug_bounds("about-updates-content").unwrap();
+        let button = cx.debug_bounds("about-check-updates-button").unwrap();
+        let row = cx.debug_bounds("about-check-updates").unwrap();
+        assert!(
+            button.is_contained_within(&content) && button.is_contained_within(&row),
+            "button {button:?} must fit its row {row:?} and field {content:?}"
+        );
 
         let publisher = cx.debug_bounds("about-publisher").unwrap();
         cx.simulate_click(publisher.center(), Modifiers::none());
@@ -448,6 +481,119 @@ mod tests {
             Modifiers::none(),
         );
         assert_eq!(cx.opened_url().as_deref(), Some(download_url.as_str()));
+        let about_app = about_app.unwrap();
+        for zoom in [0.8, 0.9, 1.0, 1.1, 1.25] {
+            cx.update(|window, cx| {
+                about_app.update(cx, |app, cx| {
+                    app.update_status = UpdateStatus::Checked(
+                        feed("0.12.2").check("0.12.3", "macos", "aarch64").unwrap(),
+                    );
+                    crate::theme::set_zoom(
+                        crate::theme::ThemeZoom {
+                            ui: zoom,
+                            editor: 1.,
+                        },
+                        cx,
+                    );
+                    crate::theme::configure(cx);
+                    cx.notify();
+                });
+                window.refresh();
+            });
+            cx.run_until_parked();
+            let content = cx.debug_bounds("about-updates-content").unwrap();
+            let button = cx.debug_bounds("about-check-updates-button").unwrap();
+            let row = cx.debug_bounds("about-check-updates").unwrap();
+            assert!(
+                button.is_contained_within(&content) && button.is_contained_within(&row),
+                "zoom {zoom}: button {button:?} must fit its row {row:?} and field {content:?}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn menu_actions_open_about_clear_search_and_check_only_when_requested(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+        store.initialize().unwrap();
+        let mut app = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            let bindings = shortcuts::capture_base_key_bindings(cx);
+            crate::theme::configure(cx);
+            let view = cx.new(|cx| {
+                let mut app = ApiTester::new_with_database_store(bindings, store, window, cx);
+                // Leave this runtime undriven so the menu test observes the queued
+                // check deterministically without contacting the public feed.
+                app.runtime = Arc::new(
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap(),
+                );
+                app
+            });
+            crate::register_app_action_handlers(&view, cx);
+            app = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app = app.unwrap();
+        cx.simulate_resize(size(px(1200.), px(900.)));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        cx.dispatch_action(shortcuts::ShowSettings);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("upstream-settings-list").is_some());
+        cx.dispatch_action(shortcuts::ShowAboutResolved);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("about-version").is_some());
+        cx.update(|_, cx| {
+            let app = app.read(cx);
+            assert_eq!(app.workspace_tabs.active(), ActiveWorkspaceTab::Settings);
+            assert!(matches!(app.update_status, UpdateStatus::Unchecked));
+        });
+
+        let search_bounds = cx.debug_bounds("settings-search").unwrap();
+        cx.simulate_click(search_bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+        let search = cx.update(|window, cx| window.focused_input(cx)).unwrap();
+        cx.update(|window, cx| {
+            search.update(cx, |input, cx| input.set_value("Tab size", window, cx));
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert_eq!(search.read(cx).value().as_ref(), "Tab size");
+            app.update(cx, |_, cx| cx.notify());
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| assert_eq!(search.read(cx).value().as_ref(), "Tab size"));
+
+        cx.dispatch_action(shortcuts::ShowAboutResolved);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("about-version").is_some());
+        cx.update(|_, cx| {
+            assert!(search.read(cx).value().is_empty());
+            assert!(matches!(
+                app.read(cx).update_status,
+                UpdateStatus::Unchecked
+            ));
+        });
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.activate_request_workspace(SidebarTab::Collections, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(shortcuts::CheckForUpdates);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("about-version").is_some());
+        cx.update(|_, cx| {
+            let app = app.read(cx);
+            assert_eq!(app.workspace_tabs.active(), ActiveWorkspaceTab::Settings);
+            assert!(matches!(app.update_status, UpdateStatus::Checking));
+        });
     }
 
     #[tokio::test]

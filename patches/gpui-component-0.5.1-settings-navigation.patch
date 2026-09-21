@@ -1,0 +1,89 @@
+diff --git a/src/setting/settings.rs b/src/setting/settings.rs
+--- a/src/setting/settings.rs
++++ b/src/setting/settings.rs
+@@ -9,6 +9,6 @@
+ use gpui::{
+-    App, AppContext as _, Axis, ElementId, Entity, IntoElement, ParentElement as _, Pixels,
+-    RenderOnce, StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _, px, relative,
++    App, AppContext as _, Axis, ElementId, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
++    RenderOnce, SharedString, StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _, px, relative,
+ };
+ use rust_i18n::t;
+ 
+@@ -33,6 +33,7 @@
+     sidebar_width: Pixels,
+     sidebar_style: StyleRefinement,
+     content_top_inset: Pixels,
++    page_request: Option<(SharedString, u64)>,
+ }
+ 
+ impl Settings {
+@@ -46,6 +47,7 @@
+             sidebar_width: px(250.0),
+             sidebar_style: StyleRefinement::default(),
+             content_top_inset: px(0.),
++            page_request: None,
+         }
+     }
+ 
+@@ -60,6 +62,14 @@
+         self
+     }
+ 
++    /// Navigate once per request ID, clearing search and scrolling to the top.
++    /// Keep the same ID on subsequent renders so sidebar navigation is retained.
++    /// Use a new ID for each explicit navigation, even to the same page.
++    pub fn navigate_to_page(mut self, title: impl Into<SharedString>, request_id: u64) -> Self {
++        self.page_request = Some((title.into(), request_id));
++        self
++    }
++
+     /// Add a page to the settings.
+     pub fn page(mut self, page: SettingPage) -> Self {
+         self.pages.push(page);
+@@ -161,6 +171,7 @@
+             .header(
+                 div()
++                    .debug_selector(|| "settings-search".to_owned())
+                     .w_full()
+                     .child(Input::new(&search_input).prefix(IconName::Search)),
+             )
+             .child(
+@@ -225,6 +235,7 @@
+     /// If set, defer scrolling to this group index after rendering.
+     pub(super) deferred_scroll_group_ix: Option<usize>,
+     pub(super) search_input: Entity<InputState>,
++    last_page_request: Option<u64>,
+ }
+ 
+ /// Options for rendering setting item.
+@@ -258,6 +269,7 @@
+                 search_input,
+                 selected_index: SelectIndex::default(),
+                 deferred_scroll_group_ix: None,
++                last_page_request: None,
+             }
+         });
+         // Keep the page/search state stable when the requested sidebar width
+@@ -269,6 +281,21 @@
+             format!("resizable-{:?}", self.sidebar_width),
+         );
+ 
++        if let Some((title, request_id)) = &self.page_request {
++            if state.read(cx).last_page_request != Some(*request_id) {
++                if let Some(page_ix) = self.pages.iter().position(|page| page.title == *title) {
++                    state.update(cx, |state, cx| {
++                        state.last_page_request = Some(*request_id);
++                        state.selected_index = SelectIndex { page_ix, group_ix: None };
++                        state.deferred_scroll_group_ix = Some(0);
++                        state.search_input.update(cx, |input, cx| {
++                            input.set_value("", window, cx);
++                        });
++                    });
++                }
++            }
++        }
++
+         let query = state.read(cx).search_input.read(cx).value();
+         let filtered_pages = self.filtered_pages(&query);
+         let options = RenderOptions {

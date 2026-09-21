@@ -104,6 +104,7 @@ prepare_crate \
     "$project_dir/patches/gpui-component-0.5.1-code-folding.patch" \
     "$project_dir/patches/gpui-component-0.5.1-indent-guide-layout.patch" \
     "$project_dir/patches/gpui-component-0.5.1-responsive-settings-sidebar.patch" \
+    "$project_dir/patches/gpui-component-0.5.1-settings-navigation.patch" \
     "$project_dir/patches/gpui-component-0.5.1-inline-actions.patch" \
     "$project_dir/patches/gpui-component-0.5.1-public-input-menu-state.patch" \
     "$project_dir/patches/gpui-component-0.5.1-completion-edge-placement.patch" \
