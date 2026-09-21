@@ -48,9 +48,11 @@ Release builds also produce
 Mac instead of sending the `Resolved.app` directory directly. The ZIP preserves
 Unix modes while excluding quarantine, per-user access records, and other
 build-machine extended attributes. It is then extracted and checked by the
-build script to ensure `Contents/MacOS/api-tester` still has executable
-permission, contains no packaged security attributes, and retains a valid
-signature.
+build script to ensure `Contents/MacOS/api-tester` and
+`Contents/Helpers/resolved-updater` retain their executable permissions and
+native architecture, contain no packaged security attributes, and retain valid
+signatures. The updater's build identity, health protocol, and license notices
+are also checked after extraction.
 
 Some sandboxed file-sharing applications can mark downloaded code as created
 without user consent. That produces an immediate “can't be opened” error instead
@@ -77,6 +79,41 @@ quarantine procedure above; seamless public distribution without a security
 override requires a Developer ID signature and notarization. TypeScript's Apache
 2.0 license and third-party notice are copied to
 `Resolved.app/Contents/Resources/ThirdPartyLicenses/TypeScript-6.0.2/`.
+
+### Bundled macOS updater foundation
+
+`bundle-macos.sh` is the sole build entry point for the standalone Rust helper
+in `macos/updater/`. It has its own lockfile and is excluded from the desktop
+Cargo workspace: ordinary `scripts/cargo.sh build`, `check`, and workspace tests
+do not compile it. Its build script rejects builds without the bundler's build
+marker; that marker is a workflow guard, not a security credential.
+
+The helper is installed at `Resolved.app/Contents/Helpers/resolved-updater` and
+signed before the outer app, without the app's Keychain entitlements. Its
+reported product/build versions come from the same bundler inputs as the app.
+Before compilation, the bundler checks its locked dependency graph and upstream
+license texts against a reviewed inventory, then includes the required notices
+under `Contents/Resources/ThirdPartyLicenses/Updater/`.
+
+This is the build/protocol foundation only. The helper currently supports a
+versioned, side-effect-free `health` command and explicitly reports installation
+as disabled. It cannot check for updates, download, install, or restart the app.
+The desktop's existing browser-download update checker is unchanged.
+
+To compile/test only the helper, audit its licenses, and verify that it remains
+outside the desktop workspace:
+
+```sh
+scripts/bundle-macos.sh debug --verify-updater
+```
+
+This mode does not build the desktop, change `Resolved.app`, sign releases, or
+contact notarization services. Its dependency preparation still runs through
+`scripts/cargo.sh`. macOS release CI runs the same verification in the release
+profile before building the full bundle.
+
+See the [OTA design](design/macos-ota.md) for the agreed feed, approval workflow,
+and installation/security work still to implement.
 
 ### Signed macOS releases outside the App Store
 

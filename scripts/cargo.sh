@@ -61,7 +61,8 @@ if [ "${1:-}" = "run" ] && [ "$(uname -s)" = "Darwin" ]; then
     exec /usr/bin/open -W "$bundle_path"
 fi
 
-"$project_dir/scripts/prepare-gpui.sh"
-"$project_dir/scripts/prepare-typescript-service.sh"
+# Keep Cargo's stdout machine-readable (for metadata and JSON build output).
+"$project_dir/scripts/prepare-gpui.sh" >&2
+"$project_dir/scripts/prepare-typescript-service.sh" >&2
 cd "$project_dir"
 exec cargo "$@"

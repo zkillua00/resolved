@@ -158,6 +158,7 @@ jobs:
         env:
           ARCH: ${{ matrix.arch }}
         run: |
+          scripts/bundle-macos.sh release --verify-updater
           scripts/bundle-macos.sh release
           mkdir -p dist
           cp "target/release/Resolved-$RESOLVED_BUILD_VERSION-$API_TESTER_BUILD_NUMBER-macos.zip" \

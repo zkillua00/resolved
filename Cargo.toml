@@ -9,6 +9,8 @@ autobins = false
 [workspace]
 members = ["crates/resolved-mcp"]
 default-members = [".", "crates/resolved-mcp"]
+# The macOS bundler alone builds the standalone updater executable.
+exclude = ["macos/updater"]
 resolver = "3"
 
 [[bin]]
