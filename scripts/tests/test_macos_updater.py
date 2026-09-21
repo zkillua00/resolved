@@ -70,14 +70,14 @@ class HealthTests(unittest.TestCase):
             'os': 'macos',
             'arch': 'arm64',
             'feed_url': 'https://apiworkbench.dev/downloads.json',
-            'capabilities': ['health'],
+            'capabilities': ['health', 'download'],
             'installation_enabled': False,
         }
 
     def verify(self, stdout):
         verifier.verify_health(stdout, '0.12.4', '0.12.4.abcdef123456', '42', 'arm64')
 
-    def test_expected_identity_and_health_only_capability(self):
+    def test_expected_identity_and_download_capability(self):
         self.verify(json.dumps(self.response) + '\n')
 
     def test_each_wrong_metadata_field_is_rejected(self):

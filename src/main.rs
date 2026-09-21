@@ -31,6 +31,7 @@ mod template_intelligence;
 mod theme;
 mod tls;
 mod typescript_service;
+mod update_download;
 mod web_preview;
 
 use app::ApiTester;
@@ -38,11 +39,11 @@ use brand::{ICON_ASSET_PATH, PRODUCT_NAME};
 use core::DatabaseStore;
 use instance_guard::InstanceGuard;
 use shortcuts::{
-    ActivateNextRequestTab, ActivatePreviousRequestTab, CheckForUpdates, CloseRequestTab, FocusRequestUrl,
-    FormatRawBody, NewRequestTab, QuickSendWebSocketTemplate, QuitApp, SaveRequest, SaveRequestAs,
-    SendOrCancelRequest, ShowAboutResolved, ShowCollections, ShowEnvironments, ShowHistory, ShowSettings,
-    ToggleMetrics, ToggleNavigation, ZoomEditorIn, ZoomEditorOut, ZoomEditorReset, ZoomUiIn,
-    ZoomUiOut, ZoomUiReset,
+    ActivateNextRequestTab, ActivatePreviousRequestTab, CheckForUpdates, CloseRequestTab,
+    FocusRequestUrl, FormatRawBody, NewRequestTab, QuickSendWebSocketTemplate, QuitApp,
+    SaveRequest, SaveRequestAs, SendOrCancelRequest, ShowAboutResolved, ShowCollections,
+    ShowEnvironments, ShowHistory, ShowSettings, ToggleMetrics, ToggleNavigation, ZoomEditorIn,
+    ZoomEditorOut, ZoomEditorReset, ZoomUiIn, ZoomUiOut, ZoomUiReset,
 };
 
 struct AppAssets;
@@ -55,25 +56,45 @@ fn request_app_exit(view: &gpui::WeakEntity<ApiTester>, pending: &Rc<Cell<bool>>
     }
     let view = view.clone();
     let pending = Rc::clone(pending);
-    if let Err(error) = view.update(cx, |view, cx| {
+    let download = match view.update(cx, |view, cx| {
+        let download = view.prepare_update_download_exit(cx)?;
         view.flush_local_state(cx);
         view.local_persistence_ready_to_close(cx);
+        Ok(download)
     }) {
-        tracing::error!("could not begin flushing local state: {error}");
-        pending.set(false);
-        return;
-    }
+        Ok(Ok(download)) => download,
+        Ok(Err(())) => {
+            pending.set(false);
+            return;
+        }
+        Err(error) => {
+            tracing::error!("could not begin flushing local state: {error}");
+            pending.set(false);
+            return;
+        }
+    };
     let barrier = io::flush();
     cx.spawn(async move |cx| {
+        // GPUI's final quit hook has a short deadline. Let the updater cancel,
+        // clean its transport/partial files, and reap before entering that hook.
+        if let Some(mut finished) = download {
+            while !*finished.borrow_and_update() {
+                if finished.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
         let result = barrier.await;
         let _ = cx.update(|cx| {
             pending.set(false);
             if let Err(error) = result {
                 tracing::error!("could not drain I/O before quit: {error}");
+                let _ = view.update(cx, |view, cx| view.finish_update_download_exit(cx));
                 return;
             }
             let saved = view
                 .update(cx, |view, cx| {
+                    view.finish_update_download_exit(cx);
                     view.flush_local_state(cx) && view.local_persistence_ready_to_close(cx)
                 })
                 .unwrap_or_else(|error| {

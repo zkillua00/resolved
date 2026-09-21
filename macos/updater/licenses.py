@@ -43,10 +43,26 @@ def audit(metadata, output):
     if Path(own["manifest_path"]).resolve() != HERE / "Cargo.toml":
         raise ValueError("metadata root is not this helper")
     seen = set()
+    first_party_seen = False
     copies = []
     for package in packages:
         if package["id"] == own["id"]:
             continue
+        # This is a first-party source module, not an exemption for arbitrary
+        # path dependencies (including copies bearing the same package name).
+        if package["name"] == "resolved-release":
+            if first_party_seen:
+                raise ValueError("duplicate first-party resolved-release dependency")
+            first_party_seen = True
+            if (package["version"], package["source"], package.get("license"),
+                    package.get("license_file")) != ("0.0.0", None, "Apache-2.0", None):
+                raise ValueError("wrong first-party resolved-release identity or license")
+            manifest = HERE.parent.parent / "crates" / "resolved-release" / "Cargo.toml"
+            if Path(package["manifest_path"]).resolve() != manifest:
+                raise ValueError("first-party resolved-release manifest path mismatch")
+            continue
+        if package["source"] is None:
+            raise ValueError("unexpected local dependency: " + package["name"])
         key = (package["name"], package["version"])
         if key not in expected or key in seen:
             raise ValueError("unreviewed or duplicate dependency: " + str(key))
@@ -65,19 +81,31 @@ def audit(metadata, output):
             data = reviewed.read_bytes()
             upstream = (root / text["upstream"]).read_bytes()
             if text.get("prefix_lines"):
-                upstream = b"".join(upstream.splitlines(keepends=True)[:text["prefix_lines"]])
-            if digest(data) != text["sha256"] or upstream != data:
+                start = text.get("start_line", 1) - 1
+                upstream = b"".join(upstream.splitlines(keepends=True)[
+                    start:start + text["prefix_lines"]])
+            # Some upstream texts use CRLF or omit the final newline. Keep a
+            # separately pinned LF snapshot for review, but ship exact upstream
+            # bytes. Neither source nor text hashing is normalized.
+            comparison = upstream
+            if "reviewed_lf_sha256" in text:
+                comparison = upstream.replace(b"\r\n", b"\n")
+                if not comparison.endswith(b"\n"):
+                    comparison += b"\n"
+            if (digest(upstream) != text["sha256"]
+                    or digest(data) != text.get("reviewed_lf_sha256", text["sha256"])
+                    or comparison != data):
                 raise ValueError("license/attribution text mismatch: " + str(key))
-            copies.append((reviewed, output / (package["name"] + "-" + package["version"]) / text["reviewed"]))
+            copies.append((upstream, output / (package["name"] + "-" + package["version"]) / text["reviewed"]))
     if seen != set(expected):
         raise ValueError("resolved graph differs from reviewed inventory")
     # Validate everything before touching the fresh output directory.
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise ValueError("notices output must be absent or empty")
     output.mkdir(parents=True, exist_ok=True)
-    for source, destination in copies:
+    for data, destination in copies:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, destination)
+        destination.write_bytes(data)
     shutil.copyfile(inventory_path, output / "inventory.json")
     shutil.copyfile(HERE / "licenses" / "README.md", output / "README.md")
 

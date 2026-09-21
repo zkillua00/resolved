@@ -161,13 +161,14 @@ updater_executable="$(python3 "$project_dir/scripts/cargo-artifact.py" \
     "$work_dir/updater-build.jsonl" "$updater_dir/Cargo.toml" resolved-updater)"
 if [ "$verify_updater" = true ]; then
     updater_cargo test
+    "$project_dir/scripts/cargo.sh" test --locked -p resolved-release --profile "$cargo_profile"
     "$project_dir/scripts/cargo.sh" metadata --locked --no-deps --format-version 1 \
         --manifest-path "$project_dir/Cargo.toml" >"$work_dir/workspace-metadata.json"
     verify_updater_binary "$updater_executable" \
         --workspace-metadata "$work_dir/workspace-metadata.json"
     python3 -B -m unittest discover -s "$updater_dir" -p 'test_*.py'
     python3 -B -m unittest discover -s "$project_dir/scripts/tests" -p 'test_macos_updater.py'
-    echo "Updater verification passed (health protocol only; installation disabled)"
+    echo "Updater verification passed (download integrity only; installation disabled)"
     exit 0
 fi
 

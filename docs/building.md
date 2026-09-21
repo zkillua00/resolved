@@ -80,7 +80,7 @@ override requires a Developer ID signature and notarization. TypeScript's Apache
 2.0 license and third-party notice are copied to
 `Resolved.app/Contents/Resources/ThirdPartyLicenses/TypeScript-6.0.2/`.
 
-### Bundled macOS updater foundation
+### Bundled macOS updater
 
 `bundle-macos.sh` is the sole build entry point for the standalone Rust helper
 in `macos/updater/`. It has its own lockfile and is excluded from the desktop
@@ -95,13 +95,24 @@ Before compilation, the bundler checks its locked dependency graph and upstream
 license texts against a reviewed inventory, then includes the required notices
 under `Contents/Resources/ThirdPartyLicenses/Updater/`.
 
-This is the build/protocol foundation only. The helper currently supports a
-versioned, side-effect-free `health` command and explicitly reports installation
-as disabled. It cannot check for updates, download, install, or restart the app.
-The desktop's existing browser-download update checker is unchanged.
+The helper supports a side-effect-free `health` command and an explicit,
+cancellable `download` operation. The app and helper share the release model in
+`crates/resolved-release/`. A download rechecks `downloads.json` and must match the
+complete artifact approved by the user before requesting archive bytes.
 
-To compile/test only the helper, audit its licenses, and verify that it remains
-outside the desktop workspace:
+The helper uses macOS's `/usr/bin/curl` as its HTTP/TLS transport, not a bundled
+TLS binding. It ignores curl configuration and inherited proxy/TLS settings,
+requires HTTPS, validates redirects itself, and bounds headers, bodies, and
+operation times. Rust owns approval, size/SHA-256 verification, private cache
+storage, progress, and cancellation. No shell commands come from the feed.
+
+The helper still reports installation as disabled. A size/hash-verified ZIP is
+not publisher-verified or ready to install: extraction, native signature
+validation, replacement, and restart remain unimplemented. Browser downloads
+remain available, including on Windows and Linux.
+
+To compile/test the helper and shared release model, audit licenses, and verify
+that the helper remains outside the desktop workspace:
 
 ```sh
 scripts/bundle-macos.sh debug --verify-updater

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gpui::{App, Menu, MenuItem, SystemMenuType, px};
 use wry::WebViewBuilder;
@@ -26,6 +26,19 @@ impl PlatformBackend for MacOsBackend {
                     .to_owned(),
             )
         }
+    }
+
+    fn supports_update_downloads() -> bool {
+        true
+    }
+
+    fn updater_executable() -> Result<PathBuf, String> {
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("Could not locate Resolved: {error}"))?;
+        let bundle = containing_app_bundle(&executable).ok_or_else(|| {
+            "Run Resolved from its application bundle to download updates.".to_owned()
+        })?;
+        Ok(bundle.join("Contents/Helpers/resolved-updater"))
     }
 
     fn configure_menus(cx: &mut App) {

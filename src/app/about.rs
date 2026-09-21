@@ -1,10 +1,7 @@
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage};
-use semver::Version;
-use serde::Deserialize;
+use resolved_release::{FEED_URL, MAX_FEED_BYTES, ReleaseCheck, check_feed};
 
 use super::*;
-
-const DOWNLOADS_URL: &str = "https://apiworkbench.dev/downloads.json";
 
 #[derive(Default)]
 pub(super) enum UpdateStatus {
@@ -15,73 +12,51 @@ pub(super) enum UpdateStatus {
     Failed(String),
 }
 
-#[derive(Deserialize)]
-struct Downloads {
-    version: String,
-    resolved: HashMap<String, HashMap<String, Vec<ReleaseDownload>>>,
+#[derive(Default)]
+pub(super) enum UpdateDownload {
+    #[default]
+    Idle,
+    Running {
+        progress: crate::update_download::Progress,
+        cancel: tokio::sync::watch::Sender<bool>,
+        finished: tokio::sync::watch::Receiver<bool>,
+        cancelling: bool,
+    },
+    Downloaded {
+        version: String,
+        path: PathBuf,
+    },
+    Cancelled,
+    Failed(String),
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct ReleaseDownload {
-    name: String,
-    url: String,
-}
+impl UpdateDownload {
+    fn running(&self) -> bool {
+        matches!(self, Self::Running { .. })
+    }
 
-pub(super) struct ReleaseCheck {
-    version: Version,
-    newer: bool,
-    downloads: Vec<ReleaseDownload>,
-}
-
-impl Downloads {
-    fn check(self, installed: &str, os: &str, arch: &str) -> Result<ReleaseCheck, String> {
-        let version = Version::parse(&self.version)
-            .map_err(|_| "The download feed contains an invalid version.".to_owned())?;
-        // Nightlies use MAJOR.MINOR.PATCH.<12-character-commit-hash>, not SemVer.
-        // Compare their base version against the stable release feed.
-        let installed = Version::parse(installed)
-            .or_else(|error| {
-                let Some((base, hash)) = installed.rsplit_once('.') else {
-                    return Err(error);
-                };
-                if hash.len() == 12 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                    Version::parse(base)
-                } else {
-                    Err(error)
-                }
-            })
-            .map_err(|_| "The installed build has an invalid version.".to_owned())?;
-        let arch = match arch {
-            "aarch64" => "arm64",
-            "x86_64" => "x64",
-            other => other,
-        };
-        let downloads = self
-            .resolved
-            .get(os)
-            .and_then(|platform| platform.get(arch))
-            .cloned()
-            .unwrap_or_default();
-        // The feed supplies release links, never commands or arbitrary URL schemes.
-        for download in &downloads {
-            let valid = url::Url::parse(&download.url).is_ok_and(|url| {
-                url.scheme() == "https"
-                    && url.host_str() == Some("github.com")
-                    && url.username().is_empty()
-                    && url.password().is_none()
-                    && url.port_or_known_default() == Some(443)
-                    && url
-                        .path()
-                        .starts_with("/zkillua00/resolved/releases/download/")
-            });
-            if !valid {
-                return Err("The download feed contains an invalid GitHub release link.".to_owned());
-            }
-        }
-        Ok(ReleaseCheck {
-            newer: version.cmp_precedence(&installed).is_gt(),
-            version,
-            downloads,
+    fn message(&self) -> Option<String> {
+        use crate::update_download::Phase;
+        Some(match self {
+            Self::Idle => return None,
+            Self::Running {
+                cancelling: true, ..
+            } => "Cancelling download…".to_owned(),
+            Self::Running { progress, .. } => match progress.phase {
+                Phase::Checking => "Confirming the selected release…".to_owned(),
+                Phase::Downloading => format!(
+                    "Downloading: {:.1} / {:.1} MiB",
+                    progress.downloaded as f64 / 1_048_576.0,
+                    progress.total as f64 / 1_048_576.0,
+                ),
+                Phase::Verifying => "Verifying download size and SHA-256…".to_owned(),
+            },
+            Self::Downloaded { version, path } => format!(
+                "Resolved {version} downloaded; size and SHA-256 verified. Publisher verification and in-app installation are not available yet. Saved to {}",
+                path.display()
+            ),
+            Self::Cancelled => "Download cancelled. No update was installed.".to_owned(),
+            Self::Failed(error) => format!("Download failed: {error}"),
         })
     }
 }
@@ -92,20 +67,39 @@ async fn check_for_updates() -> Result<ReleaseCheck, String> {
     crate::tls::install_crypto_provider().map_err(str::to_owned)?;
     let client = Client::builder()
         .timeout(Duration::from_secs(15))
+        .connect_timeout(Duration::from_secs(5))
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("resolved/", env!("RESOLVED_BUILD_VERSION")))
         .build()
         .map_err(|error| error.to_string())?;
-    let feed = client
-        .get(DOWNLOADS_URL)
+    let mut response = client
+        .get(FEED_URL)
         .header(reqwest::header::CACHE_CONTROL, "no-cache")
         .send()
         .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|error| error.to_string())?
-        .json::<Downloads>()
-        .await
-        .map_err(|error| format!("Could not read the download feed: {error}"))?;
-    feed.check(
+        .map_err(|error| error.to_string())?;
+    if response.status() != reqwest::StatusCode::OK {
+        return Err(format!(
+            "The download feed returned HTTP {}.",
+            response.status()
+        ));
+    }
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_FEED_BYTES as u64)
+    {
+        return Err("The download feed is too large.".to_owned());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+        if chunk.len() > MAX_FEED_BYTES - bytes.len() {
+            return Err("The download feed is too large.".to_owned());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    check_feed(
+        &bytes,
         env!("RESOLVED_BUILD_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH,
@@ -197,7 +191,11 @@ impl ApiTester {
             .group(
                 SettingGroup::new()
                     .title("Updates")
-                    .description("Checks apiworkbench.dev for GitHub releases. Downloads open in your browser.")
+                    .description(if crate::platform::supports_update_downloads() {
+                        "Check apiworkbench.dev and explicitly download a macOS update. Nothing installs or restarts automatically."
+                    } else {
+                        "Checks apiworkbench.dev for GitHub releases. Downloads open in your browser."
+                    })
                     .item(
                         SettingItem::new(
                             "Available updates",
@@ -207,6 +205,7 @@ impl ApiTester {
                                 };
                                 let state = entity.read(cx);
                                 let checking = matches!(state.update_status, UpdateStatus::Checking);
+                                let downloading = state.update_download.running();
                                 let message = match &state.update_status {
                                     UpdateStatus::Unchecked => "Not checked yet.".to_owned(),
                                     UpdateStatus::Checking => "Checking for updates…".to_owned(),
@@ -227,9 +226,40 @@ impl ApiTester {
                                     .pb_px()
                                     .gap_2()
                                     .child(div().text_sm().child(message));
+                                if let Some(message) = state.update_download.message() {
+                                    content = content.child(
+                                        div().debug_selector(|| "about-update-download-status".to_owned())
+                                            .text_sm().child(message),
+                                    );
+                                }
                                 if let UpdateStatus::Checked(release) = &state.update_status
                                     && release.newer
                                 {
+                                    if crate::platform::supports_update_downloads() {
+                                        match release.macos_update(std::env::consts::ARCH) {
+                                            Ok(Some(_)) if !downloading && !matches!(state.update_download, UpdateDownload::Downloaded { .. }) => {
+                                                let this = this.clone();
+                                                content = content.child(
+                                                    Button::new("about-download-update")
+                                                        .debug_selector(|| "about-download-update".to_owned())
+                                                        .label("Download update")
+                                                        .outline()
+                                                        .disabled(state.update_download_exit_pending)
+                                                        .on_click(move |_, _, cx| {
+                                                            if let Some(this) = this.upgrade() {
+                                                                this.update(cx, |this, cx| this.start_update_download(cx));
+                                                            }
+                                                        }),
+                                                );
+                                            }
+                                            Err(error) => {
+                                                content = content.child(div().text_sm().child(
+                                                    format!("In-app download unavailable: {error} Use a browser download below."),
+                                                ));
+                                            }
+                                            _ => {}
+                                        }
+                                    }
                                     if release.downloads.is_empty() {
                                         content = content.child(
                                             div().text_sm().child("No download is listed for this OS and architecture."),
@@ -242,12 +272,30 @@ impl ApiTester {
                                                 .debug_selector(move || format!("about-download-{index}"))
                                                 .child(
                                                     Button::new(("about-download", index))
-                                                        .label(download.name.clone())
+                                                        .label(format!("Open in browser: {}", download.name))
                                                         .link()
                                                         .on_click(move |_, _, cx| cx.open_url(&url)),
                                                 ),
                                         );
                                     }
+                                }
+                                if let UpdateDownload::Running { cancelling, .. } = &state.update_download {
+                                    let this = this.clone();
+                                    content = content.child(
+                                        Button::new("about-cancel-update-download")
+                                            .debug_selector(|| "about-cancel-update-download".to_owned())
+                                            .label("Cancel download")
+                                            .outline()
+                                            .disabled(*cancelling)
+                                            .on_click(move |_, _, cx| {
+                                                if let Some(this) = this.upgrade() {
+                                                    this.update(cx, |this, cx| {
+                                                        this.cancel_update_download();
+                                                        cx.notify();
+                                                    });
+                                                }
+                                            }),
+                                    );
                                 }
                                 let this = this.clone();
                                 content
@@ -259,7 +307,7 @@ impl ApiTester {
                                                     .debug_selector(|| "about-check-updates-button".to_owned())
                                                     .label("Check for updates")
                                                     .outline()
-                                                    .disabled(checking)
+                                                    .disabled(checking || downloading || state.update_download_exit_pending)
                                                     .on_click(move |_, _, cx| {
                                                         if let Some(this) = this.upgrade() {
                                                             this.update(cx, |this, cx| this.start_update_check(cx));
@@ -276,9 +324,13 @@ impl ApiTester {
     }
 
     fn start_update_check(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.update_status, UpdateStatus::Checking) {
+        if matches!(self.update_status, UpdateStatus::Checking)
+            || self.update_download.running()
+            || self.update_download_exit_pending
+        {
             return;
         }
+        self.update_download = UpdateDownload::Idle;
         self.update_status = UpdateStatus::Checking;
         let task = self.runtime.spawn(check_for_updates());
         cx.spawn(async move |this, cx| {
@@ -294,6 +346,106 @@ impl ApiTester {
         .detach();
         cx.notify();
     }
+
+    fn start_update_download(&mut self, cx: &mut Context<Self>) {
+        if !crate::platform::supports_update_downloads()
+            || self.update_download.running()
+            || self.update_download_exit_pending
+        {
+            return;
+        }
+        let UpdateStatus::Checked(release) = &self.update_status else {
+            return;
+        };
+        let artifact = match release.macos_update(std::env::consts::ARCH) {
+            Ok(Some(artifact)) => artifact,
+            Ok(None) => return,
+            Err(error) => {
+                self.update_download = UpdateDownload::Failed(error);
+                cx.notify();
+                return;
+            }
+        };
+        let version = artifact.version.clone();
+        let (cancel, cancelled) = tokio::sync::watch::channel(false);
+        let (finished, completion) = tokio::sync::watch::channel(false);
+        self.update_download = UpdateDownload::Running {
+            progress: crate::update_download::Progress {
+                phase: crate::update_download::Phase::Checking,
+                downloaded: 0,
+                total: artifact.size,
+            },
+            cancel,
+            finished: completion,
+            cancelling: false,
+        };
+        let (progress, mut updates) = tokio::sync::mpsc::channel(8);
+        let task = self.runtime.spawn(crate::update_download::download(
+            artifact, progress, cancelled, finished,
+        ));
+        cx.spawn(async move |this, cx| {
+            while let Some(update) = updates.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        if let UpdateDownload::Running { progress, .. } = &mut this.update_download
+                        {
+                            *progress = update;
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            drop(updates);
+            let result = task.await.unwrap_or_else(|error| Err(error.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                this.update_download = match result {
+                    Ok(crate::update_download::Outcome::Downloaded(path)) => {
+                        UpdateDownload::Downloaded { version, path }
+                    }
+                    Ok(crate::update_download::Outcome::Cancelled) => UpdateDownload::Cancelled,
+                    Err(error) => UpdateDownload::Failed(error),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(super) fn cancel_update_download(&mut self) {
+        if let UpdateDownload::Running {
+            cancel, cancelling, ..
+        } = &mut self.update_download
+        {
+            *cancelling = true;
+            let _ = cancel.send(true);
+        }
+    }
+
+    pub(crate) fn prepare_update_download_exit(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<Option<tokio::sync::watch::Receiver<bool>>, ()> {
+        if self.update_download_exit_pending {
+            return Err(());
+        }
+        self.update_download_exit_pending = true;
+        self.cancel_update_download();
+        cx.notify();
+        if let UpdateDownload::Running { finished, .. } = &self.update_download {
+            Ok(Some(finished.clone()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub(crate) fn finish_update_download_exit(&mut self, cx: &mut Context<Self>) {
+        self.update_download_exit_pending = false;
+        cx.notify();
+    }
 }
 
 #[cfg(test)]
@@ -302,8 +454,8 @@ mod tests {
 
     use super::*;
 
-    fn feed(version: &str) -> Downloads {
-        serde_json::from_value(serde_json::json!({
+    fn feed(version: &str) -> serde_json::Value {
+        serde_json::json!({
             "version": version,
             "resolved": {
                 "macos": {
@@ -334,7 +486,21 @@ mod tests {
             },
             "resolved-mcp": {},
             "additional_files": []
-        })).unwrap()
+        })
+    }
+
+    fn checked_feed(
+        version: &str,
+        installed: &str,
+        os: &str,
+        arch: &str,
+    ) -> Result<ReleaseCheck, String> {
+        check_feed(
+            &serde_json::to_vec(&feed(version)).unwrap(),
+            installed,
+            os,
+            arch,
+        )
     }
 
     #[test]
@@ -349,8 +515,7 @@ mod tests {
             ("0.12.2+build.2", "0.12.2+build.1", false),
         ] {
             assert_eq!(
-                feed(latest)
-                    .check(installed, "macos", "aarch64")
+                checked_feed(latest, installed, "macos", "aarch64")
                     .unwrap()
                     .newer,
                 newer,
@@ -372,7 +537,7 @@ mod tests {
                 vec!["Resolved.rpm", "Resolved.tar.xz", "Resolved.deb"],
             ),
         ] {
-            let release = feed("0.12.2").check("0.12.1", os, arch).unwrap();
+            let release = checked_feed("0.12.2", "0.12.1", os, arch).unwrap();
             assert_eq!(
                 release
                     .downloads
@@ -386,17 +551,9 @@ mod tests {
 
     #[test]
     fn rejects_invalid_versions_and_release_links() {
-        assert!(
-            feed("not-a-version")
-                .check("0.12.2", "macos", "aarch64")
-                .is_err()
-        );
-        assert!(
-            feed("0.12.2")
-                .check("0.12.2.invalid", "macos", "aarch64")
-                .is_err()
-        );
-        assert!(serde_json::from_str::<Downloads>(r#"{"version":"0.12.2"}"#).is_err());
+        assert!(checked_feed("not-a-version", "0.12.2", "macos", "aarch64").is_err());
+        assert!(checked_feed("0.12.2", "0.12.2.invalid", "macos", "aarch64").is_err());
+        assert!(check_feed(br#"{"version":"0.12.2"}"#, "0.12.1", "macos", "aarch64").is_err());
         for url in [
             "file:///tmp/download",
             "http://github.com/zkillua00/resolved/releases/download/v0.12.2/app.zip",
@@ -404,13 +561,16 @@ mod tests {
             "https://github.com/someone/else/releases/download/app.zip",
         ] {
             let mut feed = feed("0.12.2");
-            feed.resolved
-                .get_mut("macos")
-                .unwrap()
-                .get_mut("arm64")
-                .unwrap()[0]
-                .url = url.to_owned();
-            assert!(feed.check("0.12.1", "macos", "aarch64").is_err());
+            feed["resolved"]["macos"]["arm64"][0]["url"] = serde_json::json!(url);
+            assert!(
+                check_feed(
+                    &serde_json::to_vec(&feed).unwrap(),
+                    "0.12.1",
+                    "macos",
+                    "aarch64"
+                )
+                .is_err()
+            );
         }
     }
 
@@ -424,12 +584,123 @@ mod tests {
         }
     }
 
+    #[test]
+    fn downloaded_status_does_not_claim_installation_trust() {
+        let state = UpdateDownload::Downloaded {
+            version: "0.13.0".into(),
+            path: PathBuf::from("/cache/Resolved.zip"),
+        };
+        let message = state.message().unwrap();
+        assert!(message.contains("size and SHA-256 verified"));
+        assert!(
+            message.contains("Publisher verification and in-app installation are not available")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn download_requires_a_click_and_supports_cancellation(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+        store.initialize().unwrap();
+        let arch = if std::env::consts::ARCH == "aarch64" {
+            "arm64"
+        } else {
+            "x64"
+        };
+        let name = format!("Resolved-999.0.0-macos-{arch}.zip");
+        let release = ReleaseCheck {
+            version: "999.0.0".into(),
+            newer: true,
+            downloads: vec![resolved_release::ReleaseDownload {
+                name: name.clone(),
+                url: format!(
+                    "https://github.com/zkillua00/resolved/releases/download/v999.0.0/{name}"
+                ),
+                size: Some(100),
+                sha256: Some("a".repeat(64)),
+            }],
+        };
+        let mut about_app = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            let bindings = shortcuts::capture_base_key_bindings(cx);
+            crate::theme::configure(cx);
+            let app = cx.new(|cx| {
+                let mut app = ApiTester::new_with_database_store(bindings, store, window, cx);
+                // No child process or network operation runs in this UI test.
+                app.runtime = Arc::new(
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap(),
+                );
+                app.update_status = UpdateStatus::Checked(release);
+                app
+            });
+            about_app = Some(app.clone());
+            let view = cx.new(|cx| {
+                cx.observe(&app, |_, _, cx| cx.notify()).detach();
+                SettingsHarness(app)
+            });
+            Root::new(view, window, cx)
+        });
+        let app = about_app.unwrap();
+        cx.simulate_resize(size(px(1100.), px(1000.)));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.update(|_, cx| assert!(matches!(app.read(cx).update_download, UpdateDownload::Idle)));
+        let button = cx.debug_bounds("about-download-update").unwrap();
+        cx.simulate_click(button.center(), Modifiers::none());
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                assert!(app.update_download.running());
+                app.start_update_check(cx);
+                assert!(matches!(app.update_status, UpdateStatus::Checked(_)));
+            });
+        });
+        // GPUI retains old debug-selector bounds across frames; use the newly
+        // rendered cancel control and the state guard, not absence of old bounds.
+        let cancel = cx.debug_bounds("about-cancel-update-download").unwrap();
+        cx.simulate_click(cancel.center(), Modifiers::none());
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let UpdateDownload::Running {
+                cancel, cancelling, ..
+            } = &app.read(cx).update_download
+            else {
+                panic!("download must remain owned until the helper finishes cancelling");
+            };
+            assert!(*cancelling && *cancel.borrow());
+        });
+        assert!(cx.debug_bounds("about-restart-update").is_none());
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                let finished = app.prepare_update_download_exit(cx).unwrap().unwrap();
+                assert!(!*finished.borrow());
+                assert!(app.prepare_update_download_exit(cx).is_err());
+                // Even after cleanup updates the visible state, a pending close
+                // cannot start a fresh helper before its persistence barrier ends.
+                app.update_download = UpdateDownload::Cancelled;
+                app.start_update_download(cx);
+                app.start_update_check(cx);
+                assert!(matches!(app.update_download, UpdateDownload::Cancelled));
+                assert!(matches!(app.update_status, UpdateStatus::Checked(_)));
+                app.finish_update_download_exit(cx);
+                assert!(!app.update_download_exit_pending);
+            });
+        });
+    }
+
     #[gpui::test]
     fn about_page_renders_and_links_and_copy_work(cx: &mut TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
         let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
         store.initialize().unwrap();
-        let release = feed("0.12.2").check("0.12.1", "macos", "aarch64").unwrap();
+        let release = checked_feed("0.12.2", "0.12.1", "macos", "aarch64").unwrap();
         let download_url = release.downloads[0].url.clone();
         let mut about_app = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
@@ -486,7 +757,7 @@ mod tests {
             cx.update(|window, cx| {
                 about_app.update(cx, |app, cx| {
                     app.update_status = UpdateStatus::Checked(
-                        feed("0.12.2").check("0.12.3", "macos", "aarch64").unwrap(),
+                        checked_feed("0.12.2", "0.12.3", "macos", "aarch64").unwrap(),
                     );
                     crate::theme::set_zoom(
                         crate::theme::ThemeZoom {

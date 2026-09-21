@@ -10,11 +10,11 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
+#[cfg(target_os = "linux")]
+use gpui::px;
 use gpui::{App, Keystroke, Pixels, Task, WindowOptions};
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use gpui::{Menu, MenuItem};
-#[cfg(target_os = "linux")]
-use gpui::px;
 use wry::{WebView, WebViewBuilder};
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -51,6 +51,14 @@ pub(crate) struct TitleBarIntegration {
 pub(crate) trait PlatformBackend {
     fn launch_blocker() -> Result<(), String> {
         Ok(())
+    }
+
+    fn supports_update_downloads() -> bool {
+        false
+    }
+
+    fn updater_executable() -> Result<PathBuf, String> {
+        Err("In-app update downloads are not supported on this platform.".to_owned())
     }
 
     fn configure_menus(cx: &mut App);
@@ -92,6 +100,14 @@ pub(crate) trait PlatformBackend {
 
 pub(crate) fn launch_blocker() -> Result<(), String> {
     ActiveBackend::launch_blocker()
+}
+
+pub(crate) fn supports_update_downloads() -> bool {
+    ActiveBackend::supports_update_downloads()
+}
+
+pub(crate) fn updater_executable() -> Result<PathBuf, String> {
+    ActiveBackend::updater_executable()
 }
 
 pub(crate) fn configure_menus(cx: &mut App) {

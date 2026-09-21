@@ -1,11 +1,28 @@
+mod download;
+mod storage;
+mod transport;
+
 use serde_json::{Value, json};
 use std::{
     ffi::OsString,
-    io::{self, Write},
+    io::{self, Read, Write},
     process::ExitCode,
 };
+use tokio::sync::watch;
 
-fn parse(args: impl IntoIterator<Item = OsString>) -> Result<(), &'static str> {
+#[cfg(test)]
+#[path = "../build_support.rs"]
+mod build_support;
+
+#[derive(Debug, PartialEq, Eq)]
+enum Command {
+    Health,
+    Download {
+        artifact: resolved_release::UpdateArtifact,
+    },
+}
+
+fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, &'static str> {
     let args = args
         .into_iter()
         .map(|arg| arg.into_string().map_err(|_| "invalid_utf8"))
@@ -16,115 +33,282 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<(), &'static str> {
     if args.get(1).map(String::as_str) != Some("1") {
         return Err("unsupported_protocol_version");
     }
-    if args.len() != 3 {
-        return Err("invalid_arguments");
+    match args.get(2).map(String::as_str) {
+        Some("health") if args.len() == 3 => Ok(Command::Health),
+        Some("download")
+            if args.len() == 5 && args[3] == "--artifact-json" && args[4].len() <= 16 * 1024 =>
+        {
+            Ok(Command::Download {
+                artifact: serde_json::from_str(&args[4]).map_err(|_| "invalid_arguments")?,
+            })
+        }
+        None | Some("health" | "download") => Err("invalid_arguments"),
+        _ => Err("unsupported_command"),
     }
-    if args[2] != "health" {
-        return Err("unsupported_command");
-    }
-    Ok(())
 }
 
-fn response(args: impl IntoIterator<Item = OsString>) -> (Value, bool) {
-    match parse(args) {
-        Ok(()) => (
-            json!({
-                "protocol_version": 1,
-                "kind": "health",
-                "name": "resolved-updater",
-                "app_version": env!("RESOLVED_UPDATER_APP_VERSION"),
-                "build_version": env!("RESOLVED_BUILD_VERSION"),
-                "build_number": env!("API_TESTER_BUILD_NUMBER"),
-                "os": "macos",
-                "arch": env!("RESOLVED_UPDATER_ARCH"),
-                "feed_url": "https://apiworkbench.dev/downloads.json",
-                "capabilities": ["health"],
-                "installation_enabled": false
-            }),
-            true,
-        ),
-        Err(code) => (
-            json!({
-                "protocol_version": 1,
-                "kind": "error",
-                "name": "resolved-updater",
-                "error": {"code": code},
-                "installation_enabled": false
-            }),
-            false,
-        ),
+fn event(mut value: Value) -> Value {
+    value["protocol_version"] = json!(1);
+    value["installation_enabled"] = json!(false);
+    value
+}
+
+fn emit(value: Value) -> download::Result<()> {
+    let mut line = serde_json::to_vec(&event(value))
+        .map_err(|_| download::Failure::new("output", "Cannot encode updater event."))?;
+    // Parent's record cap includes the final NDJSON newline.
+    if line.len() >= 16 * 1024 {
+        return Err(download::Failure::new(
+            "output",
+            "Updater event is too large.",
+        ));
     }
+    line.push(b'\n');
+    io::stdout()
+        .lock()
+        .write_all(&line)
+        .map_err(|_| download::Failure::new("output", "Updater output is unavailable."))
+}
+
+fn health() -> Value {
+    json!({
+        "kind": "health", "name": "resolved-updater",
+        "app_version": env!("RESOLVED_UPDATER_APP_VERSION"),
+        "build_version": env!("RESOLVED_BUILD_VERSION"),
+        "build_number": env!("API_TESTER_BUILD_NUMBER"),
+        "os": "macos", "arch": env!("RESOLVED_UPDATER_ARCH"),
+        "feed_url": resolved_release::FEED_URL,
+        "capabilities": ["health", "download"]
+    })
+}
+
+// A detached std thread cannot keep runtime shutdown waiting for an open pipe.
+fn monitor(mut input: impl Read, cancel: watch::Sender<bool>) {
+    let mut line = Vec::with_capacity(7);
+    let mut overflow = false;
+    let mut byte = [0];
+    loop {
+        match input.read(&mut byte) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Ok(0) | Err(_) => break,
+            Ok(_) if byte[0] == b'\n' => {
+                if !overflow && line == b"cancel" {
+                    break;
+                }
+                line.clear();
+                overflow = false;
+            }
+            Ok(_) => {
+                if line.len() < 6 {
+                    line.push(byte[0]);
+                } else {
+                    overflow = true;
+                }
+            }
+        }
+    }
+    let _ = cancel.send(true);
+}
+
+struct NonblockingOutput {
+    fd: libc::c_int,
+    flags: libc::c_int,
+}
+
+impl NonblockingOutput {
+    fn new(fd: libc::c_int) -> download::Result<Self> {
+        // A slow/full pipe must fail, not block cancellation. Restore inherited
+        // flags on normal exit because an open file description may be shared.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+                return Err(download::Failure::new(
+                    "output",
+                    "Cannot configure updater output.",
+                ));
+            }
+            Ok(Self { fd, flags })
+        }
+    }
+}
+
+impl Drop for NonblockingOutput {
+    fn drop(&mut self) {
+        unsafe { libc::fcntl(self.fd, libc::F_SETFL, self.flags) };
+    }
+}
+
+fn run(command: Command) -> download::Result<()> {
+    let Command::Download { artifact } = command else {
+        return emit(health());
+    };
+    let (sender, mut receiver) = watch::channel(false);
+    std::thread::Builder::new()
+        .name("updater-cancel".into())
+        .spawn(move || monitor(io::stdin().lock(), sender))
+        .map_err(|_| download::Failure::new("runtime", "Cannot monitor cancellation."))?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| download::Failure::new("runtime", "Cannot start updater runtime."))?;
+    let result = runtime.block_on(download::interruptible(&mut receiver, async {
+        download::run(&artifact, &mut emit).await
+    }));
+    // Transport guards have already synchronously killed/reaped their child,
+    // including when interruptible dropped a stalled network future.
+    runtime.shutdown_timeout(std::time::Duration::from_millis(100));
+    result
 }
 
 fn main() -> ExitCode {
-    let (value, success) = response(std::env::args_os().skip(1));
-    let mut line = serde_json::to_vec(&value).expect("JSON value serialization");
-    line.push(b'\n');
-    if io::stdout().lock().write_all(&line).is_err() {
-        return ExitCode::FAILURE;
-    }
-    if success {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
+    let mut output_mode = None;
+    let result = parse(std::env::args_os().skip(1))
+        .map_err(|code| download::Failure::new(code, "Invalid updater arguments."))
+        .and_then(|command| {
+            if matches!(command, Command::Download { .. }) {
+                output_mode = Some(NonblockingOutput::new(libc::STDOUT_FILENO)?);
+            }
+            run(command)
+        });
+    let code = match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(failure) => {
+            let value = if failure.code == "cancelled" {
+                json!({"kind": "cancelled"})
+            } else {
+                json!({"kind": "error", "error": {"code": failure.code, "message": failure.message}})
+            };
+            let _ = emit(value);
+            ExitCode::FAILURE
+        }
+    };
+    drop(output_mode);
+    code
 }
 
 #[cfg(test)]
-#[path = "../build_support.rs"]
-mod build_support;
-
-#[cfg(test)]
 mod tests {
-    use super::build_support::*;
     use super::*;
 
     #[test]
-    fn parsing_is_exact() {
-        for (args, expected) in [
-            (vec!["--protocol-version", "1", "health"], Ok(())),
-            (vec![], Err("missing_protocol_version")),
-            (vec!["health"], Err("missing_protocol_version")),
-            (
-                vec!["--protocol-version"],
-                Err("unsupported_protocol_version"),
-            ),
-            (
-                vec!["--protocol-version", "2", "health"],
-                Err("unsupported_protocol_version"),
-            ),
-            (vec!["--protocol-version", "1"], Err("invalid_arguments")),
-            (
-                vec!["--protocol-version", "1", "health", "extra"],
-                Err("invalid_arguments"),
-            ),
-            (
-                vec!["--protocol-version", "1", "check"],
-                Err("unsupported_command"),
-            ),
-            (
-                vec!["--protocol-version", "1", "download"],
-                Err("unsupported_command"),
-            ),
-            (
-                vec!["--protocol-version", "1", "install"],
-                Err("unsupported_command"),
-            ),
-            (
-                vec!["--protocol-version", "1", "unknown"],
-                Err("unsupported_command"),
-            ),
-        ] {
-            assert_eq!(parse(args.into_iter().map(OsString::from)), expected);
-        }
+    fn restores_inherited_output_flags() {
+        use std::os::fd::AsRawFd;
+        let output = tempfile::tempfile().unwrap();
+        let copy = output.try_clone().unwrap();
+        let original = unsafe { libc::fcntl(copy.as_raw_fd(), libc::F_GETFL) };
+        let mode = NonblockingOutput::new(output.as_raw_fd()).unwrap();
+        assert_ne!(
+            unsafe { libc::fcntl(copy.as_raw_fd(), libc::F_GETFL) } & libc::O_NONBLOCK,
+            0
+        );
+        drop(mode);
+        assert_eq!(
+            unsafe { libc::fcntl(copy.as_raw_fd(), libc::F_GETFL) },
+            original
+        );
     }
 
     #[test]
-    fn invalid_utf8_fails_closed() {
-        use std::os::unix::ffi::OsStringExt;
-        let (value, success) = response([OsString::from_vec(vec![0xff])]);
-        assert!(!success);
-        assert_eq!(value["error"]["code"], "invalid_utf8");
+    fn exact_arguments_and_messages() {
+        let hash = "a".repeat(64);
+        let artifact = json!({"version":"2.0","sha256":hash,"size":3,
+            "name":"Resolved.zip","arch":"arm64","url":"https://example.invalid/a"})
+        .to_string();
+        assert!(matches!(
+            parse(
+                [
+                    "--protocol-version",
+                    "1",
+                    "download",
+                    "--artifact-json",
+                    &artifact
+                ]
+                .map(OsString::from)
+            ),
+            Ok(Command::Download { .. })
+        ));
+        let padded = format!("{artifact}{}", " ".repeat(16 * 1024 - artifact.len()));
+        assert!(
+            parse(
+                [
+                    "--protocol-version",
+                    "1",
+                    "download",
+                    "--artifact-json",
+                    &padded
+                ]
+                .map(OsString::from)
+            )
+            .is_ok()
+        );
+        let oversized = format!("{padded} ");
+        assert!(
+            parse(
+                [
+                    "--protocol-version",
+                    "1",
+                    "download",
+                    "--artifact-json",
+                    &oversized
+                ]
+                .map(OsString::from)
+            )
+            .is_err()
+        );
+        for args in [
+            vec![],
+            vec!["health"],
+            vec!["--protocol-version", "2", "health"],
+            vec!["--protocol-version", "1", "health", "extra"],
+            vec!["--protocol-version", "1", "download"],
+            vec!["--protocol-version", "1", "install"],
+            vec![
+                "--protocol-version",
+                "1",
+                "download",
+                "--sha256",
+                &hash,
+                "--version",
+                "2.0",
+            ],
+            vec![
+                "--protocol-version",
+                "1",
+                "download",
+                "--version",
+                "2.0",
+                "--sha256",
+                "bad",
+            ],
+        ] {
+            assert!(parse(args.into_iter().map(OsString::from)).is_err());
+        }
+        assert_eq!(
+            event(health())["capabilities"],
+            json!(["health", "download"])
+        );
+        assert_eq!(event(health())["installation_enabled"], false);
+    }
+
+    #[test]
+    fn cancellation_input_and_eof() {
+        for mut input in [
+            b"".as_slice(),
+            b"cancel\r\njunk".as_slice(),
+            b"cancelx\njunk".as_slice(),
+            b" cancel\njunk".as_slice(),
+            b"cancel\0\njunk".as_slice(),
+        ] {
+            let (tx, rx) = watch::channel(false);
+            monitor(&mut input, tx);
+            assert!(input.is_empty(), "only EOF may cancel malformed lines");
+            assert!(*rx.borrow());
+        }
+        let (tx, rx) = watch::channel(false);
+        let mut input = b"cancel\nignored".as_slice();
+        monitor(&mut input, tx);
+        assert!(*rx.borrow());
+        assert_eq!(input, b"ignored");
     }
 
     #[test]
@@ -138,29 +322,32 @@ mod tests {
             " 1",
             "💥",
         ] {
-            assert!(validate_version(value).is_err());
+            assert!(build_support::validate_version(value).is_err());
         }
-        assert!(validate_version(&"a".repeat(129)).is_err());
+        assert!(build_support::validate_version(&"a".repeat(129)).is_err());
         for value in ["1.2.3", "1.2.3-nightly.abc+1", "nightly-abc123"] {
-            assert!(validate_version(value).is_ok());
+            assert!(build_support::validate_version(value).is_ok());
         }
         for value in ["", "0", "-1", "+1", "1\n", "1.0", "18446744073709551616"] {
-            assert!(validate_build_number(value).is_err());
+            assert!(build_support::validate_build_number(value).is_err());
         }
-        assert!(validate_build_number("1").is_ok());
-        assert!(validate_build_number("18446744073709551615").is_ok());
+        assert!(build_support::validate_build_number("1").is_ok());
+        assert!(build_support::validate_build_number("18446744073709551615").is_ok());
     }
 
     #[test]
-    fn build_entry_point_and_target_are_required() {
-        assert!(
-            validate_target("", "macos", "aarch64")
-                .unwrap_err()
-                .contains("scripts/bundle-macos.sh")
+    fn build_contract() {
+        assert!(build_support::validate_target("", "macos", "aarch64").is_err());
+        assert_eq!(
+            build_support::validate_target("1", "macos", "aarch64"),
+            Ok("arm64")
         );
-        assert!(validate_target("1", "linux", "aarch64").is_err());
-        assert!(validate_target("1", "macos", "arm").is_err());
-        assert_eq!(validate_target("1", "macos", "aarch64"), Ok("arm64"));
-        assert_eq!(validate_target("1", "macos", "x86_64"), Ok("x64"));
+        assert_eq!(
+            build_support::validate_target("1", "macos", "x86_64"),
+            Ok("x64")
+        );
+        assert!(build_support::validate_target("1", "linux", "aarch64").is_err());
+        assert!(build_support::validate_version("1\ncargo:X=Y").is_err());
+        assert!(build_support::validate_build_number("0").is_err());
     }
 }

@@ -1046,6 +1046,7 @@ impl ApiTester {
         );
         let quit_subscription = (!execution_only).then(|| {
             cx.on_app_quit(|this, cx| {
+                this.cancel_update_download();
                 this.stop_realtime();
                 this.stop_websocket();
                 this.stop_mcp_runtime_operations(cx);
@@ -1251,6 +1252,8 @@ impl ApiTester {
             recording_shortcut_id: None,
             settings_notice: None,
             update_status: about::UpdateStatus::default(),
+            update_download: about::UpdateDownload::default(),
+            update_download_exit_pending: false,
             about_page_request: 0,
             mcp_open_tool_groups: crate::control_tools::CONTROL_TOOL_GROUPS
                 .iter()

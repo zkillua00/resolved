@@ -457,6 +457,28 @@ and request scripts so a shareable code sample cannot conceal unsent or
 sensitive editor state. External source import recovers common URL expressions,
 methods, headers, and body forms without executing the code.
 
+## Downloading macOS updates
+
+Open **About Resolved** or choose **Check for updates** in the application menu.
+Checks use `https://apiworkbench.dev/downloads.json`; they do not use workspace
+cookies, credentials, proxies, or custom certificate settings.
+
+On macOS, a newer release with valid architecture, size, and SHA-256 metadata
+offers **Download update**. Downloading is always an explicit action. Progress
+and **Cancel download** remain available while the bundled helper downloads and
+checks the ZIP. If release metadata changes after approval, check again before
+retrying. Missing integrity metadata leaves the browser-download option available.
+Quitting cancels an active download and waits for helper cleanup before closing.
+A download that already completed when cancellation arrives stays visible as
+completed rather than hiding the saved archive.
+
+Successful ZIPs are kept in a private directory under
+`~/Library/Caches/dev.apitester.desktop/updates/`, with the path shown in Settings.
+Size and SHA-256 establish download integrity, **not publisher authenticity**.
+This stage does not extract, install, replace the app, or restart it; there is no
+silent installation. In-app publisher verification and installation are still
+being implemented. Windows and Linux retain browser-download behavior.
+
 ## Settings, shortcuts, and themes
 
 Open Settings from the navigation rail or with `⌘,`. The Servers page switches

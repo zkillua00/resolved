@@ -16,7 +16,7 @@ class LicenseAuditTests(unittest.TestCase):
         # macOS exposes /var as a symlink to /private/var; match the audit's
         # canonical manifest paths instead of failing every test at the root check.
         self.root = Path(self.temporary.name).resolve()
-        self.helper = self.root / "helper"
+        self.helper = self.root / "macos" / "updater"
         self.reviewed = self.helper / "licenses"
         self.reviewed.mkdir(parents=True)
         self.source = self.root / "upstream"
@@ -68,8 +68,58 @@ class LicenseAuditTests(unittest.TestCase):
                 metadata = copy.deepcopy(self.metadata)
                 metadata["packages"][1][field] = value
                 reason = ("unreviewed or duplicate dependency" if field in ("name", "version")
+                          else "unexpected local dependency" if field == "source"
                           else "dependency " + field + " mismatch")
                 self.reject(reason, metadata)
+
+    def add_first_party(self):
+        manifest = self.root / "crates" / "resolved-release" / "Cargo.toml"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text('[package]\nname = "resolved-release"\n')
+        package = {
+            "id": "release", "name": "resolved-release", "version": "0.0.0",
+            "source": None, "license": "Apache-2.0", "license_file": None,
+            "manifest_path": str(manifest),
+        }
+        self.metadata["packages"].append(package)
+        self.metadata["resolve"]["nodes"].append({"id": package["id"]})
+        return package
+
+    def test_canonical_first_party_allowed(self):
+        self.add_first_party()
+        licenses.audit(self.metadata, self.output)
+        self.assertTrue((self.output / "inventory.json").is_file())
+
+    def test_first_party_identity_and_license_rejected(self):
+        self.add_first_party()
+        for field, value in [("version", "0.0.1"), ("source", "registry+unexpected"),
+                             ("license", "MIT"), ("license_file", "LICENSE")]:
+            with self.subTest(field=field):
+                metadata = copy.deepcopy(self.metadata)
+                metadata["packages"][-1][field] = value
+                self.reject("wrong first-party resolved-release identity or license", metadata)
+
+    def test_unexpected_local_package_rejected(self):
+        self.add_first_party()["name"] = "another-local-package"
+        self.reject("unexpected local dependency: another-local-package")
+
+    def test_first_party_path_substitution_rejected(self):
+        package = self.add_first_party()
+        package["manifest_path"] = str(self.source / "Cargo.toml")
+        self.reject("first-party resolved-release manifest path mismatch")
+
+    def test_first_party_duplicate_rejected(self):
+        package = dict(self.add_first_party(), id="duplicate-release")
+        self.metadata["packages"].append(package)
+        self.metadata["resolve"]["nodes"].append({"id": package["id"]})
+        self.reject("duplicate first-party resolved-release dependency")
+
+    def test_first_party_symlink_substitution_rejected(self):
+        package = self.add_first_party()
+        manifest = Path(package["manifest_path"])
+        manifest.unlink()
+        manifest.symlink_to(self.source / "Cargo.toml")
+        self.reject("first-party resolved-release manifest path mismatch")
 
     def test_extra_package(self):
         metadata = copy.deepcopy(self.metadata)
@@ -93,6 +143,49 @@ class LicenseAuditTests(unittest.TestCase):
 
     def test_changed_reviewed_license(self):
         (self.reviewed / "MIT.txt").write_bytes(b"different license\n")
+        self.reject("license/attribution text mismatch")
+
+    def configure_excerpt(self):
+        upstream = b"not a notice\r\nCopyright test\r\nMIT terms"
+        (self.source / "LICENSE-MIT").write_bytes(upstream)
+        snapshot = b"Copyright test\nMIT terms\n"
+        (self.reviewed / "MIT.txt").write_bytes(snapshot)
+        path = self.reviewed / "inventory.json"
+        inventory = json.loads(path.read_text())
+        review = inventory["packages"][0]
+        review["source_tree_sha256"] = licenses.source_digest(self.source)
+        review["texts"][0].update(
+            start_line=2, prefix_lines=2,
+            sha256=licenses.digest(b"Copyright test\r\nMIT terms"),
+            reviewed_lf_sha256=licenses.digest(snapshot),
+        )
+        path.write_text(json.dumps(inventory))
+        return inventory, path
+
+    def test_excerpt_and_lf_snapshot_ship_exact_upstream_bytes(self):
+        self.configure_excerpt()
+        licenses.audit(self.metadata, self.output)
+        self.assertEqual((self.output / "example-1.0.0" / "MIT.txt").read_bytes(),
+                         b"Copyright test\r\nMIT terms")
+
+    def test_excerpt_wrong_range_rejected(self):
+        inventory, path = self.configure_excerpt()
+        inventory["packages"][0]["texts"][0]["start_line"] = 1
+        path.write_text(json.dumps(inventory))
+        self.reject("license/attribution text mismatch")
+
+    def test_lf_snapshot_does_not_allow_upstream_byte_changes(self):
+        inventory, path = self.configure_excerpt()
+        (self.source / "LICENSE-MIT").write_bytes(b"not a notice\nCopyright test\nMIT terms")
+        # Even if a source hash were re-reviewed, the exact text hash must match.
+        inventory["packages"][0]["source_tree_sha256"] = licenses.source_digest(self.source)
+        path.write_text(json.dumps(inventory))
+        self.reject("license/attribution text mismatch")
+
+    def test_lf_snapshot_hash_rejected(self):
+        inventory, path = self.configure_excerpt()
+        inventory["packages"][0]["texts"][0]["reviewed_lf_sha256"] = "wrong"
+        path.write_text(json.dumps(inventory))
         self.reject("license/attribution text mismatch")
 
     def test_changed_source_with_unchanged_label_and_license(self):

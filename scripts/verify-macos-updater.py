@@ -22,7 +22,7 @@ def verify_health(stdout, app_version, build_version, build_number, arch):
         'os': 'macos',
         'arch': arch,
         'feed_url': 'https://apiworkbench.dev/downloads.json',
-        'capabilities': ['health'],
+        'capabilities': ['health', 'download'],
         'installation_enabled': False,
     }
     # JSON comparison distinguishes booleans from integers (unlike Python ==).
@@ -79,4 +79,4 @@ if __name__ == '__main__':
                args.arch, args.app_executable)
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         parser.exit(1, f'error: {error}\n')
-    print(f'Verified updater {args.build_version}, build {args.build_number} ({args.arch}; health only)')
+    print(f'Verified updater {args.build_version}, build {args.build_number} ({args.arch}; installation disabled)')

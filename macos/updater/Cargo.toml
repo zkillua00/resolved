@@ -10,3 +10,8 @@ resolver = "3"
 
 [dependencies]
 serde_json = "=1.0.151"
+resolved-release = { path = "../../crates/resolved-release" }
+tokio = { version = "=1.53.1", features = ["rt", "time", "sync", "macros", "io-util", "fs", "process"] }
+sha2 = "=0.10.9"
+tempfile = "=3.27.0"
+libc = "=0.2.189"

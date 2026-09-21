@@ -1,10 +1,10 @@
 # macOS OTA updater
 
-Status: design direction approved; build/protocol foundation implemented. The
+Status: design direction approved; download milestone implemented. The
 dedicated Rust helper and explicit download/restart workflow are accepted.
-The helper is bundled, signed, license-audited, and health-checkable only.
-Download, installation, and UI behavior below remain the target design, not
-implemented OTA functionality.
+The build/protocol and verified-download stages are implemented. Download
+integrity is separate from publisher verification: extraction, installation, and
+restart below remain the target design, not implemented OTA functionality.
 
 ## Requirements
 
@@ -34,10 +34,18 @@ integration layer. A dedicated helper fits the feed and build boundary directly.
 The tradeoff is that we own macOS installation and crash recovery; these are
 release-blocking responsibilities, not a shell script that overwrites an app.
 
-Use narrowly scoped HTTP, JSON, version, hashing, and archive dependencies plus
+Use narrowly scoped JSON, version, hashing, and archive dependencies plus
 macOS security/filesystem APIs, rather than a generic executable self-replacer.
 Updating only `Contents/MacOS/api-tester` would invalidate the bundle signature
 and leave resources and the updater at different versions.
+
+For downloads, use the macOS-supplied `/usr/bin/curl` transport, invoked directly
+with controlled arguments and no inherited curl/proxy/TLS configuration. Rust
+validates redirects, bounds streams, verifies integrity, and owns private cache
+files and child-process cleanup. The native-TLS binding initially considered was
+rejected by the license review because it includes APSL documentation. The
+updater does not redistribute curl or that binding. OS transport maintenance is
+therefore supplied by macOS; failure never falls back to insecure TLS.
 
 Suggested source layout:
 
@@ -237,7 +245,10 @@ in `macos/updater/licenses/` and the bundler checks it before compilation.
    no installation behavior yet. Verification runs through
    `scripts/bundle-macos.sh debug --verify-updater`.
 2. Share feed parsing/selection with the desktop and add bounded downloads,
-   cancellation, integrity checks, and explicit UI states.
+   cancellation, integrity checks, and explicit UI states. Implemented.
+   Approval and completion bind the complete artifact tuple; a changed
+   feed requires a new check, not silent substitution. Downloaded ZIPs remain
+   ineligible to install.
 3. Implement secure staging, native signature verification, installation
    transactions, and recovery.
 4. Integrate the graceful restart continuation and exercise the complete signed

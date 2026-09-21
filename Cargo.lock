@@ -133,6 +133,7 @@ dependencies = [
  "memmap2",
  "quick-xml 0.41.0",
  "reqwest",
+ "resolved-release",
  "ring",
  "roxmltree",
  "rquickjs",
@@ -6288,6 +6289,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "resolved-release"
+version = "0.0.0"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "resvg"
 version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7990,6 +8001,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
