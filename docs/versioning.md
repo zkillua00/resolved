@@ -131,6 +131,14 @@ request user agent and control API. Ordinary local builds default to the Cargo
 version. The nightly string is a display/build identifier, not valid Cargo
 SemVer, so Cargo files are never rewritten by CI.
 
+`RESOLVED_BUILD_COMMIT` separately exposes the source Git commit at compile time.
+An explicit environment override takes precedence; otherwise `build.rs` uses
+`git rev-parse HEAD` (the full hash), or `Unknown` when Git metadata is unavailable.
+Source-archive builds can supply the override when the source commit is known.
+Git HEAD, loose refs, and existing packed refs are tracked for incremental builds,
+including detached HEAD and linked worktrees. This identifies the source commit,
+not uncommitted changes, and is distinct from a downloaded archive's SHA256 checksum.
+
 macOS retains the three-part Cargo version in `CFBundleShortVersionString` and
 uses the workflow run number for `CFBundleVersion`. MSIX requires numeric
 components: version builds use `MAJOR.MINOR.PATCH.0`; nightlies use the workflow

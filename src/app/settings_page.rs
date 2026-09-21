@@ -190,7 +190,7 @@ impl ApiTester {
                     ]),
             );
 
-        let mut pages = Vec::with_capacity(8);
+        let mut pages = Vec::with_capacity(9);
         pages.push(servers_page);
         pages.push(self.local_execution_limits_settings_page(cx));
         pages.extend([
@@ -200,6 +200,7 @@ impl ApiTester {
             appearance_page,
             mcp_page,
             developer_page,
+            self.about_settings_page(cx),
         ]);
 
         let (message_inset, message_overlay) = settings_message_overlay(

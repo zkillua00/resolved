@@ -1250,6 +1250,7 @@ impl ApiTester {
             base_key_bindings,
             recording_shortcut_id: None,
             settings_notice: None,
+            update_status: about::UpdateStatus::default(),
             mcp_open_tool_groups: crate::control_tools::CONTROL_TOOL_GROUPS
                 .iter()
                 .map(|group| group.id.to_owned())

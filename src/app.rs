@@ -104,6 +104,7 @@ use crate::{
 
 // Composition root only. Page/workspace behavior and every concrete render
 // component live in their dedicated child modules under `src/app/`.
+mod about;
 mod bootstrap;
 mod collection_folder_actions;
 mod collections_actions;
@@ -394,6 +395,7 @@ pub struct ApiTester {
     base_key_bindings: Vec<gpui::KeyBinding>,
     recording_shortcut_id: Option<ShortcutId>,
     settings_notice: Option<String>,
+    update_status: about::UpdateStatus,
     mcp_open_tool_groups: HashSet<String>,
     server_management: server_management::ServerManagementState,
     server_management_generation: u64,
