@@ -1,10 +1,13 @@
 # macOS OTA updater
 
-Status: design direction approved; download milestone implemented. The
-dedicated Rust helper and explicit download/restart workflow are accepted.
-The build/protocol and verified-download stages are implemented. Download
-integrity is separate from publisher verification: extraction, installation, and
-restart below remain the target design, not implemented OTA functionality.
+Status: implementation complete through verification, restart handoff, and
+transaction recovery. Local Developer ID signing, Apple notarization, stapling,
+and runtime host verification passed on Apple Silicon; full upgrade and clean
+recipient validation remain release gates. See the
+[validation record](macos-ota-validation.md) for the exact artifact and limits.
+The dedicated Rust helper and explicit download/restart workflow are accepted.
+Download integrity remains separate from publisher verification. Debug and
+ad-hoc builds cannot authorize installation.
 
 ## Requirements
 
@@ -175,6 +178,25 @@ Keep rollback scoped to installation failures: do not promise automatic rollback
 after the new application has migrated the user's database. Binary rollback is
 not database rollback.
 
+The implementation snapshots and re-hashes cached bytes before every extraction.
+Verification staging is discarded; installation prepares a fresh verified copy
+on the destination filesystem. V1 rejects all links and nonportable/ambiguous
+paths, ZIP64, comments, padding, unsupported records/compression, and non-native
+or universal Mach-O executables. The final published ZIP must pass the same
+extractor in the bundler.
+
+Notarization requires both structured Gatekeeper assessment and the independent
+native `notarized` code requirement; an authority label alone is insufficient.
+No developer tools are required at recipient runtime. Recovery acknowledgement
+also verifies the live caller's CDHash against the installed app, not just its
+path or a journal flag.
+
+After preparation, a single nonblocking `commit` write and normal quit occur
+without an intervening await. The helper requires clean, drained control EOF and
+the captured parent's kqueue exit before mutation. Explicit cancellation remains
+sticky through the final pre-swap checks. Old code may be relaunched after a
+proven pre-swap failure, never after a successful exchange.
+
 ## Desktop lifecycle and UI
 
 Reuse the existing Check for Updates action, macOS application menu, and
@@ -241,8 +263,7 @@ in `macos/updater/licenses/` and the bundler checks it before compilation.
 ## Implementation and verification plan
 
 1. Establish the isolated helper, versioned IPC, build boundary, license
-   inventory, and nested signing. Implemented as a one-shot health protocol;
-   no installation behavior yet. Verification runs through
+   inventory, and nested signing. Implemented. Verification runs through
    `scripts/bundle-macos.sh debug --verify-updater`.
 2. Share feed parsing/selection with the desktop and add bounded downloads,
    cancellation, integrity checks, and explicit UI states. Implemented.
@@ -250,9 +271,14 @@ in `macos/updater/licenses/` and the bundler checks it before compilation.
    feed requires a new check, not silent substitution. Downloaded ZIPs remain
    ineligible to install.
 3. Implement secure staging, native signature verification, installation
-   transactions, and recovery.
+   transactions, and recovery. Implemented, with no privilege escalation or
+   automatic rollback after replacement.
 4. Integrate the graceful restart continuation and exercise the complete signed
-   release workflow on Apple Silicon and Intel.
+   release workflow on Apple Silicon and Intel. Continuation and release gates
+   are implemented. Apple Silicon signing/notarization and the packaged runtime
+   trust checks passed; a notarized end-to-end upgrade, Intel validation, and
+   clean offline-recipient validation remain required before declaring public
+   OTA production-ready.
 
 Release-blocking tests include malformed/oversized feeds, missing hashes,
 ambiguous assets, wrong architecture, redirects, interrupted downloads, ZIP

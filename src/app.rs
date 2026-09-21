@@ -398,6 +398,8 @@ pub struct ApiTester {
     update_status: about::UpdateStatus,
     update_download: about::UpdateDownload,
     update_download_exit_pending: bool,
+    update_recovery_started: bool,
+    update_recovery_notice: Option<String>,
     about_page_request: u64,
     mcp_open_tool_groups: HashSet<String>,
     server_management: server_management::ServerManagementState,

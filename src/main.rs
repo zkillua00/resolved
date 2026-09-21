@@ -32,6 +32,7 @@ mod theme;
 mod tls;
 mod typescript_service;
 mod update_download;
+mod update_install;
 mod web_preview;
 
 use app::ApiTester;
@@ -102,6 +103,110 @@ fn request_app_exit(view: &gpui::WeakEntity<ApiTester>, pending: &Rc<Cell<bool>>
                     false
                 });
             if saved {
+                cx.quit();
+            }
+        });
+    })
+    .detach();
+}
+
+fn request_update_restart(view: &gpui::WeakEntity<ApiTester>, cx: &mut App) {
+    let (cancel, cancelled) = tokio::sync::watch::channel(false);
+    let (finished, completion) = tokio::sync::watch::channel(false);
+    let request = view.update(cx, |view, cx| {
+        let request = view.begin_update_restart(cancel, completion, cx)?;
+        view.flush_local_state(cx);
+        view.local_persistence_ready_to_close(cx);
+        Some(request)
+    });
+    let Ok(Some(request)) = request else { return };
+    let view = view.clone();
+    let barrier = io::flush();
+    cx.spawn(async move |cx| {
+        if barrier.await.is_err() {
+            let _ = cx.update(|cx| {
+                view.update(cx, |view, cx| {
+                    view.fail_update_restart(
+                        "Could not save local state before updating.".to_owned(),
+                        cx,
+                    );
+                })
+            });
+            return;
+        }
+        let task = cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                if !view.flush_local_state(cx) || !view.local_persistence_ready_to_close(cx) {
+                    view.fail_update_restart(
+                        "Finish active work and save local changes before restarting.".to_owned(),
+                        cx,
+                    );
+                    return None;
+                }
+                Some(view.spawn_update_installer(request, cancelled, finished))
+            })
+        });
+        let Ok(Ok(Some(task))) = task else { return };
+        let ticket = match task.await {
+            Ok(Ok(ticket)) => ticket,
+            result => {
+                let message = match result {
+                    Ok(Err(error)) => error,
+                    Err(_) => "The installer supervisor stopped before readiness.".to_owned(),
+                    _ => unreachable!(),
+                };
+                let _ = cx
+                    .update(|cx| view.update(cx, |view, cx| view.fail_update_restart(message, cx)));
+                return;
+            }
+        };
+        // Preparation is asynchronous. Drain again because edits may have arrived
+        // while the helper revalidated and staged the signed application.
+        let flushed = cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.flush_local_state(cx);
+                view.local_persistence_ready_to_close(cx);
+            })
+        });
+        if flushed.is_err() || io::flush().await.is_err() {
+            drop(ticket);
+            let _ = cx.update(|cx| {
+                view.update(cx, |view, cx| {
+                    view.fail_update_restart(
+                        "Could not finish saving before restart.".to_owned(),
+                        cx,
+                    );
+                })
+            });
+            return;
+        }
+        let _ = cx.update(|cx| {
+            let committed = view
+                .update(cx, |view, cx| {
+                    if !view.flush_local_state(cx) || !view.local_persistence_ready_to_close(cx) {
+                        drop(ticket);
+                        view.fail_update_restart(
+                            "Local work changed during update preparation. Save it and retry."
+                                .to_owned(),
+                            cx,
+                        );
+                        return false;
+                    }
+                    match ticket.commit() {
+                        Ok(()) => {
+                            view.commit_update_restart(cx);
+                            true
+                        }
+                        Err(error) => {
+                            view.fail_update_restart(error, cx);
+                            false
+                        }
+                    }
+                })
+                .unwrap_or(false);
+            // No await or event dispatch occurs between the final durability
+            // check, nonblocking commit write, and normal app termination.
+            if committed {
                 cx.quit();
             }
         });
@@ -317,6 +422,7 @@ fn main() {
                         });
                         register_app_action_handlers(&view, cx);
                         platform::configure_menus(cx);
+                        view.update(cx, |view, cx| view.start_update_recovery(cx));
                         let exit_pending = Rc::new(Cell::new(false));
                         let close_pending = Rc::clone(&exit_pending);
                         let view_for_close = view.downgrade();

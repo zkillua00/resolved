@@ -457,7 +457,7 @@ and request scripts so a shareable code sample cannot conceal unsent or
 sensitive editor state. External source import recovers common URL expressions,
 methods, headers, and body forms without executing the code.
 
-## Downloading macOS updates
+## Updating on macOS
 
 Open **About Resolved** or choose **Check for updates** in the application menu.
 Checks use `https://apiworkbench.dev/downloads.json`; they do not use workspace
@@ -465,7 +465,7 @@ cookies, credentials, proxies, or custom certificate settings.
 
 On macOS, a newer release with valid architecture, size, and SHA-256 metadata
 offers **Download update**. Downloading is always an explicit action. Progress
-and **Cancel download** remain available while the bundled helper downloads and
+and **Cancel update** remain available while the bundled helper downloads and
 checks the ZIP. If release metadata changes after approval, check again before
 retrying. Missing integrity metadata leaves the browser-download option available.
 Quitting cancels an active download and waits for helper cleanup before closing.
@@ -475,9 +475,27 @@ completed rather than hiding the saved archive.
 Successful ZIPs are kept in a private directory under
 `~/Library/Caches/dev.apitester.desktop/updates/`, with the path shown in Settings.
 Size and SHA-256 establish download integrity, **not publisher authenticity**.
-This stage does not extract, install, replace the app, or restart it; there is no
-silent installation. In-app publisher verification and installation are still
-being implemented. Windows and Linux retain browser-download behavior.
+Verification then checks a fresh private extraction, the app and helper's
+Developer ID signatures, the installed publisher's Team ID, notarization,
+architecture, version, and minimum macOS version. Only a verified update offers
+**Restart and update**. Failed verification never offers an installation bypass.
+
+Restart is a separate approval. Resolved saves local state, prepares and verifies
+the replacement again, and only quits after the installer is ready. The helper
+waits for that exact process to exit, atomically replaces the app, and relaunches
+the final application path. Pending work or failed persistence keeps Resolved
+open. There is no silent installation or forced restart.
+
+Automatic installation requires an official, stable, Developer ID-signed and
+notarized app in a user-owned, writable location. Debug, ad-hoc, nightly,
+read-only/translocated, and administrator-owned installations use manual updates;
+the updater does not request elevated privileges. Windows and Linux retain
+browser-download behavior.
+
+A recovery copy is retained until the new app acknowledges startup. If launch
+fails or recovery is ambiguous, it is kept for manual attention. The updater
+never automatically restores an older binary after the new app could have run,
+because binary rollback would not undo database migrations.
 
 ## Settings, shortcuts, and themes
 

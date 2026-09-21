@@ -1,5 +1,5 @@
-//! Desktop side of the bundled updater protocol. Downloaded bytes are not yet
-//! publisher-verified, extracted, or eligible to install.
+//! Desktop side of the bundled updater protocol. Byte-integrity download and
+//! native publisher verification are separate, explicitly validated operations.
 use std::{path::PathBuf, process::Stdio, time::Duration};
 
 use resolved_release::UpdateArtifact;
@@ -32,7 +32,18 @@ pub(crate) struct Progress {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Downloaded(PathBuf),
+    Verified {
+        team_id: String,
+        bundle_version: String,
+    },
     Cancelled,
+}
+
+#[derive(Clone, Default)]
+enum Operation {
+    #[default]
+    Download,
+    Verify(PathBuf),
 }
 
 #[derive(Deserialize)]
@@ -55,6 +66,12 @@ enum Event {
         artifact: UpdateArtifact,
         path: PathBuf,
     },
+    Verified {
+        artifact: UpdateArtifact,
+        archive: PathBuf,
+        team_id: String,
+        bundle_version: String,
+    },
     Cancelled,
     Error {
         error: ErrorMessage,
@@ -73,14 +90,27 @@ enum Validated {
     Finished(Result<Outcome, String>),
 }
 
+#[cfg(test)]
 fn decode(line: &[u8], expected: &UpdateArtifact) -> Result<Validated, String> {
+    decode_operation(line, expected, &Operation::Download)
+}
+
+fn decode_operation(
+    line: &[u8],
+    expected: &UpdateArtifact,
+    operation: &Operation,
+) -> Result<Validated, String> {
     if line.len() as u64 > MAX_EVENT_BYTES || !line.ends_with(b"\n") {
         return Err("The updater returned an oversized or incomplete response.".to_owned());
     }
     let message: Envelope = serde_json::from_slice(line).map_err(|_| {
         "The updater returned an invalid response. Rebuild or reinstall Resolved.".to_owned()
     })?;
-    if message.protocol_version != 1 || message.installation_enabled {
+    let verified = matches!(
+        (&message.event, operation),
+        (Event::Verified { .. }, Operation::Verify(_))
+    );
+    if message.protocol_version != 1 || message.installation_enabled != verified {
         return Err("The updater protocol or capabilities do not match this app.".to_owned());
     }
     Ok(match message.event {
@@ -91,7 +121,11 @@ fn decode(line: &[u8], expected: &UpdateArtifact) -> Result<Validated, String> {
         } => {
             let valid = match phase {
                 Phase::Checking => downloaded == 0 && (total == 0 || total == expected.size),
-                Phase::Downloading => total == expected.size && downloaded <= total,
+                Phase::Downloading => {
+                    matches!(operation, Operation::Download)
+                        && total == expected.size
+                        && downloaded <= total
+                }
                 Phase::Verifying => total == expected.size && downloaded == total,
             };
             if !valid {
@@ -104,7 +138,8 @@ fn decode(line: &[u8], expected: &UpdateArtifact) -> Result<Validated, String> {
             })
         }
         Event::Downloaded { artifact, path } => {
-            if artifact != *expected
+            if !matches!(operation, Operation::Download)
+                || artifact != *expected
                 || !path.is_absolute()
                 || path.file_name().and_then(|name| name.to_str()) != Some(expected.name.as_str())
             {
@@ -113,6 +148,30 @@ fn decode(line: &[u8], expected: &UpdateArtifact) -> Result<Validated, String> {
                 );
             }
             Validated::Finished(Ok(Outcome::Downloaded(path)))
+        }
+        Event::Verified {
+            artifact,
+            archive,
+            team_id,
+            bundle_version,
+        } => {
+            if !matches!(operation, Operation::Verify(path) if path.as_os_str() == archive.as_os_str())
+                || artifact != *expected
+                || !archive.is_absolute()
+                || team_id.len() != 10
+                || !team_id
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+                || bundle_version.is_empty()
+                || !bundle_version.bytes().all(|b| b.is_ascii_digit())
+                || !bundle_version.bytes().any(|b| b != b'0')
+            {
+                return Err("The verified artifact or publisher metadata does not match the requested update.".to_owned());
+            }
+            Validated::Finished(Ok(Outcome::Verified {
+                team_id,
+                bundle_version,
+            }))
         }
         Event::Cancelled => Validated::Finished(Ok(Outcome::Cancelled)),
         Event::Error { error } => {
@@ -160,11 +219,68 @@ async fn run_command(
     cancel: watch::Receiver<bool>,
     finished: watch::Sender<bool>,
 ) -> Result<Outcome, String> {
+    run_operation(
+        command,
+        artifact,
+        Operation::Download,
+        progress,
+        cancel,
+        finished,
+    )
+    .await
+}
+
+pub(crate) async fn verify(
+    artifact: UpdateArtifact,
+    archive: PathBuf,
+    progress: mpsc::Sender<Progress>,
+    cancel: watch::Receiver<bool>,
+    finished: watch::Sender<bool>,
+) -> Result<Outcome, String> {
+    if !archive.is_absolute() {
+        return Err("Verification requires an absolute archive path.".to_owned());
+    }
+    let executable = crate::platform::updater_executable()?;
+    let approval = serde_json::to_string(&artifact)
+        .map_err(|_| "Could not encode the selected update.".to_owned())?;
+    if approval.len() as u64 > MAX_EVENT_BYTES {
+        return Err("The selected update metadata is too large.".to_owned());
+    }
+    let mut command = Command::new(executable);
+    command
+        .args([
+            "--protocol-version",
+            "1",
+            "verify",
+            "--artifact-json",
+            &approval,
+            "--archive",
+        ])
+        .arg(&archive);
+    run_operation(
+        command,
+        artifact,
+        Operation::Verify(archive),
+        progress,
+        cancel,
+        finished,
+    )
+    .await
+}
+
+async fn run_operation(
+    command: Command,
+    artifact: UpdateArtifact,
+    operation: Operation,
+    progress: mpsc::Sender<Progress>,
+    cancel: watch::Receiver<bool>,
+    finished: watch::Sender<bool>,
+) -> Result<Outcome, String> {
     // Dropping a caller cancels ownership, not the child. This independent task
     // survives caller cancellation; normal app exit waits for its finished signal.
     let (owner, gone) = watch::channel(());
     let supervisor = tokio::spawn(async move {
-        let result = own_command(command, artifact, progress, cancel, gone).await;
+        let result = own_command(command, artifact, operation, progress, cancel, gone).await;
         let _ = finished.send(true);
         result
     });
@@ -177,6 +293,7 @@ async fn run_command(
 
 #[derive(Default)]
 struct Session {
+    operation: Operation,
     // read_until is cancellation-safe only if its partially filled buffer survives.
     line: Vec<u8>,
     result: Option<Result<Outcome, String>>,
@@ -203,7 +320,7 @@ impl Session {
             if self.result.is_some() {
                 return Err("The updater returned data after its terminal response.".to_owned());
             }
-            let event = decode(&self.line, artifact)?;
+            let event = decode_operation(&self.line, artifact, &self.operation)?;
             self.line.clear();
             match event {
                 Validated::Progress(update) => {
@@ -227,6 +344,7 @@ impl Session {
 async fn own_command(
     mut command: Command,
     artifact: UpdateArtifact,
+    operation: Operation,
     progress: mpsc::Sender<Progress>,
     mut cancel: watch::Receiver<bool>,
     mut owner_gone: watch::Receiver<()>,
@@ -245,7 +363,10 @@ async fn own_command(
         })?;
     let mut input = child.stdin.take().expect("piped updater stdin");
     let mut output = BufReader::new(child.stdout.take().expect("piped updater stdout"));
-    let mut session = Session::default();
+    let mut session = Session {
+        operation,
+        ..Session::default()
+    };
     let mut cancelled = false;
     let mut received = tokio::select! {
         biased;
@@ -279,11 +400,18 @@ async fn own_command(
         }
     };
     received?;
-    if matches!(session.result, Some(Ok(Outcome::Downloaded(_)))) && !status.success() {
+    if matches!(
+        session.result,
+        Some(Ok(Outcome::Downloaded(_) | Outcome::Verified { .. }))
+    ) && !status.success()
+    {
         return Err("The updater failed after reporting a download.".to_owned());
     }
-    if let Some(Ok(Outcome::Downloaded(path))) = session.result {
-        return Ok(Outcome::Downloaded(path));
+    if matches!(
+        session.result,
+        Some(Ok(Outcome::Downloaded(_) | Outcome::Verified { .. }))
+    ) {
+        return session.result.unwrap();
     }
     if cancelled {
         return Ok(Outcome::Cancelled);
@@ -311,6 +439,82 @@ mod tests {
         payload["protocol_version"] = json!(1);
         payload["installation_enabled"] = json!(false);
         format!("{payload}\n").into_bytes()
+    }
+
+    #[test]
+    fn verification_requires_exact_terminal_and_native_trust() {
+        let expected = artifact();
+        let archive = PathBuf::from(format!("/cache/{}", expected.name));
+        let operation = Operation::Verify(archive.clone());
+        let payload = json!({"protocol_version":1,"installation_enabled":true,
+            "kind":"verified","artifact":expected,"archive":archive,
+            "team_id":"ABCDE12345","bundle_version":"42"});
+        let encode = |value: &serde_json::Value| format!("{value}\n").into_bytes();
+        assert!(matches!(
+            decode_operation(&encode(&payload), &expected, &operation),
+            Ok(Validated::Finished(Ok(Outcome::Verified { .. })))
+        ));
+        assert!(decode(&encode(&payload), &expected).is_err());
+        for (key, value) in [
+            ("installation_enabled", json!(false)),
+            ("archive", json!("/other/archive.zip")),
+            ("team_id", json!("abcde12345")),
+            ("team_id", json!("ABC123")),
+            ("bundle_version", json!("0")),
+            ("bundle_version", json!("1.2")),
+            ("bundle_version", json!("+42")),
+        ] {
+            let mut invalid = payload.clone();
+            invalid[key] = value;
+            assert!(decode_operation(&encode(&invalid), &expected, &operation).is_err());
+        }
+        let mut invalid = payload.clone();
+        invalid["artifact"]["sha256"] = json!("b".repeat(64));
+        assert!(decode_operation(&encode(&invalid), &expected, &operation).is_err());
+        for value in [
+            json!({"kind":"downloaded","artifact":expected,"path":archive}),
+            json!({"kind":"progress","phase":"downloading","downloaded":0,"total":100}),
+            json!({"kind":"capabilities","capabilities":["verify"]}),
+        ] {
+            assert!(decode_operation(&line(value), &expected, &operation).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn verification_completion_wins_cancellation_with_partial_frame() {
+        let expected = artifact();
+        let archive = PathBuf::from(format!("/cache/{}", expected.name));
+        let payload = format!(
+            "{}\n",
+            json!({"protocol_version":1,"installation_enabled":true,
+            "kind":"verified","artifact":expected,"archive":archive,
+            "team_id":"ABCDE12345","bundle_version":"42"})
+        );
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c",
+            "printf '%s\\n' '{\"protocol_version\":1,\"installation_enabled\":false,\"kind\":\"progress\",\"phase\":\"checking\",\"downloaded\":0,\"total\":0}'; printf '%s' \"$1\"; read line; printf '%s' \"$2\"; exit 0",
+            "verify-test", &payload[..20], &payload[20..]]);
+        let (progress, mut receiver) = mpsc::channel(1);
+        let (sender, cancel) = watch::channel(false);
+        let task = tokio::spawn(run_operation(
+            command,
+            expected,
+            Operation::Verify(archive),
+            progress,
+            cancel,
+            watch::channel(false).0,
+        ));
+        receiver.recv().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        sender.send(true).unwrap();
+        assert_eq!(
+            task.await.unwrap().unwrap(),
+            Outcome::Verified {
+                team_id: "ABCDE12345".into(),
+                bundle_version: "42".into()
+            }
+        );
     }
 
     #[test]

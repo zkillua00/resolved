@@ -23,16 +23,40 @@ pub(super) enum UpdateDownload {
         cancelling: bool,
     },
     Downloaded {
-        version: String,
-        path: PathBuf,
+        request: crate::update_install::RestartRequest,
+        error: Option<String>,
     },
+    Verifying {
+        request: crate::update_install::RestartRequest,
+        cancel: tokio::sync::watch::Sender<bool>,
+        finished: tokio::sync::watch::Receiver<bool>,
+        cancelling: bool,
+    },
+    Ready {
+        request: crate::update_install::RestartRequest,
+        team_id: String,
+        bundle_version: String,
+    },
+    Preparing {
+        request: crate::update_install::RestartRequest,
+        cancel: tokio::sync::watch::Sender<bool>,
+        finished: tokio::sync::watch::Receiver<bool>,
+        cancelling: bool,
+    },
+    Committed,
     Cancelled,
     Failed(String),
 }
 
 impl UpdateDownload {
     fn running(&self) -> bool {
-        matches!(self, Self::Running { .. })
+        matches!(
+            self,
+            Self::Running { .. }
+                | Self::Verifying { .. }
+                | Self::Preparing { .. }
+                | Self::Committed
+        )
     }
 
     fn message(&self) -> Option<String> {
@@ -51,10 +75,15 @@ impl UpdateDownload {
                 ),
                 Phase::Verifying => "Verifying download size and SHA-256…".to_owned(),
             },
-            Self::Downloaded { version, path } => format!(
-                "Resolved {version} downloaded; size and SHA-256 verified. Publisher verification and in-app installation are not available yet. Saved to {}",
-                path.display()
+            Self::Downloaded { request, error } => format!(
+                "Resolved {} downloaded; size and SHA-256 verified. Publisher verification required. Saved to {}{}",
+                request.artifact.version, request.archive.display(),
+                error.as_ref().map(|error| format!(". Verification or installation failed: {error}. Retry verification or use a browser download.")).unwrap_or_default()
             ),
+            Self::Verifying { cancelling, .. } => if *cancelling { "Cancelling verification…" } else { "Verifying publisher identity, signatures, and notarization…" }.to_owned(),
+            Self::Ready { team_id, bundle_version, .. } => format!("Publisher {team_id} and notarization verified (build {bundle_version}). Ready to restart and update."),
+            Self::Preparing { cancelling, .. } => if *cancelling { "Cancelling update preparation…" } else { "Preparing update; verifying again before restart…" }.to_owned(),
+            Self::Committed => "Update committed. Restarting Resolved…".to_owned(),
             Self::Cancelled => "Download cancelled. No update was installed.".to_owned(),
             Self::Failed(error) => format!("Download failed: {error}"),
         })
@@ -237,7 +266,7 @@ impl ApiTester {
                                 {
                                     if crate::platform::supports_update_downloads() {
                                         match release.macos_update(std::env::consts::ARCH) {
-                                            Ok(Some(_)) if !downloading && !matches!(state.update_download, UpdateDownload::Downloaded { .. }) => {
+                                            Ok(Some(_)) if !downloading && !matches!(state.update_download, UpdateDownload::Downloaded { .. } | UpdateDownload::Ready { .. }) => {
                                                 let this = this.clone();
                                                 content = content.child(
                                                     Button::new("about-download-update")
@@ -279,12 +308,37 @@ impl ApiTester {
                                         );
                                     }
                                 }
-                                if let UpdateDownload::Running { cancelling, .. } = &state.update_download {
+                                if let Some(notice) = &state.update_recovery_notice {
+                                    content = content.child(div().text_sm().child(notice.clone()));
+                                }
+                                if matches!(state.update_download, UpdateDownload::Ready { .. }) {
+                                    let this = this.clone();
+                                    content = content.child(Button::new("about-restart-update")
+                                        .debug_selector(|| "about-restart-update".to_owned())
+                                        .label("Restart and update").outline()
+                                        .disabled(state.update_download_exit_pending)
+                                        .on_click(move |_, _, cx| crate::request_update_restart(&this, cx)));
+                                }
+                                if matches!(state.update_download, UpdateDownload::Downloaded { .. }) {
+                                    let this = this.clone();
+                                    content = content.child(Button::new("about-verify-update")
+                                        .debug_selector(|| "about-verify-update".to_owned())
+                                        .label("Retry verification").outline()
+                                        .disabled(state.update_download_exit_pending)
+                                        .on_click(move |_, _, cx| {
+                                            if let Some(this) = this.upgrade() {
+                                                this.update(cx, |this, cx| this.start_update_verification(cx));
+                                            }
+                                        }));
+                                }
+                                if let UpdateDownload::Running { cancelling, .. }
+                                    | UpdateDownload::Verifying { cancelling, .. }
+                                    | UpdateDownload::Preparing { cancelling, .. } = &state.update_download {
                                     let this = this.clone();
                                     content = content.child(
                                         Button::new("about-cancel-update-download")
                                             .debug_selector(|| "about-cancel-update-download".to_owned())
-                                            .label("Cancel download")
+                                            .label("Cancel update")
                                             .outline()
                                             .disabled(*cancelling)
                                             .on_click(move |_, _, cx| {
@@ -366,7 +420,7 @@ impl ApiTester {
                 return;
             }
         };
-        let version = artifact.version.clone();
+        let selected = artifact.clone();
         let (cancel, cancelled) = tokio::sync::watch::channel(false);
         let (finished, completion) = tokio::sync::watch::channel(false);
         self.update_download = UpdateDownload::Running {
@@ -401,13 +455,7 @@ impl ApiTester {
             drop(updates);
             let result = task.await.unwrap_or_else(|error| Err(error.to_string()));
             let _ = this.update(cx, |this, cx| {
-                this.update_download = match result {
-                    Ok(crate::update_download::Outcome::Downloaded(path)) => {
-                        UpdateDownload::Downloaded { version, path }
-                    }
-                    Ok(crate::update_download::Outcome::Cancelled) => UpdateDownload::Cancelled,
-                    Err(error) => UpdateDownload::Failed(error),
-                };
+                this.finish_update_download(selected, result, cx);
                 cx.notify();
             });
         })
@@ -415,8 +463,204 @@ impl ApiTester {
         cx.notify();
     }
 
+    fn finish_update_download(
+        &mut self,
+        artifact: resolved_release::UpdateArtifact,
+        result: Result<crate::update_download::Outcome, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_download = match result {
+            Ok(crate::update_download::Outcome::Downloaded(archive)) => {
+                UpdateDownload::Downloaded {
+                    request: crate::update_install::RestartRequest { artifact, archive },
+                    error: None,
+                }
+            }
+            Ok(crate::update_download::Outcome::Cancelled) => UpdateDownload::Cancelled,
+            Ok(_) => UpdateDownload::Failed(
+                "Unexpected verification response during download.".to_owned(),
+            ),
+            Err(error) => UpdateDownload::Failed(error),
+        };
+        // App exit owns the latch: never start another helper after exit begins.
+        self.start_update_verification(cx);
+    }
+
+    fn start_update_verification(&mut self, cx: &mut Context<Self>) {
+        if self.update_download_exit_pending {
+            return;
+        }
+        let UpdateDownload::Downloaded { request, .. } = &self.update_download else {
+            return;
+        };
+        let request = request.clone();
+        let (cancel, cancelled) = tokio::sync::watch::channel(false);
+        let (finished, completion) = tokio::sync::watch::channel(false);
+        self.update_download = UpdateDownload::Verifying {
+            request: request.clone(),
+            cancel,
+            finished: completion,
+            cancelling: false,
+        };
+        let (progress, mut updates) = tokio::sync::mpsc::channel(8);
+        let task = self.runtime.spawn(crate::update_download::verify(
+            request.artifact,
+            request.archive,
+            progress,
+            cancelled,
+            finished,
+        ));
+        cx.spawn(async move |this, cx| {
+            // Verification is indeterminate; drain validated progress without
+            // turning byte completion into a publisher-trust decision.
+            while updates.recv().await.is_some() {}
+            let result = task.await.unwrap_or_else(|error| Err(error.to_string()));
+            let _ = this.update(cx, |this, cx| this.finish_update_verification(result, cx));
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn finish_update_verification(
+        &mut self,
+        result: Result<crate::update_download::Outcome, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let UpdateDownload::Verifying { request, .. } = &self.update_download else {
+            return;
+        };
+        let request = request.clone();
+        self.update_download = match result {
+            Ok(crate::update_download::Outcome::Verified {
+                team_id,
+                bundle_version,
+            }) => UpdateDownload::Ready {
+                request,
+                team_id,
+                bundle_version,
+            },
+            other => UpdateDownload::Downloaded {
+                request,
+                error: Some(match other {
+                    Err(message) => message,
+                    Ok(crate::update_download::Outcome::Cancelled) => {
+                        "Verification cancelled; no update installed".to_owned()
+                    }
+                    _ => "Unexpected download response during verification".to_owned(),
+                }),
+            },
+        };
+        cx.notify();
+    }
+
+    pub(crate) fn begin_update_restart(
+        &mut self,
+        cancel: tokio::sync::watch::Sender<bool>,
+        finished: tokio::sync::watch::Receiver<bool>,
+        cx: &mut Context<Self>,
+    ) -> Option<crate::update_install::RestartRequest> {
+        if self.update_download_exit_pending {
+            return None;
+        }
+        let UpdateDownload::Ready { request, .. } = &self.update_download else {
+            return None;
+        };
+        let request = request.clone();
+        self.update_download_exit_pending = true;
+        self.update_download = UpdateDownload::Preparing {
+            request: request.clone(),
+            cancel,
+            finished,
+            cancelling: false,
+        };
+        cx.notify();
+        Some(request)
+    }
+
+    pub(crate) fn fail_update_restart(&mut self, message: String, cx: &mut Context<Self>) {
+        let UpdateDownload::Preparing {
+            cancel,
+            finished,
+            cancelling,
+            ..
+        } = &mut self.update_download
+        else {
+            return;
+        };
+        *cancelling = true;
+        let _ = cancel.send(true);
+        // Dropping an installer ticket requests cancellation, but its supervisor
+        // still owns filesystem cleanup. Do not permit a new helper or normal
+        // quit until that owner signals completion (or never started and closed).
+        if *finished.borrow() || finished.has_changed().is_err() {
+            self.finish_failed_update_restart(message, cx);
+            return;
+        }
+        let mut completion = finished.clone();
+        cx.spawn(async move |this, cx| {
+            while !*completion.borrow_and_update() {
+                if completion.changed().await.is_err() {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |this, cx| {
+                if matches!(&this.update_download, UpdateDownload::Preparing { finished, .. }
+                    if finished.same_channel(&completion))
+                {
+                    this.finish_failed_update_restart(message, cx);
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn finish_failed_update_restart(&mut self, message: String, cx: &mut Context<Self>) {
+        let UpdateDownload::Preparing { request, .. } = &self.update_download else {
+            return;
+        };
+        self.update_download = UpdateDownload::Downloaded {
+            request: request.clone(),
+            error: Some(message),
+        };
+        self.update_download_exit_pending = false;
+        cx.notify();
+    }
+
+    pub(crate) fn commit_update_restart(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.update_download, UpdateDownload::Preparing { .. }) {
+            return;
+        }
+        // Removing the sender disarms on_app_quit's normal cancellation.
+        self.update_download = UpdateDownload::Committed;
+        self.update_download_exit_pending = true;
+        cx.notify();
+    }
+
+    pub(crate) fn start_update_recovery(&mut self, cx: &mut Context<Self>) {
+        if self.update_recovery_started {
+            return;
+        }
+        self.update_recovery_started = true;
+        let task = self.runtime.spawn(crate::update_install::recovery());
+        cx.spawn(async move |this, cx| {
+            let result = task.await.unwrap_or_else(|error| Err(error.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                this.update_recovery_notice = recovery_notice(result);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn cancel_update_download(&mut self) {
         if let UpdateDownload::Running {
+            cancel, cancelling, ..
+        }
+        | UpdateDownload::Verifying {
+            cancel, cancelling, ..
+        }
+        | UpdateDownload::Preparing {
             cancel, cancelling, ..
         } = &mut self.update_download
         {
@@ -435,16 +679,45 @@ impl ApiTester {
         self.update_download_exit_pending = true;
         self.cancel_update_download();
         cx.notify();
-        if let UpdateDownload::Running { finished, .. } = &self.update_download {
+        if let UpdateDownload::Running { finished, .. }
+        | UpdateDownload::Verifying { finished, .. }
+        | UpdateDownload::Preparing { finished, .. } = &self.update_download
+        {
             Ok(Some(finished.clone()))
         } else {
             Ok(None)
         }
     }
 
+    pub(crate) fn spawn_update_installer(
+        &self,
+        request: crate::update_install::RestartRequest,
+        cancel: tokio::sync::watch::Receiver<bool>,
+        finished: tokio::sync::watch::Sender<bool>,
+    ) -> tokio::task::JoinHandle<Result<crate::update_install::InstallTicket, String>> {
+        self.runtime
+            .spawn(crate::update_install::prepare(request, cancel, finished))
+    }
+
     pub(crate) fn finish_update_download_exit(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.update_download, UpdateDownload::Committed) {
+            return;
+        }
         self.update_download_exit_pending = false;
         cx.notify();
+    }
+}
+
+fn recovery_notice(result: Result<Option<String>, String>) -> Option<String> {
+    match result {
+        // These notices are bounded, desktop-owned text from update_install,
+        // not raw helper output. Preserve manual-action and cancellation advice.
+        Ok(Some(message)) if !message.is_empty() => Some(message),
+        Err(_) => Some(
+            "Previous update recovery could not be completed. Use a manual installation if needed."
+                .to_owned(),
+        ),
+        _ => None,
     }
 }
 
@@ -587,14 +860,245 @@ mod tests {
     #[test]
     fn downloaded_status_does_not_claim_installation_trust() {
         let state = UpdateDownload::Downloaded {
-            version: "0.13.0".into(),
-            path: PathBuf::from("/cache/Resolved.zip"),
+            request: restart_request(),
+            error: None,
         };
         let message = state.message().unwrap();
         assert!(message.contains("size and SHA-256 verified"));
+        assert!(message.contains("Publisher verification required"));
+    }
+
+    fn restart_request() -> crate::update_install::RestartRequest {
+        crate::update_install::RestartRequest {
+            artifact: resolved_release::UpdateArtifact {
+                version: "0.13.0".into(),
+                name: "Resolved-0.13.0-macos-arm64.zip".into(),
+                url: "https://github.com/zkillua00/resolved/releases/download/v0.13.0/Resolved-0.13.0-macos-arm64.zip".into(),
+                size: 100, sha256: "a".repeat(64), arch: "arm64".into(),
+            },
+            archive: PathBuf::from("/cache/Resolved-0.13.0-macos-arm64.zip"),
+        }
+    }
+
+    #[test]
+    fn recovery_notice_preserves_manual_action_and_cancellation() {
+        for message in [
+            "An interrupted update needs manual recovery. Reinstall Resolved.",
+            "The previous update was cancelled.",
+            "Resolved was updated successfully.",
+        ] {
+            assert_eq!(
+                recovery_notice(Ok(Some(message.into()))).as_deref(),
+                Some(message)
+            );
+        }
+        assert!(recovery_notice(Ok(None)).is_none());
+        assert!(recovery_notice(Ok(Some(String::new()))).is_none());
         assert!(
-            message.contains("Publisher verification and in-app installation are not available")
+            !recovery_notice(Err("untrusted helper detail".into()))
+                .unwrap()
+                .contains("untrusted")
         );
+    }
+
+    #[gpui::test]
+    fn restart_failure_keeps_latch_until_supervisor_finishes(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+        store.initialize().unwrap();
+        let mut about_app = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            let bindings = shortcuts::capture_base_key_bindings(cx);
+            crate::theme::configure(cx);
+            let app = cx.new(|cx| {
+                let mut app = ApiTester::new_with_database_store(bindings, store, window, cx);
+                app.runtime = Arc::new(
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap(),
+                );
+                app
+            });
+            about_app = Some(app.clone());
+            SettingsHarness(app)
+        });
+        let app = about_app.unwrap();
+        // Both a completed supervisor and an abandoned pre-spawn sender release
+        // the latch; a pending/false completion must never do so.
+        for close_sender in [false, true] {
+            let (finished, completion) = tokio::sync::watch::channel(false);
+            let (cancel, cancellation) = tokio::sync::watch::channel(false);
+            cx.update(|_, cx| {
+                app.update(cx, |app, cx| {
+                    app.update_download = UpdateDownload::Ready {
+                        request: restart_request(),
+                        team_id: "ABCDE12345".into(),
+                        bundle_version: "42".into(),
+                    };
+                    app.begin_update_restart(cancel, completion, cx).unwrap();
+                    app.fail_update_restart("Preparation failed".into(), cx);
+                })
+            });
+            cx.run_until_parked();
+            assert!(*cancellation.borrow());
+            finished.send(false).unwrap();
+            cx.run_until_parked();
+            cx.update(|_, cx| {
+                app.update(cx, |app, cx| {
+                    assert!(app.update_download_exit_pending);
+                    assert!(matches!(
+                        app.update_download,
+                        UpdateDownload::Preparing {
+                            cancelling: true,
+                            ..
+                        }
+                    ));
+                    assert!(app.prepare_update_download_exit(cx).is_err());
+                    app.start_update_verification(cx);
+                    app.start_update_check(cx);
+                    assert!(matches!(
+                        app.update_download,
+                        UpdateDownload::Preparing { .. }
+                    ));
+                })
+            });
+            assert!(cx.debug_bounds("about-verify-update").is_none());
+            if close_sender {
+                drop(finished);
+            } else {
+                finished.send(true).unwrap();
+            }
+            cx.run_until_parked();
+            cx.update(|_, cx| app.update(cx, |app, _| {
+                assert!(!app.update_download_exit_pending);
+                assert!(matches!(&app.update_download, UpdateDownload::Downloaded { error: Some(error), .. } if error == "Preparation failed"));
+            }));
+            assert!(cx.debug_bounds("about-verify-update").is_some());
+        }
+    }
+
+    #[gpui::test]
+    fn verification_restart_states_and_closing_latch(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DatabaseStore::new(directory.path().join("api-tester.sqlite3"));
+        store.initialize().unwrap();
+        let mut about_app = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            gpui_component::init(cx);
+            let bindings = shortcuts::capture_base_key_bindings(cx);
+            crate::theme::configure(cx);
+            let app = cx.new(|cx| {
+                let mut app = ApiTester::new_with_database_store(bindings, store, window, cx);
+                app.runtime = Arc::new(
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap(),
+                );
+                let request = restart_request();
+                app.finish_update_download(
+                    request.artifact.clone(),
+                    Ok(crate::update_download::Outcome::Downloaded(
+                        request.archive.clone(),
+                    )),
+                    cx,
+                );
+                assert!(matches!(
+                    app.update_download,
+                    UpdateDownload::Verifying { .. }
+                ));
+                app.finish_update_verification(
+                    Err("Ad-hoc host cannot establish publisher identity".into()),
+                    cx,
+                );
+                assert!(matches!(
+                    app.update_download,
+                    UpdateDownload::Downloaded { error: Some(_), .. }
+                ));
+                assert!(
+                    app.begin_update_restart(
+                        tokio::sync::watch::channel(false).0,
+                        tokio::sync::watch::channel(false).1,
+                        cx
+                    )
+                    .is_none()
+                );
+                app.start_update_verification(cx);
+                app.finish_update_verification(
+                    Ok(crate::update_download::Outcome::Verified {
+                        team_id: "ABCDE12345".into(),
+                        bundle_version: "42".into(),
+                    }),
+                    cx,
+                );
+                let (cancel, cancellation) = tokio::sync::watch::channel(false);
+                assert!(
+                    app.begin_update_restart(cancel, tokio::sync::watch::channel(false).1, cx)
+                        .is_some()
+                );
+                assert!(app.update_download_exit_pending);
+                app.cancel_update_download();
+                assert!(*cancellation.borrow());
+                app.fail_update_restart("Cancelled".into(), cx);
+                assert!(!app.update_download_exit_pending);
+                assert!(matches!(
+                    app.update_download,
+                    UpdateDownload::Downloaded { .. }
+                ));
+                app.start_update_verification(cx);
+                app.finish_update_verification(
+                    Ok(crate::update_download::Outcome::Verified {
+                        team_id: "ABCDE12345".into(),
+                        bundle_version: "42".into(),
+                    }),
+                    cx,
+                );
+                let (cancel, cancellation) = tokio::sync::watch::channel(false);
+                app.begin_update_restart(cancel, tokio::sync::watch::channel(false).1, cx)
+                    .unwrap();
+                app.commit_update_restart(cx);
+                app.cancel_update_download();
+                assert!(!*cancellation.borrow());
+                assert!(app.update_download_exit_pending);
+                assert!(matches!(app.update_download, UpdateDownload::Committed));
+                app.finish_update_download(
+                    request.artifact,
+                    Ok(crate::update_download::Outcome::Downloaded(request.archive)),
+                    cx,
+                );
+                assert!(matches!(
+                    app.update_download,
+                    UpdateDownload::Downloaded { .. }
+                ));
+                app
+            });
+            about_app = Some(app.clone());
+            SettingsHarness(app)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("about-restart-update").is_none());
+        cx.update(|window, cx| {
+            about_app.as_ref().unwrap().update(cx, |app, cx| {
+                app.update_download_exit_pending = false;
+                app.update_download = UpdateDownload::Ready {
+                    request: restart_request(),
+                    team_id: "ABCDE12345".into(),
+                    bundle_version: "42".into(),
+                };
+                assert!(
+                    app.update_download
+                        .message()
+                        .unwrap()
+                        .contains("notarization verified")
+                );
+                cx.notify();
+            });
+            window.refresh();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("about-restart-update").is_some());
     }
 
     #[cfg(target_os = "macos")]

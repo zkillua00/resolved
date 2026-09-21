@@ -145,6 +145,50 @@ class LicenseAuditTests(unittest.TestCase):
         (self.reviewed / "MIT.txt").write_bytes(b"different license\n")
         self.reject("license/attribution text mismatch")
 
+    def configure_supplemental(self):
+        data = b"Original embedded upstream copyright\r\nBSD terms"
+        (self.reviewed / "embedded.txt").write_bytes(data)
+        path = self.reviewed / "inventory.json"
+        inventory = json.loads(path.read_text())
+        inventory["packages"][0]["supplemental_texts"] = [{
+            "reviewed": "embedded.txt", "sha256": licenses.digest(data),
+            "upstream_url": "https://example.invalid/revision/LICENSE",
+        }]
+        path.write_text(json.dumps(inventory))
+        return data, inventory, path
+
+    def test_supplemental_notice_ships_exact_bytes(self):
+        data, _, _ = self.configure_supplemental()
+        licenses.audit(self.metadata, self.output)
+        self.assertEqual((self.output / "example-1.0.0" / "embedded.txt").read_bytes(), data)
+
+    def test_changed_supplemental_notice_rejected(self):
+        self.configure_supplemental()
+        (self.reviewed / "embedded.txt").write_bytes(b"changed")
+        self.reject("supplemental notice mismatch")
+
+    def test_supplemental_notice_cannot_replace_source_validation(self):
+        self.configure_supplemental()
+        (self.source / "Cargo.toml").write_text("changed source")
+        self.reject("upstream source text mismatch")
+
+    def test_supplemental_notice_invalid_record_rejected(self):
+        _, inventory, path = self.configure_supplemental()
+        for field, value in [("reviewed", "../embedded.txt"), ("upstream_url", "file:///LICENSE"),
+                             ("reviewed_lf_sha256", "not-supported")]:
+            with self.subTest(field=field):
+                invalid = copy.deepcopy(inventory)
+                invalid["packages"][0]["supplemental_texts"][0][field] = value
+                path.write_text(json.dumps(invalid))
+                self.reject("invalid supplemental notice")
+
+    def test_supplemental_notice_symlink_rejected(self):
+        self.configure_supplemental()
+        notice = self.reviewed / "embedded.txt"
+        notice.unlink()
+        notice.symlink_to(self.reviewed / "MIT.txt")
+        self.reject("symlink supplemental notice")
+
     def configure_excerpt(self):
         upstream = b"not a notice\r\nCopyright test\r\nMIT terms"
         (self.source / "LICENSE-MIT").write_bytes(upstream)

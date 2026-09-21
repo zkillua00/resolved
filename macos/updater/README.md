@@ -1,10 +1,10 @@
-# Standalone macOS updater: download and integrity verification
+# Standalone macOS updater
 
-This internal, unpublished binary supports a side-effect-free health probe and
-a one-shot, cancellable download. It **does not extract, verify code signatures,
-install, restart, execute the archive, or provide UI**. A downloaded ZIP is
-integrity-verified against the HTTPS feed, **not publisher-verified or ready to
-install**. No Sparkle, GPUI, database, or workspace configuration is used.
+This internal, unpublished binary owns downloads, bounded extraction, native
+publisher verification, installation handoff, and recovery. A downloaded ZIP
+alone is **not publisher-verified or ready to install**. Verification is explicit
+and installation requires a separate commit from the running app after its
+durability checks. No Sparkle, GPUI, database, or workspace configuration is used.
 Package version `0.0.0` is not a second product version; the bundler supplies
 the desktop identity.
 
@@ -16,11 +16,12 @@ Success emits exactly one JSON line on stdout and exits zero. It reports
 `protocol_version: 1`, `kind: "health"`, `name: "resolved-updater"`, the supplied
 `app_version`, `build_version` and string `build_number`, `os: "macos"`,
 `arch: "arm64"` or `"x64"`, the informational
-`feed_url: "https://apiworkbench.dev/downloads.json"`, `capabilities: ["health", "download"]`,
-and `installation_enabled: false`. This does not imply OTA exists or that this
-executable is trusted to install.
+`feed_url: "https://apiworkbench.dev/downloads.json"`, and capabilities
+`["health", "download", "verify", "verify-host", "install", "recover"]`.
+`installation_enabled: false` means health authorizes no particular artifact;
+only successful verification/readiness responses carry authorization.
 
-Missing/wrong protocol, unknown commands (including check/install),
+Missing/wrong protocol, unknown commands (such as check),
 extra arguments and non-UTF-8 arguments fail with a nonzero exit and a single
 JSON error line: `kind: "error"`, protocol/disabled-installation fields and
 `error: {"code": "...", "message": "..."}`. Arguments are not echoed. An unwritable stdout exits
@@ -65,6 +66,63 @@ Cancellation drops in-flight network futures and RAII storage, including during
 a stalled response. Closed/full stdout fails the operation and cleans storage;
 the parent must continuously drain stdout. Error/cancel exit codes are nonzero.
 
+## Verification and installation protocol v1
+
+```text
+resolved-updater --protocol-version 1 verify --artifact-json <JSON> --archive <absolute ZIP path>
+resolved-updater --protocol-version 1 install --artifact-json <JSON> --archive <absolute ZIP path>
+resolved-updater --protocol-version 1 recover [--ack]
+resolved-updater --protocol-version 1 verify-host
+```
+
+`verify` checks the trusted installed host, validates the exact approved upgrade,
+and copies/re-hashes a safe cache file into a new private snapshot. It extracts
+with bounded stored/deflate ZIP decoding, then requires Developer ID Application
+signatures for both app and helper, the host-derived Team ID, correct identifiers,
+architecture/version/minimum OS, and native notarization evidence. Gatekeeper's
+raw authority/verdict is checked in addition to the independent `notarized` code
+requirement; a matching policy label alone cannot authorize installation.
+No recipient-side Xcode, `lipo`, `xcrun` or `stapler` is needed.
+
+Success emits `kind: "verified"` with the exact artifact/archive, validated
+`team_id`, positive decimal `bundle_version`, and `installation_enabled: true`.
+The temporary extracted tree is discarded. Every install verifies a fresh
+snapshot on the destination filesystem instead of trusting a marker.
+Debug/ad-hoc/nightly hosts are ineligible; no trust bypass is provided.
+
+`install` derives its only target from the helper's own bundle. It binds the
+direct parent using a kqueue process-exit registration, executable path, and
+live signing CDHash. After locking, durable journaling, destination-filesystem
+staging, and revalidation, it emits `kind: "install_ready"` with the exact
+artifact and `installation_enabled: true`. Nothing has replaced the app yet.
+The parent must send one `commit\n` only after a final durable-state check, then
+quit normally. `cancel\n`, early commit, malformed/truncated input, or precommit
+EOF cancels. After commit, only a clean EOF plus the captured process's actual
+exit permits replacement; explicit cancellation remains sticky through swap.
+
+Replacement uses only `renameatx_np(RENAME_SWAP)`. The old app remains in private
+staging. Postcommit results use the journal rather than a pipe whose reader has
+exited. Pre-swap failures may relaunch the proven unchanged old app; after swap,
+old code is never automatically restored or launched. Relaunch uses the exact
+final path and records launch intent before invoking `/usr/bin/open`.
+
+`recover --ack` is called after the new desktop initializes its data. No journal
+means no signature/network assessment. Existing state is checked against actual
+native identities and inode/fingerprint anchors; acknowledgement also binds the
+live caller to the installed CDHash. Only then can the backup be removed.
+Unknown/ambiguous state remains manual; unrecognized directories are not swept.
+Status is one `recovery` record (`none`, `updated`, `cancelled`, or `manual`).
+`verify-host` exercises the full runtime trust policy on the helper's own bundle
+for release validation; it authorizes no artifact.
+
+The supported filesystem boundary is the current user's installed app, without
+elevation. The normal root:admin `/Applications` parent is allowed for user-owned
+apps; unsafe/read-only/translocated or administrator-owned targets are refused.
+Same-user or privileged local mutation is not prevented by cache permissions.
+An unresponsive kernel or hard termination can leave inert staging; journals
+and conservative recovery avoid inventing successful installation or rolling
+back a potentially migrated database.
+
 ## Transport and storage
 
 The helper directly spawns absolute `/usr/bin/curl` with argv, never a shell or
@@ -106,8 +164,10 @@ no such directory is discovered or resumed automatically.
 
 Pinned runtime dependencies are Tokio 1.53.1 (`rt`, `time`, `sync`, `macros`,
 `io-util`, `fs`, `process`),
-sha2 0.10.9, tempfile 3.27.0, libc 0.2.189, serde_json 1.0.151, and the local
-`../../crates/resolved-release`. No reqwest, TLS bindings, curl crate, or shell.
+sha2 0.10.9, tempfile 3.27.0, libc 0.2.189, serde_json 1.0.151, zip 8.6.0
+(`deflate-flate2` only), flate2 1.1.9 (`rust_backend`), and the local
+`../../crates/resolved-release`. No reqwest, TLS bindings, curl crate, native
+compression library, encryption backend, or shell is used.
 
 ## Build boundary and verification
 

@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 import unittest
 from unittest.mock import Mock, patch
 
@@ -70,7 +71,7 @@ class HealthTests(unittest.TestCase):
             'os': 'macos',
             'arch': 'arm64',
             'feed_url': 'https://apiworkbench.dev/downloads.json',
-            'capabilities': ['health', 'download'],
+            'capabilities': ['health', 'download', 'verify', 'verify-host', 'install', 'recover'],
             'installation_enabled': False,
         }
 
@@ -112,6 +113,141 @@ class HealthTests(unittest.TestCase):
         self.response['unrecognized'] = True
         with self.assertRaises(ValueError):
             self.verify(json.dumps(self.response) + '\n')
+
+
+class BoundedCommandTests(unittest.TestCase):
+    # Only spawn Python; never codesign, spctl, keychains, or a real app/helper.
+    def test_captures_both_streams(self):
+        self.assertEqual(verifier.run_bounded([
+            sys.executable, '-c', 'import sys; print("out"); print("err", file=sys.stderr)']),
+            ('out\n', 'err\n'))
+
+    def test_rejects_output_overflow(self):
+        with self.assertRaises(ValueError):
+            verifier.run_bounded([sys.executable, '-c', 'print("x" * 65537)'])
+
+    def test_rejects_timeout(self):
+        with self.assertRaises(subprocess.TimeoutExpired):
+            verifier.run_bounded([sys.executable, '-c', 'import time; time.sleep(5)'],
+                                 timeout=0.1)
+
+    def test_rejects_failed_exit(self):
+        with self.assertRaises(subprocess.CalledProcessError):
+            verifier.run_bounded([sys.executable, '-c', 'raise SystemExit(7)'])
+
+
+class DeveloperIDTests(unittest.TestCase):
+    def test_team_parser_cardinality_and_injection(self):
+        self.assertEqual(verifier.parse_team('Other=value\nTeamIdentifier=ABCDE12345\n'),
+                         'ABCDE12345')
+        for metadata in ['', 'TeamIdentifier=not set\n',
+                         'TeamIdentifier=ABCDE12345\nTeamIdentifier=ABCDE12345\n',
+                         'TeamIdentifier=abcde12345\n', 'TeamIdentifier=ABCDE123456\n',
+                         'TeamIdentifier=ABCDE12345 \n',
+                         'TeamIdentifier=ABCDE12345" or true\n']:
+            with self.subTest(metadata=metadata), self.assertRaises(ValueError):
+                verifier.parse_team(metadata)
+
+    def test_requirements_pin_certificate_type_identifiers_and_team(self):
+        for identifier in ['dev.apitester.desktop', 'dev.apitester.desktop.updater']:
+            requirement = verifier.developer_id_requirement(identifier, 'ABCDE12345')
+            self.assertTrue(requirement.startswith('='), 'codesign must parse text, not a requirement filename')
+            self.assertIn('anchor apple generic', requirement)
+            self.assertIn(f'identifier "{identifier}"', requirement)
+            self.assertIn('certificate 1[field.1.2.840.113635.100.6.2.6] exists', requirement)
+            self.assertIn('certificate leaf[field.1.2.840.113635.100.6.1.13] exists', requirement)
+            self.assertIn('certificate leaf[subject.OU] = "ABCDE12345"', requirement)
+        for team in ['ABCDE12345" or true', 'abcde12345', '']:
+            with self.assertRaises(ValueError):
+                verifier.developer_id_requirement('dev.apitester.desktop', team)
+        with self.assertRaises(ValueError):
+            verifier.developer_id_requirement('dev.apitester.desktop" or true')
+
+    @patch.object(verifier, 'run_bounded')
+    def test_validates_signature_before_deriving_team(self, run):
+        run.side_effect = [('', ''), ('', ''), ('', 'TeamIdentifier=ABCDE12345\n'),
+                           ('', ''), ('', '')]
+        self.assertEqual(verifier.verify_developer_id(Path('/Resolved.app'), Path('/helper')),
+                         'ABCDE12345')
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertIn('--verify', commands[0])
+        self.assertIn('.6.1.13', commands[0][-2])
+        self.assertIn('--deep', commands[1])
+        self.assertIn('--display', commands[2])
+        self.assertIn('subject.OU] = "ABCDE12345"', commands[3][-2])
+        self.assertIn('dev.apitester.desktop.updater', commands[4][-2])
+
+    @patch.object(verifier, 'run_bounded')
+    def test_expected_team_mismatch(self, run):
+        run.side_effect = [('', ''), ('', ''), ('', 'TeamIdentifier=ABCDE12345\n')]
+        with self.assertRaises(ValueError):
+            verifier.verify_developer_id(Path('/Resolved.app'), Path('/helper'), 'ZZZZZ99999')
+        self.assertEqual(run.call_count, 3)
+
+    @patch.object(verifier, 'run_bounded')
+    def test_signature_failures_stop_verification(self, run):
+        for failure_index in [0, 1, 3, 4]:
+            results = [('', ''), ('', ''), ('', 'TeamIdentifier=ABCDE12345\n'),
+                       ('', ''), ('', '')]
+            results[failure_index] = subprocess.CalledProcessError(1, 'codesign')
+            run.reset_mock()
+            run.side_effect = results
+            with self.assertRaises(subprocess.CalledProcessError):
+                verifier.verify_developer_id(Path('/Resolved.app'), Path('/helper'))
+            self.assertEqual(run.call_count, failure_index + 1)
+
+
+class HostVerificationTests(unittest.TestCase):
+    def setUp(self):
+        self.response = {
+            'protocol_version': 1, 'kind': 'host_verified', 'installation_enabled': False,
+            'team_id': 'ABCDE12345', 'app_version': '0.12.4', 'build_number': '42',
+        }
+
+    def verify(self, response):
+        verifier.verify_host_response(response, '0.12.4', '42', 'ABCDE12345')
+
+    def test_valid_response(self):
+        self.verify(json.dumps(self.response) + '\n')
+
+    def test_wrong_fields_and_types(self):
+        for key, value in [('protocol_version', True), ('protocol_version', 1.0),
+                           ('kind', 'health'), ('installation_enabled', True),
+                           ('installation_enabled', 0), ('team_id', 'ZZZZZ99999'),
+                           ('app_version', '0.12.5'), ('build_number', 42)]:
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                self.verify(json.dumps(dict(self.response, **{key: value})) + '\n')
+
+    def test_missing_extra_fields_and_framing(self):
+        response = json.dumps(self.response)
+        missing = dict(self.response)
+        del missing['team_id']
+        for output in ['', response, response + '\n\n', response + '\n' + response + '\n',
+                       'not JSON\n', json.dumps(missing) + '\n',
+                       json.dumps(dict(self.response, extra=True)) + '\n']:
+            with self.subTest(output=output), self.assertRaises(ValueError):
+                self.verify(output)
+
+    @patch.object(verifier, 'run_bounded')
+    def test_bundled_command_and_failure(self, run):
+        run.return_value = (json.dumps(self.response) + '\n', '')
+        verifier.verify_host(Path('/Resolved.app/Contents/Helpers/resolved-updater'),
+                             '0.12.4', '0.12.4', '42', 'ABCDE12345')
+        self.assertEqual(run.call_args.args[0], [
+            '/Resolved.app/Contents/Helpers/resolved-updater',
+            '--protocol-version', '1', 'verify-host'])
+        for error in [subprocess.CalledProcessError(1, 'verify-host'),
+                      subprocess.TimeoutExpired('verify-host', 120),
+                      ValueError('output limit')]:
+            run.side_effect = error
+            with self.assertRaises(type(error)):
+                verifier.verify_host(Path('/helper'), '0.12.4', '0.12.4', '42', 'ABCDE12345')
+
+    @patch.object(verifier, 'run_bounded')
+    def test_nightly_does_not_run_host_verification(self, run):
+        with self.assertRaises(ValueError):
+            verifier.verify_host(Path('/helper'), '0.12.4', '0.12.4.nightly', '42', 'ABCDE12345')
+        run.assert_not_called()
 
 
 class WorkspaceTests(unittest.TestCase):

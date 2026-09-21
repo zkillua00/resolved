@@ -160,6 +160,8 @@ jobs:
         run: |
           scripts/bundle-macos.sh release --verify-updater
           scripts/cargo.sh test --locked --release --bin api-tester update_download::tests -- --test-threads=1
+          scripts/cargo.sh test --locked --release --bin api-tester update_install::tests -- --test-threads=1
+          scripts/cargo.sh test --locked --release --bin api-tester platform::macos::update_install::tests -- --test-threads=1
           scripts/cargo.sh test --locked --release --bin api-tester app::about::tests -- --test-threads=1
           scripts/bundle-macos.sh release
           mkdir -p dist

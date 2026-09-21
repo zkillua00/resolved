@@ -1,14 +1,19 @@
+mod archive;
 mod download;
+mod install;
+mod native;
 mod storage;
 mod transport;
+mod verification;
 
 use serde_json::{Value, json};
 use std::{
     ffi::OsString,
     io::{self, Read, Write},
+    path::PathBuf,
     process::ExitCode,
 };
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 #[cfg(test)]
 #[path = "../build_support.rs"]
@@ -17,8 +22,20 @@ mod build_support;
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Health,
+    VerifyHost,
     Download {
         artifact: resolved_release::UpdateArtifact,
+    },
+    Verify {
+        artifact: resolved_release::UpdateArtifact,
+        archive: PathBuf,
+    },
+    Install {
+        artifact: resolved_release::UpdateArtifact,
+        archive: PathBuf,
+    },
+    Recover {
+        acknowledge: bool,
     },
 }
 
@@ -35,6 +52,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, &'static s
     }
     match args.get(2).map(String::as_str) {
         Some("health") if args.len() == 3 => Ok(Command::Health),
+        Some("verify-host") if args.len() == 3 => Ok(Command::VerifyHost),
         Some("download")
             if args.len() == 5 && args[3] == "--artifact-json" && args[4].len() <= 16 * 1024 =>
         {
@@ -42,14 +60,38 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, &'static s
                 artifact: serde_json::from_str(&args[4]).map_err(|_| "invalid_arguments")?,
             })
         }
-        None | Some("health" | "download") => Err("invalid_arguments"),
+        Some(operation @ ("verify" | "install"))
+            if args.len() == 7
+                && args[3] == "--artifact-json"
+                && args[4].len() <= 16 * 1024
+                && args[5] == "--archive"
+                && args[6].len() <= 4096
+                && std::path::Path::new(&args[6]).is_absolute() =>
+        {
+            let artifact = serde_json::from_str(&args[4]).map_err(|_| "invalid_arguments")?;
+            let archive = PathBuf::from(&args[6]);
+            if operation == "verify" {
+                Ok(Command::Verify { artifact, archive })
+            } else {
+                Ok(Command::Install { artifact, archive })
+            }
+        }
+        Some("recover") if args.len() == 3 => Ok(Command::Recover { acknowledge: false }),
+        Some("recover") if args.len() == 4 && args[3] == "--ack" => {
+            Ok(Command::Recover { acknowledge: true })
+        }
+        None | Some("health" | "download" | "verify" | "verify-host" | "install" | "recover") => {
+            Err("invalid_arguments")
+        }
         _ => Err("unsupported_command"),
     }
 }
 
 fn event(mut value: Value) -> Value {
     value["protocol_version"] = json!(1);
-    value["installation_enabled"] = json!(false);
+    if value.get("installation_enabled").is_none() {
+        value["installation_enabled"] = json!(false);
+    }
     value
 }
 
@@ -78,7 +120,7 @@ fn health() -> Value {
         "build_number": env!("API_TESTER_BUILD_NUMBER"),
         "os": "macos", "arch": env!("RESOLVED_UPDATER_ARCH"),
         "feed_url": resolved_release::FEED_URL,
-        "capabilities": ["health", "download"]
+        "capabilities": ["health", "download", "verify", "verify-host", "install", "recover"]
     })
 }
 
@@ -110,6 +152,56 @@ fn monitor(mut input: impl Read, cancel: watch::Sender<bool>) {
     let _ = cancel.send(true);
 }
 
+fn monitor_install(
+    mut input: impl Read,
+    controls: mpsc::Sender<install::Control>,
+    cancel: watch::Sender<bool>,
+) {
+    let mut line = Vec::new();
+    let mut committed = false;
+    let mut byte = [0];
+    loop {
+        match input.read(&mut byte) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Ok(0) => {
+                if !committed || !line.is_empty() {
+                    let _ = cancel.send(true);
+                    let _ = controls.try_send(install::Control::Cancel);
+                }
+                let _ = controls.try_send(install::Control::Closed);
+                return;
+            }
+            Err(_) => {
+                let _ = cancel.send(true);
+                let _ = controls.try_send(install::Control::Cancel);
+                return;
+            }
+            Ok(_) if byte[0] == b'\n' => {
+                let control = if line == b"commit" && !committed {
+                    committed = true;
+                    install::Control::Commit
+                } else {
+                    let _ = cancel.send(true);
+                    install::Control::Cancel
+                };
+                if controls.try_send(control).is_err() {
+                    let _ = cancel.send(true);
+                    return;
+                }
+                line.clear();
+            }
+            Ok(_) => {
+                if line.len() >= 6 {
+                    let _ = cancel.send(true);
+                    let _ = controls.try_send(install::Control::Cancel);
+                    return;
+                }
+                line.push(byte[0]);
+            }
+        }
+    }
+}
+
 struct NonblockingOutput {
     fd: libc::c_int,
     flags: libc::c_int,
@@ -139,21 +231,61 @@ impl Drop for NonblockingOutput {
 }
 
 fn run(command: Command) -> download::Result<()> {
-    let Command::Download { artifact } = command else {
+    if matches!(command, Command::Health) {
         return emit(health());
-    };
+    }
     let (sender, mut receiver) = watch::channel(false);
-    std::thread::Builder::new()
-        .name("updater-cancel".into())
-        .spawn(move || monitor(io::stdin().lock(), sender))
-        .map_err(|_| download::Failure::new("runtime", "Cannot monitor cancellation."))?;
+    let (controls, control_receiver) = mpsc::channel(8);
+    let installing = matches!(command, Command::Install { .. });
+    let recovering = matches!(command, Command::Recover { .. } | Command::VerifyHost);
+    if !recovering {
+        std::thread::Builder::new()
+            .name("updater-cancel".into())
+            .spawn(move || {
+                if installing {
+                    monitor_install(io::stdin().lock(), controls, sender);
+                } else {
+                    monitor(io::stdin().lock(), sender);
+                }
+            })
+            .map_err(|_| download::Failure::new("runtime", "Cannot monitor cancellation."))?;
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|_| download::Failure::new("runtime", "Cannot start updater runtime."))?;
-    let result = runtime.block_on(download::interruptible(&mut receiver, async {
-        download::run(&artifact, &mut emit).await
-    }));
+    let result = runtime.block_on(async {
+        match command {
+            Command::Download { artifact } => {
+                download::interruptible(&mut receiver, download::run(&artifact, &mut emit)).await
+            }
+            Command::Verify { artifact, archive } => {
+                let cooperative_cancel = receiver.clone();
+                download::interruptible(
+                    &mut receiver,
+                    verification::run(&artifact, &archive, &cooperative_cancel, &mut emit),
+                )
+                .await
+            }
+            Command::Install { artifact, archive } => {
+                install::run(&artifact, &archive, control_receiver, receiver, &mut emit).await
+            }
+            Command::Recover { acknowledge } => tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                install::recover(acknowledge, &mut emit),
+            )
+            .await
+            .map_err(|_| download::Failure::new("timeout", "Update recovery timed out."))?,
+            Command::VerifyHost => {
+                let host = native::host().await?;
+                emit(
+                    json!({"kind":"host_verified","team_id":host.identity.team_id,
+                    "app_version":host.identity.version,"build_number":host.identity.build}),
+                )
+            }
+            Command::Health => unreachable!(),
+        }
+    });
     // Transport guards have already synchronously killed/reaped their child,
     // including when interruptible dropped a stalled network future.
     runtime.shutdown_timeout(std::time::Duration::from_millis(100));
@@ -165,7 +297,7 @@ fn main() -> ExitCode {
     let result = parse(std::env::args_os().skip(1))
         .map_err(|code| download::Failure::new(code, "Invalid updater arguments."))
         .and_then(|command| {
-            if matches!(command, Command::Download { .. }) {
+            if !matches!(command, Command::Health) {
                 output_mode = Some(NonblockingOutput::new(libc::STDOUT_FILENO)?);
             }
             run(command)
@@ -189,6 +321,40 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_eof_requires_a_clean_frame_and_read_errors_cancel() {
+        let (tx, mut controls) = mpsc::channel(8);
+        let (cancel, cancelled) = watch::channel(false);
+        monitor_install(b"commit\n".as_slice(), tx, cancel);
+        assert!(matches!(controls.try_recv(), Ok(install::Control::Commit)));
+        assert!(matches!(controls.try_recv(), Ok(install::Control::Closed)));
+        assert!(!*cancelled.borrow());
+        for input in [
+            b"commit\ncancel".as_slice(),
+            b"commit\nx".as_slice(),
+            b"commit\ncancel\n".as_slice(),
+        ] {
+            let (tx, mut controls) = mpsc::channel(8);
+            let (cancel, cancelled) = watch::channel(false);
+            monitor_install(input, tx, cancel);
+            assert!(matches!(controls.try_recv(), Ok(install::Control::Commit)));
+            assert!(matches!(controls.try_recv(), Ok(install::Control::Cancel)));
+            assert!(*cancelled.borrow());
+        }
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("broken input"))
+            }
+        }
+        let (tx, mut controls) = mpsc::channel(8);
+        let (cancel, cancelled) = watch::channel(false);
+        monitor_install(b"commit\n".as_slice().chain(Broken), tx, cancel);
+        assert!(matches!(controls.try_recv(), Ok(install::Control::Commit)));
+        assert!(matches!(controls.try_recv(), Ok(install::Control::Cancel)));
+        assert!(*cancelled.borrow());
+    }
 
     #[test]
     fn restores_inherited_output_flags() {
@@ -285,7 +451,14 @@ mod tests {
         }
         assert_eq!(
             event(health())["capabilities"],
-            json!(["health", "download"])
+            json!([
+                "health",
+                "download",
+                "verify",
+                "verify-host",
+                "install",
+                "recover"
+            ])
         );
         assert_eq!(event(health())["installation_enabled"], false);
     }

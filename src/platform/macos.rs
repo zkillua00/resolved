@@ -12,6 +12,8 @@ use crate::{
     },
 };
 
+mod update_install;
+
 pub(super) struct MacOsBackend;
 
 impl PlatformBackend for MacOsBackend {
@@ -39,6 +41,17 @@ impl PlatformBackend for MacOsBackend {
             "Run Resolved from its application bundle to download updates.".to_owned()
         })?;
         Ok(bundle.join("Contents/Helpers/resolved-updater"))
+    }
+
+    fn prepare_update_install(
+        request: crate::update_install::RestartRequest,
+        cancel: tokio::sync::watch::Receiver<bool>,
+        finished: tokio::sync::watch::Sender<bool>,
+    ) -> impl std::future::Future<Output = Result<crate::update_install::InstallTicket, String>> + Send
+    {
+        async move {
+            update_install::prepare(Self::updater_executable()?, request, cancel, finished).await
+        }
     }
 
     fn configure_menus(cx: &mut App) {

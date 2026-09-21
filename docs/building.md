@@ -106,10 +106,16 @@ requires HTTPS, validates redirects itself, and bounds headers, bodies, and
 operation times. Rust owns approval, size/SHA-256 verification, private cache
 storage, progress, and cancellation. No shell commands come from the feed.
 
-The helper still reports installation as disabled. A size/hash-verified ZIP is
-not publisher-verified or ready to install: extraction, native signature
-validation, replacement, and restart remain unimplemented. Browser downloads
-remain available, including on Windows and Linux.
+Health reports no artifact-specific installation authorization. The helper now
+supports bounded extraction, native Developer ID/notarization verification,
+same-filesystem atomic installation, and recovery. Runtime trust comes from the
+validated installed host, never the feed or a caller-provided Team ID. Recipient
+Macs need no developer tools: verification uses system `codesign`, `spctl`, and
+`plutil`, and reads Mach-O headers directly.
+
+Only stable release builds with genuine Developer ID/notarization trust can
+install. Debug/ad-hoc builds remain ineligible even when a ZIP checksum matches.
+Browser downloads remain available on all platforms.
 
 To compile/test the helper and shared release model, audit licenses, and verify
 that the helper remains outside the desktop workspace:
@@ -122,6 +128,19 @@ This mode does not build the desktop, change `Resolved.app`, sign releases, or
 contact notarization services. Its dependency preparation still runs through
 `scripts/cargo.sh`. macOS release CI runs the same verification in the release
 profile before building the full bundle.
+
+Every final release ZIP is exercised through the updater's bounded extractor
+before publication. To test an existing archive through the same build entry:
+
+```sh
+RESOLVED_UPDATE_ARCHIVE_FIXTURE="$PWD/target/release/Resolved-<version>-<build>-macos.zip" \
+  scripts/bundle-macos.sh release --verify-updater
+```
+
+V1 accepts normal stored/deflate ZIPs with portable ASCII paths and native thin
+Mach-O executables. Links, special files, ZIP64, comments, padding, ambiguous
+paths, and unsupported extra records fail closed. Distribution-format changes
+require an updater compatibility plan, not just a new packager.
 
 See the [OTA design](design/macos-ota.md) for the agreed feed, approval workflow,
 and installation/security work still to implement.
@@ -159,6 +178,14 @@ and a secure timestamp, submits to Apple, waits for explicit acceptance, staples
 the app, recreates its ZIP, and checks the extracted app with stapler and
 Gatekeeper. No additional sandbox or Keychain entitlements are granted by this
 workflow. Biometric storage still requires its separate authorized provisioning.
+
+Signed release bundles additionally require Developer ID Application certificate
+types, explicit app/helper identifiers, and the same signing team. Set the public
+`RESOLVED_DEVELOPER_ID_TEAM_ID` to require a particular release team; CI obtains it
+from `APPLE_TEAM_ID`. This is a producer-side check, not runtime trust supplied to
+the updater. After stapling and again after extraction, stable releases run the
+bundled helper's `verify-host` command to exercise the actual runtime trust rule.
+Nightlies remain manual-download builds rather than OTA installation candidates.
 
 Submission responses are saved under `target/notarization/`. The default wait
 is 30 minutes (`RESOLVED_NOTARY_TIMEOUT` overrides it). If Apple rejects a

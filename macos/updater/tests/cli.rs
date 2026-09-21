@@ -28,7 +28,7 @@ fn health_reports_desktop_identity_not_package_version() {
             "build_number": env!("API_TESTER_BUILD_NUMBER"),
             "os": "macos", "arch": env!("RESOLVED_UPDATER_ARCH"),
             "feed_url": "https://apiworkbench.dev/downloads.json",
-            "capabilities": ["health", "download"], "installation_enabled": false
+            "capabilities": ["health", "download", "verify", "verify-host", "install", "recover"], "installation_enabled": false
         })
     );
     assert!(["arm64", "x64"].contains(&value["arch"].as_str().unwrap()));

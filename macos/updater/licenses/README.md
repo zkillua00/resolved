@@ -1,16 +1,90 @@
-# Resolved updater dependency notices — OTA download milestone
+# Resolved updater dependency notices — bounded ZIP extraction
+
+## Approved pure-Rust ZIP resolution
+
+The reviewed graph uses `zip = 8.6.0` with default features disabled and only
+`deflate-flate2`, plus `flate2 = 1.1.9` with default features disabled and
+`rust_backend`. It adds ten registry packages to the OTA baseline without
+upgrading any previously reviewed version. flate2 1.1.9 deliberately replaces
+the unapproved candidate's 1.1.10 to match the desktop's existing backend family.
+The complete graph has **80 packages: 78 registry and two first-party packages**.
+
+Resolved features: zip `_deflate-any, deflate-flate2`; flate2
+`any_impl, miniz_oxide, rust_backend`; miniz_oxide
+`simd, simd-adler32, with-alloc`; adler2 and simd-adler32 have no enabled features.
+
+This selects pure-Rust miniz_oxide, not zlib-rs or native zlib/zlib-ng.
+There is no encryption dependency, native compression library, C compiler
+package, CC-BY material, or zlib-rs package in this approved graph.
+This is source/metadata evidence, not a binary linkage check or an assertion
+that ZIP source contains no encryption implementation.
+
+## Rejected zlib-rs candidate (not shipping)
+
+The earlier `deflate-flate2-zlib-rs` candidate contained 78 packages, including
+zlib-rs 0.6.8 and flate2 1.1.10. It was not approved. Its lockfile SHA-256 was
+`828d5d29e9dbd672d3f343a5e63ab89237e30cf5bb5b8e2ee581afe6c0f5eeb2`.
+No CC-BY exception was granted; the backend was replaced instead.
+
+zlib-rs's top-level `LICENSE` is Zlib, copyright 2024 Trifecta Tech Foundation:
+retain the notice, do not misrepresent origin, and mark altered source versions.
+However, the source archive also contains separately attributed material:
+
+- `src/adler32/avx2.rs:32` identifies Agner Fog's vector library as the source
+  of the horizontal-sum implementation. Vector Class version 2 publishes
+  Apache-2.0 terms and Agner Fog attribution, not Zlib-only terms:
+  <https://github.com/vectorclass/version2/blob/master/LICENSE>.
+- `src/adler32/wasm.rs:1` identifies simd-adler32, whose upstream `LICENSE.md`
+  supplies MIT terms, copyright 2021 Marvin Countryman:
+  <https://github.com/mcountryman/simd-adler32/blob/main/LICENSE.md>.
+- `src/crc32/acle.rs:13-19` identifies stock zlib's ARMCRC32 path.
+  Original zlib provenance/notices must be retained as well as zlib-rs's notice.
+- `src/deflate/test-data/paper-100k.pdf` is a 102400-byte truncated scientific
+  paper, not software under the package's Zlib grant. Its readable compressed
+  PDF streams identify PLOS Computational Biology article e1003419:
+  Francesco Comoglio and Renato Paro, *Combinatorial Modeling of Chromatin
+  Features Quantitatively Predicts DNA Replication Timing in Drosophila*,
+  DOI <https://doi.org/10.1371/journal.pcbi.1003419>. The publisher identifies
+  copyright 2014 Comoglio and Paro and **CC-BY-4.0** terms:
+  <https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1003419>.
+  This is not a selectable Zlib alternative. Apache's guidance treats CC-BY
+  content as conditional Category B, not an unconditional permissive-software
+  approval: <https://www.apache.org/legal/resolved.html#cc-by>.
+
+These findings require explicit review of the embedded works, applicable
+attribution and modification notices, and the permitted distribution scope
+before this graph can be approved under the Apache-2.0-compatible-only rule.
+Test-only/non-macOS content is not silently exempted from source review.
+No determination that the CC-BY paper is inherently prohibited is made here;
+nor is its conditional acceptability treated as blanket approval.
+
+Rejected zlib-rs 0.6.8 provenance:
+
+- Repository: <https://github.com/trifectatechfoundation/zlib-rs>;
+  archive VCS revision `0254e07204884bfc902d6ebb68c8b703d0ea49cf`.
+- Registry archive SHA-256:
+  `b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112`.
+- Source-tree SHA-256:
+  `4730687462d54215d6d681b98f1f5b2b256fc442b37d359096ce234145771f9c`.
+- Exact top-level `LICENSE` SHA-256:
+  `e72111c52b7d96ebe25348dee19f0744f444d3c95ae6b1ecb6ccaecc5bce05ba`.
+- Exact PDF SHA-256:
+  `60f73a051b7ca35bfec44734b2eed7736cb5c0b7f728beb7b97ade6c5e44849b`.
+
+## Complete approved inventory
 
 This directory accompanies the internal `resolved-updater` helper.
-`inventory.json` identifies **all 68 registry packages** in its locked Cargo
+`inventory.json` identifies **all 78 registry packages** in its locked Cargo
 resolution, including build/proc-macro and non-macOS packages even when not linked
-into this executable. The complete graph has **70 packages**, including the
+into this executable. The complete graph has **80 packages**, including the
 Apache-2.0 first-party helper and `resolved-release` module.
 
 ## Selected terms
 
 All reviewed registry packages have Apache-2.0-compatible selections:
-**49 MIT**, **17 Unicode-3.0**, and **2 MIT AND Unicode-3.0** (unicode-ident
-and icu_provider). Dependencies retain their own licenses; they are not
+**58 MIT**, **17 Unicode-3.0**, **2 MIT AND Unicode-3.0** (unicode-ident
+and icu_provider), and **1 MIT AND BSD-3-Clause** (simd-adler32).
+Dependencies retain their own licenses; they are not
 relicensed as Apache-2.0. MIT is explicitly selected wherever available,
 including instead of Unlicense, LGPL-2.1-or-later, Apache-2.0, or the
 Apache-2.0 WITH LLVM-exception alternatives. Historical `MIT/Apache-2.0`
@@ -18,6 +92,16 @@ syntax in version_check denotes a choice; its README and license files confirm i
 
 | Package | Version | Selected terms |
 | --- | --- | --- |
+| adler2 | 2.0.1 | MIT |
+| crc32fast | 1.5.2 | MIT |
+| equivalent | 1.0.2 | MIT |
+| flate2 | 1.1.9 | MIT |
+| hashbrown | 0.17.1 | MIT |
+| indexmap | 2.14.2 | MIT |
+| miniz_oxide | 0.8.9 | MIT |
+| simd-adler32 | 0.3.10 | MIT AND BSD-3-Clause |
+| typed-path | 0.12.3 | MIT |
+| zip | 8.6.0 | MIT |
 | bitflags | 2.13.2 | MIT |
 | block-buffer | 0.10.4 | MIT |
 | bytes | 1.12.1 | MIT |
@@ -93,9 +177,27 @@ Review included exact registry manifests (including original manifests),
 license/copying/copyright/authors files and source attribution searches, not
 automatic approval of SPDX labels. No additional NOTICE files were found in
 the approved graph. Required copyright statements, permission grants and
-disclaimers are retained in 81 per-package text records, deduplicated into
-44 checked-in text snapshots. In particular:
+disclaimers are retained in 97 per-package text records (95 crate-source
+records and two supplemental upstream records), deduplicated into
+58 checked-in text snapshots. In particular:
 
+- flate2's `src/bufreader.rs:1-9` Rust Project MIT/Apache attribution is
+  retained alongside its Alex Crichton MIT license; MIT is selected for both.
+- miniz_oxide's MIT license explicitly includes original miniz provenance:
+  RAD Game Tools, Valve Software, Rich Geldreich, Tenacious Software LLC,
+  Frommi, and oyvindln. MIT is selected, not its Zlib or Apache alternatives.
+  Its archive contains Rust code, not a bundled native miniz library.
+- adler2 is a clean-room implementation. MIT is selected; its 0BSD text is
+  additionally retained because it contains Jonas Schievink's copyright.
+- simd-adler32's NEON implementation explicitly converts Chromium
+  `adler32_simd.c`. **BSD-3-Clause applies to this embedded code in addition
+  to the package's MIT terms.** Its source attribution, README project credits,
+  Chromium's 2017 source copyright header, and complete Chromium BSD license
+  are retained. The latter two are exact supplemental upstream snapshots at
+  Chromium revision `26fee633ef3173f9be86e2fc4289e8f120f41921`, with URLs
+  and SHA-256 hashes in the inventory. BSD requires notice/disclaimer retention
+  in source and binary distributions and forbids endorsement using Google
+  or contributor names without permission; it adds no copyleft obligation.
 - ICU4X's Unicode-3.0 license includes the IBM/ICU4C/ICU4J attribution and
   Unicode 2020–2024 copyright. The Unicode notice for icu_collections test data
   is also retained. unicode-ident has its distinct Unicode 1991–2023 notice.
@@ -142,6 +244,13 @@ CRLF or missing final newline. All other snapshots are byte-identical upstream
 copies. Every emitted package notice therefore retains the reviewed upstream
 bytes. Nothing is written until the complete audit succeeds.
 
+`supplemental_texts` records are only for reviewed embedded-code notices
+missing from the registry archive. Their `upstream_url` identifies the pinned
+external source; the checker verifies the snapshot's exact SHA-256 offline and
+ships those exact bytes without normalization or build-time network access.
+They do not replace any package identity, source-tree, or crate-text checks.
+The two Chromium records are the only such supplements in this inventory.
+
 Only two first-party packages are outside the registry inventory: the helper
 itself and `resolved-release`, version `0.0.0`, Apache-2.0, source `None`,
 no `license_file`, at the exact canonical repository path
@@ -154,7 +263,7 @@ maintained in this repository, not pinned as an immutable registry archive.
 Changing any dependency's source, version, license or text requires a renewed
 review. The checker is an offline integrity comparison, not a network trust
 service or an automated legal determination. The reviewed lockfile SHA-256 is
-`8de1622d7b072b930c07350f8c1936abffb643c0c74e722bd40743d40ba9a41d`.
+`7d756b464e4112144c1ecc6f1250932568fd337b08da85815962fe1d8cf92987`.
 
 ## OS-provided transport, SDK and toolchain scope
 

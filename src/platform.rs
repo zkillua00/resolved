@@ -61,6 +61,15 @@ pub(crate) trait PlatformBackend {
         Err("In-app update downloads are not supported on this platform.".to_owned())
     }
 
+    fn prepare_update_install(
+        _request: crate::update_install::RestartRequest,
+        _cancel: tokio::sync::watch::Receiver<bool>,
+        _finished: tokio::sync::watch::Sender<bool>,
+    ) -> impl std::future::Future<Output = Result<crate::update_install::InstallTicket, String>> + Send
+    {
+        async { Err("In-app installation is not supported on this platform.".to_owned()) }
+    }
+
     fn configure_menus(cx: &mut App);
 
     fn install_runtime_hooks() {}
@@ -108,6 +117,14 @@ pub(crate) fn supports_update_downloads() -> bool {
 
 pub(crate) fn updater_executable() -> Result<PathBuf, String> {
     ActiveBackend::updater_executable()
+}
+
+pub(crate) async fn prepare_update_install(
+    request: crate::update_install::RestartRequest,
+    cancel: tokio::sync::watch::Receiver<bool>,
+    finished: tokio::sync::watch::Sender<bool>,
+) -> Result<crate::update_install::InstallTicket, String> {
+    ActiveBackend::prepare_update_install(request, cancel, finished).await
 }
 
 pub(crate) fn configure_menus(cx: &mut App) {

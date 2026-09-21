@@ -57,6 +57,11 @@ fn cache(home: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+pub fn cache_root() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME").ok_or_else(failure)?;
+    cache(Path::new(&home))
+}
+
 pub struct Download {
     directory: Option<TempDir>,
     file: Option<File>,
@@ -65,8 +70,7 @@ pub struct Download {
 
 impl Download {
     pub fn create() -> Result<Self> {
-        let home = std::env::var_os("HOME").ok_or_else(failure)?;
-        Self::in_cache(&cache(Path::new(&home))?)
+        Self::in_cache(&cache_root()?)
     }
     pub(crate) fn in_cache(root: &Path) -> Result<Self> {
         validate_directory(root, true)?;

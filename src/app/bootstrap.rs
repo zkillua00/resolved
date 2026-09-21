@@ -1254,6 +1254,8 @@ impl ApiTester {
             update_status: about::UpdateStatus::default(),
             update_download: about::UpdateDownload::default(),
             update_download_exit_pending: false,
+            update_recovery_started: false,
+            update_recovery_notice: None,
             about_page_request: 0,
             mcp_open_tool_groups: crate::control_tools::CONTROL_TOOL_GROUPS
                 .iter()

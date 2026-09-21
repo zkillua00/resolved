@@ -7,6 +7,10 @@ for name in MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD MACOS_SIGNIN
         exit 2
     fi
 done
+if [[ ! "$APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]; then
+    echo "error: APPLE_TEAM_ID must be a 10-character uppercase alphanumeric identifier" >&2
+    exit 2
+fi
 umask 077
 keychain="$RUNNER_TEMP/resolved-signing.keychain-db"
 certificate="$RUNNER_TEMP/resolved-signing.p12"
@@ -24,6 +28,7 @@ xcrun notarytool store-credentials resolved-notary --keychain "$keychain" \
     --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD"
 {
     echo "API_TESTER_CODESIGN_IDENTITY=$MACOS_SIGNING_IDENTITY"
+    echo "RESOLVED_DEVELOPER_ID_TEAM_ID=$APPLE_TEAM_ID"
     echo "RESOLVED_NOTARY_PROFILE=resolved-notary"
     echo "RESOLVED_NOTARY_KEYCHAIN=$keychain"
 } >> "$GITHUB_ENV"

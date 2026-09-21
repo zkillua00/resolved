@@ -134,13 +134,15 @@ python3 "$updater_dir/licenses.py" \
 install -m 644 "$project_dir/LICENSE" "$work_dir/updater-notices/Resolved-LICENSE.txt"
 
 updater_cargo() {
+    updater_command="$1"
+    shift
     RESOLVED_UPDATER_BUILD=1 \
     RESOLVED_UPDATER_APP_VERSION="$package_version" \
     RESOLVED_BUILD_VERSION="$build_version" \
     API_TESTER_BUILD_NUMBER="$build_number" \
-        "$project_dir/scripts/cargo.sh" "$@" --locked \
+        "$project_dir/scripts/cargo.sh" "$updater_command" --locked \
         --manifest-path "$updater_dir/Cargo.toml" \
-        --target-dir "$updater_target_dir" --profile "$cargo_profile"
+        --target-dir "$updater_target_dir" --profile "$cargo_profile" "$@"
 }
 
 verify_updater_binary() {
@@ -150,9 +152,17 @@ verify_updater_binary() {
 }
 
 verify_bundle_updater() {
-    verify_updater_binary "$1/Contents/Helpers/resolved-updater" \
-        --app-executable "$1/Contents/MacOS/api-tester"
-    diff -r "$work_dir/updater-notices" "$1/Contents/Resources/ThirdPartyLicenses/Updater"
+    verified_bundle="$1"
+    shift
+    if [ "$profile" = release ] && [ "$codesign_identity" != "-" ]; then
+        set -- "$@" --developer-id
+        if [ -n "${RESOLVED_DEVELOPER_ID_TEAM_ID:-}" ]; then
+            set -- "$@" --expected-team "$RESOLVED_DEVELOPER_ID_TEAM_ID"
+        fi
+    fi
+    verify_updater_binary "$verified_bundle/Contents/Helpers/resolved-updater" \
+        --app-executable "$verified_bundle/Contents/MacOS/api-tester" "$@"
+    diff -r "$work_dir/updater-notices" "$verified_bundle/Contents/Resources/ThirdPartyLicenses/Updater"
 }
 
 # This is the sole compilation entry point, including helper tests.
@@ -161,6 +171,9 @@ updater_executable="$(python3 "$project_dir/scripts/cargo-artifact.py" \
     "$work_dir/updater-build.jsonl" "$updater_dir/Cargo.toml" resolved-updater)"
 if [ "$verify_updater" = true ]; then
     updater_cargo test
+    if [ -n "${RESOLVED_UPDATE_ARCHIVE_FIXTURE:-}" ]; then
+        updater_cargo test archive::tests::real_current_bundle -- --ignored
+    fi
     "$project_dir/scripts/cargo.sh" test --locked -p resolved-release --profile "$cargo_profile"
     "$project_dir/scripts/cargo.sh" metadata --locked --no-deps --format-version 1 \
         --manifest-path "$project_dir/Cargo.toml" >"$work_dir/workspace-metadata.json"
@@ -168,7 +181,7 @@ if [ "$verify_updater" = true ]; then
         --workspace-metadata "$work_dir/workspace-metadata.json"
     python3 -B -m unittest discover -s "$updater_dir" -p 'test_*.py'
     python3 -B -m unittest discover -s "$project_dir/scripts/tests" -p 'test_macos_updater.py'
-    echo "Updater verification passed (download integrity only; installation disabled)"
+    echo "Updater verification passed (no installation attempted)"
     exit 0
 fi
 
@@ -245,6 +258,12 @@ if [ "$profile" = "release" ]; then
         "$project_dir/scripts/notarize-macos.sh" "$archive_staging_path"
         xcrun stapler staple "$bundle_dir"
         xcrun stapler validate "$bundle_dir"
+        if [ "$build_version" = "$package_version" ]; then
+            verify_bundle_updater "$bundle_dir" --verify-host
+        else
+            # Nightlies are manual downloads, not runtime OTA candidates.
+            spctl --assess --type execute --verbose=2 "$bundle_dir"
+        fi
         # ZIPs cannot be stapled: repackage the app containing the ticket.
         rm "$archive_staging_path"
         ditto -c -k --norsrc --noextattr --noacl --keepParent \
@@ -272,7 +291,15 @@ if [ "$profile" = "release" ]; then
     if [ -n "$notary_profile" ]; then
         xcrun stapler validate "$archived_bundle_dir"
         spctl --assess --type execute --verbose=2 "$archived_bundle_dir"
+        if [ "$build_version" = "$package_version" ]; then
+            verify_bundle_updater "$archived_bundle_dir" --verify-host
+        fi
     fi
+
+    # Validate the final (stapled and repacked) bytes with the runtime archive
+    # policy before exposing the release ZIP. Only this script compiles helpers.
+    RESOLVED_UPDATE_ARCHIVE_FIXTURE="$archive_staging_path" \
+        updater_cargo test archive::tests::real_current_bundle -- --ignored
 
     mv -f "$archive_staging_path" "$archive_path"
 

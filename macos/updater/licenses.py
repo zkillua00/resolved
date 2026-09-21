@@ -97,6 +97,21 @@ def audit(metadata, output):
                     or comparison != data):
                 raise ValueError("license/attribution text mismatch: " + str(key))
             copies.append((upstream, output / (package["name"] + "-" + package["version"]) / text["reviewed"]))
+        # Some embedded code's original notices are omitted from the crate.
+        # These separately reviewed upstream snapshots are pinned offline, not
+        # fetched at build time and never a substitute for source-tree checks.
+        for text in review.get("supplemental_texts", []):
+            if (set(text) != {"reviewed", "sha256", "upstream_url"}
+                    or not text["upstream_url"].startswith("https://")
+                    or Path(text["reviewed"]).name != text["reviewed"]):
+                raise ValueError("invalid supplemental notice: " + str(key))
+            reviewed = HERE / "licenses" / text["reviewed"]
+            if reviewed.is_symlink():
+                raise ValueError("symlink supplemental notice: " + str(key))
+            data = reviewed.read_bytes()
+            if digest(data) != text["sha256"]:
+                raise ValueError("supplemental notice mismatch: " + str(key))
+            copies.append((data, output / (package["name"] + "-" + package["version"]) / text["reviewed"]))
     if seen != set(expected):
         raise ValueError("resolved graph differs from reviewed inventory")
     # Validate everything before touching the fresh output directory.
