@@ -112,6 +112,17 @@ URL-control redaction regressions are also fixed. Combined validation: 407 core
 tests passed and the Go suite passed on rerun (an existing short-timeout test
 failed once, then passed three focused repetitions).
 
+First runnable local preview is implemented; see [setup and scope](gateway-preview.md).
+It deliberately advances the usable local slice before the full fidelity gate:
+Settings, session token, explicit targets, bounded loopback HTTP, pinned local
+execution context, and native durable summary history work together. Unsupported
+binary history, transformed targets, opaque headers, remote preview execution,
+interpolation, scripts, and DNS remain explicit exclusions. Gateway redirects
+and compressed responses are passed through without automatic transformation.
+Review added hard execution ceilings and a stalled-backend/disconnected-caller
+regression. Automated evidence: 19 gateway-focused tests and the full desktop
+suite (911 passed, four ignored). No OS DNS changes or live-account tests.
+
 ### v0.1.0 — Prove end-to-end fidelity before feature implementation
 
 The current editor representation is not a transparent forwarding representation:

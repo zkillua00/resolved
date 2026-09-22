@@ -26,6 +26,7 @@ pub struct AppSettings {
     pub script: ScriptSettings,
     pub execution_limits: super::local_execution_limits::LocalExecutionLimitSettings,
     pub mcp: McpSettings,
+    pub gateway: GatewaySettings,
     pub navigation_compact: bool,
     pub metrics_position: MetricsPosition,
     pub upstreams: UpstreamSettings,
@@ -33,6 +34,19 @@ pub struct AppSettings {
     /// build changes a setting it understands.
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// Non-secret gateway preferences. Enabling and authentication are session-only.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct GatewaySettings {
+    pub port: u16,
+}
+
+impl Default for GatewaySettings {
+    fn default() -> Self {
+        Self { port: 47831 }
+    }
 }
 
 /// Local Model Context Protocol exposure. The transport is absent unless
@@ -805,6 +819,26 @@ fn new_theme_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_preferences_roundtrip_without_session_state() {
+        let mut settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.gateway.port, 47831);
+        settings.gateway.port = 47832;
+        let encoded = serde_json::to_value(&settings).unwrap();
+        assert_eq!(encoded["gateway"], serde_json::json!({"port": 47832}));
+        assert_eq!(
+            serde_json::from_value::<AppSettings>(encoded).unwrap(),
+            settings
+        );
+        let legacy: GatewaySettings =
+            serde_json::from_str(r#"{"enabled":true,"token":"must-not-persist","port":47831}"#)
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(legacy).unwrap(),
+            serde_json::json!({"port":47831})
+        );
+    }
 
     #[test]
     fn defaults_are_empty_and_backward_compatible() {

@@ -529,6 +529,7 @@ pub struct ExecutionInput {
     pub(super) headers: HeaderMap,
     pub(super) input_header_count: usize,
     pub(super) body: ExecutionBody,
+    strict_response_headers: bool,
 }
 
 pub(super) enum ExecutionBody {
@@ -568,7 +569,39 @@ impl ExecutionInput {
             input_header_count,
             headers,
             body: ExecutionBody::Bytes(body),
+            strict_response_headers: false,
         })
+    }
+
+    /// Bounded Gateway preview: reject targets the URL transport would rewrite,
+    /// and reject unrepresentable response fields rather than forward lossy text.
+    pub fn gateway(
+        method: &str,
+        target: &str,
+        headers: HeaderMap,
+        body: ResponseBody,
+    ) -> Result<Self, RequestError> {
+        let mut input = Self::literal(method, target, headers, body)?;
+        let authority = target
+            .split_once("://")
+            .map(|(_, rest)| rest)
+            .ok_or_else(|| {
+                RequestError::InvalidUrl("gateway target must be an absolute HTTP URL".into())
+            })?;
+        let raw_target = authority.find('/').map(|offset| &authority[offset..]);
+        let parsed_target = &input.url[url::Position::BeforePath..url::Position::AfterQuery];
+        if input.url.fragment().is_some()
+            || !input.url.username().is_empty()
+            || input.url.password().is_some()
+            || raw_target != Some(parsed_target)
+            || target.contains(['\t', '\r', '\n', '\\'])
+        {
+            return Err(RequestError::InvalidUrl(
+                "gateway preview cannot preserve this request target".into(),
+            ));
+        }
+        input.strict_response_headers = true;
+        Ok(input)
     }
 }
 
@@ -622,6 +655,7 @@ impl TryFrom<RequestDraft> for ExecutionInput {
             headers,
             input_header_count,
             body,
+            strict_response_headers: false,
         })
     }
 }
@@ -903,6 +937,23 @@ pub fn build_http_client_with_limits(
     cookie_jar: Arc<CookieJar>,
     limits: &ExecutionLimits,
 ) -> Result<Client, RequestError> {
+    build_policy_http_client(cookie_jar, limits, false)
+}
+
+/// Gateway mode returns redirects and encoded entity bytes to the caller.
+/// It shares all policy budgets and cookie handling with normal local Send.
+pub fn build_gateway_http_client_with_limits(
+    cookie_jar: Arc<CookieJar>,
+    limits: &ExecutionLimits,
+) -> Result<Client, RequestError> {
+    build_policy_http_client(cookie_jar, limits, true)
+}
+
+fn build_policy_http_client(
+    cookie_jar: Arc<CookieJar>,
+    limits: &ExecutionLimits,
+    gateway: bool,
+) -> Result<Client, RequestError> {
     limits.validate().map_err(RequestError::TaskFailed)?;
     crate::tls::install_crypto_provider()
         .map_err(|error| RequestError::TaskFailed(error.to_owned()))?;
@@ -926,6 +977,14 @@ pub fn build_http_client_with_limits(
             }
             attempt.follow()
         }));
+    if gateway {
+        builder = builder
+            .redirect(reqwest::redirect::Policy::none())
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
+            .no_zstd();
+    }
     if let Some(timeout) = limits
         .get("http.connect_timeout_ms")
         .as_duration()
@@ -1018,6 +1077,7 @@ async fn send_request_inner(
         url,
         headers,
         body,
+        strict_response_headers,
         ..
     } = request;
 
@@ -1046,11 +1106,25 @@ async fn send_request_inner(
     let headers = response
         .headers()
         .iter()
-        .map(|(name, value)| ResponseHeader {
-            name: name.as_str().to_owned(),
-            value: String::from_utf8_lossy(value.as_bytes()).into_owned(),
+        .map(|(name, value)| {
+            let value = if strict_response_headers {
+                value
+                    .to_str()
+                    .map_err(|_| {
+                        RequestError::TaskFailed(
+                            "gateway preview cannot preserve an opaque response header".into(),
+                        )
+                    })?
+                    .to_owned()
+            } else {
+                String::from_utf8_lossy(value.as_bytes()).into_owned()
+            };
+            Ok(ResponseHeader {
+                name: name.as_str().to_owned(),
+                value,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, RequestError>>()?;
     let response_limit = match limits {
         Some(limits) => limits
             .get("http.response_bytes")

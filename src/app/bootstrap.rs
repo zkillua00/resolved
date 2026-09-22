@@ -1050,6 +1050,7 @@ impl ApiTester {
                 this.stop_realtime();
                 this.stop_websocket();
                 this.stop_mcp_runtime_operations(cx);
+                this.stop_gateway();
                 if this.sending {
                     this.cancel_request(cx);
                 }
@@ -1060,7 +1061,9 @@ impl ApiTester {
                     // Post-response cancellation may still enqueue history.
                     // Wait for visible and isolated finalizers before sealing I/O.
                     while owner
-                        .read_with(&cx, |this, cx| this.has_pending_execution(cx))
+                        .read_with(&cx, |this, cx| {
+                            this.has_pending_execution(cx) || this.gateway.pending > 0
+                        })
                         .unwrap_or(false)
                     {
                         gpui::Timer::after(std::time::Duration::from_millis(10)).await;
@@ -1245,7 +1248,11 @@ impl ApiTester {
             primary_pane_scroll: ScrollHandle::default(),
             pane_request_generation: 0,
             pane_requests_in_flight: HashMap::new(),
+            gateway_port_input: cx.new(|cx| {
+                InputState::new(window, cx).default_value(settings.gateway.port.to_string())
+            }),
             settings,
+            gateway: gateway::GatewayState::default(),
             settings_warning,
             settings_writable,
             base_key_bindings,

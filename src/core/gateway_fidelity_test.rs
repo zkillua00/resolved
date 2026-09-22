@@ -266,3 +266,81 @@ async fn gateway_fidelity_url_dot_segments_are_normalized_and_head_has_no_body()
     assert_eq!(capture.await.unwrap().line, "HEAD /b HTTP/1.1");
     assert!(result.body.is_empty());
 }
+
+async fn execute_preview(target: &str) -> Result<ResponseData, RequestError> {
+    let limits = execution_limits::ExecutionLimits::default();
+    let directory = tempfile::tempdir().unwrap();
+    let vault = CredentialVault::new(DatabaseStore::new(directory.path().join("cookies.sqlite3")));
+    let jar = Arc::new(CookieJar::uninitialized(vault, "gateway-preview"));
+    let client = build_gateway_http_client_with_limits(jar, &limits).unwrap();
+    let input = ExecutionInput::gateway(
+        "GET",
+        target,
+        reqwest::header::HeaderMap::new(),
+        Vec::new().into(),
+    )?;
+    send_execution_input_with_limits(&client, input, &limits).await
+}
+
+#[tokio::test]
+async fn gateway_preview_preserves_gzip_and_returns_redirect_without_following() {
+    let gzip = [
+        31, 139, 8, 0, 0, 0, 0, 0, 2, 3, 203, 72, 205, 201, 201, 7, 0, 134, 166, 16, 54, 5, 0, 0, 0,
+    ];
+    let (origin, capture) = fixture(response(
+        "302 Found",
+        "Location: http://127.0.0.1:1/must-not-follow\r\nContent-Encoding: gzip\r\n",
+        &gzip,
+    ))
+    .await;
+    let result = execute_preview(&format!("{origin}/path?x=a%20b&&bare"))
+        .await
+        .unwrap();
+    assert_eq!(
+        capture.await.unwrap().line,
+        "GET /path?x=a%20b&&bare HTTP/1.1"
+    );
+    assert_eq!(result.status, 302);
+    assert_eq!(result.body.as_ref(), gzip);
+    assert!(
+        result
+            .headers
+            .iter()
+            .any(|header| header.name == "content-encoding" && header.value == "gzip")
+    );
+}
+
+#[tokio::test]
+async fn gateway_preview_rejects_opaque_response_headers_instead_of_replacing_bytes() {
+    let mut wire = response("200 OK", "", b"body");
+    let position = wire.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 2;
+    wire.splice(position..position, b"X-Opaque: \xff\r\n".iter().copied());
+    let (origin, capture) = fixture(wire).await;
+    let error = execute_preview(&format!("{origin}/")).await.unwrap_err();
+    capture.await.unwrap();
+    assert!(error.to_string().contains("opaque response header"));
+    assert!(!error.to_string().contains('\u{fffd}'));
+}
+
+#[test]
+fn gateway_preview_rejects_targets_that_transport_would_rewrite() {
+    for target in [
+        "http://example.test/a/%2e%2e/b",
+        "http://example.test/a/../b",
+        "http://example.test/a\\b",
+        "http://example.test/a\tb",
+        "http://example.test/a#fragment",
+        "http://user:password@example.test/a",
+    ] {
+        assert!(
+            ExecutionInput::gateway(
+                "GET",
+                target,
+                reqwest::header::HeaderMap::new(),
+                Vec::new().into(),
+            )
+            .is_err(),
+            "{target}"
+        );
+    }
+}

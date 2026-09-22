@@ -52,7 +52,8 @@ pub use request::{ExecutionInput, send_execution_input_with_limits};
 pub use request::{
     BodyField, BodyFieldKind, BodyMode, HeaderEntry, QueryParamEntry, RawBodyLanguage,
     RequestDraft, RequestError, RequestTask, ResponseBody, ResponseData, STANDARD_HTTP_METHODS,
-    build_client_with_cookie_jar, build_http_client_with_limits, query_params_from_url,
+    build_client_with_cookie_jar, build_gateway_http_client_with_limits,
+    build_http_client_with_limits, query_params_from_url,
     send_request_with_limits, url_with_query_params,
 };
 #[allow(unused_imports)]

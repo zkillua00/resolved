@@ -43,6 +43,33 @@ mod policy_scope_tests {
     }
 
     #[test]
+    fn gateway_limits_bound_unlimited_work_without_relaxing_policy() {
+        use crate::core::execution_limits::{Bound, ExecutionLimits};
+        for bound in [Bound::unlimited(), Bound::limited(0), Bound::limited(5)] {
+            let mut limits = ExecutionLimits::default();
+            for key in ["http.timeout_ms", "http.connect_timeout_ms", "http.response_bytes"] {
+                limits.0.insert(key.into(), bound);
+            }
+            let prepared = PreparedExecution {
+                scope_key: "local:test".into(),
+                limits,
+                upstream: None,
+            };
+            let capped = prepared.gateway_limits().unwrap();
+            for (key, maximum) in [
+                ("http.timeout_ms", 90_000),
+                ("http.connect_timeout_ms", 30_000),
+                ("http.response_bytes", crate::gateway::MAX_RESPONSE_BODY_BYTES as i64),
+            ] {
+                assert_eq!(
+                    capped.get(key),
+                    if bound.unlimited { Bound::limited(maximum) } else { bound }
+                );
+            }
+        }
+    }
+
+    #[test]
     fn execution_snapshot_is_independent_of_later_policy_edits() {
         let mut limits: crate::core::execution_limits::ExecutionLimits = serde_json::from_value(
             serde_json::json!({"chain.max_requests": {"unlimited": false, "value": 0}}),
@@ -98,6 +125,57 @@ pub(super) fn request_collection_scope(
 }
 
 impl PreparedExecution {
+    /// First preview is local-only until remote forwarding semantics are negotiated.
+    pub(super) async fn send_gateway_input(
+        &self,
+        request: crate::core::ExecutionInput,
+        cookie_jar: &Arc<CookieJar>,
+    ) -> Result<ResponseData, RequestError> {
+        let limits = self.gateway_limits()?;
+        let client =
+            crate::core::build_gateway_http_client_with_limits(cookie_jar.clone(), &limits)?;
+        crate::core::send_execution_input_with_limits(&client, request, &limits).await
+    }
+
+    fn gateway_limits(&self) -> Result<crate::core::execution_limits::ExecutionLimits, RequestError> {
+        if self.upstream.is_some() {
+            return Err(RequestError::TaskFailed(
+                "Gateway preview requires a local workspace".into(),
+            ));
+        }
+        let mut limits = self.limits.clone();
+        limits.validate().map_err(RequestError::TaskFailed)?;
+        let maximum = crate::gateway::MAX_RESPONSE_BODY_BYTES;
+        let response_limit = limits
+            .get("http.response_bytes")
+            .as_usize()
+            .map_err(RequestError::TaskFailed)?
+            .unwrap_or(maximum)
+            .min(maximum);
+        limits.0.insert(
+            "http.response_bytes".into(),
+            crate::core::execution_limits::Bound::limited(response_limit as i64),
+        );
+        // Disconnected callers and disabled listeners must not leave Unlimited
+        // upstream requests occupying slots (and preventing app close) forever.
+        // Finish/record accepted work, but bound it below the listener deadline.
+        for (key, maximum) in [
+            ("http.timeout_ms", 90_000),
+            ("http.connect_timeout_ms", 30_000),
+        ] {
+            let current = limits.get(key);
+            let value = if current.unlimited {
+                maximum
+            } else {
+                current.value.min(maximum)
+            };
+            limits
+                .0
+                .insert(key.into(), crate::core::execution_limits::Bound::limited(value));
+        }
+        Ok(limits)
+    }
+
     pub(super) async fn send(
         &self,
         upstream_client: &Client,

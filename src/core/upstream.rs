@@ -1024,6 +1024,7 @@ async fn execute_upstream_request_with_cookies(
     .await
 }
 
+#[cfg(test)]
 pub async fn execute_upstream_request_with_scope(
     client: &Client,
     base_url: &Url,
