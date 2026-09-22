@@ -516,21 +516,22 @@ struct PreparedRequest {
     headers: HeaderMap,
 }
 
-/// Validated local transport input, below editor/template semantics.
+/// Validated transport input, below editor/template semantics.
 ///
 /// This is not an execution coordinator: callers must still acquire workspace
 /// policy, credentials, cookie scope and history ownership before dispatch.
 /// `Url`/reqwest normalize encoded dot segments; this type does NOT promise
-/// original request-target fidelity. Remote dispatch is not supported yet.
+/// original request-target fidelity. Remote dispatch rejects header values
+/// outside the existing string envelope and negotiates literal method case.
 pub struct ExecutionInput {
-    method: Method,
-    url: Url,
-    headers: HeaderMap,
-    input_header_count: usize,
-    body: ExecutionBody,
+    pub(super) method: Method,
+    pub(super) url: Url,
+    pub(super) headers: HeaderMap,
+    pub(super) input_header_count: usize,
+    pub(super) body: ExecutionBody,
 }
 
-enum ExecutionBody {
+pub(super) enum ExecutionBody {
     None,
     Bytes(ResponseBody),
     /// Only editor conversion can request boundary/file generation.

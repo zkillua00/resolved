@@ -103,6 +103,15 @@ receipt. Existing editor normalization and generated multipart semantics remain.
 Combined validation: 403 core tests passed. This is a transport seam, not yet the
 gateway execution coordinator, remote byte-input path, or completed wire gate.
 
+Remote byte-input follow-up is implemented through `PreparedExecution::send_input`
+and the existing scoped upstream dispatcher. Raw base64 preserves binary and
+already-encoded multipart entities; `literal_method` capability negotiation
+protects method case with older servers. Unsupported remote header values fail
+explicitly. No policy failure falls back locally. The review's encoded-key and
+URL-control redaction regressions are also fixed. Combined validation: 407 core
+tests passed and the Go suite passed on rerun (an existing short-timeout test
+failed once, then passed three focused repetitions).
+
 ### v0.1.0 — Prove end-to-end fidelity before feature implementation
 
 The current editor representation is not a transparent forwarding representation:

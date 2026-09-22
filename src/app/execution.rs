@@ -104,6 +104,20 @@ impl PreparedExecution {
         request: RequestDraft,
         cookie_jar: &Arc<CookieJar>,
     ) -> Result<ResponseData, RequestError> {
+        self.send_input(
+            upstream_client,
+            crate::core::UpstreamExecutionInput::Editor(request),
+            cookie_jar,
+        )
+        .await
+    }
+
+    pub(super) async fn send_input(
+        &self,
+        upstream_client: &Client,
+        request: crate::core::UpstreamExecutionInput,
+        cookie_jar: &Arc<CookieJar>,
+    ) -> Result<ResponseData, RequestError> {
         let local_client =
             crate::core::build_http_client_with_limits(cookie_jar.clone(), &self.limits)?;
         match &self.upstream {
@@ -122,9 +136,20 @@ impl PreparedExecution {
                 )
                 .await
             }
-            None => {
-                crate::core::send_request_with_limits(&local_client, request, &self.limits).await
-            }
+            None => match request {
+                crate::core::UpstreamExecutionInput::Editor(request) => {
+                    crate::core::send_request_with_limits(&local_client, request, &self.limits)
+                        .await
+                }
+                crate::core::UpstreamExecutionInput::Literal(request) => {
+                    crate::core::send_execution_input_with_limits(
+                        &local_client,
+                        request,
+                        &self.limits,
+                    )
+                    .await
+                }
+            },
         }
     }
 }

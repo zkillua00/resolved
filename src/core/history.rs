@@ -481,23 +481,42 @@ fn redact_encoded_query(query: &str, sensitive_values: &[String]) -> String {
     query
         .split('&')
         .map(|segment| {
-            let Some((key, value)) = url::form_urlencoded::parse(segment.as_bytes()).next() else {
+            // URL parsing removes these ASCII controls before query decoding.
+            // Classify the value that execution sees, not a spelling which can
+            // disguise sensitive field names or known secrets.
+            let normalized = segment.replace(['\t', '\r', '\n'], "");
+            let Some((key, value)) = url::form_urlencoded::parse(normalized.as_bytes()).next()
+            else {
                 return segment.to_owned();
             };
+            let redacted_key = redact_secret_values(&key, sensitive_values);
             let redacted_value = if is_sensitive_field(&key) {
                 REDACTED_VALUE.to_owned()
             } else {
                 redact_secret_values(&value, sensitive_values)
             };
-            if redacted_value == value {
+            if redacted_key == key && redacted_value == value {
                 return segment.to_owned();
             }
-            // Keep the original key spelling, and encode only the value which
-            // actually changed. Final whole-URL redaction still covers keys.
-            let raw_key = segment.split_once('=').map_or(segment, |(key, _)| key);
-            let encoded: String =
-                url::form_urlencoded::byte_serialize(redacted_value.as_bytes()).collect();
-            format!("{raw_key}={encoded}")
+            // Decode for inspection, but only replace spans requiring redaction.
+            // Keys can contain partially percent-encoded known secrets too.
+            let (raw_key, raw_value) = segment
+                .split_once('=')
+                .map_or((segment, None), |(key, value)| (key, Some(value)));
+            let key = if redacted_key == key {
+                raw_key.to_owned()
+            } else {
+                url::form_urlencoded::byte_serialize(redacted_key.as_bytes()).collect()
+            };
+            if redacted_value != value {
+                let encoded: String =
+                    url::form_urlencoded::byte_serialize(redacted_value.as_bytes()).collect();
+                format!("{key}={encoded}")
+            } else if let Some(value) = raw_value {
+                format!("{key}={value}")
+            } else {
+                key
+            }
         })
         .collect::<Vec<_>>()
         .join("&")
@@ -697,6 +716,33 @@ mod tests {
         assert_eq!(
             redact_url("https://example.com/?token&keep=%ff&token=second&", &[]),
             "https://example.com/?token=%5BREDACTED%5D&keep=%ff&token=%5BREDACTED%5D&"
+        );
+    }
+
+    #[test]
+    fn history_url_redaction_classifies_decoded_keys_and_url_controls() {
+        assert_eq!(
+            redact_url(
+                "https://example.com/?%68unter2=x&%68unter2&%68unter2=%68unter2&keep=a%20b",
+                &["hunter2".into()],
+            ),
+            "https://example.com/?%5BREDACTED%5D=x&%5BREDACTED%5D&%5BREDACTED%5D=%5BREDACTED%5D&keep=a%20b"
+        );
+        for disguised_key in ["to\tken", "to\rken", "to\nken", "%74o\tken"] {
+            assert_eq!(
+                redact_url(
+                    &format!("https://example.com/?{disguised_key}=private&&bare"),
+                    &[],
+                ),
+                format!("https://example.com/?{disguised_key}=%5BREDACTED%5D&&bare")
+            );
+        }
+        assert_eq!(
+            redact_url(
+                "https://example.com/?value=hun\tter2&%68un\rter2=x",
+                &["hunter2".into()],
+            ),
+            "https://example.com/?value=%5BREDACTED%5D&%5BREDACTED%5D=x"
         );
     }
 

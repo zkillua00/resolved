@@ -52,8 +52,10 @@ func WithEvents(events resourceevents.Emitter) ServiceOption {
 }
 
 type ExecuteInput struct {
-	CollectionID string
-	UseCookieJar bool
+	// Opt-in only: authored editor requests retain historical normalization.
+	LiteralMethod bool
+	CollectionID  string
+	UseCookieJar  bool
 	// RequestID optionally names the saved request being executed so proxy
 	// resolution can apply request- and collection-scoped proxies.
 	RequestID string
@@ -247,7 +249,7 @@ func (s *Service) Policy(ctx context.Context) (Policy, error) {
 			return Policy{}, err
 		}
 	}
-	return Policy{Mode: settings.Mode, CookieJar: true, Limits: snapshot.Effective}, nil
+	return Policy{Mode: settings.Mode, CookieJar: true, LiteralMethod: true, Limits: snapshot.Effective}, nil
 }
 
 func (s *Service) Settings(ctx context.Context) (Settings, error) {
@@ -369,6 +371,9 @@ func (s *Service) Execute(
 	}
 
 	method := strings.ToUpper(strings.TrimSpace(input.Method))
+	if input.LiteralMethod {
+		method = input.Method
+	}
 	if method == "" {
 		return ExecuteResult{}, invalidField("method", "is required")
 	}

@@ -22,8 +22,17 @@ full-body copying. Caller length/transfer-encoding fields are replaced by genera
 framing; their original count still contributes to header limits.
 
 This does not change `RequestDraft`'s editor normalization or solve reqwest URL
-normalization, response-header conversion, remote dispatch, or durable byte replay.
+normalization, response-header conversion, or durable byte replay.
 It is not yet connected to a gateway coordinator or listener.
+
+Remote follow-up: the prepared execution dispatcher now accepts editor or literal
+input through the same policy-selected local/server paths, cookie synchronization,
+credentials, limits, and errors. Binary and fixed-boundary multipart entities use
+the existing raw base64 envelope. Mixed/lowercase methods require advertised
+`literal_method` support; older servers fail explicitly, while uppercase methods
+omit the extension. Remote opaque/non-ASCII header values are rejected rather than
+coerced. UI editor normalization remains unchanged, and no server denial falls
+back to local execution. See [proxy compatibility](request-proxies.md#literal-execution-compatibility).
 
 ## Executable proof
 
@@ -151,3 +160,12 @@ Combined local-input/history validation: **403 core tests passed**, including
 opaque repeated request headers, fixed multipart boundaries, framing, body limits,
 and mapped body ownership. Encoded dot normalization remains a characterization
 test, not a fidelity success.
+
+Remote/combined follow-up validation: **407 core tests passed**. The Go suite
+passed on rerun; its existing `TestExecuteUsesFrozenSnapshotAndTimeout` initially
+hit its deadline during policy lookup instead of transport. Three focused
+repetitions passed before the full-suite rerun. New remote tests cover literal
+method negotiation, bytes/multipart, repeated supported headers, rejected opaque
+headers, body limits, scoped identity/authentication, and authorization denial
+without local fallback. Redaction review added tests for partially encoded secret
+keys and URL-parser control-character normalization.
