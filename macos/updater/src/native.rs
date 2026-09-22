@@ -260,7 +260,10 @@ fn process_target(pid: u32) -> Result<PathBuf> {
     if pid == 0 || pid > i32::MAX as u32 {
         return Err(invalid());
     }
-    Ok(PathBuf::from(format!("+{pid}")))
+    // Requirement checks need codesign's decimal PID operand. A +PID can
+    // display metadata and pass plain verification, yet reject every -R
+    // requirement with EINVAL. Keep this distinct from an on-disk path.
+    Ok(PathBuf::from(pid.to_string()))
 }
 
 fn running_requirement(team: &str, hash: &str) -> Result<String> {
@@ -278,13 +281,20 @@ fn running_requirement(team: &str, hash: &str) -> Result<String> {
 }
 
 async fn running_signature(target: &Path, requirement: &str) -> Result<()> {
+    let failed = || {
+        Failure::new(
+            "running_host_verification",
+            "The running Resolved process could not be verified against the installed app.",
+        )
+    };
     let output = command(
         "/usr/bin/codesign",
         &args(&["--verify", "--test-requirement", requirement], target),
     )
-    .await?;
+    .await
+    .map_err(|_| failed())?;
     if !output.success {
-        return Err(invalid());
+        return Err(failed());
     }
     Ok(())
 }
@@ -1104,11 +1114,35 @@ mod tests {
         for pid in [0, i32::MAX as u32 + 1, u32::MAX] {
             assert!(process_target(pid).is_err());
         }
-        assert_eq!(process_target(123).unwrap(), Path::new("+123"));
+        assert_eq!(process_target(123).unwrap(), Path::new("123"));
         assert_eq!(
             process_target(i32::MAX as u32).unwrap(),
-            PathBuf::from(format!("+{}", i32::MAX))
+            PathBuf::from(i32::MAX.to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn live_process_requirement_is_evaluated_by_codesign() {
+        // Use OS-signed code, so this works on Intel as well as Apple Silicon
+        // without signing test binaries or accessing a Developer ID key.
+        let child = OwnedChild(
+            tokio::process::Command::new("/bin/sleep")
+                .arg("30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap(),
+        );
+        let target = process_target(child.0.id().unwrap()).unwrap();
+        let hash = cdhash(&target).await.unwrap();
+        running_signature(&target, &format!("=cdhash H\"{hash}\""))
+            .await
+            .expect("codesign must accept a matching live CodeDirectory requirement");
+        let error = running_signature(&target, "=false").await.unwrap_err();
+        assert_eq!(error.code, "running_host_verification");
+        // OwnedChild kills and reaps the fixture, including on assertion failure.
     }
 
     #[test]

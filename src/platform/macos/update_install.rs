@@ -196,10 +196,26 @@ fn ready_event(line: &[u8], request: &RestartRequest) -> Result<bool, String> {
         }
         Some("progress") if value["installation_enabled"] == false => Ok(false),
         Some("cancelled") => Err("Update preparation cancelled.".to_owned()),
-        Some("error") => Err(
-            "Update preparation failed. Recheck verification and installation permissions."
-                .to_owned(),
-        ),
+        Some("error") if value["installation_enabled"] == false => {
+            let code = value["error"]["code"].as_str().filter(|code| {
+                !code.is_empty()
+                    && code.len() <= 64
+                    && code
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            });
+            let message = value["error"]["message"].as_str().filter(|message| {
+                !message.is_empty()
+                    && message.len() <= 1024
+                    && !message.chars().any(char::is_control)
+            });
+            match (code, message) {
+                (Some(code), Some(message)) => {
+                    Err(format!("Update preparation failed [{code}]: {message}"))
+                }
+                _ => Err("The installer returned an invalid error response.".to_owned()),
+            }
+        }
         _ => Err("The installer returned an unexpected response.".to_owned()),
     }
 }
@@ -419,5 +435,51 @@ mod tests {
         assert!(ready_event(value.to_string().as_bytes(), &request).unwrap());
         value["artifact"]["size"] = serde_json::json!(4);
         assert!(ready_event(value.to_string().as_bytes(), &request).is_err());
+    }
+
+    #[test]
+    fn preparation_preserves_the_helpers_bounded_failure_reason() {
+        let value = serde_json::json!({
+            "protocol_version": 1,
+            "kind": "error",
+            "installation_enabled": false,
+            "error": {
+                "code": "running_host_verification",
+                "message": "The running Resolved process could not be verified against the installed app."
+            }
+        });
+        assert_eq!(
+            ready_event(value.to_string().as_bytes(), &request()).unwrap_err(),
+            "Update preparation failed [running_host_verification]: The running Resolved process could not be verified against the installed app."
+        );
+    }
+
+    #[test]
+    fn malformed_helper_errors_are_not_relayed_to_the_ui() {
+        for (code, message) in [
+            ("".to_owned(), "message".to_owned()),
+            ("x".repeat(65), "message".to_owned()),
+            ("bad\ncode".to_owned(), "message".to_owned()),
+            ("verification".to_owned(), String::new()),
+            ("verification".to_owned(), "x".repeat(1025)),
+            ("verification".to_owned(), "hidden\u{1b}control".to_owned()),
+        ] {
+            let value = serde_json::json!({
+                "protocol_version": 1, "kind": "error", "installation_enabled": false,
+                "error": { "code": code, "message": message }
+            });
+            assert_eq!(
+                ready_event(value.to_string().as_bytes(), &request()).unwrap_err(),
+                "The installer returned an invalid error response."
+            );
+        }
+        let value = serde_json::json!({
+            "protocol_version": 1, "kind": "error", "installation_enabled": true,
+            "error": { "code": "verification", "message": "message" }
+        });
+        assert_eq!(
+            ready_event(value.to_string().as_bytes(), &request()).unwrap_err(),
+            "The installer returned an unexpected response."
+        );
     }
 }
