@@ -129,7 +129,7 @@ impl ApiTester {
     /// Called again after the close barrier. The barrier only drains worker
     /// jobs; foreground completion handlers must also have recorded success.
     pub(crate) fn local_persistence_ready_to_close(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.has_pending_execution(cx) {
+        if self.has_pending_execution(cx) || self.gateway.pending > 0 {
             self.request_notice = Some(
                 "Finish or cancel running requests before closing; their history is not finalized."
                     .into(),

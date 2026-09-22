@@ -654,6 +654,9 @@ pub struct ProxyExecutionPolicy {
     pub mode: RequestExecutionMode,
     #[serde(default)]
     pub cookie_jar: bool,
+    /// Absent on old servers, whose execute endpoint uppercases methods.
+    #[serde(default)]
+    pub literal_method: bool,
     #[serde(default)]
     pub limits: ExecutionLimits,
 }
@@ -714,6 +717,7 @@ pub async fn get_upstream_execution_policy_for_scope(
         return Ok(ProxyExecutionPolicy {
             mode: RequestExecutionMode::Local,
             cookie_jar: false,
+            literal_method: false,
             limits: ExecutionLimits::default(),
         });
     }
@@ -808,6 +812,25 @@ pub async fn send_request_for_upstream_workspace(
     }
 }
 
+/// Dispatch provenance: editor authoring remains unchanged; literal input
+/// is never converted through text fields or sent locally as a fallback.
+pub enum UpstreamExecutionInput {
+    Editor(RequestDraft),
+    Literal(super::ExecutionInput),
+}
+
+impl From<RequestDraft> for UpstreamExecutionInput {
+    fn from(request: RequestDraft) -> Self {
+        Self::Editor(request)
+    }
+}
+
+impl From<super::ExecutionInput> for UpstreamExecutionInput {
+    fn from(request: super::ExecutionInput) -> Self {
+        Self::Literal(request)
+    }
+}
+
 pub async fn send_request_for_upstream_workspace_with_scope(
     upstream_client: &Client,
     local_client: &Client,
@@ -815,26 +838,46 @@ pub async fn send_request_for_upstream_workspace_with_scope(
     bearer_token: &str,
     workspace_id: &str,
     saved_request_id: Option<&str>,
-    request: RequestDraft,
+    request: impl Into<UpstreamExecutionInput>,
     jar: &super::CookieJar,
     collection_id: Option<&str>,
     policy: &ProxyExecutionPolicy,
 ) -> Result<ResponseData, RequestError> {
+    let request = request.into();
     jar.synchronized().await.map_err(RequestError::Upstream)?;
     match policy.mode {
         RequestExecutionMode::Local => {
-            let result =
-                super::request::send_request_with_limits(local_client, request, &policy.limits)
-                    .await;
+            let result = match request {
+                UpstreamExecutionInput::Editor(request) => {
+                    super::request::send_request_with_limits(local_client, request, &policy.limits)
+                        .await
+                }
+                UpstreamExecutionInput::Literal(request) => {
+                    super::request::send_execution_input_with_limits(
+                        local_client,
+                        request,
+                        &policy.limits,
+                    )
+                    .await
+                }
+            };
             finish_cookie_sync(result, jar.synchronized().await, "cookie synchronization")
         }
         RequestExecutionMode::Server => {
+            if matches!(&request, UpstreamExecutionInput::Literal(input)
+                if input.method.as_str() != input.method.as_str().to_ascii_uppercase())
+                && !policy.literal_method
+            {
+                return Err(RequestError::Upstream(
+                    "Update this server to preserve literal mixed-case HTTP methods.".into(),
+                ));
+            }
             if jar.enabled() && !policy.cookie_jar {
                 return Err(RequestError::Upstream(
                     "Update this server to support encrypted cookie jars.".into(),
                 ));
             }
-            let result = execute_upstream_request_with_scope(
+            let result = execute_upstream_input_with_scope(
                 upstream_client,
                 base_url,
                 bearer_token,
@@ -887,6 +930,8 @@ struct ProxyExecuteRequest {
     /// request- and collection-scoped proxies.
     #[serde(skip_serializing_if = "Option::is_none")]
     request_id: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    literal_method: bool,
     method: String,
     url: String,
     headers: Vec<ProxyHeader>,
@@ -979,6 +1024,7 @@ async fn execute_upstream_request_with_cookies(
     .await
 }
 
+#[cfg(test)]
 pub async fn execute_upstream_request_with_scope(
     client: &Client,
     base_url: &Url,
@@ -990,7 +1036,37 @@ pub async fn execute_upstream_request_with_scope(
     collection_id: Option<&str>,
     limits: &ExecutionLimits,
 ) -> Result<ResponseData, RequestError> {
-    let mut payload = proxy_request_payload_with_limits(request, limits).await?;
+    execute_upstream_input_with_scope(
+        client,
+        base_url,
+        bearer_token,
+        workspace_id,
+        saved_request_id,
+        UpstreamExecutionInput::Editor(request),
+        use_cookie_jar,
+        collection_id,
+        limits,
+    )
+    .await
+}
+
+async fn execute_upstream_input_with_scope(
+    client: &Client,
+    base_url: &Url,
+    bearer_token: &str,
+    workspace_id: &str,
+    saved_request_id: Option<&str>,
+    request: UpstreamExecutionInput,
+    use_cookie_jar: bool,
+    collection_id: Option<&str>,
+    limits: &ExecutionLimits,
+) -> Result<ResponseData, RequestError> {
+    let mut payload = match request {
+        UpstreamExecutionInput::Editor(request) => {
+            proxy_request_payload_with_limits(request, limits).await?
+        }
+        UpstreamExecutionInput::Literal(request) => proxy_literal_payload(request, limits).await?,
+    };
     payload.use_cookie_jar = use_cookie_jar;
     payload.request_id = saved_request_id.map(str::to_owned);
     payload.collection_id = collection_id.map(str::to_owned);
@@ -1175,8 +1251,96 @@ async fn proxy_request_payload_with_limits(
         collection_id: None,
         use_cookie_jar: false,
         request_id: None,
+        literal_method: false,
         method: request.method,
         url: request.url,
+        headers,
+        body,
+    })
+}
+
+async fn proxy_literal_payload(
+    request: super::ExecutionInput,
+    limits: &ExecutionLimits,
+) -> Result<ProxyExecuteRequest, RequestError> {
+    for (key, size) in [
+        ("http.url_bytes", request.url.as_str().len()),
+        ("http.header_count", request.input_header_count),
+    ] {
+        if limits
+            .get(key)
+            .as_usize()
+            .map_err(RequestError::Upstream)?
+            .is_some_and(|limit| size > limit)
+        {
+            return Err(RequestError::Upstream(format!(
+                "literal request exceeds {key}"
+            )));
+        }
+    }
+    let headers = request
+        .headers
+        .iter()
+        .map(|(name, value)| {
+            // JSON strings cannot carry arbitrary HTTP field bytes. Never
+            // replace bytes with U+FFFD or leak the field value in diagnostics.
+            let value = value.to_str().map_err(|_| {
+                RequestError::Upstream(format!(
+                    "remote execution cannot represent non-ASCII header value for {name}"
+                ))
+            })?;
+            Ok(ProxyHeader {
+                name: name.to_string(),
+                value: value.to_owned(),
+            })
+        })
+        .collect::<Result<Vec<_>, RequestError>>()?;
+    let body = match request.body {
+        super::request::ExecutionBody::Bytes(bytes) => {
+            ensure_proxy_body_limit(
+                bytes.len(),
+                limits
+                    .get("http.request_bytes")
+                    .as_usize()
+                    .map_err(RequestError::Upstream)?,
+            )?;
+            // Already-encoded multipart is also raw entity bytes. In particular,
+            // leave Content-Type/boundary entirely to the captured headers.
+            ProxyBody {
+                mode: "raw",
+                raw_content_type: None,
+                data_base64: Some(BASE64_STANDARD.encode(bytes.as_ref())),
+                fields: Vec::new(),
+            }
+        }
+        super::request::ExecutionBody::None => ProxyBody {
+            mode: "none",
+            raw_content_type: None,
+            data_base64: None,
+            fields: Vec::new(),
+        },
+        super::request::ExecutionBody::Multipart(fields) => {
+            proxy_request_payload_with_limits(
+                RequestDraft {
+                    body_mode: BodyMode::MultipartFormData,
+                    body_fields: fields,
+                    ..RequestDraft::default()
+                },
+                limits,
+            )
+            .await?
+            .body
+        }
+    };
+    Ok(ProxyExecuteRequest {
+        collection_id: None,
+        use_cookie_jar: false,
+        request_id: None,
+        // Uppercase tokens need no extension, keeping their legacy envelope
+        // compatible even with servers that reject unknown request fields.
+        literal_method: request.method.as_str() != request.method.as_str().to_ascii_uppercase(),
+        method: request.method.to_string(),
+        url: request.url.to_string(),
         headers,
         body,
     })
@@ -2204,9 +2368,154 @@ mod tests {
     use crate::core::{BodyField, HeaderEntry};
 
     #[test]
+    fn literal_proxy_payload_preserves_binary_and_encoded_multipart_without_inference() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for (content_type, bytes) in [
+            (None, b"\0\xff\x80\r\n".as_slice()),
+            (Some("multipart/form-data; boundary=fixed"), b"--fixed\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\n\0\xff\x80\r\n--fixed--\r\n".as_slice()),
+        ] {
+            let mut headers = reqwest::header::HeaderMap::new();
+            if let Some(content_type) = content_type {
+                headers.insert("content-type", content_type.parse().unwrap());
+            }
+            headers.append("x-repeat", "one".parse().unwrap());
+            headers.append("x-repeat", "two".parse().unwrap());
+            let input = super::super::ExecutionInput::literal("mIxEd", "https://example.test/a%2Fb?x=%20&x=+&bare", headers, bytes.to_vec().into()).unwrap();
+            let payload = runtime.block_on(proxy_literal_payload(input, &ExecutionLimits::default())).unwrap();
+            assert_eq!(payload.method, "mIxEd");
+            assert!(payload.literal_method);
+            assert_eq!(payload.url, "https://example.test/a%2Fb?x=%20&x=+&bare");
+            assert_eq!(payload.body.mode, "raw");
+            assert!(payload.body.raw_content_type.is_none());
+            assert!(payload.body.fields.is_empty());
+            assert_eq!(BASE64_STANDARD.decode(payload.body.data_base64.unwrap()).unwrap(), bytes);
+            assert_eq!(payload.headers.iter().filter(|h| h.name == "x-repeat").map(|h| h.value.as_str()).collect::<Vec<_>>(), ["one", "two"]);
+            assert!(!payload.headers.iter().any(|h| h.name.eq_ignore_ascii_case("user-agent")));
+            assert_eq!(payload.headers.iter().find(|h| h.name == "content-type").map(|h| h.value.as_str()), content_type);
+        }
+    }
+
+    #[test]
+    fn literal_proxy_payload_rejects_opaque_headers_and_body_over_budget() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "x-opaque",
+            reqwest::header::HeaderValue::from_bytes(b"\xff").unwrap(),
+        );
+        let input = super::super::ExecutionInput::literal(
+            "POST",
+            "https://example.test",
+            headers,
+            vec![0].into(),
+        )
+        .unwrap();
+        let error = runtime
+            .block_on(proxy_literal_payload(input, &ExecutionLimits::default()))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("non-ASCII"));
+        let limits: ExecutionLimits = serde_json::from_value(
+            serde_json::json!({"http.request_bytes": {"value": 0, "unlimited": false}}),
+        )
+        .unwrap();
+        let input = super::super::ExecutionInput::literal(
+            "POST",
+            "https://example.test",
+            reqwest::header::HeaderMap::new(),
+            vec![0].into(),
+        )
+        .unwrap();
+        assert!(
+            runtime
+                .block_on(proxy_literal_payload(input, &limits))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn literal_remote_compatibility_gate_and_permission_denial_never_fall_back() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = thread::spawn(move || {
+            for method in ["POST", "mIxEd"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let bytes = read_http_request(&mut stream);
+                let end = bytes.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+                let headers = String::from_utf8_lossy(&bytes[..end]);
+                assert!(headers.starts_with(
+                    "POST /api/v1/workspaces/workspace/execute?collection_id=collection "
+                ));
+                assert!(headers.contains("authorization: Bearer token"));
+                let payload: serde_json::Value = serde_json::from_slice(&bytes[end + 4..]).unwrap();
+                assert_eq!(payload["method"], method);
+                if method == "POST" {
+                    assert!(payload.get("literal_method").is_none());
+                } else {
+                    assert_eq!(payload["literal_method"], true);
+                }
+                assert_eq!(payload["request_id"], "saved");
+                assert_eq!(payload["collection_id"], "collection");
+                assert_eq!(
+                    BASE64_STANDARD
+                        .decode(payload["body"]["data_base64"].as_str().unwrap())
+                        .unwrap(),
+                    [0, 255]
+                );
+                let body = br#"{"success":false,"error":{"code":"forbidden","message":"denied"}}"#;
+                write!(stream, "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let vault = crate::core::CredentialVault::new(crate::core::DatabaseStore::new(
+            directory.path().join("cookies.sqlite3"),
+        ));
+        let jar = crate::core::CookieJar::uninitialized(vault, "remote-test");
+        let client = build_upstream_execution_client().unwrap();
+        let mut policy: ProxyExecutionPolicy =
+            serde_json::from_str(r#"{"mode":"server"}"#).unwrap();
+        let send = |method: &str, policy: &ProxyExecutionPolicy| {
+            let input = crate::core::ExecutionInput::literal(
+                method,
+                "http://127.0.0.1:1/never-fallback",
+                reqwest::header::HeaderMap::new(),
+                vec![0, 255].into(),
+            )
+            .unwrap();
+            runtime
+                .block_on(send_request_for_upstream_workspace_with_scope(
+                    &client,
+                    &client,
+                    &base_url,
+                    "token",
+                    "workspace",
+                    Some("saved"),
+                    UpstreamExecutionInput::Literal(input),
+                    &jar,
+                    Some("collection"),
+                    policy,
+                ))
+                .err()
+                .unwrap()
+                .to_string()
+        };
+        assert!(send("mIxEd", &policy).contains("Update this server"));
+        assert!(send("POST", &policy).contains("denied"));
+        policy.literal_method = true;
+        assert!(send("mIxEd", &policy).contains("denied"));
+        server.join().unwrap();
+    }
+
+    #[test]
     fn policy_defaults_and_dynamic_body_limits_preserve_zero_and_unlimited() {
         let policy: ProxyExecutionPolicy = serde_json::from_str(r#"{"mode":"server"}"#).unwrap();
         assert_eq!(policy.limits.get("http.request_bytes").value, 67_108_864);
+        assert!(!policy.literal_method);
         assert!(ensure_proxy_body_limit(1, Some(0)).is_err());
         assert!(ensure_proxy_body_limit(0, Some(0)).is_ok());
         assert!(ensure_proxy_body_limit(9, Some(8)).is_err());
@@ -2216,6 +2525,7 @@ mod tests {
             collection_id: Some("nested-collection".into()),
             request_id: Some("saved-request".into()),
             use_cookie_jar: false,
+            literal_method: false,
             method: "GET".into(),
             url: "https://example.com".into(),
             headers: vec![],

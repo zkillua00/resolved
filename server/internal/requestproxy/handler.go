@@ -57,14 +57,15 @@ type websocketOpenResponse struct {
 }
 
 type ExecuteRequest struct {
-	CollectionID string         `json:"collection_id,omitempty"`
-	UseCookieJar bool           `json:"use_cookie_jar"`
-	WorkspaceID  string         `json:"-" validate:"required"`
-	RequestID    string         `json:"request_id" validate:"omitempty,uuid"`
-	Method       string         `json:"method" validate:"required,max=64"`
-	URL          string         `json:"url" validate:"required"`
-	Headers      []Header       `json:"headers"`
-	Body         proxybody.Body `json:"body"`
+	LiteralMethod bool           `json:"literal_method"`
+	CollectionID  string         `json:"collection_id,omitempty"`
+	UseCookieJar  bool           `json:"use_cookie_jar"`
+	WorkspaceID   string         `json:"-" validate:"required"`
+	RequestID     string         `json:"request_id" validate:"omitempty,uuid"`
+	Method        string         `json:"method" validate:"required,max=64"`
+	URL           string         `json:"url" validate:"required"`
+	Headers       []Header       `json:"headers"`
+	Body          proxybody.Body `json:"body"`
 }
 
 type ExecutePayload ExecuteRequest
@@ -242,13 +243,14 @@ func (h *Handler) ExecuteController() fiber.Handler {
 				actorFromContext(c),
 				payload.WorkspaceID,
 				ExecuteInput{
-					UseCookieJar: payload.UseCookieJar,
-					RequestID:    payload.RequestID,
-					CollectionID: payload.CollectionID,
-					Method:       payload.Method,
-					URL:          payload.URL,
-					Headers:      payload.Headers,
-					Body:         payload.Body,
+					LiteralMethod: payload.LiteralMethod,
+					UseCookieJar:  payload.UseCookieJar,
+					RequestID:     payload.RequestID,
+					CollectionID:  payload.CollectionID,
+					Method:        payload.Method,
+					URL:           payload.URL,
+					Headers:       payload.Headers,
+					Body:          payload.Body,
 				},
 			)
 			if err != nil {

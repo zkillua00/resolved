@@ -80,9 +80,10 @@ type allowlistPayload struct {
 }
 
 type Policy struct {
-	Limits    map[string]executionlimits.Bound `json:"limits"`
-	CookieJar bool                             `json:"cookie_jar"`
-	Mode      string                           `json:"mode"`
+	LiteralMethod bool                             `json:"literal_method"`
+	Limits        map[string]executionlimits.Bound `json:"limits"`
+	CookieJar     bool                             `json:"cookie_jar"`
+	Mode          string                           `json:"mode"`
 }
 
 type SettingsRepository struct {

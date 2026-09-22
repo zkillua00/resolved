@@ -19,6 +19,7 @@ mod documentation_body;
 mod documentation_intelligence;
 mod documentation_references;
 mod editor_util;
+mod gateway;
 mod instance_guard;
 mod io;
 mod platform;

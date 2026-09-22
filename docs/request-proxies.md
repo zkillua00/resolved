@@ -54,6 +54,26 @@ Manage proxies under `/api/v1/proxies`. Assignment and exclusion `PUT` endpoints
 replace the entire set; rule/name edits use `PATCH /proxies/{proxy_id}`.
 See the [route catalog](../server/docs/architecture.md#http-surface).
 
+### Literal execution compatibility
+
+Execution policy advertises `literal_method: true` when the execute endpoint can
+preserve a supplied method token's case. The request's optional `literal_method`
+flag enables that behavior; omitted/false keeps the existing editor behavior of
+trimming and uppercasing methods. Permissions, proxy selection, destination policy,
+and limits are unchanged.
+
+The desktop's byte-input execution path requires this capability for mixed/lowercase
+methods. Older servers omit it, so unsupported requests fail before submission
+rather than silently changing method or falling back to local execution. Uppercase
+literal methods omit the request extension and remain compatible with older servers.
+
+Literal bodies use the existing raw base64 envelope, including already-encoded
+multipart bodies with an explicit Content-Type/boundary. They do not infer a
+Content-Type or regenerate multipart. Header values outside the supported ASCII
+envelope are rejected explicitly; they are not converted lossily. Transport defaults
+such as User-Agent, redirect handling, and decompression are not a wire-fidelity
+guarantee. This is execution infrastructure, not an enabled Gateway listener.
+
 ## Execution diagnostics
 
 When a relayed execution fails, inspect its phase, reason, affected field, and

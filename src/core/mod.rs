@@ -27,6 +27,9 @@ mod workspace_provider;
 #[cfg(test)]
 mod mvp_smoke_test;
 
+#[cfg(test)]
+mod gateway_fidelity_test;
+
 pub use chain::{
     ChainExecutor, ChainFailure, ChainLimits, ChainRequestExecution, ChainRun,
     run_chain_with_executor,
@@ -44,10 +47,13 @@ pub use interchange::{
 pub use realtime::{RealtimeResourceChange, RealtimeSignal, watch_upstream_changes};
 #[cfg(test)]
 pub use request::{build_client, spawn_request};
+#[allow(unused_imports)]
+pub use request::{ExecutionInput, send_execution_input_with_limits};
 pub use request::{
     BodyField, BodyFieldKind, BodyMode, HeaderEntry, QueryParamEntry, RawBodyLanguage,
     RequestDraft, RequestError, RequestTask, ResponseBody, ResponseData, STANDARD_HTTP_METHODS,
-    build_client_with_cookie_jar, build_http_client_with_limits, query_params_from_url,
+    build_client_with_cookie_jar, build_gateway_http_client_with_limits,
+    build_http_client_with_limits, query_params_from_url,
     send_request_with_limits, url_with_query_params,
 };
 #[allow(unused_imports)]
@@ -92,13 +98,14 @@ pub use template::{RequestTemplate, ResolvedRequest, resolve_request, resolve_te
 #[allow(unused_imports)]
 pub use upstream::{
     LoginPermission, LoginRole, LoginUser, ProxyExecutionPolicy, UpstreamCollectionView,
-    UpstreamEnvironmentVariableView, UpstreamEnvironmentView, UpstreamLoginError,
-    UpstreamLoginResult, UpstreamProfile, UpstreamSavedRequestView, UpstreamSettings,
-    UpstreamUrlError, UpstreamUserSummary, UpstreamWorkspaceError, UpstreamWorkspaceSummary,
-    UpstreamWorkspaceView, add_upstream_proxy_allowlist_entry, build_upstream_client,
-    build_upstream_execution_client, create_upstream_collection, create_upstream_environment,
-    create_upstream_environment_variable, create_upstream_saved_request, create_upstream_workspace,
-    delete_upstream_collection, delete_upstream_environment, delete_upstream_environment_variable,
+    UpstreamEnvironmentVariableView, UpstreamEnvironmentView, UpstreamExecutionInput,
+    UpstreamLoginError, UpstreamLoginResult, UpstreamProfile, UpstreamSavedRequestView,
+    UpstreamSettings, UpstreamUrlError, UpstreamUserSummary, UpstreamWorkspaceError,
+    UpstreamWorkspaceSummary, UpstreamWorkspaceView, add_upstream_proxy_allowlist_entry,
+    build_upstream_client, build_upstream_execution_client, create_upstream_collection,
+    create_upstream_environment, create_upstream_environment_variable,
+    create_upstream_saved_request, create_upstream_workspace, delete_upstream_collection,
+    delete_upstream_environment, delete_upstream_environment_variable,
     delete_upstream_saved_request, delete_upstream_workspace,
     get_upstream_execution_policy_for_scope, get_upstream_user, get_upstream_workspace,
     list_upstream_environments, list_upstream_workspaces, login_upstream, move_upstream_collection,

@@ -122,6 +122,7 @@ mod environments_actions;
 mod environments_page;
 mod execution;
 mod execution_stage;
+mod gateway;
 mod headers_editor;
 mod history_page;
 mod local_execution_limits;
@@ -390,6 +391,8 @@ pub struct ApiTester {
     pane_request_generation: u64,
     pane_requests_in_flight: HashMap<String, u64>,
     settings: AppSettings,
+    gateway: gateway::GatewayState,
+    gateway_port_input: Entity<InputState>,
     settings_warning: Option<String>,
     settings_writable: bool,
     base_key_bindings: Vec<gpui::KeyBinding>,
