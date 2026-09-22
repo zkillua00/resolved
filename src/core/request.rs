@@ -516,6 +516,115 @@ struct PreparedRequest {
     headers: HeaderMap,
 }
 
+/// Validated local transport input, below editor/template semantics.
+///
+/// This is not an execution coordinator: callers must still acquire workspace
+/// policy, credentials, cookie scope and history ownership before dispatch.
+/// `Url`/reqwest normalize encoded dot segments; this type does NOT promise
+/// original request-target fidelity. Remote dispatch is not supported yet.
+pub struct ExecutionInput {
+    method: Method,
+    url: Url,
+    headers: HeaderMap,
+    input_header_count: usize,
+    body: ExecutionBody,
+}
+
+enum ExecutionBody {
+    None,
+    Bytes(ResponseBody),
+    /// Only editor conversion can request boundary/file generation.
+    Multipart(Vec<BodyField>),
+}
+
+impl ExecutionInput {
+    /// Literal entity bytes and validated byte-valued repeated headers.
+    /// No trimming, method uppercasing, template expansion, body serialization
+    /// or content-type inference is performed. HeaderMap preserves per-name
+    /// value order, not original header casing or cross-name order. Transport
+    /// framing is regenerated from the entity bytes, never caller length or
+    /// transfer-encoding. Gateway hop-by-hop filtering remains ingress work.
+    #[allow(dead_code)] // Literal ingress is not connected until coordinator work lands.
+    pub fn literal(
+        method: &str,
+        url: &str,
+        mut headers: HeaderMap,
+        body: ResponseBody,
+    ) -> Result<Self, RequestError> {
+        let method = Method::from_bytes(method.as_bytes())
+            .map_err(|_| RequestError::InvalidMethod(method.to_owned()))?;
+        let url = Url::parse(url).map_err(|error| RequestError::InvalidUrl(error.to_string()))?;
+        match url.scheme() {
+            "http" | "https" => {}
+            scheme => return Err(RequestError::UnsupportedScheme(scheme.to_owned())),
+        }
+        let input_header_count = headers.len();
+        headers.remove(CONTENT_LENGTH);
+        headers.remove(reqwest::header::TRANSFER_ENCODING);
+        Ok(Self {
+            method,
+            url,
+            input_header_count,
+            headers,
+            body: ExecutionBody::Bytes(body),
+        })
+    }
+}
+
+impl TryFrom<RequestDraft> for ExecutionInput {
+    type Error = RequestError;
+
+    fn try_from(request: RequestDraft) -> Result<Self, Self::Error> {
+        let PreparedRequest {
+            method,
+            url,
+            mut headers,
+        } = request.prepared()?;
+        let input_header_count = headers.len();
+        let body = match request.body_mode {
+            BodyMode::None => ExecutionBody::None,
+            BodyMode::Raw if request.body.is_empty() => ExecutionBody::None,
+            BodyMode::Raw => {
+                if !headers.contains_key(CONTENT_TYPE) {
+                    headers.insert(
+                        CONTENT_TYPE,
+                        HeaderValue::from_static(request.raw_body_language.content_type()),
+                    );
+                }
+                ExecutionBody::Bytes(request.body.into_bytes().into())
+            }
+            BodyMode::FormUrlEncoded => {
+                let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+                for field in &request.body_fields {
+                    if field.enabled && !field.name.trim().is_empty() {
+                        serializer.append_pair(&field.name, &field.value);
+                    }
+                }
+                if !headers.contains_key(CONTENT_TYPE) {
+                    headers.insert(
+                        CONTENT_TYPE,
+                        HeaderValue::from_static("application/x-www-form-urlencoded"),
+                    );
+                }
+                ExecutionBody::Bytes(serializer.finish().into_bytes().into())
+            }
+            BodyMode::MultipartFormData => {
+                // The generated boundary and length, never editor values, win.
+                headers.remove(CONTENT_TYPE);
+                headers.remove(CONTENT_LENGTH);
+                ExecutionBody::Multipart(request.body_fields)
+            }
+        };
+        Ok(Self {
+            method,
+            url,
+            headers,
+            input_header_count,
+            body,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResponseHeader {
     pub name: String,
@@ -780,7 +889,7 @@ pub async fn send_request(
     client: &Client,
     request: RequestDraft,
 ) -> Result<ResponseData, RequestError> {
-    send_request_inner(client, request, None).await
+    send_request_inner(client, request.try_into()?, None).await
 }
 
 /// Build a policy-specific client while retaining workspace cookie isolation.
@@ -835,6 +944,26 @@ pub async fn send_request_with_limits(
     request: RequestDraft,
     limits: &ExecutionLimits,
 ) -> Result<ResponseData, RequestError> {
+    send_with_limits(client, || request.try_into(), limits).await
+}
+
+/// Local dispatch only. The caller must supply the policy-selected client and
+/// matching immutable limits, exactly as for editor execution. This does not
+/// authorize a destination or select local execution for a remote workspace.
+#[allow(dead_code)] // Shared transport entry for the next coordinator step.
+pub async fn send_execution_input_with_limits(
+    client: &Client,
+    request: ExecutionInput,
+    limits: &ExecutionLimits,
+) -> Result<ResponseData, RequestError> {
+    send_with_limits(client, || Ok(request), limits).await
+}
+
+async fn send_with_limits(
+    client: &Client,
+    prepare: impl FnOnce() -> Result<ExecutionInput, RequestError>,
+    limits: &ExecutionLimits,
+) -> Result<ResponseData, RequestError> {
     limits.validate().map_err(RequestError::TaskFailed)?;
     let timeout = limits
         .get("http.timeout_ms")
@@ -851,7 +980,7 @@ pub async fn send_request_with_limits(
             "HTTP execution is disabled by a zero time budget".into(),
         ));
     }
-    let future = send_request_inner(client, request, Some(limits));
+    let future = async { send_request_inner(client, prepare()?, Some(limits)).await };
     match timeout {
         Some(timeout) => tokio::time::timeout(timeout, future)
             .await
@@ -876,27 +1005,20 @@ fn check_http_size(limits: &ExecutionLimits, key: &str, size: usize) -> Result<(
 
 async fn send_request_inner(
     client: &Client,
-    request: RequestDraft,
+    request: ExecutionInput,
     limits: Option<&ExecutionLimits>,
 ) -> Result<ResponseData, RequestError> {
-    let prepared = request.prepared()?;
     if let Some(limits) = limits {
-        check_http_size(limits, "http.url_bytes", prepared.url.as_str().len())?;
-        check_http_size(limits, "http.header_count", prepared.headers.len())?;
+        check_http_size(limits, "http.url_bytes", request.url.as_str().len())?;
+        check_http_size(limits, "http.header_count", request.input_header_count)?;
     }
-    let PreparedRequest {
+    let ExecutionInput {
         method,
         url,
-        mut headers,
-    } = prepared;
-    let has_user_content_type = headers.contains_key(CONTENT_TYPE);
-
-    if request.body_mode == BodyMode::MultipartFormData {
-        // reqwest must provide the boundary-bearing Content-Type and the
-        // matching length for the generated multipart stream.
-        headers.remove(CONTENT_TYPE);
-        headers.remove(CONTENT_LENGTH);
-    }
+        headers,
+        body,
+        ..
+    } = request;
 
     let mut builder = client.request(method, url).headers(headers);
     let body_limit = limits
@@ -904,7 +1026,7 @@ async fn send_request_inner(
         .transpose()
         .map_err(RequestError::TaskFailed)?
         .flatten();
-    builder = apply_request_body(builder, &request, has_user_content_type, body_limit).await?;
+    builder = apply_execution_body(builder, body, body_limit).await?;
 
     let started_at = Instant::now();
     let response = builder.send().await?;
@@ -950,46 +1072,21 @@ async fn send_request_inner(
     })
 }
 
-async fn apply_request_body(
+async fn apply_execution_body(
     mut builder: reqwest::RequestBuilder,
-    request: &RequestDraft,
-    has_user_content_type: bool,
+    body: ExecutionBody,
     body_limit: Option<usize>,
 ) -> Result<reqwest::RequestBuilder, RequestError> {
-    match request.body_mode {
-        BodyMode::None => {}
-        BodyMode::Raw => {
-            check_request_body_size(body_limit, request.body.len())?;
-            if request.body.is_empty() {
-                return Ok(builder);
-            }
-            if !has_user_content_type {
-                builder = builder.header(CONTENT_TYPE, request.raw_body_language.content_type());
-            }
-            builder = builder.body(request.body.clone());
+    match body {
+        ExecutionBody::None => {}
+        ExecutionBody::Bytes(body) => {
+            check_request_body_size(body_limit, body.len())?;
+            // Bytes owns the shared memory/file mapping; no body-sized copy.
+            builder = builder.body(Bytes::from_owner(body));
         }
-        BodyMode::FormUrlEncoded => {
-            let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-            for field in &request.body_fields {
-                if !field.enabled || field.name.trim().is_empty() {
-                    continue;
-                }
-                // URL-encoded fields are text on the wire. Retaining the
-                // editor's multipart kind lets users switch modes without
-                // losing which rows were file uploads.
-                serializer.append_pair(&field.name, &field.value);
-            }
-            if !has_user_content_type {
-                builder = builder.header(CONTENT_TYPE, "application/x-www-form-urlencoded");
-            }
-            let encoded = serializer.finish();
-            check_request_body_size(body_limit, encoded.len())?;
-            builder = builder.body(encoded);
-        }
-        BodyMode::MultipartFormData => {
+        ExecutionBody::Multipart(fields) => {
             let mut form = reqwest::multipart::Form::new();
-            for field in request
-                .body_fields
+            for field in fields
                 .iter()
                 .filter(|field| field.enabled && !field.name.trim().is_empty())
             {
@@ -1252,25 +1349,26 @@ mod tests {
             .unwrap();
         let client = super::build_client().unwrap();
         let request = super::RequestDraft {
+            url: "http://example.test".into(),
             body_mode: super::BodyMode::FormUrlEncoded,
             body_fields: vec![super::BodyField::text("x", " ")],
             ..super::RequestDraft::default()
         };
         assert!(
             runtime
-                .block_on(super::apply_request_body(
+                .block_on(super::apply_execution_body(
                     client.post("http://example.test"),
-                    &request,
-                    false,
+                    super::ExecutionInput::try_from(request.clone())
+                        .unwrap()
+                        .body,
                     Some(2),
                 ))
                 .is_err()
         );
         let built = runtime
-            .block_on(super::apply_request_body(
+            .block_on(super::apply_execution_body(
                 client.post("http://example.test"),
-                &request,
-                false,
+                super::ExecutionInput::try_from(request).unwrap().body,
                 Some(3),
             ))
             .unwrap()
@@ -1371,6 +1469,13 @@ mod tests {
     }
 
     fn send_and_capture_at(mut request: RequestDraft, target: &str) -> Vec<u8> {
+        capture_input(target, |url| {
+            request.url = url;
+            request.try_into().unwrap()
+        })
+    }
+
+    fn capture_input(target: &str, input: impl FnOnce(String) -> ExecutionInput) -> Vec<u8> {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
         let address = listener.local_addr().unwrap();
         let (request_tx, request_rx) = mpsc::channel();
@@ -1429,16 +1534,142 @@ mod tests {
                 .expect("write test response");
         });
 
-        request.url = format!("http://{address}{target}");
+        let request = input(format!("http://{address}{target}"));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         runtime
-            .block_on(send_request(&build_client().unwrap(), request))
+            .block_on(send_request_inner(&build_client().unwrap(), request, None))
             .expect("request should succeed");
         server.join().unwrap();
         request_rx.recv().unwrap()
+    }
+
+    #[test]
+    fn literal_execution_preserves_method_binary_body_and_repeated_opaque_headers() {
+        let body = vec![0, 255, 128, b'\r', b'\n', b'{', b'{', b'x', b'}', b'}'];
+        for method in ["get", "mIxEd-Extension", "POST"] {
+            let wire = capture_input("/a%2Fb?x=1&x=2", |url| {
+                let mut headers = HeaderMap::new();
+                headers.insert(CONTENT_LENGTH, HeaderValue::from_static("999"));
+                headers.insert(
+                    reqwest::header::TRANSFER_ENCODING,
+                    HeaderValue::from_static("chunked"),
+                );
+                headers.append("x-opaque", HeaderValue::from_bytes(b"\x80one").unwrap());
+                headers.append("x-opaque", HeaderValue::from_bytes(b"\xfftwo").unwrap());
+                ExecutionInput::literal(method, &url, headers, body.clone().into()).unwrap()
+            });
+            assert!(wire.starts_with(format!("{method} /a%2Fb?x=1&x=2 HTTP/1.1\r\n").as_bytes()));
+            assert!(
+                wire.windows(b"x-opaque: \x80one\r\nx-opaque: \xfftwo\r\n".len())
+                    .any(|part| part == b"x-opaque: \x80one\r\nx-opaque: \xfftwo\r\n")
+            );
+            let end = wire
+                .windows(4)
+                .position(|part| part == b"\r\n\r\n")
+                .unwrap()
+                + 4;
+            assert_eq!(&wire[end..], body);
+            assert!(!String::from_utf8_lossy(&wire[..end]).contains("content-type:"));
+        }
+        for method in ["", " GET", "GET ", "bad method", "GET\r\nx: y"] {
+            assert!(
+                ExecutionInput::literal(
+                    method,
+                    "http://example.test",
+                    HeaderMap::new(),
+                    Vec::new().into(),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn literal_encoded_multipart_is_not_regenerated() {
+        let body =
+            b"--fixed\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\n\xff\0\r\n--fixed--\r\n";
+        let wire = capture_input("/multipart", |url| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                CONTENT_TYPE,
+                HeaderValue::from_static("multipart/form-data; boundary=fixed"),
+            );
+            ExecutionInput::literal("POST", &url, headers, body.to_vec().into()).unwrap()
+        });
+        let end = wire
+            .windows(4)
+            .position(|part| part == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        assert_eq!(&wire[end..], body);
+        assert!(String::from_utf8_lossy(&wire[..end]).contains("boundary=fixed"));
+    }
+
+    #[test]
+    fn literal_target_still_has_reqwest_encoded_dot_normalization() {
+        let wire = capture_input("/a/%2e%2e/b?x=%2f", |url| {
+            ExecutionInput::literal("GET", &url, HeaderMap::new(), Vec::new().into()).unwrap()
+        });
+        assert!(wire.starts_with(b"GET /b?x=%2f HTTP/1.1\r\n"));
+    }
+
+    #[test]
+    fn literal_bytes_share_request_limit_enforcement() {
+        use super::super::execution_limits::Bound;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let limits = ExecutionLimits(
+            [("http.request_bytes".into(), Bound::limited(1))]
+                .into_iter()
+                .collect(),
+        );
+        let input = ExecutionInput::literal(
+            "POST",
+            "http://127.0.0.1:1",
+            HeaderMap::new(),
+            vec![0, 255].into(),
+        )
+        .unwrap();
+        let error = runtime
+            .block_on(send_execution_input_with_limits(
+                &build_client().unwrap(),
+                input,
+                &limits,
+            ))
+            .unwrap_err();
+        assert!(error.to_string().contains("http.request_bytes"));
+    }
+
+    #[tokio::test]
+    async fn execution_body_reuses_file_mapping_without_copying() {
+        let mut writer = BoundedResponseBody::new(usize::MAX);
+        writer
+            .extend(&vec![0xff; RESPONSE_BODY_MEMORY_THRESHOLD_BYTES + 1])
+            .await
+            .unwrap();
+        let body = writer.finish().await.unwrap();
+        assert!(body.is_file_backed());
+        let pointer = body.as_ptr();
+        let input =
+            ExecutionInput::literal("POST", "http://example.test", HeaderMap::new(), body).unwrap();
+        let request = apply_execution_body(
+            build_client().unwrap().post("http://example.test"),
+            input.body,
+            None,
+        )
+        .await
+        .unwrap()
+        .build()
+        .unwrap();
+        let bytes = request.body().unwrap().as_bytes().unwrap();
+        assert_eq!(bytes.as_ptr(), pointer);
+        assert_eq!(bytes.len(), RESPONSE_BODY_MEMORY_THRESHOLD_BYTES + 1);
+        assert_eq!(bytes[bytes.len() - 1], 0xff);
     }
 
     fn captured_request_parts(request: &[u8]) -> (&str, &[u8]) {

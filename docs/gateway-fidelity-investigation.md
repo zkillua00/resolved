@@ -3,7 +3,27 @@
 Status: **characterization implemented; fidelity acceptance gate remains open**.
 This is an investigation of the existing native local HTTP executor and SQLite
 history, not gateway ingress, a caller-facing adapter, DNS, or remote forwarding.
-No production transport behavior or persistence schema is changed.
+The initial characterization did not change production behavior. The follow-ups
+below add a shared local input boundary and fix history URL redaction; persistence
+schema and response handling remain unchanged.
+
+Follow-up implementation: history URL redaction now preserves original URL/query
+spelling when no replacement is needed and changes only affected query values.
+The replay characterization is now a preservation regression test. Credential
+removal and known-secret/sensitive-field redaction remain enabled; URLs containing
+userinfo still use parsed credential removal and may normalize other URL parts.
+
+Local transport follow-up: `ExecutionInput::literal` now carries method case,
+repeated byte-valued request headers, and arbitrary body bytes into the same
+limits-aware local send path used by `RequestDraft` conversion. Original entity
+bytes can include encoded multipart without regeneration. Shared file-backed
+bodies use `Bytes::from_owner`, with pointer identity tested to prevent accidental
+full-body copying. Caller length/transfer-encoding fields are replaced by generated
+framing; their original count still contributes to header limits.
+
+This does not change `RequestDraft`'s editor normalization or solve reqwest URL
+normalization, response-header conversion, remote dispatch, or durable byte replay.
+It is not yet connected to a gateway coordinator or listener.
 
 ## Executable proof
 
@@ -39,7 +59,7 @@ behavior, **not** a claim of transparent forwarding.
 | Multipart binary file | A file containing NUL, `ff`, `80`, and CRLF arrives intact inside a generated multipart body. The supplied `boundary=original` is replaced; captured opening/closing delimiters match the new boundary. Structured multipart generation is not forwarding an existing multipart entity. |
 | Encoded path/query on first send | `%2F`, `%20`, `+`, duplicate keys, empty values, bare keys, empty query segments, and ordering are preserved in the captured target when the draft URL is used directly. Construction of query rows alone does not rebuild that URL. |
 | Params editor reconstruction | `url_with_query_params` changes `%20` to `+`, adds `=` to bare keys, and drops empty segments. Gateway ingress must not pass through that conversion. |
-| History query replay | **Even with no secrets**, history redaction rebuilds the URL query. `%20` becomes `+`, bare keys gain `=`, empty segments disappear. SQLite preserves that already-normalized draft, and replay sends a different target. The regression test explicitly asserts this limitation. |
+| History query replay | Fixed in follow-up: untouched `%20`, bare keys, empty segments, and order survive history save/reload/replay. Sensitive query values are still replaced; redacted history is not an exact replay snapshot. |
 | Encoded dot segments | `/a/%2e%2e/b` becomes `/b` in the captured target through URL parsing. Retaining a raw target in a new type alone will not fix a transport that still normalizes it. |
 | Extension method case | `mIxEd` arrives as `MIXED`. History retains editor spelling but replay uppercases it again. HTTP method case is significant. |
 | Repeated request/response fields | Two `X-Repeat` request fields arrive separately in order; repeated response fields and two separate Set-Cookie fields remain separate in `ResponseData`. Global ordering across differently named fields and capitalization are not promised. |
@@ -55,10 +75,10 @@ behavior, **not** a claim of transparent forwarding.
   `apply_request_body` takes a cloned String for raw mode and creates multipart
   forms/file streams for structured mode. `send_request_inner` converts response
   header values lossily. The client builders leave automatic decompression on.
-- `src/core/history.rs`: `redact_url` always calls `query_pairs`, clears the query,
-  and appends parsed pairs, even when no value is redacted. This loss occurs
-  **before** database persistence. `HistoryEntry` contains `RequestDraft` and
-  `ResponseSummary`; it is not a response archive.
+- `src/core/history.rs`: the original investigation found query reconstruction
+  before persistence. Follow-up now preserves untouched query segments and
+  encodes only values that actually need redaction. `HistoryEntry` still contains
+  `RequestDraft` and `ResponseSummary`; it is not a response archive.
 - Multipart history retains a local path, not a snapshot of the file bytes.
   A later send can fail or read changed content. Shared-history conversion clears
   file paths. Neither is a binary replay contract.
@@ -120,3 +140,14 @@ Cargo wrapper. The broader `./scripts/cargo.sh test --bin api-tester core:: --
 --test-threads=4` run also passed: **396 passed, 0 failed**. Existing vendor C
 scanner warnings were emitted. No external API,
 DNS setup, gateway settings, live account, or credentials were involved.
+
+History follow-up validation: **11 history tests**, **5 fidelity tests**, and
+**398 core tests** passed through the wrapper. New redaction regressions cover
+encoded sensitive keys, duplicate/bare sensitive keys, unchanged empty segments,
+credential removal, shared history, and fragment/query separation.
+
+Combined local-input/history validation: **403 core tests passed**, including
+**35 request tests**. The literal input tests cover binary bodies, method case,
+opaque repeated request headers, fixed multipart boundaries, framing, body limits,
+and mapped body ownership. Encoded dot normalization remains a characterization
+test, not a fidelity success.

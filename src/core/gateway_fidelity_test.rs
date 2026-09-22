@@ -112,7 +112,7 @@ async fn execute(request: RequestDraft) -> ResponseData {
 }
 
 #[tokio::test]
-async fn gateway_fidelity_native_wire_preserved_but_history_normalizes_query_replay() {
+async fn gateway_fidelity_native_wire_and_history_preserve_query_replay() {
     let reply = b"\0\xff\x80binary";
     let (origin, capture) = fixture(response(
         "200 OK",
@@ -152,15 +152,12 @@ async fn gateway_fidelity_native_wire_preserved_but_history_normalizes_query_rep
     let path = dir.path().join("history.sqlite3");
     let mut history = RequestHistory::default();
     history.push(HistoryEntry::completed(&request, &result));
-    let normalized_target = "/a%2Fb/%20?q=a+b&q=a+b&empty=&bare=&=value";
-    let mut expected_history_request = request.clone();
-    expected_history_request.url = format!("{origin}{normalized_target}");
-    // Redaction rebuilds every query, even when no secret needs replacing.
-    assert_eq!(history.entries()[0].request, expected_history_request);
+    // Redaction must not rebuild query syntax when no value needs replacing.
+    assert_eq!(history.entries()[0].request, request);
     DatabaseStore::new(&path).save_history(&history).unwrap();
     let loaded = DatabaseStore::new(&path).load_history().unwrap();
     let entry = &loaded.entries()[0];
-    assert_eq!(entry.request, expected_history_request);
+    assert_eq!(entry.request, request);
     assert_eq!(entry.response.as_ref().unwrap().size_bytes, reply.len());
     let persisted = serde_json::to_value(entry).unwrap();
     assert!(persisted["response"].get("body").is_none());
@@ -174,8 +171,7 @@ async fn gateway_fidelity_native_wire_preserved_but_history_normalizes_query_rep
     );
     assert!(execute(replay).await.body.is_empty());
     let replayed = capture.await.unwrap();
-    assert_eq!(replayed.line, format!("MIXED {normalized_target} HTTP/1.1"));
-    assert_ne!(replayed.line, captured.line);
+    assert_eq!(replayed.line, captured.line);
     assert_eq!(replayed.body, captured.body);
     assert_eq!(replayed.values("x-repeat"), captured.values("x-repeat"));
 }

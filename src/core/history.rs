@@ -448,32 +448,59 @@ fn redact_url(value: &str, sensitive_values: &[String]) -> String {
         return redact_secret_values(value, sensitive_values);
     };
 
+    let has_credentials = !url.username().is_empty() || url.password().is_some();
     if !url.username().is_empty() {
         let _ = url.set_username(REDACTED_VALUE);
     }
     if url.password().is_some() {
         let _ = url.set_password(Some(REDACTED_VALUE));
     }
-    if url.query().is_some() {
-        let pairs = url
-            .query_pairs()
-            .map(|(key, value)| {
-                let value = if is_sensitive_field(&key) {
-                    REDACTED_VALUE.to_owned()
-                } else {
-                    redact_secret_values(&value, sensitive_values)
-                };
-                (key.into_owned(), value)
-            })
-            .collect::<Vec<_>>();
-        url.set_query(None);
-        let mut query = url.query_pairs_mut();
-        for (key, value) in pairs {
-            query.append_pair(&key, &value);
-        }
-    }
 
-    redact_secret_values(url.as_str(), sensitive_values)
+    // Parsing is for validation and credential removal, not serialization of
+    // untouched requests. A query-pair roundtrip changes %20, bare keys, and
+    // empty segments, making persisted replay different from the original.
+    let source = if has_credentials { url.as_str() } else { value };
+    let (before_fragment, fragment) = source
+        .split_once('#')
+        .map_or((source, None), |(prefix, fragment)| {
+            (prefix, Some(fragment))
+        });
+    let mut redacted = if let Some((prefix, query)) = before_fragment.split_once('?') {
+        format!("{prefix}?{}", redact_encoded_query(query, sensitive_values))
+    } else {
+        before_fragment.to_owned()
+    };
+    if let Some(fragment) = fragment {
+        redacted.push('#');
+        redacted.push_str(fragment);
+    }
+    redact_secret_values(&redacted, sensitive_values)
+}
+
+fn redact_encoded_query(query: &str, sensitive_values: &[String]) -> String {
+    query
+        .split('&')
+        .map(|segment| {
+            let Some((key, value)) = url::form_urlencoded::parse(segment.as_bytes()).next() else {
+                return segment.to_owned();
+            };
+            let redacted_value = if is_sensitive_field(&key) {
+                REDACTED_VALUE.to_owned()
+            } else {
+                redact_secret_values(&value, sensitive_values)
+            };
+            if redacted_value == value {
+                return segment.to_owned();
+            }
+            // Keep the original key spelling, and encode only the value which
+            // actually changed. Final whole-URL redaction still covers keys.
+            let raw_key = segment.split_once('=').map_or(segment, |(key, _)| key);
+            let encoded: String =
+                url::form_urlencoded::byte_serialize(redacted_value.as_bytes()).collect();
+            format!("{raw_key}={encoded}")
+        })
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 fn redact_body(request: &RequestDraft, sensitive_values: &[String]) -> String {
@@ -647,6 +674,46 @@ mod tests {
             !serde_json::to_string(&failure)
                 .unwrap()
                 .contains("credential")
+        );
+    }
+
+    #[test]
+    fn history_url_redaction_preserves_untouched_encoded_spans() {
+        for value in [
+            "https://EXAMPLE.com:443/a/%2e%2e/b?q=a%20b&q=a+b&empty=&bare&&=value",
+            "https://example.com/path?",
+            "https://example.com/path?#fragment?token=not-a-query",
+            "https://example.com/path#fragment?token=not-a-query",
+        ] {
+            assert_eq!(redact_url(value, &[]), value);
+        }
+        assert_eq!(
+            redact_url(
+                "https://example.com/?keep=a%20b&&%61pi_key=private&bare&value=rotated+secret#end",
+                &["rotated secret".into()],
+            ),
+            "https://example.com/?keep=a%20b&&%61pi_key=%5BREDACTED%5D&bare&value=%5BREDACTED%5D#end"
+        );
+        assert_eq!(
+            redact_url("https://example.com/?token&keep=%ff&token=second&", &[]),
+            "https://example.com/?token=%5BREDACTED%5D&keep=%ff&token=%5BREDACTED%5D&"
+        );
+    }
+
+    #[test]
+    fn history_url_credentials_and_shared_queries_remain_redacted() {
+        let request = RequestDraft::new(
+            "GET",
+            "https://user:private@example.com/path?keep=a%20b&&token=secret&bare",
+        );
+        let (shared, _) = request_for_shared_history(&request, &[]);
+        assert!(!shared.url.contains("user"));
+        assert!(!shared.url.contains("private"));
+        assert!(!shared.url.contains("secret"));
+        assert!(
+            shared
+                .url
+                .ends_with("?keep=a%20b&&token=%5BREDACTED%5D&bare")
         );
     }
 

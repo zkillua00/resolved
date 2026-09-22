@@ -87,8 +87,21 @@ Initial characterization is implemented in
 [the fidelity investigation](gateway-fidelity-investigation.md): five focused
 tests passed, and the broader core suite passed (396 tests). These demonstrate
 both preservation and current losses; they do not close the end-to-end gate.
-Next: the shared byte-preserving execution representation and history/replay
-contract, including a transport strategy for encoded dot segments.
+Local byte-input dispatch is now implemented beneath editor conversion; the
+history/replay contract and encoded-dot-target transport strategy remain open.
+
+History follow-up implemented: URL redaction now preserves untouched encoded
+query syntax, including across SQLite save/reload/replay, while retaining secret
+redaction. Validation: 11 history tests, 5 fidelity tests, 398 core tests passed.
+This does not add persistent raw-body/response snapshots or guarantee exact replay
+of redacted requests.
+
+Shared local transport follow-up: `ExecutionInput::literal` accepts case-preserving
+methods, byte-valued repeated headers, and shared memory/file-backed entity bytes.
+Editor conversion and literal inputs now share limits, dispatch, and response
+receipt. Existing editor normalization and generated multipart semantics remain.
+Combined validation: 403 core tests passed. This is a transport seam, not yet the
+gateway execution coordinator, remote byte-input path, or completed wire gate.
 
 ### v0.1.0 — Prove end-to-end fidelity before feature implementation
 

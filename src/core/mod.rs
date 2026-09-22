@@ -47,6 +47,8 @@ pub use interchange::{
 pub use realtime::{RealtimeResourceChange, RealtimeSignal, watch_upstream_changes};
 #[cfg(test)]
 pub use request::{build_client, spawn_request};
+#[allow(unused_imports)]
+pub use request::{ExecutionInput, send_execution_input_with_limits};
 pub use request::{
     BodyField, BodyFieldKind, BodyMode, HeaderEntry, QueryParamEntry, RawBodyLanguage,
     RequestDraft, RequestError, RequestTask, ResponseBody, ResponseData, STANDARD_HTTP_METHODS,
